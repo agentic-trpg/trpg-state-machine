@@ -124,12 +124,15 @@ def test_nonaccepted_four_state_protocol(
         before = sm.read_session(command.session_id, mechanical_package, context=context)
         receipt = sm.submit_command(command, mechanical_package, context=context)
         assert receipt.status == "rejected" and receipt.error_code == code
-        result = evaluator.results[0]
-        assert result.status == status and result.delta is None
-        assert result.proposed_events == () and result.rng_transition is None
+        if status == "needs_choice":
+            assert evaluator.results == []  # Refuse unsupported choice before evaluation.
+        else:
+            result = evaluator.results[0]
+            assert result.status == status and result.delta is None
+            assert result.proposed_events == () and result.rng_transition is None
         assert sm.read_session(command.session_id, mechanical_package, context=context) == before
         assert sm.submit_command(command, mechanical_package, context=context) == receipt
-        assert evaluator.calls == 1
+        assert evaluator.calls == (0 if status == "needs_choice" else 1)
 
 
 @pytest.mark.parametrize(

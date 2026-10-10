@@ -2,14 +2,21 @@
 
 import hashlib
 import json
+from copy import deepcopy
 from dataclasses import asdict, dataclass
 
+from dnd5e_engine.evaluation_contracts import CombatIntentPayload
+from pydantic import ValidationError
+
 from ._operations import EnterScene, MoveActor, SetObjectState, SetSceneFlag
+from .combat import InitializeCombat
 from .errors import StateMachineError
 from .mechanics import RuleOperation
 from .package import canonical_json
 
 OPERATIONS = {
+    "combat.intent": CombatIntentPayload,
+    "combat.initialize": InitializeCombat,
     "rule_operation": RuleOperation,
     "enter_scene": EnterScene,
     "set_scene_flag": SetSceneFlag,
@@ -24,7 +31,15 @@ class TypedCommand:
     command_id: str
     actor_id: str
     command_type: str
-    payload: EnterScene | SetSceneFlag | SetObjectState | MoveActor | RuleOperation
+    payload: (
+        EnterScene
+        | SetSceneFlag
+        | SetObjectState
+        | MoveActor
+        | RuleOperation
+        | InitializeCombat
+        | CombatIntentPayload
+    )
     expected_world_version: int
     schema_version: str = "sm-command/1"
 
@@ -59,6 +74,14 @@ def validate_command(command: TypedCommand) -> None:
     operation_type = OPERATIONS.get(command.command_type)
     if operation_type is None or type(command.payload) is not operation_type:
         raise StateMachineError("unsupported_operation", "Unknown command or payload type")
+    if type(command.payload) is CombatIntentPayload:
+        try:
+            CombatIntentPayload.model_validate(deepcopy(command.payload))
+        except ValidationError as exc:
+            raise StateMachineError("invalid_command", "Invalid Engine intent schema") from exc
+        if command.payload.source_id not in (None, command.actor_id):
+            raise StateMachineError("invalid_actor", "Intent source differs from trusted actor")
+        return
     if type(command.payload) is RuleOperation:
         operation = command.payload
         if operation.difficulty is not None and (
@@ -79,10 +102,29 @@ def validate_command(command: TypedCommand) -> None:
             raise StateMachineError("invalid_operation", "Invalid operation field")
 
 
+def command_fingerprint(command, package, context):
+    data = asdict(command)
+    if type(command.payload) is CombatIntentPayload:
+        data["payload"] = command.payload.model_dump(mode="json")
+    return hashlib.sha256(
+        canonical_json(
+            {
+                "command": data,
+                "principal": context.principal_id,
+                "player": context.player_id,
+                "package": package.package_digest,
+                "binding": asdict(package.ruleset_binding),
+            }
+        ).encode()
+    ).hexdigest()
+
+
 class CommandRuntime:
     def _authorize_command(self, row, actor_id, payload, context):
-        if isinstance(payload, MoveActor):
-            if actor_id != payload.actor_id:
+        if isinstance(payload, MoveActor) or (
+            isinstance(payload, CombatIntentPayload) and actor_id != row["pc_actor_id"]
+        ):
+            if isinstance(payload, MoveActor) and actor_id != payload.actor_id:
                 raise StateMachineError("invalid_actor", "Envelope and payload actors differ")
             actor = self._conn.execute(
                 "SELECT kind FROM actors WHERE session_id=? AND actor_id=?",
@@ -94,6 +136,17 @@ class CommandRuntime:
                 raise StateMachineError("unauthorized", "Trusted NPC control grant required")
         elif actor_id != row["pc_actor_id"]:
             raise StateMachineError("invalid_actor", "Command requires the selected PC")
+
+    def _world_operation_capability(self, row, payload):
+        if isinstance(payload, (EnterScene, MoveActor, SetObjectState)):
+            combat = self._conn.execute(
+                "SELECT state_json FROM combats WHERE session_id=?", (row["session_id"],)
+            ).fetchone()
+            if combat and not json.loads(combat[0])["ended"]:
+                raise StateMachineError(
+                    "unsupported_combat_world_operation",
+                    "This world operation has no represented mechanical Delta during combat",
+                )
 
     def _command_replay(self, command, fingerprint):
         stored = self._conn.execute(
@@ -110,19 +163,26 @@ class CommandRuntime:
     def submit_command(self, command: TypedCommand, package, *, context) -> CommandReceipt:
         validate_command(command)
         self.read_session(command.session_id, package, context=context)
-        fingerprint = hashlib.sha256(
-            canonical_json(
-                {
-                    "command": asdict(command),
-                    "principal": context.principal_id,
-                    "player": context.player_id,
-                    "package": package.package_digest,
-                    "binding": asdict(package.ruleset_binding),
-                }
-            ).encode()
-        ).hexdigest()
+        fingerprint = command_fingerprint(command, package, context)
+        if type(command.payload) is CombatIntentPayload:
+            import asyncio
+
+            try:
+                asyncio.get_running_loop()
+            except RuntimeError:
+                return asyncio.run(self._submit_dnd(command, package, context, fingerprint))
+            raise StateMachineError("async_context_required", "Use await submit_command_async")
         if type(command.payload) is RuleOperation:
             return self._submit_mechanical(command, package, context, fingerprint)
+        prepared = None
+        if type(command.payload) is InitializeCombat:
+            with self._transaction():
+                row = self._session(command.session_id, package, context)
+                self._authorize_command(row, command.actor_id, command.payload, context)
+                if replay := self._command_replay(command, fingerprint):
+                    return replay
+                prepared_row = dict(row)
+            prepared = self._prepare_combat(prepared_row, package)
         with self._transaction(write=True):
             row = self._session(command.session_id, package, context)
             self._authorize_command(row, command.actor_id, command.payload, context)
@@ -138,7 +198,11 @@ class CommandRuntime:
             else:
                 self._conn.execute("SAVEPOINT command_effects")
                 try:
-                    events = self._operate(row, package, command.payload)
+                    events = (
+                        self._initialize_combat(row, package, prepared)
+                        if isinstance(command.payload, InitializeCombat)
+                        else self._operate(row, package, command.payload)
+                    )
                     events = self._expand_events(row, package, events, command.command_id)
                     if events:
                         version += 1

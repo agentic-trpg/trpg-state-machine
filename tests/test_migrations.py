@@ -27,6 +27,8 @@ from trpg_state_machine.perception import NPCContext
 
 ROOT = Path(__file__).resolve().parents[1]
 HISTORY = {
+    7: "74368459ec805a341d9b6e9451e218444a174fa6",
+    6: "4d84e36ff889c94e107a86d27eb28f274ddc6136",
     1: "182efbe6b6b331fea274b5ae7863a8888e791339",
     2: "86ac1bf816d917c155cadf436097eb6b6f81a6f4",
     3: "1e289a9b57d72d955777ff1d781b1ba90f89112f",
@@ -96,7 +98,7 @@ def assert_preserved(database, original):
         for table, (columns, rows) in original.items():
             after = set(conn.execute(f"SELECT {','.join(columns)} FROM {table}").fetchall())
             assert rows <= after, table
-        assert conn.execute("PRAGMA user_version").fetchone()[0] == 6
+        assert conn.execute("PRAGMA user_version").fetchone()[0] == 8
         assert conn.execute("PRAGMA integrity_check").fetchone()[0] == "ok"
         assert conn.execute("PRAGMA foreign_key_check").fetchall() == []
 
@@ -280,7 +282,7 @@ def test_concurrent_initialization_and_upgrade(tmp_path, version, monkeypatch):
             )
 
     with ThreadPoolExecutor(max_workers=4) as workers:
-        assert list(workers.map(open_runtime, range(4))) == [(6, 1, "wal")] * 4
+        assert list(workers.map(open_runtime, range(4))) == [(8, 1, "wal")] * 4
     assert len(version_reads) >= 4 and all(version_reads)
     monkeypatch.undo()
     assert_preserved(database, original)

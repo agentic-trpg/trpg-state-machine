@@ -144,6 +144,11 @@ class MechanicalRuntime:
             snapshot_digest(detached),
         )
         result = None
+        unsupported_choice = (
+            command.payload.domain == "noncombat"
+            and command.payload.operation_kind == "synthetic_attempt"
+            and command.payload.difficulty is None
+        )
         if (
             snapshot.world_version == command.expected_world_version
             and package.ruleset_binding == SYNTHETIC_EVALUATION_RULESET
@@ -152,13 +157,18 @@ class MechanicalRuntime:
                 raise StateMachineError(
                     "ruleset_binding_mismatch", "Configured Evaluator does not match the Session"
                 )
-            try:
-                result = deepcopy(self._evaluator.evaluate(deepcopy(request)))
-            except Exception as exc:
-                raise StateMachineError(
-                    "rule_evaluation_failed", "Evaluation may be retried"
-                ) from exc
-            validate_result(request, result)
+            if not unsupported_choice:
+                try:
+                    result = deepcopy(self._evaluator.evaluate(deepcopy(request)))
+                except Exception as exc:
+                    raise StateMachineError(
+                        "rule_evaluation_failed", "Evaluation may be retried"
+                    ) from exc
+                validate_result(request, result)
+                if result.status == "needs_choice":
+                    raise StateMachineError(
+                        "invalid_rule_result", "Unexpected choice after capability admission"
+                    )
         with self._transaction(write=True):
             row = self._session(command.session_id, package, context)
             self._authorize_command(row, command.actor_id, command.payload, context)
@@ -175,15 +185,13 @@ class MechanicalRuntime:
                 or current.rng != request.rng
             ):
                 status, error = "conflict", "version_conflict"
+            elif unsupported_choice and package.ruleset_binding == SYNTHETIC_EVALUATION_RULESET:
+                status, error = "rejected", "pending_choice_unsupported"
             elif result is None:
                 status, error = "rejected", "unsupported_ruleset"
             elif result.status != "accepted":
                 status = "rejected"
-                error = (
-                    "pending_choice_unsupported"
-                    if result.status == "needs_choice"
-                    else result.error.code
-                )
+                error = result.error.code
             else:
                 # Revalidate the exact result and closed Delta after reacquiring authority.
                 validate_result(request, result)
