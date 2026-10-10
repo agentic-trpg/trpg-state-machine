@@ -109,8 +109,10 @@ class EventRuntime:
             (session_id, seq, consumer),
         )
         row = self._conn.execute(
-            "SELECT MIN(event_seq) FROM event_outbox WHERE session_id=? AND consumer=? AND done=0",
-            (session_id, consumer),
+            "SELECT MIN(event_seq) FROM event_outbox WHERE session_id=? AND consumer=? AND done=0 "
+            "AND (consumer!='perception' OR event_seq>coalesce("
+            "(SELECT through_event_seq FROM legacy_perception_boundaries WHERE session_id=?),0))",
+            (session_id, consumer, session_id),
         ).fetchone()
         end = self._conn.execute(
             "SELECT event_seq FROM sessions WHERE session_id=?", (session_id,)

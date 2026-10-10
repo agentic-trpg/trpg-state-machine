@@ -104,7 +104,7 @@ Receipts use durable `(session_id, command_id)` keys and a canonical fingerprint
 - 初始 `world_version=0`。每次实际状态修改成功提交推进一次；无变化操作不推进。`event_seq` 是独立的内部审计序号：创建产生两条记录，Scene 转移产生 exit/enter 两条记录，因此不等于 world_version。
 - 事件保存稳定 ID、来源命令及受限 Signals，事件时位置证据与持久 Outbox 同事务提交；当前提供受限合成 Perception 投影，完整规则/传播协议未实现。没有 event-only 或 Meta-only 提交能力，未冻结它们的 world_version 策略。
 - RNG 单独持久保存 `state_id / algorithm=unselected / encoding=foundation-placeholder/1 / position=0`，Session 保存引用。Foundation binding 不掷骰；新增 synthetic.atomic binding 使用独立、显式版本化的合成计数 RNG，未实现 D&D RNG 协议。
-- 所有修改立即提交；`save_session` 不创建第二份权威快照/检查点。Storage schema 5 automatically migrates schema 1/2/3/4 while preserving package pins/digests and state. Legacy events have no fabricated historical evidence. Unknown schemas are refused. No online backup tool.
+- 所有修改立即提交；`save_session` 不创建第二份权威快照/检查点。Storage schema 6 automatically migrates schemas 1–5 while preserving package pins/digests and state. Migration locks cover version recheck, all steps, FK validation and commit; interrupted upgrades roll back together. Legacy events have no fabricated historical evidence. Unknown schemas are refused. No online backup tool.
 
 ## 自动化验收证据
 
@@ -158,7 +158,7 @@ Engine main 64dd920 was inspected read-only. Public resolve_check and rest resol
 
 ## SM-5 NPC perception foundation
 
-Package NPCs may declare explicit synthetic `senses: {visual: true, auditory: true}`. Missing senses remain unknown; they do not default to true/false. Every new event durably captures actor positions and these senses together with authored Signal scope/occlusion and perception work. Projection never reads a later position to reconstruct history. Old events without sufficient evidence stay unresolved.
+Package NPCs may declare explicit synthetic `senses: {visual: true, auditory: true}`. Missing senses remain unknown; they do not default to true/false. Every new event durably captures actor positions and these senses together with authored Signal scope/occlusion and perception work. Projection never reads a later position to reconstruct history. Known pre-perception history is explicitly archived at the durable compatibility boundary described below; genuine new missing evidence remains unresolved.
 
 `project_event(session_id, event_seq, package, *, context, judgment=None)` processes durable work outside the write transaction. Scene scope, declared senses and clear/blocked evidence give deterministic answers. Only undetermined, adequately evidenced Signals are sent as a same-observer/event JudgmentRequest batch to the optional restricted callback. JudgmentResult must contain exactly one typed Boolean for every requested signal_id; omissions, duplicates, unknown IDs, bad types and exceptions leave work unresolved. No real JEV/LLM Host is implemented.
 
@@ -169,3 +169,47 @@ Owner-only `grant_npc_access(...)` assigns an authenticated principal to an exis
 `get_scene_view` returns CurrentPerceptualView for NPCs: own current scene and currently visible actors/objects in the synthetic clear-scene model, with unresolved status for missing senses. It never infers a past causal actor from current presence. Owner access returns the ordinary current SceneInstance. Physical LOS, distance, walls, D&D senses/checks and secret-content authoring validation remain unsupported.
 
 168 tests pass, including 22 perception tests: two observers/multiple Signals, event-time movement, hidden activity, malformed/timeout JEV, all-false/known occlusion, durable unresolved gaps, inbox rollback, concurrent deduplication, authorization revocation/isolation and fresh-process reading of real persisted inbox rows. See docs/batches/SM5.md.
+
+## Stabilization of SM-2–SM-5
+
+Evaluator configuration and Result RulesetBinding mismatches raise structured
+`StateMachineError(code="ruleset_binding_mismatch")`, without a receipt, state/RNG
+change or event. Correcting configuration allows the original command to retry.
+Unsupported operations still return their durable business rejection. Mechanical
+`event_cascade_limit` rolls back the candidate HP/resources/world/RNG/events/trigger
+history inside a savepoint, then atomically saves the rejected receipt. Replays,
+including after restart, return that receipt without evaluating again. Protocol,
+evaluation and storage failures are not cached as business rejections.
+
+Schema 6 adds `legacy_perception_boundaries(session_id, through_event_seq, reason)`.
+The locked source schema 1–4 proves that all existing events predate perception.
+For already upgraded schema 5, migration identifies only a contiguous prefix with
+old `event-evidence/1`, or missing evidence plus the migration-generated source,
+empty Signals and no matching real command/creation key. Classification stops at
+the first other event. The stored reason is `legacy_event_evidence_unavailable`;
+original events, evidence and Work remain, with no fabricated Signals, false
+decisions or historical Observations. `project_event` returns `legacy_unavailable`
+for this archived prefix. The perception cursor orders work **after** this explicit
+boundary; it does not assert historical projection or cognition completion.
+Delivery work and its cursor are unaffected. Genuine new pending work, unknown
+senses and missing event-time evidence still hold later Inbox delivery.
+
+This is a local migration compatibility policy, not a frozen cross-module epoch
+or ACK protocol. It cannot recover lost evidence or invent senses for an old pinned
+Package. Ambiguous schema-5 provenance stays unresolved conservatively. Package
+digest mismatches still refuse resume; no silent Package rewrite is provided.
+
+191 tests pass (168 existing + 23 stabilization cases), including real historical
+runtime subprocesses, schema 1–4 upgrades, already-upgraded schema-5 mixed history,
+nonzero RNG/receipts, concurrent initialization/upgrades, migration process exit,
+new Observation delivery and new unresolved cursor gaps. Historical tests require
+Git and the five fixed commits in `tests/test_migrations.py` to be available to
+`git archive`; shallow clones/source archives need that repository history first.
+The original old Loader/Fixture tests are separate from forward-authored senses
+fixtures passed through the old trusted typed-package service boundary; they do
+not claim old YAML loaders supported senses.
+
+See [Stabilization Review](docs/reviews/SM_STABILIZATION_REVIEW.md) for commands,
+evidence, compatibility and the merge recommendation. F5 (exact triggering-event
+reference) and F6 (full versioned Snapshot/read-set and PendingChoice protocol)
+remain known follow-up work. No real D&D Adapter or NPC EVA was added.

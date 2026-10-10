@@ -13,7 +13,11 @@ from trpg_state_machine.mechanics import (
     StateDelta,
     SyntheticEvaluator,
 )
-from trpg_state_machine.package import SYNTHETIC_EVALUATION_RULESET, load_adventure_package
+from trpg_state_machine.package import (
+    SYNTHETIC_EVALUATION_RULESET,
+    SYNTHETIC_RULESET,
+    load_adventure_package,
+)
 
 
 @pytest.fixture
@@ -277,3 +281,110 @@ def test_evaluator_exception_retry_uses_same_rng(
         assert error.value.code == "rule_evaluation_failed"
         assert sm.submit_command(command, mechanical_package, context=context).status == "committed"
         assert seen[0] == seen[1]
+
+
+@pytest.mark.parametrize("binding", [SYNTHETIC_RULESET, None])
+def test_evaluator_configuration_error_is_not_a_receipt(
+    tmp_path, mechanical_package, context, request_for, binding
+):
+    database = tmp_path / "state.db"
+    evaluator = InspectEvaluator()
+    evaluator.ruleset_binding = binding
+    with StateMachine(database, evaluator=evaluator) as sm:
+        command = setup_mechanical(sm, mechanical_package, request_for, context)
+        before = sm.read_session(command.session_id, mechanical_package, context=context)
+        with pytest.raises(StateMachineError) as error:
+            sm.submit_command(command, mechanical_package, context=context)
+        assert error.value.code == "ruleset_binding_mismatch"
+        assert evaluator.calls == 0
+        assert sm.read_session(command.session_id, mechanical_package, context=context) == before
+        assert sm._conn.execute("SELECT count(*) FROM command_receipts").fetchone()[0] == 0
+        assert sm._conn.execute("SELECT count(*) FROM events").fetchone()[0] == before.event_seq
+    evaluator.ruleset_binding = SYNTHETIC_EVALUATION_RULESET
+    with StateMachine(database, evaluator=evaluator) as sm:
+        receipt = sm.submit_command(command, mechanical_package, context=context)
+        assert receipt.status == "committed" and evaluator.calls == 1
+        evaluator.ruleset_binding = binding
+        # A stored outcome is independent of later deployment configuration.
+        assert sm.submit_command(command, mechanical_package, context=context) == receipt
+        assert evaluator.calls == 1
+
+
+def test_result_binding_error_can_retry_original_command(
+    tmp_path, mechanical_package, context, request_for
+):
+    evaluator = InspectEvaluator(
+        lambda request, result: replace(result, ruleset_binding=SYNTHETIC_RULESET)
+    )
+    with StateMachine(tmp_path / "state.db", evaluator=evaluator) as sm:
+        command = setup_mechanical(sm, mechanical_package, request_for, context)
+        before = sm.read_session(command.session_id, mechanical_package, context=context)
+        with pytest.raises(StateMachineError) as error:
+            sm.submit_command(command, mechanical_package, context=context)
+        assert error.value.code == "ruleset_binding_mismatch"
+        assert sm.read_session(command.session_id, mechanical_package, context=context) == before
+        assert sm._conn.execute("SELECT count(*) FROM command_receipts").fetchone()[0] == 0
+        assert sm._conn.execute("SELECT count(*) FROM events").fetchone()[0] == before.event_seq
+        evaluator.transform = lambda request, result: result
+        assert sm.submit_command(command, mechanical_package, context=context).status == "committed"
+        assert evaluator.requests[0].rng == evaluator.requests[1].rng
+
+
+@pytest.mark.parametrize("fault_table", [None, "command_receipts", "trigger_history"])
+def test_mechanical_cascade_rejection_is_atomic_durable_and_idempotent(
+    tmp_path, mechanical_package, context, request_for, fault_table
+):
+    from test_events import event_data, load_event_package
+
+    # Same rule candidate changes HP, pays a resource, draws RNG and changes a flag;
+    # its world consequences exceed the bound after partially updating trigger history.
+    data = yaml.safe_load((tmp_path / "mechanics.yaml").read_text("utf-8"))
+    package = load_event_package(
+        tmp_path, data, [event_data(f"event.reward_{i}") for i in range(33)]
+    ).package
+    evaluator = InspectEvaluator()
+    database = tmp_path / "state.db"
+    with StateMachine(database, evaluator=evaluator) as sm:
+        command = setup_mechanical(sm, package, request_for, context)
+        before = sm.read_session(command.session_id, package, context=context)
+        if fault_table is None:
+            evaluator.ruleset_binding = SYNTHETIC_RULESET
+            with pytest.raises(StateMachineError) as configuration:
+                sm.submit_command(command, package, context=context)
+            assert configuration.value.code == "ruleset_binding_mismatch"
+            assert sm._conn.execute("SELECT count(*) FROM command_receipts").fetchone()[0] == 0
+            evaluator.ruleset_binding = SYNTHETIC_EVALUATION_RULESET
+        if fault_table:
+            sm._conn.execute(
+                f"CREATE TRIGGER fault BEFORE INSERT ON {fault_table} "
+                "BEGIN SELECT RAISE(ABORT,'injected storage failure'); END"
+            )
+            with pytest.raises(StateMachineError) as error:
+                sm.submit_command(command, package, context=context)
+            assert error.value.code == "storage_error"
+            assert sm.read_session(command.session_id, package, context=context) == before
+            assert sm._conn.execute("SELECT count(*) FROM command_receipts").fetchone()[0] == 0
+            sm._conn.execute("DROP TRIGGER fault")
+        receipt = sm.submit_command(command, package, context=context)
+        assert receipt.status == "rejected" and receipt.error_code == "event_cascade_limit"
+        assert receipt.world_version == 0 and receipt.event_seqs == ()
+        assert sm.read_session(command.session_id, package, context=context) == before
+        assert sm.submit_command(command, package, context=context) == receipt
+        calls = evaluator.calls
+        assert calls == 1 + int(fault_table is not None)
+    with StateMachine(database, evaluator=evaluator) as sm:
+        assert (
+            sm.get_command_receipt(command.session_id, command.command_id, package, context=context)
+            == receipt
+        )
+        assert sm.submit_command(command, package, context=context) == receipt
+        assert sm.read_session(command.session_id, package, context=context) == before
+        assert evaluator.calls == calls
+    with sqlite3.connect(database) as conn:
+        assert conn.execute("SELECT count(*) FROM command_receipts").fetchone()[0] == 1
+        assert conn.execute("SELECT count(*) FROM trigger_history").fetchone()[0] == 0
+        assert conn.execute("SELECT count(*) FROM events").fetchone()[0] == before.event_seq
+        assert (
+            conn.execute("SELECT count(*) FROM event_outbox").fetchone()[0] == 2 * before.event_seq
+        )
+        assert conn.execute("PRAGMA foreign_key_check").fetchall() == []

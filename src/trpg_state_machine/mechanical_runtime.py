@@ -29,6 +29,10 @@ def validate_result(request, result):
 
     if type(result) is not RuleEvaluationResult:
         invalid()
+    if result.ruleset_binding != request.ruleset_binding:
+        raise StateMachineError(
+            "ruleset_binding_mismatch", "Evaluator result does not match the Session binding"
+        )
     if type(result.input_world_version) is not int:
         invalid()
     if result.schema_version != "synthetic-rule-result/1" or (
@@ -143,8 +147,11 @@ class MechanicalRuntime:
         if (
             snapshot.world_version == command.expected_world_version
             and package.ruleset_binding == SYNTHETIC_EVALUATION_RULESET
-            and self._evaluator.ruleset_binding == package.ruleset_binding
         ):
+            if getattr(self._evaluator, "ruleset_binding", None) != package.ruleset_binding:
+                raise StateMachineError(
+                    "ruleset_binding_mismatch", "Configured Evaluator does not match the Session"
+                )
             try:
                 result = deepcopy(self._evaluator.evaluate(deepcopy(request)))
             except Exception as exc:
@@ -181,32 +188,46 @@ class MechanicalRuntime:
                 # Revalidate the exact result and closed Delta after reacquiring authority.
                 validate_result(request, result)
                 self._validate_delta(request, result.delta)
-                events, changed = self._apply_delta(row, package, result.delta)
-                events.extend((event.event_type, event.payload) for event in result.proposed_events)
-                events = self._expand_events(row, package, events, command.command_id)
-                if not changed:
-                    # No event-only mechanical submissions until its version policy is decided.
-                    raise StateMachineError(
-                        "unsupported_delta", "An actual mechanical change is required"
+                self._conn.execute("SAVEPOINT mechanical_effects")
+                try:
+                    events, changed = self._apply_delta(row, package, result.delta)
+                    events.extend(
+                        (event.event_type, event.payload) for event in result.proposed_events
                     )
-                version += 1
-                self._conn.execute(
-                    "UPDATE sessions SET world_version=? WHERE session_id=?",
-                    (version, command.session_id),
-                )
-                rng = result.rng_transition.after
-                self._conn.execute(
-                    "UPDATE rng_states SET position=?,rng_version=?,state_json=? "
-                    "WHERE session_id=?",
-                    (rng.position, rng.rng_version, rng.state_json, command.session_id),
-                )
-                self._append_events(
-                    command.session_id,
-                    version,
-                    events,
-                    source_command_id=command.command_id,
-                    package=package,
-                )
+                    events = self._expand_events(row, package, events, command.command_id)
+                    if not changed:
+                        # Event-only mechanical version policy remains OPEN.
+                        raise StateMachineError(
+                            "unsupported_delta", "An actual mechanical change is required"
+                        )
+                    version += 1
+                    self._conn.execute(
+                        "UPDATE sessions SET world_version=? WHERE session_id=?",
+                        (version, command.session_id),
+                    )
+                    rng = result.rng_transition.after
+                    self._conn.execute(
+                        "UPDATE rng_states SET position=?,rng_version=?,state_json=? "
+                        "WHERE session_id=?",
+                        (rng.position, rng.rng_version, rng.state_json, command.session_id),
+                    )
+                    self._append_events(
+                        command.session_id,
+                        version,
+                        events,
+                        source_command_id=command.command_id,
+                        package=package,
+                    )
+                except StateMachineError as exc:
+                    # Only this deterministic domain limit is a durable rejection.
+                    # Invalid results/configuration/storage failures remain retryable errors.
+                    if exc.code != "event_cascade_limit":
+                        raise
+                    self._conn.execute("ROLLBACK TO mechanical_effects")
+                    version = row["world_version"]
+                    status, error = "rejected", exc.code
+                finally:
+                    self._conn.execute("RELEASE mechanical_effects")
             end = self._conn.execute(
                 "SELECT event_seq FROM sessions WHERE session_id=?", (command.session_id,)
             ).fetchone()[0]

@@ -5,6 +5,7 @@ import sqlite3
 from contextlib import contextmanager
 from dataclasses import asdict, replace
 from pathlib import Path
+from time import monotonic, sleep
 from uuid import uuid4
 
 from ._operations import (
@@ -66,6 +67,26 @@ def _trusted(context: TrustedContext) -> None:
         raise StateMachineError("invalid_context", "NPC grants must be trusted identity tuples")
 
 
+def _migration_statements(script: str) -> tuple[str, ...]:
+    """Read our bundled SQL without executescript's implicit transaction commits."""
+    statements, pending = [], ""
+    for line in script.splitlines(keepends=True):
+        pending += line
+        if sqlite3.complete_statement(pending):
+            normalized = " ".join(pending.split()).upper()
+            if normalized not in (
+                "BEGIN IMMEDIATE;",
+                "COMMIT;",
+                "PRAGMA FOREIGN_KEYS = OFF;",
+                "PRAGMA FOREIGN_KEYS = ON;",
+            ):
+                statements.append(pending)
+            pending = ""
+    if pending.strip():
+        raise StateMachineError("storage_error", "Incomplete bundled migration SQL")
+    return tuple(statements)
+
+
 class StateMachine(CommandRuntime, EventRuntime, MechanicalRuntime, PerceptionRuntime):
     """Trusted in-process runtime. One connection per instance/thread; close explicitly.
 
@@ -88,39 +109,21 @@ class StateMachine(CommandRuntime, EventRuntime, MechanicalRuntime, PerceptionRu
         try:
             self._conn.execute("PRAGMA foreign_keys = ON")
             self._conn.execute("PRAGMA busy_timeout = 5000")
-            if self._conn.execute("PRAGMA journal_mode = WAL").fetchone()[0] != "wal":
+            self._migrate()
+            # Journal-mode changes cannot run in the migration transaction. SQLite
+            # can report BUSY immediately when simultaneous openers change the mode.
+            deadline = monotonic() + 5.0
+            while True:
+                try:
+                    mode = self._conn.execute("PRAGMA journal_mode = WAL").fetchone()[0]
+                    break
+                except sqlite3.OperationalError as exc:
+                    if exc.sqlite_errorcode != sqlite3.SQLITE_BUSY or monotonic() >= deadline:
+                        raise
+                    sleep(0.01)
+            if mode != "wal":
                 raise StateMachineError("unsupported_storage", "Database must support WAL")
             self._conn.execute("PRAGMA synchronous = FULL")
-            version = self._conn.execute("PRAGMA user_version").fetchone()[0]
-            if version == 0:
-                tables = self._conn.execute(
-                    "SELECT name FROM sqlite_master WHERE type = 'table'"
-                ).fetchall()
-                if tables:
-                    raise StateMachineError(
-                        "unsupported_storage_schema", "Unversioned nonempty database"
-                    )
-                self._conn.executescript(Path(__file__).with_name("_schema.sql").read_text("utf-8"))
-            elif version not in (1, 2, 3, 4, 5):
-                raise StateMachineError(
-                    "unsupported_storage_schema", f"Unsupported storage version: {version}"
-                )
-            if version in (0, 1):
-                self._conn.executescript(
-                    Path(__file__).with_name("_migration_2.sql").read_text("utf-8")
-                )
-            if version < 3:
-                self._conn.executescript(
-                    Path(__file__).with_name("_migration_3.sql").read_text("utf-8")
-                )
-            if version < 4:
-                self._conn.executescript(
-                    Path(__file__).with_name("_migration_4.sql").read_text("utf-8")
-                )
-            if version < 5:
-                self._conn.executescript(
-                    Path(__file__).with_name("_migration_5.sql").read_text("utf-8")
-                )
             if not self._conn.execute("PRAGMA foreign_keys").fetchone()[0]:
                 raise StateMachineError("storage_error", "Foreign keys must be enabled")
             if self._conn.execute("PRAGMA foreign_key_check").fetchone():
@@ -133,6 +136,61 @@ class StateMachine(CommandRuntime, EventRuntime, MechanicalRuntime, PerceptionRu
             self._conn.close()
             self._closed = True
             raise
+
+    def _migrate(self):
+        scripts = [Path(__file__).with_name("_schema.sql")] + [
+            Path(__file__).with_name(f"_migration_{v}.sql") for v in range(2, 7)
+        ]
+        steps = [_migration_statements(path.read_text("utf-8")) for path in scripts]
+        # Migration 4 rebuilds a referenced table. Disable FK enforcement only on
+        # this unopened runtime connection, then validate all references before commit.
+        self._conn.execute("PRAGMA foreign_keys = OFF")
+        try:
+            self._conn.execute("BEGIN IMMEDIATE")
+            # Read AFTER acquiring the cross-process SQLite migration write lock.
+            version = self._conn.execute("PRAGMA user_version").fetchone()[0]
+            if version not in range(7):
+                raise StateMachineError(
+                    "unsupported_storage_schema", f"Unsupported storage version: {version}"
+                )
+            if (
+                version == 0
+                and self._conn.execute(
+                    "SELECT name FROM sqlite_master WHERE type='table'"
+                ).fetchone()
+            ):
+                raise StateMachineError(
+                    "unsupported_storage_schema", "Unversioned nonempty database"
+                )
+            for target in range(version + 1, 7):
+                for statement in steps[target - 1]:
+                    self._conn.execute(statement)
+                if self._conn.execute("PRAGMA user_version").fetchone()[0] != target:
+                    raise StateMachineError("storage_error", "Non-contiguous schema migration")
+            if version < 5:
+                # The locked source version proves ALL existing events predate
+                # perception, even if a user command used the legacy source sentinel.
+                self._conn.execute(
+                    "INSERT INTO legacy_perception_boundaries "
+                    "SELECT session_id,event_seq,'legacy_event_evidence_unavailable' "
+                    "FROM sessions WHERE event_seq>0 "
+                    "ON CONFLICT(session_id) DO UPDATE SET "
+                    "through_event_seq=excluded.through_event_seq"
+                )
+                self._conn.execute(
+                    "INSERT INTO projection_cursors "
+                    "SELECT session_id,'perception',through_event_seq "
+                    "FROM legacy_perception_boundaries WHERE true "
+                    "ON CONFLICT(session_id,consumer) DO UPDATE SET event_seq=excluded.event_seq"
+                )
+            if self._conn.execute("PRAGMA foreign_key_check").fetchone():
+                raise StateMachineError("storage_error", "Migration contains invalid references")
+            self._conn.commit()
+        except BaseException:
+            self._conn.rollback()
+            raise
+        finally:
+            self._conn.execute("PRAGMA foreign_keys = ON")
 
     def __enter__(self):
         self._ensure_open()

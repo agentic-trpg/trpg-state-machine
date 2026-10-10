@@ -141,7 +141,7 @@ class PerceptionRuntime:
             return row[0] if row else 0
 
     def project_event(self, session_id, event_seq, package, *, context, judgment=None):
-        """Project one durable event. Return resolved/unresolved/already_complete.
+        """Return resolved/unresolved/already_complete/legacy_unavailable.
 
         Judgment receives only one observer/event's undecidable Signals and evidence,
         outside the write transaction. Immutable event-time evidence remains authority.
@@ -157,6 +157,12 @@ class PerceptionRuntime:
             ).fetchone()
             if work is None:
                 raise StateMachineError("event_not_found", "Unknown perception work")
+            boundary = self._conn.execute(
+                "SELECT through_event_seq FROM legacy_perception_boundaries WHERE session_id=?",
+                (session_id,),
+            ).fetchone()
+            if boundary is not None and event_seq <= boundary[0]:
+                return "legacy_unavailable"
             if work[0]:
                 return "already_complete"
             event = self._read_event(session_id, event_seq)
