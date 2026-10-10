@@ -16,6 +16,7 @@ from ._operations import (
     SetObjectState,
     SetSceneFlag,
 )
+from .combat import DND_RULESET, CombatRuntime
 from .commands import OPERATIONS, CommandRuntime, TypedCommand
 from .errors import StateMachineError
 from .events import EventRuntime
@@ -87,14 +88,19 @@ def _migration_statements(script: str) -> tuple[str, ...]:
     return tuple(statements)
 
 
-class StateMachine(CommandRuntime, EventRuntime, MechanicalRuntime, PerceptionRuntime):
+class StateMachine(
+    CommandRuntime, EventRuntime, MechanicalRuntime, PerceptionRuntime, CombatRuntime
+):
     """Trusted in-process runtime. One connection per instance/thread; close explicitly.
 
     All writes commit immediately. Public lifecycle methods are not HTTP endpoints
     or player/NPC views. Only an authenticated adapter may supply TrustedContext.
     """
 
-    def __init__(self, database: str | Path, *, evaluator=None) -> None:
+    def __init__(self, database: str | Path, *, evaluator=None, dnd_loader=None) -> None:
+        from dnd5e_srd_data import BundledAssetLoader
+
+        self._dnd_loader = dnd_loader if dnd_loader is not None else BundledAssetLoader()
         self._evaluator = evaluator if evaluator is not None else SyntheticEvaluator()
         if str(database) == ":memory:":
             raise StateMachineError(
@@ -139,7 +145,7 @@ class StateMachine(CommandRuntime, EventRuntime, MechanicalRuntime, PerceptionRu
 
     def _migrate(self):
         scripts = [Path(__file__).with_name("_schema.sql")] + [
-            Path(__file__).with_name(f"_migration_{v}.sql") for v in range(2, 7)
+            Path(__file__).with_name(f"_migration_{v}.sql") for v in range(2, 8)
         ]
         steps = [_migration_statements(path.read_text("utf-8")) for path in scripts]
         # Migration 4 rebuilds a referenced table. Disable FK enforcement only on
@@ -149,7 +155,7 @@ class StateMachine(CommandRuntime, EventRuntime, MechanicalRuntime, PerceptionRu
             self._conn.execute("BEGIN IMMEDIATE")
             # Read AFTER acquiring the cross-process SQLite migration write lock.
             version = self._conn.execute("PRAGMA user_version").fetchone()[0]
-            if version not in range(7):
+            if version not in range(8):
                 raise StateMachineError(
                     "unsupported_storage_schema", f"Unsupported storage version: {version}"
                 )
@@ -162,7 +168,7 @@ class StateMachine(CommandRuntime, EventRuntime, MechanicalRuntime, PerceptionRu
                 raise StateMachineError(
                     "unsupported_storage_schema", "Unversioned nonempty database"
                 )
-            for target in range(version + 1, 7):
+            for target in range(version + 1, 8):
                 for statement in steps[target - 1]:
                     self._conn.execute(statement)
                 if self._conn.execute("PRAGMA user_version").fetchone()[0] != target:
@@ -335,6 +341,8 @@ class StateMachine(CommandRuntime, EventRuntime, MechanicalRuntime, PerceptionRu
             )
         if replay is not None:
             return replay
+        if package.ruleset_binding.ruleset_id == DND_RULESET:
+            self._verify_dnd_binding(package)
         pc = next(
             (p for p in package.pc_templates if p.pc_template_id == player.pc_template_id), None
         )
@@ -737,10 +745,13 @@ class StateMachine(CommandRuntime, EventRuntime, MechanicalRuntime, PerceptionRu
 
         No mutable snapshot is accepted and no checkpoint/event/Meta commit is made.
         """
-        return self.read_session(session_id, package, context=context)
+        with self._transaction():
+            row = self._session(session_id, package, context)
+            self._require_noncombat_save(row)
+            return self._snapshot(row)
 
     def resume_session(
         self, session_id: str, package: AdventurePackage, *, context: TrustedContext
     ) -> SessionSnapshot:
         """Resume the persisted noncombat foundation, without replaying templates."""
-        return self.read_session(session_id, package, context=context)
+        return self.save_session(session_id, package, context=context)

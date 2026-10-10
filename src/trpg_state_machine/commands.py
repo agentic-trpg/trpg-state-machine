@@ -5,11 +5,13 @@ import json
 from dataclasses import asdict, dataclass
 
 from ._operations import EnterScene, MoveActor, SetObjectState, SetSceneFlag
+from .combat import InitializeCombat
 from .errors import StateMachineError
 from .mechanics import RuleOperation
 from .package import canonical_json
 
 OPERATIONS = {
+    "combat.initialize": InitializeCombat,
     "rule_operation": RuleOperation,
     "enter_scene": EnterScene,
     "set_scene_flag": SetSceneFlag,
@@ -24,7 +26,9 @@ class TypedCommand:
     command_id: str
     actor_id: str
     command_type: str
-    payload: EnterScene | SetSceneFlag | SetObjectState | MoveActor | RuleOperation
+    payload: (
+        EnterScene | SetSceneFlag | SetObjectState | MoveActor | RuleOperation | InitializeCombat
+    )
     expected_world_version: int
     schema_version: str = "sm-command/1"
 
@@ -123,6 +127,15 @@ class CommandRuntime:
         ).hexdigest()
         if type(command.payload) is RuleOperation:
             return self._submit_mechanical(command, package, context, fingerprint)
+        prepared = None
+        if type(command.payload) is InitializeCombat:
+            with self._transaction():
+                row = self._session(command.session_id, package, context)
+                self._authorize_command(row, command.actor_id, command.payload, context)
+                if replay := self._command_replay(command, fingerprint):
+                    return replay
+                prepared_row = dict(row)
+            prepared = self._prepare_combat(prepared_row, package)
         with self._transaction(write=True):
             row = self._session(command.session_id, package, context)
             self._authorize_command(row, command.actor_id, command.payload, context)
@@ -138,7 +151,11 @@ class CommandRuntime:
             else:
                 self._conn.execute("SAVEPOINT command_effects")
                 try:
-                    events = self._operate(row, package, command.payload)
+                    events = (
+                        self._initialize_combat(row, package, prepared)
+                        if isinstance(command.payload, InitializeCombat)
+                        else self._operate(row, package, command.payload)
+                    )
                     events = self._expand_events(row, package, events, command.command_id)
                     if events:
                         version += 1

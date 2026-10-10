@@ -114,6 +114,7 @@ class AdventurePackage:
     actors: tuple[ActorDefinition, ...]
     pc_templates: tuple[PCTemplate, ...]
     events: tuple[EventDefinition, ...] = ()
+    combat_foundation_json: str | None = None
 
     def scene(self, scene_id: str) -> SceneDefinition:
         for scene in self.scenes:
@@ -259,7 +260,14 @@ def _validate(data: dict) -> AdventurePackage:
             "manifest.ruleset_binding",
         )
     )
-    if binding not in (SYNTHETIC_RULESET, SYNTHETIC_EVALUATION_RULESET):
+    dnd = binding.ruleset_id == "dnd-2024-srd-5.2.1"
+    if dnd and (
+        not isinstance(binding.data_revision, str)
+        or not re.fullmatch(r"sha256:[0-9a-f]{64}", binding.data_revision)
+        or binding.evaluator_version != "dnd5e-evaluation/4"
+    ):
+        _fail("unsupported_ruleset", "manifest.ruleset_binding", "Invalid pinned D&D binding")
+    if not dnd and binding not in (SYNTHETIC_RULESET, SYNTHETIC_EVALUATION_RULESET):
         _fail(
             "unsupported_ruleset",
             "manifest.ruleset_binding",
@@ -284,7 +292,15 @@ def _validate(data: dict) -> AdventurePackage:
     )
     for key in compatibility:
         _empty(compatibility[key], [], f"manifest.compatibility.{key}")
-    _empty(root["rule_bindings"], {}, "rule_bindings")
+    foundation = None
+    if dnd:
+        from .combat import validate_foundation
+
+        rules = _mapping(root["rule_bindings"], "combat_foundation", "rule_bindings")
+        validate_foundation(rules["combat_foundation"])
+        foundation = canonical_json(rules["combat_foundation"])
+    else:
+        _empty(root["rule_bindings"], {}, "rule_bindings")
 
     world = _mapping(
         root["world"], "locations starting_location_id initial_flags world_facts", "world"
@@ -480,6 +496,16 @@ def _validate(data: dict) -> AdventurePackage:
         }
         if set(ids) != expected_ids:
             _fail("invalid_reference", "scenes.event_definition_ids", "Event membership mismatch")
+    if foundation is not None:
+        initial = json.loads(foundation)["snapshot"]
+        known = {a.actor_id for a in actors} | {p.pc_template_id for p in templates}
+        for actor in initial["character_states"]:
+            _reference(actor["entity_id"], known, "rule_bindings.combat_foundation.actor")
+        _reference(
+            initial["scene_state"]["scene_id"],
+            {s.scene_id for s in scenes},
+            "rule_bindings.combat_foundation.scene",
+        )
     return AdventurePackage(
         adventure_id,
         version,
@@ -491,6 +517,7 @@ def _validate(data: dict) -> AdventurePackage:
         tuple(actors),
         tuple(templates),
         definitions,
+        foundation,
     )
 
 

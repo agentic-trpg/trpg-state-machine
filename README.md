@@ -213,3 +213,13 @@ See [Stabilization Review](docs/reviews/SM_STABILIZATION_REVIEW.md) for commands
 evidence, compatibility and the merge recommendation. F5 (exact triggering-event
 reference) and F6 (full versioned Snapshot/read-set and PendingChoice protocol)
 remain known follow-up work. No real D&D Adapter or NPC EVA was added.
+
+## Real Engine integration (SM-6)
+
+The candidate D&D Engine and SRD data dependencies are pinned to
+`a7225ebaa4914f6db4ae72f3f6454c355ea7baac`. Schema 7 persists complete restricted
+mechanical components and separate RNG. `combat.initialize` accepts only the
+reviewed encounter embedded in a D&D-bound Package; trusted audit reads rebuild
+actual upstream `CombatSnapshot` / `RNGContext` from SQLite. Active combat
+save/resume is explicitly refused under SM-02. Attack execution is not yet
+implemented in SM-6. See [the mapping and compatibility notes](docs/SM6_COMBAT_FOUNDATION.md).

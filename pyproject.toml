@@ -7,7 +7,11 @@ name = "trpg-state-machine"
 version = "0.1.0"
 description = "Session and scene persistence foundation for Agentic TRPG"
 requires-python = ">=3.12"
-dependencies = ["PyYAML>=6.0.2,<7"]
+dependencies = ["PyYAML>=6.0.2,<7", "dnd5e-engine==0.6.0", "dnd5e-srd-data==0.6.0"]
+
+[tool.uv.sources]
+dnd5e-engine = { git = "https://github.com/agentic-trpg/trpg-rules-engine.git", rev = "a7225ebaa4914f6db4ae72f3f6454c355ea7baac", subdirectory = "packages/dnd5e-engine" }
+dnd5e-srd-data = { git = "https://github.com/agentic-trpg/trpg-rules-engine.git", rev = "a7225ebaa4914f6db4ae72f3f6454c355ea7baac", subdirectory = "packages/dnd5e-srd-data" }
 
 [dependency-groups]
 dev = ["pytest>=8.3,<10", "ruff>=0.9,<1"]
