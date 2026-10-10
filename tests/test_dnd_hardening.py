@@ -310,7 +310,7 @@ def test_actual_legacy_combat_upgrade_preserves_mechanics_rng_receipt(
             sm.get_command_receipt(sid, "old.real.attack", package, context=context).status
             == "committed"
         )
-        assert sm._conn.execute("PRAGMA user_version").fetchone()[0] == 11
+        assert sm._conn.execute("PRAGMA user_version").fetchone()[0] == 12
         assert sm._conn.execute("PRAGMA foreign_key_check").fetchall() == []
         before = sm.read_session(sid, package, context=context)
         assert before.ruleset_binding.evaluator_version == "dnd5e-evaluation/4"

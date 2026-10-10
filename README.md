@@ -284,3 +284,7 @@ SM-14 最终全量回归：**462 passed（396 既有 + 66 新增）**；Ruff 检
 ## SM-15 durable evaluation authorization
 
 Configured NPCs can receive persistent, controller-bound `npc-evaluation/1` tasks via `create_npc_evaluation_task`, read complete authorized inputs via `get_npc_evaluation_task`, and discover tasks after restart via `list_npc_evaluation_tasks`. Migration 11 preserves existing Inbox observations and adds Work/provenance references. Reads do not complete cognition. This batch does not run a model or submit Meta/results. See [SM-15](docs/SM15_NPC_EVALUATION_TASKS.md).
+
+## SM-16 atomic NPC cognition result
+
+`submit_npc_evaluation_result` validates a local seven-field typed Result and atomically appends all five private Meta histories with one selected Result, EvaluationReceipt and reliable output records. `get_npc_evaluation_receipt` recovers lost feedback. Schema 12 retains prior data and adds scoped Observation provenance. No model or action execution is provided in this batch. See [SM-16](docs/SM16_NPC_META_COMMIT.md).

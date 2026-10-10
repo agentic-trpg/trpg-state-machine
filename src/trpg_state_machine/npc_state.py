@@ -21,7 +21,7 @@ class NPCProfile:
 @dataclass(frozen=True, slots=True)
 class SourceReference:
     # Package backstory is explicitly different from a Session Observation.
-    kind: Literal["package", "memory"]
+    kind: Literal["package", "memory", "observation"]
     reference_id: str
     version: int | None
 
