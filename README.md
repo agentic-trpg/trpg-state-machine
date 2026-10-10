@@ -231,3 +231,9 @@ misses, Temp HP and damage resistance/immunity/vulnerability. Choice, complex
 mechanics and the unimplemented upstream `combat.end` remain restricted. Read
 [the execution and error boundaries](docs/SM7_REAL_ATTACK.md); active combat
 audit recovery must not be described as safe continuation.
+
+SM-8 adds trusted NPC `combat.intent` through that same pipeline and read-only
+`query_action_availability`. Explicit ordinary weapons and bundled Bandit's basic
+`scimitar` / `light-crossbow` actions are tested; unsupported/unknown actions fail
+closed. Availability is conditional and does not grant execution rights or reserve
+resources. See [NPC authorization and query boundaries](docs/SM8_NPC_AVAILABILITY.md).

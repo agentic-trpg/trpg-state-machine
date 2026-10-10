@@ -186,13 +186,20 @@ class DndRuntime:
     async def _evaluate_dnd(self, request):
         return await evaluate(request, loader=self._dnd_loader)
 
-    def _dnd_capability(self, command):
+    def _dnd_capability(self, payload, actor_id, snapshot):
         if (
-            command.payload.intent_type == "attack"
-            and command.payload.weapon_id is None
-            and command.payload.stat_block_action_id is None
+            payload.intent_type == "attack"
+            and payload.weapon_id is None
+            and payload.stat_block_action_id is None
         ):
             return "pending_choice_unsupported"
+        if payload.stat_block_action_id is not None:
+            slug = snapshot.combat_state.monster_slug_by_entity.get(actor_id)
+            monster = self._dnd_loader.get_monster(slug) if slug else None
+            if monster is None or payload.stat_block_action_id not in {
+                a.slug for a in monster.actions
+            }:
+                return "unsupported_stat_block_action"
         return None
 
     async def _submit_dnd(self, command, package, context, fingerprint):
@@ -221,7 +228,7 @@ class DndRuntime:
             ruleset_binding=RulesetBinding(**asdict(package.ruleset_binding)),
             rng_context=rng,
         )
-        capability = self._dnd_capability(command)
+        capability = self._dnd_capability(command.payload, command.actor_id, snapshot)
         result, changes = None, ()
         if snapshot.world_version == command.expected_world_version:
             self._verify_dnd_binding(package)

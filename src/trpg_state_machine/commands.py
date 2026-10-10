@@ -121,8 +121,10 @@ def command_fingerprint(command, package, context):
 
 class CommandRuntime:
     def _authorize_command(self, row, actor_id, payload, context):
-        if isinstance(payload, MoveActor):
-            if actor_id != payload.actor_id:
+        if isinstance(payload, MoveActor) or (
+            isinstance(payload, CombatIntentPayload) and actor_id != row["pc_actor_id"]
+        ):
+            if isinstance(payload, MoveActor) and actor_id != payload.actor_id:
                 raise StateMachineError("invalid_actor", "Envelope and payload actors differ")
             actor = self._conn.execute(
                 "SELECT kind FROM actors WHERE session_id=? AND actor_id=?",
