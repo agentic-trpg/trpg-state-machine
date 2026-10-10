@@ -288,3 +288,7 @@ Configured NPCs can receive persistent, controller-bound `npc-evaluation/1` task
 ## SM-16 atomic NPC cognition result
 
 `submit_npc_evaluation_result` validates a local seven-field typed Result and atomically appends all five private Meta histories with one selected Result, EvaluationReceipt and reliable output records. `get_npc_evaluation_receipt` recovers lost feedback. Schema 12 retains prior data and adds scoped Observation provenance. No model or action execution is provided in this batch. See [SM-16](docs/SM16_NPC_META_COMMIT.md).
+
+## SM-17 modes and Gate
+
+Persistent Interactive/Inactive scheduling now serializes task authorization, nonblocking mode cancellation and Result commit. `request_npc_interaction`, `set_npc_inactive`, `route_npc_observations`, `get_npc_mode` and bounded `report_npc_evaluation_failure` reuse the existing NPC authority and Work. Schema 13 records safe retention/no-op without inventing Meta; Interactive mode excludes Background even while idle. See [SM-17](docs/SM17_NPC_MODE_GATE.md).

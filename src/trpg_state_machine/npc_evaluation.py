@@ -131,6 +131,7 @@ class NPCEvaluationRuntime:
         expected_npc_state_version,
         source_observation_ids=(),
         player_input=None,
+        gate_authorized=False,
     ):
         actor = self._evaluation_actor(sid, package, context)
         _text(request_id, 128)
@@ -171,6 +172,7 @@ class NPCEvaluationRuntime:
             return self._task(existing)
         if actor["npc_state_version"] != expected_npc_state_version:
             raise StateMachineError("npc_version_conflict", "NPC State changed")
+        self._evaluation_mode_check(sid, context.observer_id, mode, gate_authorized)
         if self._conn.execute(
             "SELECT 1 FROM npc_evaluation_tasks WHERE session_id=? AND npc_id=? AND "
             "status='running'",
@@ -185,7 +187,10 @@ class NPCEvaluationRuntime:
                 "JOIN projection_cursors c ON c.session_id=w.session_id AND "
                 "c.consumer='perception' "
                 "WHERE w.session_id=? AND w.npc_id=? AND w.observation_id=? "
-                "AND o.event_seq<=c.event_seq AND w.status='pending'",
+                "AND o.event_seq<=c.event_seq AND w.status='pending' "
+                "AND NOT EXISTS (SELECT 1 FROM npc_evaluation_observations e "
+                "JOIN npc_evaluation_tasks t USING(evaluation_id) "
+                "WHERE e.work_id=w.work_id AND t.status='completed')",
                 (sid, context.observer_id, oid),
             ).fetchone()
             if work is None:

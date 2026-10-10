@@ -167,6 +167,7 @@ class NPCRuntime:
                 canonical_json(asdict(initial.runtime)) if initial else None,
             ),
         )
+        self._conn.execute("INSERT INTO npc_modes VALUES (?,?,'inactive')", (sid, actor.actor_id))
         if initial is None:
             return
         self._conn.executemany(
