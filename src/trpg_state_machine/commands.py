@@ -137,6 +137,17 @@ class CommandRuntime:
         elif actor_id != row["pc_actor_id"]:
             raise StateMachineError("invalid_actor", "Command requires the selected PC")
 
+    def _world_operation_capability(self, row, payload):
+        if isinstance(payload, (EnterScene, MoveActor, SetObjectState)):
+            combat = self._conn.execute(
+                "SELECT state_json FROM combats WHERE session_id=?", (row["session_id"],)
+            ).fetchone()
+            if combat and not json.loads(combat[0])["ended"]:
+                raise StateMachineError(
+                    "unsupported_combat_world_operation",
+                    "This world operation has no represented mechanical Delta during combat",
+                )
+
     def _command_replay(self, command, fingerprint):
         stored = self._conn.execute(
             "SELECT fingerprint, receipt_json FROM command_receipts "

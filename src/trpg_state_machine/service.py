@@ -153,7 +153,7 @@ class StateMachine(
 
     def _migrate(self):
         scripts = [Path(__file__).with_name("_schema.sql")] + [
-            Path(__file__).with_name(f"_migration_{v}.sql") for v in range(2, 8)
+            Path(__file__).with_name(f"_migration_{v}.sql") for v in range(2, 9)
         ]
         steps = [_migration_statements(path.read_text("utf-8")) for path in scripts]
         # Migration 4 rebuilds a referenced table. Disable FK enforcement only on
@@ -163,7 +163,7 @@ class StateMachine(
             self._conn.execute("BEGIN IMMEDIATE")
             # Read AFTER acquiring the cross-process SQLite migration write lock.
             version = self._conn.execute("PRAGMA user_version").fetchone()[0]
-            if version not in range(8):
+            if version not in range(9):
                 raise StateMachineError(
                     "unsupported_storage_schema", f"Unsupported storage version: {version}"
                 )
@@ -176,7 +176,7 @@ class StateMachine(
                 raise StateMachineError(
                     "unsupported_storage_schema", "Unversioned nonempty database"
                 )
-            for target in range(version + 1, 8):
+            for target in range(version + 1, 9):
                 for statement in steps[target - 1]:
                     self._conn.execute(statement)
                 if self._conn.execute("PRAGMA user_version").fetchone()[0] != target:
@@ -522,6 +522,12 @@ class StateMachine(
                 "actor.moved": "Someone moves into view.",
                 "object.state_changed": "An object changes position.",
             }
+            if (
+                event_type == "combat.engine_event"
+                and payload["engine_event"]["type"] == "intent_submitted"
+                and payload["engine_event"]["intent_type"] == "attack"
+            ):
+                descriptions[event_type] = "Someone makes an attack."
             if event_type in descriptions and scene_id:
                 signals = [
                     Signal(
@@ -588,6 +594,7 @@ class StateMachine(
         return self.read_session(session_id, package, context=context)
 
     def _operate(self, row, package: AdventurePackage, operation: FoundationOperation):
+        self._world_operation_capability(row, operation)
         sid = row["session_id"]
         if isinstance(operation, EnterScene):
             target = package.scene(operation.scene_id)

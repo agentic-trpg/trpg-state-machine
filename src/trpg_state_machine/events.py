@@ -53,8 +53,13 @@ class EventRuntime:
                 if flags[definition.condition_flag] != definition.condition_value:
                     continue
                 self._conn.execute(
-                    "INSERT INTO trigger_history VALUES (?, ?, ?)",
-                    (row["session_id"], definition.event_definition_id, command_id),
+                    "INSERT INTO trigger_history VALUES (?, ?, ?, ?, 'linked')",
+                    (
+                        row["session_id"],
+                        definition.event_definition_id,
+                        command_id,
+                        row["event_seq"] + index,
+                    ),
                 )
                 queue.extend(self._operate(current, package, definition.effect))
                 queue.append(

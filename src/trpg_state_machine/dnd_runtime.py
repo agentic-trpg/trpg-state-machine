@@ -117,14 +117,23 @@ def delta_changes(request, result):
             combat[field][actor_id] = _json(op.value)
             changes.append(("ledger", actor_id, field, _json(op.value)))
         elif type(op) is delta.DamageSequenceUpdate:
+            if op.value < op.expected:
+                _invalid("Damage sequence cannot move backwards")
             edit("combat", op.combat_id, "damage_instance_sequence", op.expected, op.value)
         elif type(op) is delta.ProcessedDamageUpdate:
+            if not op.expected <= op.value:
+                _invalid("An attack cannot erase processed damage history")
             if any(target_id not in actors for target_id, _ in op.value):
                 _invalid("Processed damage target outside the encounter")
             edit(
                 "combat", op.combat_id, "processed_zero_hp_damage_instances", op.expected, op.value
             )
         elif type(op) is delta.DeathLedgerUpdate:
+            if (
+                not op.expected_dead_ids <= op.dead_ids
+                or op.records[: len(op.expected_records)] != op.expected_records
+            ):
+                _invalid("An attack cannot erase or rewrite death history")
             if not op.dead_ids <= actors.keys() or any(
                 r.target_id not in actors for r in op.records
             ):
@@ -167,6 +176,12 @@ def validate_dnd_result(request, result):
         _invalid("Expected the pinned Engine's complete whole-session read fence")
     if result.status == "needs_choice":
         _invalid("Unexpected choice after explicit basic-attack capability admission")
+    actors = {a.entity_id for a in request.state_snapshot.character_states}
+    for event in result.proposed_events:
+        for field in ("actor_id", "target_id", "source_actor_id", "attacker_id", "killer_id"):
+            value = getattr(event, field, None)
+            if value is not None and value not in actors:
+                _invalid("Proposed mechanical event refers to an actor outside the encounter")
     return result, delta_changes(request, result) if result.status == "accepted" else ()
 
 

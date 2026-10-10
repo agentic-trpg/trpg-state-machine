@@ -535,6 +535,7 @@ def _event_definitions(raw, scenes):
             "scene.flag_changed",
             "object.state_changed",
             "actor.moved",
+            "combat.engine_event",
         ):
             _fail("unsupported_mechanism", path, "Unknown authoritative event trigger")
         scene = next((s for s in scenes if s.scene_id == trigger["scene_id"]), None)
