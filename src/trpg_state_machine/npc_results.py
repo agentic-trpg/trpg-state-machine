@@ -6,6 +6,8 @@ import re
 from dataclasses import asdict, dataclass
 from uuid import uuid4
 
+from dnd5e_engine.evaluation_contracts import CombatIntentPayload
+
 from .errors import StateMachineError
 from .npc_state import RECORD_TYPES, SourceReference
 from .package import canonical_json
@@ -16,6 +18,23 @@ class NPCActionIntent:
     operation: str
     destination_scene_id: str
     expected_world_version: int
+
+
+@dataclass(frozen=True, slots=True)
+class NPCCombatIntent:
+    """Local handoff envelope reusing the pinned Engine's closed intent payload."""
+
+    payload: CombatIntentPayload
+    expected_world_version: int
+
+
+def _output_data(output):
+    data = asdict(output)
+    if type(output) is NPCCombatIntent:
+        if type(output.payload) is not CombatIntentPayload:
+            _invalid("Combat handoff requires the pinned Engine payload type")
+        data["payload"] = output.payload.model_dump(mode="json")
+    return data
 
 
 @dataclass(frozen=True, slots=True)
@@ -91,7 +110,12 @@ def _result_json(result):
         if type(items) is not tuple or len(items) > 100:
             _invalid("Each update/output list must be a tuple of at most 100 items")
     try:
-        raw = canonical_json(asdict(result))
+        data = asdict(result)
+        data["action_intents"] = tuple(
+            _output_data(item) if type(item) is NPCCombatIntent else encoded
+            for item, encoded in zip(result.action_intents, data["action_intents"], strict=True)
+        )
+        raw = canonical_json(data)
         # UnicodeError is a ValueError; reject before selecting or writing a Result.
         encoded_size = len(raw.encode("utf-8"))
     except (TypeError, ValueError, RecursionError) as exc:
@@ -246,7 +270,15 @@ class NPCResultRuntime:
             outputs.append(("dialogue", dialogue, error))
         for intent in result.action_intents:
             error = None
-            if type(intent) is not NPCActionIntent or intent.operation != "move_actor":
+            if type(intent) is NPCCombatIntent:
+                if (
+                    type(intent.expected_world_version) is not int
+                    or intent.expected_world_version < 0
+                    or type(intent.payload) is not CombatIntentPayload
+                    or intent.payload.source_id not in (None, row["npc_id"])
+                ):
+                    error = "invalid_npc_action"
+            elif type(intent) is not NPCActionIntent or intent.operation != "move_actor":
                 error = "unsupported_npc_action"
             elif (
                 type(intent.expected_world_version) is not int
@@ -311,7 +343,7 @@ class NPCResultRuntime:
                     status = "rejected" if problem else "pending"
                     outputs.append(NPCOutputHandoff(ordinal, kind, command_id, status, problem))
                     encoded = (
-                        canonical_json(asdict(payload))
+                        canonical_json(_output_data(payload))
                         if hasattr(payload, "__dataclass_fields__")
                         else canonical_json(payload)
                     )

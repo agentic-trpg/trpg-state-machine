@@ -301,3 +301,19 @@ Persistent Interactive/Inactive scheduling now serializes task authorization, no
 ## SM-18 output and processing recovery
 
 `dispatch_npc_output`, `get_npc_output_status` and `npc_completed_cursor` complete the local NPC domain transaction loop. Reliable action handoffs use the existing `move_actor` TypedCommand subset and original CommandReceipt; authorized local speech publishes one observable event. Schema 14 persists a per-NPC continuous processing cursor. Completed EVA does not wait for action success, and real-process crash recovery avoids duplicate cognition/actions. This remains hand-built Result integration, not a real Agent Host/LLM MVP. See [SM-18](docs/SM18_NPC_OUTPUT_COMPLETION.md).
+
+## SM-19: NPC combat output handoff
+
+`NPCCombatIntent(payload: CombatIntentPayload, expected_world_version)` in `npc_results`
+uses the pinned Engine payload inside the existing seven-field Result. `NPCActionIntent`
+(move_actor) remains compatible. `dispatch_npc_output` restores the original TypedCommand,
+uses its durable command ID and CommandReceipt, and leaves completed Meta/EVA intact on
+command refusal or failure. Both command preparation and atomic commit recheck the
+persisted handoff/controller grant. Target admission is deliberately limited to a
+current, shared, clear bright scene with explicit visual senses and no unsupported
+conditions/obstructions. Other perception situations fail closed; no D&D visibility,
+attack, damage or action-economy formula is implemented here.
+
+Real attacks still run outside SQLite write transactions. A fresh process may reconcile
+an already committed command/handoff; it cannot resume an interrupted active combat.
+No new table, ACK, executor, continuation or second receipt store was added.

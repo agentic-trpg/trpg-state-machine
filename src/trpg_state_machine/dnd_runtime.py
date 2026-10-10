@@ -277,6 +277,7 @@ class DndRuntime:
         with self._transaction():
             row = self._session(command.session_id, package, context)
             self._authorize_command(row, command.actor_id, command.payload, context)
+            self._npc_handoff_command_guard(command)
             if replay := self._command_replay(command, fingerprint):
                 return replay
             if row["evaluator_version"] != EVALUATOR_VERSION:
@@ -284,6 +285,7 @@ class DndRuntime:
                     "ruleset_binding_mismatch", "Pinned evaluator version is not installed"
                 )
             snapshot = build_snapshot(row)
+            self._npc_combat_target_guard(command, package, snapshot)
             rng = self._rng_context(row)
             if type(command.payload) is not CheckPayload:
                 combat = self._conn.execute(
@@ -335,6 +337,7 @@ class DndRuntime:
         with self._transaction(write=True):
             row = self._session(command.session_id, package, context)
             self._authorize_command(row, command.actor_id, command.payload, context)
+            self._npc_handoff_command_guard(command)
             if replay := self._command_replay(command, fingerprint):
                 return replay
             version, seq = row["world_version"], row["event_seq"]
@@ -350,6 +353,7 @@ class DndRuntime:
             elif result.status != "accepted":
                 status, error = "rejected", result.error.code
             else:
+                self._npc_combat_target_guard(command, package, build_snapshot(row))
                 result, changes = validate_dnd_result(request, result)
                 self._conn.execute("SAVEPOINT dnd_effects")
                 try:
