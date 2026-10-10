@@ -102,9 +102,9 @@ Receipts use durable `(session_id, command_id)` keys and a canonical fingerprint
 - Package 读取/验证、指纹计算、UUID 准备在写事务外进行；写事务内没有网络/模型/规则求值。持久唯一键和事务内再查创建键处理并发重入；失败不保留占位 Session 或幂等 claim。
 - Scene 主键是 `(session_id, scene_id)`，首次初始化对象与 flags；重访只更新访问次数和 PC 位置。Actor 位置只由 Session 内唯一 Actor 行记录。全部运行态表按 Session 隔离。
 - 初始 `world_version=0`。每次实际状态修改成功提交推进一次；无变化操作不推进。`event_seq` 是独立的内部审计序号：创建产生两条记录，Scene 转移产生 exit/enter 两条记录，因此不等于 world_version。
-- 事件保存稳定 ID、来源命令及受限 Signals，事件时位置证据与持久 Outbox 同事务提交；当前没有完整 Perception 协议。没有 event-only 或 Meta-only 提交能力，未冻结它们的 world_version 策略。
+- 事件保存稳定 ID、来源命令及受限 Signals，事件时位置证据与持久 Outbox 同事务提交；当前提供受限合成 Perception 投影，完整规则/传播协议未实现。没有 event-only 或 Meta-only 提交能力，未冻结它们的 world_version 策略。
 - RNG 单独持久保存 `state_id / algorithm=unselected / encoding=foundation-placeholder/1 / position=0`，Session 保存引用。Foundation binding 不掷骰；新增 synthetic.atomic binding 使用独立、显式版本化的合成计数 RNG，未实现 D&D RNG 协议。
-- 所有修改立即提交；`save_session` 不创建第二份权威快照/检查点。Storage schema 4 automatically migrates schema 1/2/3 while preserving package pins/digests and state. Legacy events have no fabricated historical evidence. Unknown schemas are refused. No online backup tool.
+- 所有修改立即提交；`save_session` 不创建第二份权威快照/检查点。Storage schema 5 automatically migrates schema 1/2/3/4 while preserving package pins/digests and state. Legacy events have no fabricated historical evidence. Unknown schemas are refused. No online backup tool.
 
 ## 自动化验收证据
 
@@ -130,7 +130,7 @@ create → enter workshop → mutate door/flag/NPC → leave → revisit → sav
 - [Agent Architecture v0.9](https://github.com/agentic-trpg/agentic-trpg/blob/fe6a1e9edeaf2a3e120aa669b6abfe1e819d87f1/docs/AGENT_ARCHITECTURE.md)。
 - [MVP Scope v0.11](https://github.com/agentic-trpg/agentic-trpg/blob/fe6a1e9edeaf2a3e120aa669b6abfe1e819d87f1/docs/MVP_SCOPE.md)。
 
-这些文档的 `[PROPOSED]` / `[OPEN]` 不因本实现自动冻结。当前是 SM-4 Foundation，不是完整 MVP：**未实现** Rule Engine Adapter、D&D PC 机械验证、Combat/正式规则检定、完整声明式事件/条件/奖励链、Quest/Inventory 操作、NPC Meta/Perception/Observation、Gate、EVA、LLM Host、视觉系统、活跃战斗恢复、通用脚本或插件框架。
+这些文档的 `[PROPOSED]` / `[OPEN]` 不因本实现自动冻结。当前是 SM-5 Foundation，不是完整 MVP：**未实现** Rule Engine Adapter、D&D PC 机械验证、Combat/正式规则检定、完整声明式事件/条件/奖励链、Quest/Inventory 操作、NPC Meta/完整感知规则、Gate、EVA、LLM Host、视觉系统、活跃战斗恢复、通用脚本或插件框架。
 
 仍为 OPEN 或后续批次事项：规则 RNG 算法/编码与回放、事件/Meta-only 版本策略、完整规则 CharacterState/CombatState/Typed Delta、通用系统来源权限、条件 AST、Pending Choice、完整 Perception/Outbox 协议、更复杂的数据迁移/备份策略及外部 PC 导入。本批没有以空类或 Stub 宣称这些能力完成。
 
@@ -155,3 +155,17 @@ Evaluation uses a copied request outside write transactions. Commit rechecks aut
 The synthetic stream uses SHA-256 of state_id and counter to generate a 1..6 value. Counter, position and rng_version persist atomically. This deliberately local test encoding is not a frozen RNG contract or statistically reviewed dice protocol. Event-only/Meta-only/no-draw global version policies remain OPEN; mechanical commits currently require an actual world change.
 
 Engine main 64dd920 was inspected read-only. Public resolve_check and rest resolvers are reusable pure fragments, but evaluate, full Snapshot/Delta/RNGTransition and four-status envelopes are absent. The old registry-backed combat API cannot satisfy ADR-001. See docs/batches/SM4.md for exact gaps and actual smoke evidence.
+
+## SM-5 NPC perception foundation
+
+Package NPCs may declare explicit synthetic `senses: {visual: true, auditory: true}`. Missing senses remain unknown; they do not default to true/false. Every new event durably captures actor positions and these senses together with authored Signal scope/occlusion and perception work. Projection never reads a later position to reconstruct history. Old events without sufficient evidence stay unresolved.
+
+`project_event(session_id, event_seq, package, *, context, judgment=None)` processes durable work outside the write transaction. Scene scope, declared senses and clear/blocked evidence give deterministic answers. Only undetermined, adequately evidenced Signals are sent as a same-observer/event JudgmentRequest batch to the optional restricted callback. JudgmentResult must contain exactly one typed Boolean for every requested signal_id; omissions, duplicates, unknown IDs, bad types and exceptions leave work unresolved. No real JEV/LLM Host is implemented.
+
+One EventObservation aggregates all perceived Signal content per observer/event/projection-version. All false completes without an Observation. Partial/unresolved decisions do not complete the event or advance the contiguous perception cursor. Observations and inactive-NPC inbox references commit atomically and deduplicate on retry. `perception_cursor(...)` tracks projection completion, not cognition completion. There is no ACK, Agent activation, EVA, belief or goal update.
+
+Owner-only `grant_npc_access(...)` assigns an authenticated principal to an existing NPC. NPCContext is session/observer bound and checked against this durable grant on every `read_observations(...)` and `get_scene_view(...)`. NPCs cannot use owner snapshots or read_events. NPC observations expose opaque observation_id, observer_id and perceived channel/content only; event type/source command/true actor/secret target/internal trace remain in storage. Inbox reads retain records and are not cognition ACKs. A Session-wide cursor conservatively withholds later observations across any earlier unresolved gap.
+
+`get_scene_view` returns CurrentPerceptualView for NPCs: own current scene and currently visible actors/objects in the synthetic clear-scene model, with unresolved status for missing senses. It never infers a past causal actor from current presence. Owner access returns the ordinary current SceneInstance. Physical LOS, distance, walls, D&D senses/checks and secret-content authoring validation remain unsupported.
+
+168 tests pass, including 22 perception tests: two observers/multiple Signals, event-time movement, hidden activity, malformed/timeout JEV, all-false/known occlusion, durable unresolved gaps, inbox rollback, concurrent deduplication, authorization revocation/isolation and fresh-process reading of real persisted inbox rows. See docs/batches/SM5.md.

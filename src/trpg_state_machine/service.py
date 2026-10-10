@@ -41,6 +41,7 @@ from .package import (
     _creation_fingerprint,
     canonical_json,
 )
+from .perception import PerceptionRuntime
 
 
 def _binding(row: sqlite3.Row) -> RulesetBinding:
@@ -65,7 +66,7 @@ def _trusted(context: TrustedContext) -> None:
         raise StateMachineError("invalid_context", "NPC grants must be trusted identity tuples")
 
 
-class StateMachine(CommandRuntime, EventRuntime, MechanicalRuntime):
+class StateMachine(CommandRuntime, EventRuntime, MechanicalRuntime, PerceptionRuntime):
     """Trusted in-process runtime. One connection per instance/thread; close explicitly.
 
     All writes commit immediately. Public lifecycle methods are not HTTP endpoints
@@ -100,7 +101,7 @@ class StateMachine(CommandRuntime, EventRuntime, MechanicalRuntime):
                         "unsupported_storage_schema", "Unversioned nonempty database"
                     )
                 self._conn.executescript(Path(__file__).with_name("_schema.sql").read_text("utf-8"))
-            elif version not in (1, 2, 3, 4):
+            elif version not in (1, 2, 3, 4, 5):
                 raise StateMachineError(
                     "unsupported_storage_schema", f"Unsupported storage version: {version}"
                 )
@@ -115,6 +116,10 @@ class StateMachine(CommandRuntime, EventRuntime, MechanicalRuntime):
             if version < 4:
                 self._conn.executescript(
                     Path(__file__).with_name("_migration_4.sql").read_text("utf-8")
+                )
+            if version < 5:
+                self._conn.executescript(
+                    Path(__file__).with_name("_migration_5.sql").read_text("utf-8")
                 )
             if not self._conn.execute("PRAGMA foreign_keys").fetchone()[0]:
                 raise StateMachineError("storage_error", "Foreign keys must be enabled")
@@ -411,7 +416,7 @@ class StateMachine(CommandRuntime, EventRuntime, MechanicalRuntime):
             "SELECT event_seq FROM sessions WHERE session_id = ?", (session_id,)
         ).fetchone()[0]
         evidence = {
-            "schema": "event-evidence/1",
+            "schema": "event-evidence/2",
             "actors": [
                 dict(actor)
                 for actor in self._conn.execute(
@@ -420,6 +425,11 @@ class StateMachine(CommandRuntime, EventRuntime, MechanicalRuntime):
                 ).fetchall()
             ],
         }
+        for actor in evidence["actors"]:
+            definition = next((a for a in package.actors if a.actor_id == actor["actor_id"]), None)
+            actor["senses"] = (
+                dict(definition.senses) if definition and definition.senses is not None else None
+            )
         for event_type, payload in events:
             seq += 1
             self._conn.execute(
@@ -466,6 +476,11 @@ class StateMachine(CommandRuntime, EventRuntime, MechanicalRuntime):
             )
             self._conn.execute(
                 "INSERT INTO event_outbox(session_id,event_seq,consumer) VALUES (?, ?, 'delivery')",
+                (session_id, seq),
+            )
+            self._conn.execute(
+                "INSERT INTO event_outbox(session_id,event_seq,consumer) "
+                "VALUES (?, ?, 'perception')",
                 (session_id, seq),
             )
         self._conn.execute(

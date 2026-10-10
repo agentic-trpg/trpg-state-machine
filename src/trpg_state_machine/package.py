@@ -63,6 +63,7 @@ class ActorDefinition:
     actor_id: str
     name: str
     initial_scene_id: str
+    senses: tuple[tuple[str, bool], ...] | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -395,7 +396,10 @@ def _validate(data: dict) -> AdventurePackage:
     actors = []
     for i, value in enumerate(_list(root["actors"], "actors")):
         path = f"actors[{i}]"
-        a = _mapping(value, "actor_id name kind controller initial_scene_id", path)
+        fields = "actor_id name kind controller initial_scene_id"
+        if isinstance(value, dict) and "senses" in value:
+            fields += " senses"
+        a = _mapping(value, fields, path)
         key = _identifier(a["actor_id"], path + ".actor_id", "npc")
         initial_scene = _identifier(a["initial_scene_id"], path + ".initial_scene_id", "scene")
         _reference(initial_scene, scene_ids, path + ".initial_scene_id")
@@ -405,7 +409,13 @@ def _validate(data: dict) -> AdventurePackage:
             )
         if key not in next(s for s in scenes if s.scene_id == initial_scene).actor_ids:
             _fail("invalid_reference", path, "Actor must be listed in its initial scene")
-        actors.append(ActorDefinition(key, _text(a["name"], path + ".name"), initial_scene))
+        senses = None
+        if "senses" in a:
+            sense_data = _mapping(a["senses"], "visual auditory", path + ".senses")
+            if any(type(v) is not bool for v in sense_data.values()):
+                _fail("schema_error", path + ".senses", "Senses must be explicit booleans")
+            senses = tuple(sorted(sense_data.items()))
+        actors.append(ActorDefinition(key, _text(a["name"], path + ".name"), initial_scene, senses))
     _unique([a.actor_id for a in actors], "actors")
     for scene in scenes:
         for actor in scene.actor_ids:

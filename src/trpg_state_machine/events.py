@@ -138,6 +138,8 @@ class EventRuntime:
         Completion records durable delivery only, never completed NPC cognition.
         Out-of-order delivery is permitted but the cursor cannot cross an older gap.
         """
+        if type(event_seq) is not int or event_seq <= 0:
+            raise StateMachineError("invalid_event", "Expected a positive event sequence")
         with self._transaction(write=True):
             self._session(session_id, package, context)
             work = self._conn.execute(

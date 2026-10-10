@@ -72,7 +72,12 @@ def test_atomic_trigger_signals_and_restart(tmp_path, package_data, context, req
             == "open"
         )
         assert conn.execute("SELECT COUNT(*) FROM trigger_history").fetchone()[0] == 1
-        assert conn.execute("SELECT COUNT(*) FROM event_outbox").fetchone()[0] == 5
+        assert (
+            conn.execute("SELECT COUNT(*) FROM event_outbox WHERE consumer='delivery'").fetchone()[
+                0
+            ]
+            == 5
+        )
 
 
 def test_once_and_cycle_protection(tmp_path, package_data, context, request_for):
@@ -129,7 +134,7 @@ def test_outbox_insert_failure_rolls_back_everything(tmp_path, package_data, con
             ("events", 2),
             ("event_records", 2),
             ("event_evidence", 2),
-            ("event_outbox", 2),
+            ("event_outbox", 4),
             ("trigger_history", 0),
             ("command_receipts", 0),
         ]:

@@ -1,0 +1,15 @@
+# SM-5 — event-driven NPC perception foundation
+
+Base: 16291de. Architecture: local Meta fe6a1e9, Contracts §7 (PER-01–PER-08), SM §6 and Agent §5. No Meta/Engine changes.
+
+Implemented: typed scene Signal scopes; event-time NPC position and explicit synthetic senses captured atomically with immutable event/work. Deterministic scene/sense/known-occlusion discovery; restricted same-observer/event JEV judgment boundary for undecidable Signals only. Exactly one Boolean per requested Signal ID is required. Unknown/missing/duplicate/type-invalid/exception outcomes remain unresolved. Missing historical evidence is never backfilled or treated as false.
+
+One aggregate Observation per observer/event/projection version; all false completes with no Observation. Derived decisions/Observation/inactive-NPC inbox/completion commit together. Work and retries reuse the event Outbox and contiguous projection-cursor protocol. Later completed work cannot hide an older gap. Projection is at least once with unique keys; cognition completion and ACK are NOT IMPLEMENTED.
+
+Persisted owner-issued NPC access grants bind authenticated principal, Session and observer. Authorized reads expose only opaque observation ID, observer identity and perceived content/channel. Source event/type/command/real actor/hidden target remain internal. Owner snapshots/read_events reject NPC contexts. CurrentPerceptualView is a separate current-scene projection, not historical causation or observation replacement. Synthetic current scenes assume clear visibility for declared visual senses; no physical propagation or secret actors are implemented.
+
+Schema 5 preserves old Sessions and package digests. Existing events receive durable perception work; insufficient legacy evidence stays unresolved and can hold the conservative Session-wide cursor. No silent re-evaluation using current NPC positions. Owner-issued access grants are infrastructure authorization, not NPC Meta changes.
+
+Validation: uv sync --locked --group dev; uv run --locked python -m pytest -q --basetemp=.test-tmp/sm5final (168 passed); uv run --locked python -m ruff check .; uv run --locked python -m ruff format --check . . 22 new tests cover two-NPC multi-Signal aggregation, event-time movement, hidden flag activity, current-view/history separation, authorization/revocation/session isolation, malformed and timeout judgments, all false/known occlusion, unresolved gaps across restart, injected inbox failure, concurrent deduplication, actual fresh-process durable-inbox reads and strict event-sequence types.
+
+Remaining OPEN/unimplemented: real Host/JEV/model integration; distance/LOS/propagation/D&D perception; signal-content authoring safety; evaluator RNG global encoding; event-/Meta-only versions; Agent cognition/CompletedCursor/EVA/goals/beliefs. Local Signal/Judgment/Observation encoding and the conservative cursor are bounded implementation choices, not global API freezes. No invented SignalTaskID, Signal ACK, general perception framework or Agent execution loop.

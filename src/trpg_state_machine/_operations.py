@@ -1,8 +1,4 @@
-"""Closed INTERNAL operations for foundation integration tests.
-
-These are not public game commands or Rule Engine deltas. No arbitrary paths,
-JSON Patch, SQL, HP changes, rule calculation, or event/Meta-only commits.
-"""
+"""Closed world-command payloads, separate from mechanical StateDelta operations."""
 
 from dataclasses import dataclass
 from enum import StrEnum
