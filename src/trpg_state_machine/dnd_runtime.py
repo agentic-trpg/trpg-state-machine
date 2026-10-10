@@ -55,6 +55,7 @@ def delta_changes(request, result):
     if not 0 <= turn < len(snapshot.combat_state.initiative_ids):
         _invalid("Turn delta is outside the encounter")
     budget_owners = {request.actor_id, snapshot.combat_state.initiative_ids[turn]}
+    affected_actors = budget_owners | {request.payload.target_id}
 
     def edit(component, identity, field, expected, value):
         key = (component, identity, field)
@@ -78,8 +79,13 @@ def delta_changes(request, result):
         actor_id = getattr(op, "actor_id", None)
         if target is not None and (target not in actors or target != request.payload.target_id):
             _invalid("Damage/status delta must belong to the declared target")
-        if actor_id is not None and actor_id not in budget_owners:
-            _invalid("Action/movement delta actor is outside the encounter")
+        allowed_owners = budget_owners
+        if type(op) is delta.ActionBudgetUpdate:
+            # Damage can change the target's movement budget (e.g. unconscious),
+            # even when a different Actor receives the next turn.
+            allowed_owners = affected_actors
+        if actor_id is not None and (actor_id not in actors or actor_id not in allowed_owners):
+            _invalid("Action/movement delta actor is outside the authorized attack")
         if hasattr(op, "combat_id") and op.combat_id != combat["combat_id"]:
             _invalid("Delta belongs to another combat")
         if type(op) is delta.HPDelta:
@@ -91,6 +97,16 @@ def delta_changes(request, result):
                 _invalid("A basic attack cannot grant temporary HP")
             edit("actor", target, "temp_hp", op.expected_temp_hp, op.temp_hp)
         elif type(op) in (delta.DeathStateUpdate, delta.ActionBudgetUpdate, delta.TurnUpdate):
+            if type(op) is delta.TurnUpdate:
+                if op.value.ended != op.expected.ended:
+                    _invalid("Combat completion is not supported by this attack slice")
+                for field in ("monster_turn_start_done", "last_ended_turn", "departed_actor_id"):
+                    reference = getattr(op.value, field)
+                    if reference is None or reference == getattr(op.expected, field):
+                        continue
+                    owner = reference if field == "departed_actor_id" else reference[1]
+                    if owner not in actors or owner not in affected_actors:
+                        _invalid("Changed turn reference is outside the authorized attack")
             component = "combat" if type(op) is delta.TurnUpdate else "actor"
             identity = combat["combat_id"] if component == "combat" else (target or actor_id)
             for field in type(op.value).model_fields:
@@ -123,8 +139,12 @@ def delta_changes(request, result):
         elif type(op) is delta.ProcessedDamageUpdate:
             if not op.expected <= op.value:
                 _invalid("An attack cannot erase processed damage history")
-            if any(target_id not in actors for target_id, _ in op.value):
-                _invalid("Processed damage target outside the encounter")
+            new_entries = op.value - op.expected
+            if any(
+                target_id != request.payload.target_id or target_id not in actors
+                for target_id, _ in new_entries
+            ):
+                _invalid("New processed damage must belong to the declared target")
             edit(
                 "combat", op.combat_id, "processed_zero_hp_damage_instances", op.expected, op.value
             )
@@ -134,10 +154,25 @@ def delta_changes(request, result):
                 or op.records[: len(op.expected_records)] != op.expected_records
             ):
                 _invalid("An attack cannot erase or rewrite death history")
-            if not op.dead_ids <= actors.keys() or any(
-                r.target_id not in actors for r in op.records
+            new_dead_ids = op.dead_ids - op.expected_dead_ids
+            new_records = op.records[len(op.expected_records) :]
+            if any(
+                target_id != request.payload.target_id or target_id not in actors
+                for target_id in new_dead_ids
             ):
-                _invalid("Death ledger actor outside the encounter")
+                _invalid("New deaths must belong to the declared target")
+            for record in new_records:
+                if record.target_id != request.payload.target_id or record.target_id not in actors:
+                    _invalid("New death records must belong to the declared target")
+                if (
+                    record.killer_id != request.actor_id
+                    or record.location_id != snapshot.scene_state.scene_id
+                    or record.target_kind != actors[record.target_id]["entity_type"].lower()
+                ):
+                    _invalid("Death record attribution differs from the authorized attack")
+            record_targets = [record.target_id for record in new_records]
+            if set(record_targets) != new_dead_ids or len(record_targets) != len(new_dead_ids):
+                _invalid("New death identities and records must correspond exactly once")
             edit("combat", op.combat_id, "dead_ids", op.expected_dead_ids, op.dead_ids)
             edit("combat", op.combat_id, "deaths_recorded", op.expected_records, op.records)
         else:

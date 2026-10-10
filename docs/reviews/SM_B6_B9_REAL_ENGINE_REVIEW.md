@@ -1,5 +1,10 @@
 # SM-6～SM-9 Real Rule Engine Integration — Global Review
 
+> 2026-10-10 R1 Fix 后续记录：本文件保留基准 `4aa696d` 的历史审阅结论。
+> R1 已修复，新增 40 项、全量 313 项测试通过；当前修复证据及受限合并建议见
+> [SM_R1_FIX_PRE_MERGE_REVIEW.md](SM_R1_FIX_PRE_MERGE_REVIEW.md)。
+> B1 仍为 Blocked，F6 整体仍为 Partially Resolved，不代表完整 SM-9 验收通过。
+
 日期：2026-10-10。分支：`feat/sm-b6-b9-real-engine-integration`。
 业务审阅冻结点：`eeb5b8fcd63222342e9dced7295130e8e50a85f7`。
 
