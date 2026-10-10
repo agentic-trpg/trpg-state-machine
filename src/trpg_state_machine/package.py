@@ -1,0 +1,448 @@
+"""Strict, immutable, deliberately synthetic-only Adventure Package subset."""
+
+import hashlib
+import json
+import re
+from dataclasses import asdict, dataclass
+from pathlib import Path
+from typing import Literal
+
+import yaml
+
+from .errors import Issue, StateMachineError
+
+SCHEMA_VERSION = "state-machine-foundation/1"
+MAX_PACKAGE_BYTES = 1_048_576
+_ID = re.compile(r"[a-z][a-z0-9_]*(?:\.[a-z][a-z0-9_]*)+")
+
+
+def canonical_json(value: object) -> str:
+    """foundation-json/1: UTF-8, sorted keys, compact JSON; no floats/NaN."""
+    return json.dumps(
+        value, ensure_ascii=False, sort_keys=True, separators=(",", ":"), allow_nan=False
+    )
+
+
+def _digest(value: object) -> str:
+    return "sha256:" + hashlib.sha256(canonical_json(value).encode("utf-8")).hexdigest()
+
+
+@dataclass(frozen=True, slots=True)
+class RulesetBinding:
+    ruleset_id: str
+    data_revision: str
+    evaluator_version: str
+
+
+# This is a fixture data contract, NOT an Engine evaluator or D&D ruleset.
+SYNTHETIC_RULESET = RulesetBinding("synthetic.foundation", "synthetic-data/1", "none/1")
+
+
+@dataclass(frozen=True, slots=True)
+class ObjectDefinition:
+    object_id: str
+    state: Literal["closed", "open"]
+
+
+@dataclass(frozen=True, slots=True)
+class SceneDefinition:
+    scene_id: str
+    location_id: str
+    exits: tuple[str, ...]
+    flags: tuple[tuple[str, bool], ...]
+    actor_ids: tuple[str, ...]
+    objects: tuple[ObjectDefinition, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class ActorDefinition:
+    actor_id: str
+    name: str
+    initial_scene_id: str
+
+
+@dataclass(frozen=True, slots=True)
+class PCTemplate:
+    pc_template_id: str
+    name: str
+    current_hp: int
+    max_hp: int
+
+
+@dataclass(frozen=True, slots=True)
+class AdventurePackage:
+    adventure_id: str
+    package_version: str
+    package_digest: str
+    ruleset_binding: RulesetBinding
+    entry_scene_id: str
+    world_flags: tuple[tuple[str, bool], ...]
+    scenes: tuple[SceneDefinition, ...]
+    actors: tuple[ActorDefinition, ...]
+    pc_templates: tuple[PCTemplate, ...]
+
+    def scene(self, scene_id: str) -> SceneDefinition:
+        for scene in self.scenes:
+            if scene.scene_id == scene_id:
+                return scene
+        raise StateMachineError("unknown_scene", f"Unknown scene: {scene_id}")
+
+
+@dataclass(frozen=True, slots=True)
+class PackageLoadResult:
+    status: Literal["valid", "invalid"]
+    package: AdventurePackage | None = None
+    errors: tuple[Issue, ...] = ()
+    warnings: tuple[Issue, ...] = ()
+
+
+class _DataLoader(yaml.SafeLoader):
+    """SafeLoader plus duplicate-key, alias, depth and node limits."""
+
+    def __init__(self, stream: str) -> None:
+        super().__init__(stream)
+        self._depth = 0
+        self._nodes = 0
+
+    def compose_node(self, parent, index):
+        if self.check_event(yaml.AliasEvent):
+            raise yaml.YAMLError("YAML aliases are unsupported")
+        self._depth += 1
+        self._nodes += 1
+        try:
+            if self._depth > 32 or self._nodes > 20_000:
+                raise yaml.YAMLError("YAML nesting/node limit exceeded")
+            return super().compose_node(parent, index)
+        finally:
+            self._depth -= 1
+
+    def construct_mapping(self, node, deep=False):
+        result = {}
+        for key_node, value_node in node.value:
+            key = self.construct_object(key_node, deep=deep)
+            if not isinstance(key, str) or key in result:
+                raise yaml.YAMLError("Mapping keys must be unique strings")
+            result[key] = self.construct_object(value_node, deep=deep)
+        return result
+
+
+def _fail(code: str, path: str, message: str):
+    raise StateMachineError(code, message, path=path)
+
+
+def _plain(value: object, path: str = "$") -> None:
+    if type(value) in (str, int, bool, type(None)):
+        return
+    if isinstance(value, list):
+        for i, item in enumerate(value):
+            _plain(item, f"{path}[{i}]")
+    elif isinstance(value, dict):
+        for key, item in value.items():
+            _plain(item, f"{path}.{key}")
+    else:
+        _fail("unsupported_value", path, "Only strings, integers, booleans, null, lists/maps")
+
+
+def _mapping(value, fields: str, path: str) -> dict:
+    if not isinstance(value, dict):
+        _fail("schema_error", path, "Expected a mapping")
+    expected = set(fields.split())
+    if extra := value.keys() - expected:
+        _fail("unsupported_field", path, f"Unsupported fields: {sorted(extra)}")
+    if missing := expected - value.keys():
+        _fail("missing_field", path, f"Missing fields: {sorted(missing)}")
+    return value
+
+
+def _list(value, path: str, *, nonempty: bool = False) -> list:
+    if not isinstance(value, list) or (nonempty and not value):
+        _fail(
+            "schema_error",
+            path,
+            "Expected a list" + (" with at least one item" if nonempty else ""),
+        )
+    return value
+
+
+def _text(value, path: str) -> str:
+    if not isinstance(value, str) or not value.strip() or len(value) > 4096:
+        _fail("schema_error", path, "Expected a nonblank string, maximum 4096 characters")
+    return value
+
+
+def _identifier(value, path: str, namespace: str | None = None) -> str:
+    text = _text(value, path)
+    if len(text) > 128 or not _ID.fullmatch(text):
+        _fail("invalid_id", path, "Expected a lowercase dotted ID, maximum 128 characters")
+    if namespace and not text.startswith(namespace + "."):
+        _fail("invalid_id", path, f"Expected {namespace}. namespace")
+    return text
+
+
+def _empty(value, expected, path: str) -> None:
+    if type(value) is not type(expected) or value != expected:
+        _fail("unsupported_mechanism", path, "This foundation requires this field to be empty")
+
+
+def _flags(value, path: str) -> tuple[tuple[str, bool], ...]:
+    if not isinstance(value, dict):
+        _fail("schema_error", path, "Expected boolean flags")
+    for key, flag in value.items():
+        _identifier(key, f"{path}.{key}", "flag")
+        if type(flag) is not bool:
+            _fail("schema_error", f"{path}.{key}", "Flags must be booleans")
+    return tuple(sorted(value.items()))
+
+
+def _unique(values, path: str) -> None:
+    if len(values) != len(set(values)):
+        _fail("duplicate_id", path, "IDs/references must be unique in their scope")
+
+
+def _reference(value, targets, path: str) -> None:
+    if value not in targets:
+        _fail("invalid_reference", path, f"Unknown reference: {value}")
+
+
+def _validate(data: dict) -> AdventurePackage:
+    root = _mapping(data, "manifest world scenes actors pc_templates events rule_bindings", "$")
+    m = _mapping(
+        root["manifest"],
+        "schema_version adventure_id package_version title entry_scene_id "
+        "ruleset_binding player_setup content_provenance compatibility",
+        "manifest",
+    )
+    if m["schema_version"] != SCHEMA_VERSION:
+        _fail("unsupported_schema", "manifest.schema_version", f"Expected {SCHEMA_VERSION}")
+    adventure_id = _identifier(m["adventure_id"], "manifest.adventure_id")
+    version = _text(m["package_version"], "manifest.package_version")
+    _text(m["title"], "manifest.title")
+    entry = _identifier(m["entry_scene_id"], "manifest.entry_scene_id", "scene")
+    binding = RulesetBinding(
+        **_mapping(
+            m["ruleset_binding"],
+            "ruleset_id data_revision evaluator_version",
+            "manifest.ruleset_binding",
+        )
+    )
+    if binding != SYNTHETIC_RULESET:
+        _fail(
+            "unsupported_ruleset",
+            "manifest.ruleset_binding",
+            "Only the synthetic fixture binding is supported",
+        )
+    setup = _mapping(m["player_setup"], "player_count pc_count", "manifest.player_setup")
+    if any(type(v) is not int or v != 1 for v in setup.values()):
+        _fail("unsupported_player_setup", "manifest.player_setup", "Exactly one player and one PC")
+    provenance = _mapping(
+        m["content_provenance"],
+        "source_type license reviewed_by redistribution_allowed",
+        "manifest.content_provenance",
+    )
+    for key in ("source_type", "license", "reviewed_by"):
+        _text(provenance[key], f"manifest.content_provenance.{key}")
+    if type(provenance["redistribution_allowed"]) is not bool:
+        _fail(
+            "schema_error", "manifest.content_provenance.redistribution_allowed", "Expected boolean"
+        )
+    compatibility = _mapping(
+        m["compatibility"], "unresolved_issues adaptation_notes", "manifest.compatibility"
+    )
+    for key in compatibility:
+        _empty(compatibility[key], [], f"manifest.compatibility.{key}")
+    _empty(root["events"], [], "events")
+    _empty(root["rule_bindings"], {}, "rule_bindings")
+
+    world = _mapping(
+        root["world"], "locations starting_location_id initial_flags world_facts", "world"
+    )
+    _empty(world["world_facts"], [], "world.world_facts")
+    flags = _flags(world["initial_flags"], "world.initial_flags")
+    locations = {}
+    for i, value in enumerate(_list(world["locations"], "world.locations", nonempty=True)):
+        path = f"world.locations[{i}]"
+        loc = _mapping(value, "location_id name scene_ids", path)
+        key = _identifier(loc["location_id"], path + ".location_id", "location")
+        if key in locations:
+            _fail("duplicate_id", path, "Duplicate location ID")
+        _text(loc["name"], path + ".name")
+        ids = tuple(
+            _identifier(v, path + ".scene_ids", "scene")
+            for v in _list(loc["scene_ids"], path + ".scene_ids", nonempty=True)
+        )
+        _unique(ids, path + ".scene_ids")
+        locations[key] = ids
+
+    scenes = []
+    for i, value in enumerate(_list(root["scenes"], "scenes", nonempty=True)):
+        path = f"scenes[{i}]"
+        s = _mapping(
+            value,
+            "scene_id location_id description exits initial_state actor_ids objects "
+            "event_definition_ids access_policy",
+            path,
+        )
+        key = _identifier(s["scene_id"], path + ".scene_id", "scene")
+        location = _identifier(s["location_id"], path + ".location_id", "location")
+        _text(s["description"], path + ".description")
+        if s["access_policy"] != "internal_only":
+            _fail(
+                "unsupported_mechanism",
+                path + ".access_policy",
+                "No player/NPC projection API in this batch",
+            )
+        _empty(s["event_definition_ids"], [], path + ".event_definition_ids")
+        initial = _mapping(s["initial_state"], "local_flags", path + ".initial_state")
+        exits = []
+        for j, value in enumerate(_list(s["exits"], path + ".exits")):
+            ex = _mapping(value, "to_scene_id", f"{path}.exits[{j}]")
+            exits.append(_identifier(ex["to_scene_id"], path + ".exits", "scene"))
+        _unique(exits, path + ".exits")
+        actors = tuple(
+            _identifier(v, path + ".actor_ids", "npc")
+            for v in _list(s["actor_ids"], path + ".actor_ids")
+        )
+        _unique(actors, path + ".actor_ids")
+        objects = []
+        for j, value in enumerate(_list(s["objects"], path + ".objects")):
+            ob = _mapping(value, "object_id state", f"{path}.objects[{j}]")
+            oid = _identifier(ob["object_id"], path + ".objects", "object")
+            if ob["state"] not in ("closed", "open"):
+                _fail(
+                    "unsupported_mechanism", path + ".objects", "Only closed/open synthetic objects"
+                )
+            objects.append(ObjectDefinition(oid, ob["state"]))
+        scenes.append(
+            SceneDefinition(
+                key,
+                location,
+                tuple(exits),
+                _flags(initial["local_flags"], path + ".initial_state.local_flags"),
+                actors,
+                tuple(objects),
+            )
+        )
+    scene_ids = {s.scene_id for s in scenes}
+    _unique([s.scene_id for s in scenes], "scenes")
+    _unique([o.object_id for s in scenes for o in s.objects], "scenes.objects")
+    _reference(entry, scene_ids, "manifest.entry_scene_id")
+    for scene in scenes:
+        _reference(scene.location_id, locations, f"scenes.{scene.scene_id}.location_id")
+        if scene.scene_id not in locations[scene.location_id]:
+            _fail(
+                "invalid_reference",
+                "world.locations.scene_ids",
+                "Scene/location membership mismatch",
+            )
+        for target in scene.exits:
+            _reference(target, scene_ids, f"scenes.{scene.scene_id}.exits")
+    for location, members in locations.items():
+        for member in members:
+            _reference(member, scene_ids, "world.locations.scene_ids")
+            if next(s for s in scenes if s.scene_id == member).location_id != location:
+                _fail(
+                    "invalid_reference",
+                    "world.locations.scene_ids",
+                    "Scene listed in wrong location",
+                )
+    entry_location = next(s for s in scenes if s.scene_id == entry).location_id
+    if world["starting_location_id"] != entry_location:
+        _fail("invalid_reference", "world.starting_location_id", "Must match entry scene location")
+    reachable = {entry}
+    pending = [entry]
+    while pending:
+        current_scene = pending.pop()
+        scene = next(s for s in scenes if s.scene_id == current_scene)
+        for target in scene.exits:
+            if target not in reachable:
+                reachable.add(target)
+                pending.append(target)
+    if reachable != scene_ids:
+        _fail("unreachable_scene", "scenes", "All foundation scenes must be reachable from entry")
+
+    actors = []
+    for i, value in enumerate(_list(root["actors"], "actors")):
+        path = f"actors[{i}]"
+        a = _mapping(value, "actor_id name kind controller initial_scene_id", path)
+        key = _identifier(a["actor_id"], path + ".actor_id", "npc")
+        initial_scene = _identifier(a["initial_scene_id"], path + ".initial_scene_id", "scene")
+        _reference(initial_scene, scene_ids, path + ".initial_scene_id")
+        if a["kind"] != "npc" or a["controller"] != {"kind": "scripted_event"}:
+            _fail(
+                "unsupported_mechanism", path, "Only inert synthetic NPCs; no controller execution"
+            )
+        if key not in next(s for s in scenes if s.scene_id == initial_scene).actor_ids:
+            _fail("invalid_reference", path, "Actor must be listed in its initial scene")
+        actors.append(ActorDefinition(key, _text(a["name"], path + ".name"), initial_scene))
+    _unique([a.actor_id for a in actors], "actors")
+    for scene in scenes:
+        for actor in scene.actor_ids:
+            _reference(actor, {a.actor_id for a in actors}, f"scenes.{scene.scene_id}.actor_ids")
+
+    templates = []
+    for i, value in enumerate(_list(root["pc_templates"], "pc_templates", nonempty=True)):
+        path = f"pc_templates[{i}]"
+        pc = _mapping(value, "pc_template_id name character", path)
+        key = _identifier(pc["pc_template_id"], path + ".pc_template_id", "pc_template")
+        char = _mapping(pc["character"], "hp resources inventory", path + ".character")
+        hp = _mapping(char["hp"], "current max", path + ".character.hp")
+        if (
+            any(type(v) is not int for v in hp.values())
+            or not 0 <= hp["current"] <= hp["max"] <= 1_000_000
+            or hp["max"] == 0
+        ):
+            _fail(
+                "schema_error",
+                path + ".character.hp",
+                "Expected 0 <= current <= max <= 1000000, max > 0",
+            )
+        _empty(char["resources"], {}, path + ".character.resources")
+        _empty(char["inventory"], [], path + ".character.inventory")
+        templates.append(
+            PCTemplate(key, _text(pc["name"], path + ".name"), hp["current"], hp["max"])
+        )
+    _unique([pc.pc_template_id for pc in templates], "pc_templates")
+    return AdventurePackage(
+        adventure_id,
+        version,
+        _digest(data),
+        binding,
+        entry,
+        flags,
+        tuple(scenes),
+        tuple(actors),
+        tuple(templates),
+    )
+
+
+def load_adventure_package(source: str | Path) -> PackageLoadResult:
+    """Read one local UTF-8 YAML file; invalid results expose no partial package.
+
+    Fail fast with one structured issue. Provenance is metadata, not a license check.
+    """
+    try:
+        with Path(source).open("rb") as stream:
+            raw = stream.read(MAX_PACKAGE_BYTES + 1)
+        if len(raw) > MAX_PACKAGE_BYTES:
+            _fail("package_too_large", str(source), "Maximum package size is 1 MiB")
+        data = yaml.load(raw.decode("utf-8"), Loader=_DataLoader)
+        _plain(data)
+        return PackageLoadResult("valid", _validate(data))
+    except StateMachineError as exc:
+        return PackageLoadResult("invalid", errors=(exc.issue,))
+    except (OSError, UnicodeError) as exc:
+        return PackageLoadResult("invalid", errors=(Issue("source_error", str(source), str(exc)),))
+    except (yaml.YAMLError, ValueError, OverflowError) as exc:
+        return PackageLoadResult(
+            "invalid", errors=(Issue("unsafe_or_invalid_yaml", str(source), str(exc)),)
+        )
+
+
+def _creation_fingerprint(request_content: dict, binding: RulesetBinding) -> str:
+    return _digest(
+        {
+            "fingerprint_schema": "foundation-create/1",
+            **request_content,
+            "ruleset_binding": asdict(binding),
+        }
+    )

@@ -1,0 +1,74 @@
+# Entirely original synthetic test content, released under CC0-1.0.
+manifest:
+  schema_version: state-machine-foundation/1
+  adventure_id: example.lantern_station
+  package_version: 0.1.0
+  title: Lantern Station
+  entry_scene_id: scene.platform
+  ruleset_binding:
+    ruleset_id: synthetic.foundation
+    data_revision: synthetic-data/1
+    evaluator_version: none/1
+  player_setup: {player_count: 1, pc_count: 1}
+  content_provenance:
+    source_type: original_synthetic
+    license: CC0-1.0
+    reviewed_by: foundation_fixture_author
+    redistribution_allowed: true
+  compatibility: {unresolved_issues: [], adaptation_notes: []}
+world:
+  locations:
+    - location_id: location.station
+      name: Lantern Station
+      scene_ids: [scene.platform, scene.workshop]
+  starting_location_id: location.station
+  initial_flags: {flag.station_ready: false}
+  world_facts: []
+scenes:
+  - scene_id: scene.platform
+    location_id: location.station
+    description: An empty platform beside a silent signal lamp.
+    exits: [{to_scene_id: scene.workshop}]
+    initial_state:
+      local_flags: {flag.lamp_checked: false}
+    actor_ids: [npc.caretaker]
+    objects: [{object_id: object.platform_gate, state: closed}]
+    event_definition_ids: []
+    access_policy: internal_only
+  - scene_id: scene.workshop
+    location_id: location.station
+    description: A small workshop with a wooden inspection door.
+    exits: [{to_scene_id: scene.platform}]
+    initial_state:
+      local_flags: {flag.workshop_checked: false}
+    # Reusing an identity reference does not clone or teleport the caretaker.
+    actor_ids: [npc.caretaker, npc.attendant]
+    objects: [{object_id: object.workshop_door, state: closed}]
+    event_definition_ids: []
+    access_policy: internal_only
+actors:
+  - actor_id: npc.caretaker
+    name: Synthetic Caretaker
+    kind: npc
+    controller: {kind: scripted_event}
+    initial_scene_id: scene.platform
+  - actor_id: npc.attendant
+    name: Synthetic Attendant
+    kind: npc
+    controller: {kind: scripted_event}
+    initial_scene_id: scene.workshop
+pc_templates:
+  - pc_template_id: pc_template.observer
+    name: Synthetic Observer
+    character:
+      hp: {current: 8, max: 8}
+      resources: {}
+      inventory: []
+  - pc_template_id: pc_template.visitor
+    name: Synthetic Visitor
+    character:
+      hp: {current: 11, max: 12}
+      resources: {}
+      inventory: []
+events: []
+rule_bindings: {}
