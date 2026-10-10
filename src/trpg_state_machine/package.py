@@ -5,12 +5,15 @@ import json
 import re
 from dataclasses import asdict, dataclass
 from pathlib import Path
-from typing import Literal
+from typing import TYPE_CHECKING, Literal
 
 import yaml
 
 from ._operations import ObjectState, SetObjectState, SetSceneFlag
 from .errors import Issue, StateMachineError
+
+if TYPE_CHECKING:
+    from .npc_state import NPCInitialState, WorldFactDefinition
 
 SCHEMA_VERSION = "state-machine-foundation/1"
 MAX_PACKAGE_BYTES = 1_048_576
@@ -64,6 +67,8 @@ class ActorDefinition:
     name: str
     initial_scene_id: str
     senses: tuple[tuple[str, bool], ...] | None = None
+    controller_kind: str = "scripted_event"
+    npc_state: "NPCInitialState | None" = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -116,6 +121,7 @@ class AdventurePackage:
     events: tuple[EventDefinition, ...] = ()
     combat_foundation_json: str | None = None
     noncombat_foundation_json: str | None = None
+    world_facts: tuple["WorldFactDefinition", ...] = ()
 
     def scene(self, scene_id: str) -> SceneDefinition:
         for scene in self.scenes:
@@ -318,7 +324,6 @@ def _validate(data: dict) -> AdventurePackage:
     world = _mapping(
         root["world"], "locations starting_location_id initial_flags world_facts", "world"
     )
-    _empty(world["world_facts"], [], "world.world_facts")
     flags = _flags(world["initial_flags"], "world.initial_flags")
     locations = {}
     for i, value in enumerate(_list(world["locations"], "world.locations", nonempty=True)):
@@ -428,13 +433,20 @@ def _validate(data: dict) -> AdventurePackage:
         fields = "actor_id name kind controller initial_scene_id"
         if isinstance(value, dict) and "senses" in value:
             fields += " senses"
+        if isinstance(value, dict) and "npc_state" in value:
+            fields += " npc_state"
         a = _mapping(value, fields, path)
         key = _identifier(a["actor_id"], path + ".actor_id", "npc")
         initial_scene = _identifier(a["initial_scene_id"], path + ".initial_scene_id", "scene")
         _reference(initial_scene, scene_ids, path + ".initial_scene_id")
-        if a["kind"] != "npc" or a["controller"] != {"kind": "scripted_event"}:
+        controller = _mapping(a["controller"], "kind", path + ".controller")
+        if a["kind"] != "npc" or controller["kind"] not in (
+            "sub_agent",
+            "deterministic_policy",
+            "scripted_event",
+        ):
             _fail(
-                "unsupported_mechanism", path, "Only inert synthetic NPCs; no controller execution"
+                "unsupported_mechanism", path, "Only NPC identity and reviewed controller metadata"
             )
         if key not in next(s for s in scenes if s.scene_id == initial_scene).actor_ids:
             _fail("invalid_reference", path, "Actor must be listed in its initial scene")
@@ -444,11 +456,31 @@ def _validate(data: dict) -> AdventurePackage:
             if any(type(v) is not bool for v in sense_data.values()):
                 _fail("schema_error", path + ".senses", "Senses must be explicit booleans")
             senses = tuple(sorted(sense_data.items()))
-        actors.append(ActorDefinition(key, _text(a["name"], path + ".name"), initial_scene, senses))
+        actors.append(
+            ActorDefinition(
+                key, _text(a["name"], path + ".name"), initial_scene, senses, controller["kind"]
+            )
+        )
     _unique([a.actor_id for a in actors], "actors")
     for scene in scenes:
         for actor in scene.actor_ids:
             _reference(actor, {a.actor_id for a in actors}, f"scenes.{scene.scene_id}.actor_ids")
+
+    from dataclasses import replace
+
+    from .npc_schema import parse_npc_state, parse_world_facts
+
+    npc_ids = {a.actor_id for a in actors}
+    facts = parse_world_facts(world["world_facts"], npc_ids)
+    actors = [
+        replace(
+            actor,
+            npc_state=parse_npc_state(raw["npc_state"], actor.actor_id, npc_ids, scene_ids, facts),
+        )
+        if "npc_state" in raw
+        else actor
+        for actor, raw in zip(actors, root["actors"], strict=True)
+    ]
 
     templates = []
     for i, value in enumerate(_list(root["pc_templates"], "pc_templates", nonempty=True)):
@@ -573,6 +605,7 @@ def _validate(data: dict) -> AdventurePackage:
         definitions,
         foundation,
         noncombat,
+        facts,
     )
 
 
