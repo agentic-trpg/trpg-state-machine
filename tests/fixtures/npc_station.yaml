@@ -1,0 +1,333 @@
+# Original synthetic NPC domain data, CC0-1.0. No controller execution.
+manifest:
+  schema_version: state-machine-foundation/1
+  adventure_id: example.npc_station
+  package_version: 0.1.0
+  title: Lantern Station
+  entry_scene_id: scene.platform
+  ruleset_binding:
+    ruleset_id: synthetic.foundation
+    data_revision: synthetic-data/1
+    evaluator_version: none/1
+  player_setup:
+    player_count: 1
+    pc_count: 1
+  content_provenance:
+    source_type: original_synthetic
+    license: CC0-1.0
+    reviewed_by: foundation_fixture_author
+    redistribution_allowed: true
+  compatibility:
+    unresolved_issues: []
+    adaptation_notes: []
+world:
+  locations:
+  - location_id: location.station
+    name: Lantern Station
+    scene_ids:
+    - scene.platform
+    - scene.workshop
+  starting_location_id: location.station
+  initial_flags:
+    flag.station_ready: false
+  world_facts:
+  - fact_id: fact.lamp
+    text: The signal lamp is made of metal.
+    visibility: npc_authorized
+    authorized_npc_ids:
+    - npc.caretaker
+  - fact_id: fact.route
+    text: The attendant knows the private service route.
+    visibility: npc_authorized
+    authorized_npc_ids:
+    - npc.attendant
+  - fact_id: fact.dm_secret
+    text: 'DM-only synthetic secret: buried blue key.'
+    visibility: dm_only
+    authorized_npc_ids: []
+scenes:
+- scene_id: scene.platform
+  location_id: location.station
+  description: An empty platform beside a silent signal lamp.
+  exits:
+  - to_scene_id: scene.workshop
+  initial_state:
+    local_flags:
+      flag.lamp_checked: false
+  actor_ids:
+  - npc.caretaker
+  objects:
+  - object_id: object.platform_gate
+    state: closed
+  event_definition_ids: []
+  access_policy: internal_only
+- scene_id: scene.workshop
+  location_id: location.station
+  description: A small workshop with a wooden inspection door.
+  exits:
+  - to_scene_id: scene.platform
+  initial_state:
+    local_flags:
+      flag.workshop_checked: false
+  actor_ids:
+  - npc.caretaker
+  - npc.attendant
+  objects:
+  - object_id: object.workshop_door
+    state: closed
+  event_definition_ids: []
+  access_policy: internal_only
+actors:
+- actor_id: npc.caretaker
+  name: Synthetic Caretaker
+  kind: npc
+  controller:
+    kind: sub_agent
+  initial_scene_id: scene.platform
+  senses:
+    visual: true
+    auditory: true
+  npc_state:
+    schema_version: npc-state/1
+    profile:
+      role: lamp caretaker
+      personality:
+      - patient
+      - cautious
+      speaking_style: Short, precise sentences.
+      constraints:
+      - Keep private records private.
+    initial_knowledge_ids:
+    - fact.lamp
+    memories:
+    - record_id: memory.backstory
+      version: 1
+      is_current: true
+      text: Caretaker private backstory.
+      sources:
+      - kind: package
+        reference_id: npc.caretaker
+        version: null
+      epistemic_status: told
+    beliefs:
+    - record_id: belief.lamp
+      version: 1
+      is_current: false
+      text: I suspect the lamp is wooden.
+      sources:
+      - kind: package
+        reference_id: npc.caretaker
+        version: null
+      epistemic_status: inferred
+      confidence_basis_points: 7000
+      status: active
+    - record_id: belief.lamp
+      version: 2
+      is_current: true
+      text: I suspect the lamp is wooden.
+      sources:
+      - kind: memory
+        reference_id: memory.backstory
+        version: 1
+      epistemic_status: inferred
+      confidence_basis_points: null
+      status: retracted
+    relationships:
+    - record_id: relationship.visitor
+      version: 1
+      is_current: true
+      text: Respect the visiting player.
+      sources:
+      - kind: package
+        reference_id: npc.caretaker
+        version: null
+      target_id: selected_pc
+      stance: friendly
+    - record_id: relationship.colleague
+      version: 1
+      is_current: true
+      text: Work with the colleague.
+      sources:
+      - kind: package
+        reference_id: npc.caretaker
+        version: null
+      target_id: npc.attendant
+      stance: neutral
+    goals:
+    - record_id: goal.inspect
+      version: 1
+      is_current: true
+      text: Keep the lamp inspected.
+      sources:
+      - kind: package
+        reference_id: npc.caretaker
+        version: null
+      status: active
+    plans:
+    - record_id: plan.inspect
+      version: 1
+      is_current: true
+      text: Inspect the lamp after work.
+      sources:
+      - kind: package
+        reference_id: npc.caretaker
+        version: null
+      goal_id: goal.inspect
+      goal_version: 1
+      steps:
+      - Finish current task.
+      - Inspect lamp.
+      status: active
+    runtime:
+      schedule:
+      - schedule_id: schedule.inspection
+        scene_id: scene.platform
+        start_tick: 10
+        end_tick: 20
+        activity: Inspect lamp.
+      current_activity: Waiting for an inspection.
+- actor_id: npc.attendant
+  name: Synthetic Attendant
+  kind: npc
+  controller:
+    kind: deterministic_policy
+  initial_scene_id: scene.workshop
+  senses:
+    visual: true
+    auditory: true
+  npc_state:
+    schema_version: npc-state/1
+    profile:
+      role: station attendant
+      personality:
+      - patient
+      - cautious
+      speaking_style: Short, precise sentences.
+      constraints:
+      - Keep private records private.
+    initial_knowledge_ids:
+    - fact.route
+    memories:
+    - record_id: memory.backstory
+      version: 1
+      is_current: true
+      text: Attendant private backstory.
+      sources:
+      - kind: package
+        reference_id: npc.attendant
+        version: null
+      epistemic_status: told
+    - record_id: memory.attendant_only
+      version: 1
+      is_current: true
+      text: Private attendant experience.
+      sources:
+      - kind: package
+        reference_id: npc.attendant
+        version: null
+      epistemic_status: told
+    beliefs:
+    - record_id: belief.lamp
+      version: 1
+      is_current: false
+      text: I suspect the lamp is wooden.
+      sources:
+      - kind: package
+        reference_id: npc.attendant
+        version: null
+      epistemic_status: inferred
+      confidence_basis_points: 7000
+      status: active
+    - record_id: belief.lamp
+      version: 2
+      is_current: true
+      text: I suspect the lamp is wooden.
+      sources:
+      - kind: memory
+        reference_id: memory.backstory
+        version: 1
+      epistemic_status: inferred
+      confidence_basis_points: null
+      status: retracted
+    relationships:
+    - record_id: relationship.visitor
+      version: 1
+      is_current: true
+      text: Respect the visiting player.
+      sources:
+      - kind: package
+        reference_id: npc.attendant
+        version: null
+      target_id: selected_pc
+      stance: friendly
+    - record_id: relationship.colleague
+      version: 1
+      is_current: true
+      text: Work with the colleague.
+      sources:
+      - kind: package
+        reference_id: npc.attendant
+        version: null
+      target_id: npc.caretaker
+      stance: neutral
+    goals:
+    - record_id: goal.inspect
+      version: 1
+      is_current: true
+      text: Keep the lamp inspected.
+      sources:
+      - kind: package
+        reference_id: npc.attendant
+        version: null
+      status: active
+    - record_id: goal.attendant_only
+      version: 1
+      is_current: true
+      text: Preserve the private route.
+      sources:
+      - kind: package
+        reference_id: npc.attendant
+        version: null
+      status: active
+    plans:
+    - record_id: plan.inspect
+      version: 1
+      is_current: true
+      text: Inspect the lamp after work.
+      sources:
+      - kind: package
+        reference_id: npc.attendant
+        version: null
+      goal_id: goal.inspect
+      goal_version: 1
+      steps:
+      - Finish current task.
+      - Inspect lamp.
+      status: active
+    runtime:
+      schedule:
+      - schedule_id: schedule.inspection
+        scene_id: scene.workshop
+        start_tick: 10
+        end_tick: 20
+        activity: Inspect lamp.
+      current_activity: Waiting for an inspection.
+pc_templates:
+- pc_template_id: pc_template.observer
+  name: Synthetic Observer
+  character:
+    hp:
+      current: 8
+      max: 8
+    resources: {}
+    inventory: []
+- pc_template_id: pc_template.visitor
+  name: Synthetic Visitor
+  character:
+    hp:
+      current: 11
+      max: 12
+    resources: {}
+    inventory: []
+events: []
+rule_bindings: {}

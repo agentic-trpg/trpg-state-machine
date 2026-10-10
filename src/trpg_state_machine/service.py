@@ -36,6 +36,7 @@ from .models import (
     TrustedContext,
     WorldState,
 )
+from .npc_state import NPCRuntime
 from .package import (
     SYNTHETIC_EVALUATION_RULESET,
     AdventurePackage,
@@ -102,6 +103,7 @@ class StateMachine(
     CombatRuntime,
     DndRuntime,
     AvailabilityRuntime,
+    NPCRuntime,
 ):
     """Trusted in-process runtime. One connection per instance/thread; close explicitly.
 
@@ -157,7 +159,7 @@ class StateMachine(
 
     def _migrate(self):
         scripts = [Path(__file__).with_name("_schema.sql")] + [
-            Path(__file__).with_name(f"_migration_{v}.sql") for v in range(2, 10)
+            Path(__file__).with_name(f"_migration_{v}.sql") for v in range(2, 11)
         ]
         steps = [_migration_statements(path.read_text("utf-8")) for path in scripts]
         # Migration 4 rebuilds a referenced table. Disable FK enforcement only on
@@ -167,7 +169,7 @@ class StateMachine(
             self._conn.execute("BEGIN IMMEDIATE")
             # Read AFTER acquiring the cross-process SQLite migration write lock.
             version = self._conn.execute("PRAGMA user_version").fetchone()[0]
-            if version not in range(10):
+            if version not in range(11):
                 raise StateMachineError(
                     "unsupported_storage_schema", f"Unsupported storage version: {version}"
                 )
@@ -180,7 +182,7 @@ class StateMachine(
                 raise StateMachineError(
                     "unsupported_storage_schema", "Unversioned nonempty database"
                 )
-            for target in range(version + 1, 10):
+            for target in range(version + 1, 11):
                 for statement in steps[target - 1]:
                     self._conn.execute(statement)
                 if self._conn.execute("PRAGMA user_version").fetchone()[0] != target:
@@ -399,6 +401,19 @@ class StateMachine(
                 ),
             )
             self._conn.execute("INSERT INTO world_states VALUES (?, ?)", (session_id, flags_json))
+            self._conn.executemany(
+                "INSERT INTO world_facts VALUES (?, ?, ?, ?, ?)",
+                [
+                    (
+                        session_id,
+                        f.fact_id,
+                        f.text,
+                        f.visibility,
+                        canonical_json(f.authorized_npc_ids),
+                    )
+                    for f in package.world_facts
+                ],
+            )
             self._initialize_scene(session_id, package.entry_scene_id, package)
             self._conn.execute(
                 "INSERT INTO actors VALUES (?, ?, 'pc', ?)",
@@ -477,11 +492,13 @@ class StateMachine(
         for actor in package.actors:
             if actor.initial_scene_id == scene_id:
                 # A scene reference never duplicates or resets an existing world actor.
-                self._conn.execute(
+                inserted = self._conn.execute(
                     "INSERT INTO actors SELECT ?, ?, 'npc', ? WHERE NOT EXISTS "
                     "(SELECT 1 FROM actors WHERE session_id = ? AND actor_id = ?)",
                     (session_id, actor.actor_id, scene_id, session_id, actor.actor_id),
                 )
+                if inserted.rowcount:
+                    self._initialize_npc(session_id, actor)
         self._initialize_mechanical_scene(session_id, scene_id, package)
 
     def _append_events(
