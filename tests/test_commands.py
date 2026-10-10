@@ -206,16 +206,21 @@ def test_upgrade_batch1_preserves_real_database(tmp_path, package, context, requ
     with StateMachine(database) as sm:
         created = sm.create_session(request_for(), package, context=context)
         before = sm.read_session(created.session_id, package, context=context)
-    # Remove only schema-2 additions, reproducing an actual persisted Batch-1 schema.
-    with sqlite3.connect(database) as conn:
-        conn.executescript(
-            "DROP TABLE event_outbox; DROP TABLE event_records; DROP TABLE projection_cursors; "
-            "DROP TABLE trigger_history; DROP TABLE event_evidence; DROP TABLE command_receipts; "
-            "PRAGMA user_version=1;"
-        )
+    # Copy matching authority columns into the original Batch-1 schema, then upgrade it.
+    legacy = tmp_path / "legacy.db"
+    with sqlite3.connect(legacy) as conn:
+        schema = Path("src/trpg_state_machine/_schema.sql").read_text("utf-8")
+        conn.executescript(schema)
+        conn.execute("PRAGMA foreign_keys=ON")
+        conn.execute("ATTACH DATABASE ? AS source", (str(database),))
+        tables = [r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")]
+        for table in tables:
+            columns = ",".join(r[1] for r in conn.execute(f"PRAGMA table_info({table})"))
+            conn.execute(f"INSERT INTO {table}({columns}) SELECT {columns} FROM source.{table}")
+    database = legacy
     with StateMachine(database) as sm:
         assert sm.resume_session(created.session_id, package, context=context) == before
-        assert sm._conn.execute("PRAGMA user_version").fetchone()[0] == 3
+        assert sm._conn.execute("PRAGMA user_version").fetchone()[0] == 4
         assert sm._conn.execute("SELECT COUNT(*) FROM event_evidence").fetchone()[0] == 0
         assert (
             sm.submit_command(

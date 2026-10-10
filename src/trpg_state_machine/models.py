@@ -73,6 +73,7 @@ class CharacterState:
     max_hp: int
     resources: dict
     inventory: tuple
+    effects: tuple = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -81,6 +82,8 @@ class RNGState:
     algorithm: str
     encoding: str
     position: int
+    rng_version: int = 0
+    state_json: str | None = None
 
 
 @dataclass(frozen=True, slots=True)

@@ -37,6 +37,9 @@ class RulesetBinding:
 
 # This is a fixture data contract, NOT an Engine evaluator or D&D ruleset.
 SYNTHETIC_RULESET = RulesetBinding("synthetic.foundation", "synthetic-data/1", "none/1")
+SYNTHETIC_EVALUATION_RULESET = RulesetBinding(
+    "synthetic.atomic", "synthetic-data/1", "synthetic-evaluator/1"
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -68,6 +71,8 @@ class PCTemplate:
     name: str
     current_hp: int
     max_hp: int
+    resources: tuple[tuple[str, int], ...] = ()
+    inventory: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -253,7 +258,7 @@ def _validate(data: dict) -> AdventurePackage:
             "manifest.ruleset_binding",
         )
     )
-    if binding != SYNTHETIC_RULESET:
+    if binding not in (SYNTHETIC_RULESET, SYNTHETIC_EVALUATION_RULESET):
         _fail(
             "unsupported_ruleset",
             "manifest.ruleset_binding",
@@ -423,10 +428,29 @@ def _validate(data: dict) -> AdventurePackage:
                 path + ".character.hp",
                 "Expected 0 <= current <= max <= 1000000, max > 0",
             )
-        _empty(char["resources"], {}, path + ".character.resources")
-        _empty(char["inventory"], [], path + ".character.inventory")
+        resources, inventory = (), ()
+        if binding == SYNTHETIC_RULESET:
+            _empty(char["resources"], {}, path + ".character.resources")
+            _empty(char["inventory"], [], path + ".character.inventory")
+        else:
+            if not isinstance(char["resources"], dict):
+                _fail("schema_error", path, "Expected declared synthetic resource counters")
+            for resource, count in char["resources"].items():
+                _identifier(resource, path, "resource")
+                if type(count) is not int or not 0 <= count <= 1_000_000:
+                    _fail("schema_error", path, "Invalid synthetic resource count")
+            resources = tuple(sorted(char["resources"].items()))
+            inventory = tuple(_identifier(v, path, "item") for v in _list(char["inventory"], path))
+            _unique(inventory, path)
         templates.append(
-            PCTemplate(key, _text(pc["name"], path + ".name"), hp["current"], hp["max"])
+            PCTemplate(
+                key,
+                _text(pc["name"], path + ".name"),
+                hp["current"],
+                hp["max"],
+                resources,
+                inventory,
+            )
         )
     _unique([pc.pc_template_id for pc in templates], "pc_templates")
     definitions = _event_definitions(root["events"], scenes)

@@ -18,6 +18,8 @@ from ._operations import (
 from .commands import OPERATIONS, CommandRuntime, TypedCommand
 from .errors import StateMachineError
 from .events import EventRuntime
+from .mechanical_runtime import MechanicalRuntime
+from .mechanics import SyntheticEvaluator
 from .models import (
     ActorState,
     CharacterState,
@@ -31,6 +33,7 @@ from .models import (
     WorldState,
 )
 from .package import (
+    SYNTHETIC_EVALUATION_RULESET,
     AdventurePackage,
     RulesetBinding,
     Signal,
@@ -62,14 +65,15 @@ def _trusted(context: TrustedContext) -> None:
         raise StateMachineError("invalid_context", "NPC grants must be trusted identity tuples")
 
 
-class StateMachine(CommandRuntime, EventRuntime):
+class StateMachine(CommandRuntime, EventRuntime, MechanicalRuntime):
     """Trusted in-process runtime. One connection per instance/thread; close explicitly.
 
     All writes commit immediately. Public lifecycle methods are not HTTP endpoints
     or player/NPC views. Only an authenticated adapter may supply TrustedContext.
     """
 
-    def __init__(self, database: str | Path) -> None:
+    def __init__(self, database: str | Path, *, evaluator=None) -> None:
+        self._evaluator = evaluator if evaluator is not None else SyntheticEvaluator()
         if str(database) == ":memory:":
             raise StateMachineError(
                 "unsupported_storage", "A local file database with WAL is required"
@@ -96,7 +100,7 @@ class StateMachine(CommandRuntime, EventRuntime):
                         "unsupported_storage_schema", "Unversioned nonempty database"
                     )
                 self._conn.executescript(Path(__file__).with_name("_schema.sql").read_text("utf-8"))
-            elif version not in (1, 2, 3):
+            elif version not in (1, 2, 3, 4):
                 raise StateMachineError(
                     "unsupported_storage_schema", f"Unsupported storage version: {version}"
                 )
@@ -108,6 +112,14 @@ class StateMachine(CommandRuntime, EventRuntime):
                 self._conn.executescript(
                     Path(__file__).with_name("_migration_3.sql").read_text("utf-8")
                 )
+            if version < 4:
+                self._conn.executescript(
+                    Path(__file__).with_name("_migration_4.sql").read_text("utf-8")
+                )
+            if not self._conn.execute("PRAGMA foreign_keys").fetchone()[0]:
+                raise StateMachineError("storage_error", "Foreign keys must be enabled")
+            if self._conn.execute("PRAGMA foreign_key_check").fetchone():
+                raise StateMachineError("storage_error", "Database contains invalid references")
         except sqlite3.Error as exc:
             self._conn.close()
             self._closed = True
@@ -310,13 +322,29 @@ class StateMachine(CommandRuntime, EventRuntime):
                 (session_id, pc_actor_id, package.entry_scene_id),
             )
             self._conn.execute(
-                "INSERT INTO characters VALUES (?, ?, ?, ?, '{}', '[]')",
-                (session_id, pc_actor_id, pc.current_hp, pc.max_hp),
+                "INSERT INTO characters(session_id,actor_id,current_hp,max_hp,"
+                "resources_json,inventory_json) "
+                "VALUES (?, ?, ?, ?, ?, ?)",
+                (
+                    session_id,
+                    pc_actor_id,
+                    pc.current_hp,
+                    pc.max_hp,
+                    canonical_json(dict(pc.resources)),
+                    canonical_json(pc.inventory),
+                ),
             )
             self._conn.execute(
-                "INSERT INTO rng_states VALUES (?, ?, 'unselected', 'foundation-placeholder/1', 0)",
+                "INSERT INTO rng_states(session_id,state_id,algorithm,encoding,position) "
+                "VALUES (?, ?, 'unselected', 'foundation-placeholder/1', 0)",
                 (session_id, rng_ref),
             )
+            if package.ruleset_binding == SYNTHETIC_EVALUATION_RULESET:
+                self._conn.execute(
+                    "UPDATE rng_states SET algorithm='synthetic-sha256-counter/1', "
+                    "encoding='synthetic-counter-json/1', state_json=? WHERE session_id=?",
+                    (canonical_json({"counter": 0}), session_id),
+                )
             initial_row = self._conn.execute(
                 "SELECT * FROM sessions WHERE session_id=?", (session_id,)
             ).fetchone()
@@ -610,8 +638,16 @@ class StateMachine(CommandRuntime, EventRuntime):
                 pc["max_hp"],
                 json.loads(pc["resources_json"]),
                 tuple(json.loads(pc["inventory_json"])),
+                tuple(json.loads(pc["effects_json"])),
             ),
-            RNGState(rng["state_id"], rng["algorithm"], rng["encoding"], rng["position"]),
+            RNGState(
+                rng["state_id"],
+                rng["algorithm"],
+                rng["encoding"],
+                rng["position"],
+                rng["rng_version"],
+                rng["state_json"],
+            ),
         )
 
     def read_session(

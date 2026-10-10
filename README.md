@@ -2,7 +2,7 @@
 
 Batch 1 实现了一个可运行的本地闭环：**验证原创合成 Adventure Package → 创建隔离 Session → 初始化/重访 Scene → 修改实际状态 → SQLite 持久化 → 新进程恢复**。
 
-State Machine 是全部已实现可变游戏状态的唯一权威拥有者和提交者。Package 是不可变模板；返回的 Snapshot 是独立副本，修改副本不会写入数据库。当前没有 Rule Engine 或第二份运行态权威。
+State Machine 是全部已实现可变游戏状态的唯一权威拥有者和提交者。Package 是不可变模板；返回的 Snapshot 是独立副本，修改副本不会写入数据库。当前仅有显式合成 Evaluator，没有第二份运行态权威。
 
 ## 安装与验证
 
@@ -103,8 +103,8 @@ Receipts use durable `(session_id, command_id)` keys and a canonical fingerprint
 - Scene 主键是 `(session_id, scene_id)`，首次初始化对象与 flags；重访只更新访问次数和 PC 位置。Actor 位置只由 Session 内唯一 Actor 行记录。全部运行态表按 Session 隔离。
 - 初始 `world_version=0`。每次实际状态修改成功提交推进一次；无变化操作不推进。`event_seq` 是独立的内部审计序号：创建产生两条记录，Scene 转移产生 exit/enter 两条记录，因此不等于 world_version。
 - 事件保存稳定 ID、来源命令及受限 Signals，事件时位置证据与持久 Outbox 同事务提交；当前没有完整 Perception 协议。没有 event-only 或 Meta-only 提交能力，未冻结它们的 world_version 策略。
-- RNG 单独持久保存 `state_id / algorithm=unselected / encoding=foundation-placeholder/1 / position=0`，Session 保存引用。没有掷骰、随机流消耗或规则 RNG 协议，也不宣称确定性机械 Replay。
-- 所有修改立即提交；`save_session` 不创建第二份权威快照/检查点。Storage schema 3 automatically migrates schema 1/2 while preserving package pins/digests and state. Legacy events have no fabricated historical evidence. Unknown schemas are refused. No online backup tool.
+- RNG 单独持久保存 `state_id / algorithm=unselected / encoding=foundation-placeholder/1 / position=0`，Session 保存引用。Foundation binding 不掷骰；新增 synthetic.atomic binding 使用独立、显式版本化的合成计数 RNG，未实现 D&D RNG 协议。
+- 所有修改立即提交；`save_session` 不创建第二份权威快照/检查点。Storage schema 4 automatically migrates schema 1/2/3 while preserving package pins/digests and state. Legacy events have no fabricated historical evidence. Unknown schemas are refused. No online backup tool.
 
 ## 自动化验收证据
 
@@ -130,7 +130,7 @@ create → enter workshop → mutate door/flag/NPC → leave → revisit → sav
 - [Agent Architecture v0.9](https://github.com/agentic-trpg/agentic-trpg/blob/fe6a1e9edeaf2a3e120aa669b6abfe1e819d87f1/docs/AGENT_ARCHITECTURE.md)。
 - [MVP Scope v0.11](https://github.com/agentic-trpg/agentic-trpg/blob/fe6a1e9edeaf2a3e120aa669b6abfe1e819d87f1/docs/MVP_SCOPE.md)。
 
-这些文档的 `[PROPOSED]` / `[OPEN]` 不因本实现自动冻结。当前是 SM-3 Foundation，不是完整 MVP：**未实现** Rule Engine Adapter、D&D PC 机械验证、Combat/正式规则检定、完整声明式事件/条件/奖励链、Quest/Inventory 操作、NPC Meta/Perception/Observation、Gate、EVA、LLM Host、视觉系统、活跃战斗恢复、通用脚本或插件框架。
+这些文档的 `[PROPOSED]` / `[OPEN]` 不因本实现自动冻结。当前是 SM-4 Foundation，不是完整 MVP：**未实现** Rule Engine Adapter、D&D PC 机械验证、Combat/正式规则检定、完整声明式事件/条件/奖励链、Quest/Inventory 操作、NPC Meta/Perception/Observation、Gate、EVA、LLM Host、视觉系统、活跃战斗恢复、通用脚本或插件框架。
 
 仍为 OPEN 或后续批次事项：规则 RNG 算法/编码与回放、事件/Meta-only 版本策略、完整规则 CharacterState/CombatState/Typed Delta、通用系统来源权限、条件 AST、Pending Choice、完整 Perception/Outbox 协议、更复杂的数据迁移/备份策略及外部 PC 导入。本批没有以空类或 Stub 宣称这些能力完成。
 
@@ -143,3 +143,15 @@ SM-2: 112 tests passed, including durable retry after lost response, revoked aut
 Package events support only authoritative event-type/scene triggers, a typed flag_equals condition, set_scene_flag or set_object_state effects, per_session once and explicit visual/auditory scene-scoped Signals (clear/blocked/undetermined evidence). Scene event_definition_ids must match declared definitions. Conditions and effects run synchronously within the command transaction, including first-entry creation. Cycles are bounded by once history and a 32-consequence limit; exceeding the bound rejects and rolls back. No rule effects, downstream rule commands, arbitrary scripts or asynchronous cross-transaction atomicity are claimed. Signal visibility is authored synthetic evidence, not D&D perception rules or physical propagation.
 
 123 tests passed for SM-3. Tests cover restart, signal/event/outbox atomicity, initial-entry triggers, once/cycle/cascade protection, failed delivery after sink acceptance, stable retry IDs, session isolation and cursor gaps. Schema migration preserves old events with legacy.unavailable source and no invented Signals. See docs/batches/SM3.md.
+
+## SM-4 synthetic evaluation boundary
+
+`rule_operation` carries a `RuleOperation` with operation_kind, real actor/target, declared resource and current-scene flag, difficulty and domain. Only `synthetic.atomic / synthetic-data/1 / synthetic-evaluator/1` admits the synthetic evaluator. Its PC Templates may declare namespaced integer resources and unique synthetic item IDs. This is not D&D data or an Engine integration. Foundation packages keep their original digest and placeholder RNG.
+
+`RuleEvaluationRequest/Result`, `NonCombatSnapshot`, `StateDelta`, `RNGTransition` and `SyntheticEvaluator` live in mechanics.py. Detached noncombat input includes all supported characters/resources/inventory/effects, actor positions and world/scenes; RNG is separate. Results cover accepted/rejected/unsupported/needs_choice, typed correlation/read-set/binding checks and closed HP/resource/flag operations. Combat domain is explicitly unsupported; no incomplete CombatSnapshot is presented as real support. NeedsChoice is mapped to a durable rejected receipt with pending_choice_unsupported because continuation is not implemented.
+
+Evaluation uses a copied request outside write transactions. Commit rechecks authorization, world version, full read-set digest, pins, RNG and every Delta target/precondition/invariant under BEGIN IMMEDIATE. HP, resource spend, world flag, RNG, consequences, events, outbox and receipt commit together. Accepted mechanical failure still spends its token. Invalid result or storage failure writes no state or RNG. A committed retry returns the stored receipt before evaluator invocation. Evaluation-response loss retries the same explicit RNG state, giving the same synthetic result; no real remote Engine retry protocol is claimed.
+
+The synthetic stream uses SHA-256 of state_id and counter to generate a 1..6 value. Counter, position and rng_version persist atomically. This deliberately local test encoding is not a frozen RNG contract or statistically reviewed dice protocol. Event-only/Meta-only/no-draw global version policies remain OPEN; mechanical commits currently require an actual world change.
+
+Engine main 64dd920 was inspected read-only. Public resolve_check and rest resolvers are reusable pure fragments, but evaluate, full Snapshot/Delta/RNGTransition and four-status envelopes are absent. The old registry-backed combat API cannot satisfy ADR-001. See docs/batches/SM4.md for exact gaps and actual smoke evidence.

@@ -6,9 +6,11 @@ from dataclasses import asdict, dataclass
 
 from ._operations import EnterScene, MoveActor, SetObjectState, SetSceneFlag
 from .errors import StateMachineError
+from .mechanics import RuleOperation
 from .package import canonical_json
 
 OPERATIONS = {
+    "rule_operation": RuleOperation,
     "enter_scene": EnterScene,
     "set_scene_flag": SetSceneFlag,
     "set_object_state": SetObjectState,
@@ -22,7 +24,7 @@ class TypedCommand:
     command_id: str
     actor_id: str
     command_type: str
-    payload: EnterScene | SetSceneFlag | SetObjectState | MoveActor
+    payload: EnterScene | SetSceneFlag | SetObjectState | MoveActor | RuleOperation
     expected_world_version: int
     schema_version: str = "sm-command/1"
 
@@ -57,7 +59,19 @@ def validate_command(command: TypedCommand) -> None:
     operation_type = OPERATIONS.get(command.command_type)
     if operation_type is None or type(command.payload) is not operation_type:
         raise StateMachineError("unsupported_operation", "Unknown command or payload type")
-    for key, value in asdict(command.payload).items():
+    if type(command.payload) is RuleOperation:
+        operation = command.payload
+        if operation.difficulty is not None and (
+            type(operation.difficulty) is not int or not 1 <= operation.difficulty <= 7
+        ):
+            raise StateMachineError(
+                "invalid_operation", "Synthetic difficulty must be 1..7 or None"
+            )
+        fields = asdict(operation)
+        fields.pop("difficulty")
+    else:
+        fields = asdict(command.payload)
+    for key, value in fields.items():
         if key == "value":
             if type(value) is not bool:
                 raise StateMachineError("invalid_operation", "Flag must be boolean")
@@ -107,6 +121,8 @@ class CommandRuntime:
                 }
             ).encode()
         ).hexdigest()
+        if type(command.payload) is RuleOperation:
+            return self._submit_mechanical(command, package, context, fingerprint)
         with self._transaction(write=True):
             row = self._session(command.session_id, package, context)
             self._authorize_command(row, command.actor_id, command.payload, context)
