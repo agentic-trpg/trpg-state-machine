@@ -10,7 +10,8 @@ SM-10 已固定 Engine/SRD 候选 `602dcb8d448e670049427bbb751d6ed226005298`
 （Evaluator `/8`），加入首次 Combat 前的 `read_noncombat_snapshot(...)`、
 完整 Snapshot V2 机械事实及唯一存储的 XP。Schema 9 不静默升级旧 Session 的
 RulesetBinding；旧 `/4` 环境用于真实历史存档迁移测试。
-详见 [版本与字段归属](docs/SM10_VERSIONED_STATE.md)。本批完整测试 326 项通过。
+详见 [版本与字段归属](docs/SM10_VERSIONED_STATE.md)。SM-11/12 已加入真实关闭和
+非战斗检定；[当前支持矩阵与迁移说明](docs/SM13_SUPPORT_MATRIX.md) 区分了受限能力与未实现范围。
 
 需要 Python 3.12+ 和 [uv](https://docs.astral.sh/uv/)。运行时依赖 PyYAML、固定 Git SHA 的 dnd5e-engine / dnd5e-srd-data 及其必要依赖；SQLite 使用 Python 标准库，pytest/Ruff 是开发依赖。`uv.lock` 固定完整解析结果。真实异步 Engine 测试在 Windows 需要事件循环使用的本地 socketpair；受限环境须允许该 OS 功能，测试不调用外部服务。
 
@@ -115,9 +116,9 @@ Receipts use durable `(session_id, command_id)` keys and a canonical fingerprint
 - Package 读取/验证、指纹计算、UUID 准备在写事务外进行；写事务内没有网络/模型/规则求值。持久唯一键和事务内再查创建键处理并发重入；失败不保留占位 Session 或幂等 claim。
 - Scene 主键是 `(session_id, scene_id)`，首次初始化对象与 flags；重访保留实例。Actor 的 Scene 归属在唯一 actors 行；战斗格点位置在唯一 CombatState.actor_zone 中，当前拒绝无法完整表达机械副作用的战斗中场景转移。全部运行态表按 Session 隔离。
 - 初始 `world_version=0`。每次实际状态修改成功提交推进一次；无变化操作不推进。`event_seq` 是独立的内部审计序号：创建产生两条记录，Scene 转移产生 exit/enter 两条记录，因此不等于 world_version。
-- 事件保存稳定 ID、来源命令及受限 Signals，事件时位置证据与持久 Outbox 同事务提交；当前提供受限合成 Perception 投影，完整规则/传播协议未实现。没有 event-only 或 Meta-only 提交能力，未冻结它们的 world_version 策略。
+- 事件保存稳定 ID、来源命令及受限 Signals，事件时位置证据与持久 Outbox 同事务提交；当前提供受限 Perception 投影，完整规则/传播协议未实现。真实检定提交 RNG 后推进一次 world_version；通用 event-only/Meta-only 策略仍为 OPEN。
 - RNG 单独持久保存，Session 仅保存引用。Foundation 使用占位编码且不掷骰，synthetic.atomic 使用独立合成计数 RNG，真实攻击使用候选 Engine 的 `stdlib-mt19937/1` 状态及独立流版本；不把候选实现宣称为已冻结的通用跨版本规则 RNG 协议。
-- 所有修改立即提交；`save_session` 不创建第二份权威快照/检查点。Storage schema 8 automatically migrates schemas 1–7 while preserving package pins/digests and state. Migration locks cover version recheck, all steps, FK validation and commit; interrupted upgrades roll back together. Legacy events/trigger sources have no fabricated historical evidence. Unknown schemas are refused. No online backup tool.
+- 所有修改立即提交；`save_session` 不创建第二份权威快照/检查点。Storage schema 9 automatically migrates schemas 1–8 while preserving package pins/digests and state. Migration locks cover version recheck, all steps, FK validation and commit; interrupted upgrades roll back together. Legacy events/trigger sources have no fabricated historical evidence. Unknown schemas are refused. No online backup tool.
 
 ## 自动化验收证据
 
@@ -143,7 +144,7 @@ create → enter workshop → mutate door/flag/NPC → leave → revisit → sav
 - [Agent Architecture v0.9](https://github.com/agentic-trpg/agentic-trpg/blob/fe6a1e9edeaf2a3e120aa669b6abfe1e819d87f1/docs/AGENT_ARCHITECTURE.md)。
 - [MVP Scope v0.11](https://github.com/agentic-trpg/agentic-trpg/blob/fe6a1e9edeaf2a3e120aa669b6abfe1e819d87f1/docs/MVP_SCOPE.md)。
 
-这些文档的 `[PROPOSED]` / `[OPEN]` 不因本实现自动冻结。SM-6～SM-9 以本地 `D:\Projects\agentic-trpg\agentic-trpg\docs` 为最高开发依据，以上链接保留初始文档基线。当前支持受限真实基础攻击，不是完整 MVP：**未实现** 通用 PC 构建验证、combat.start/end 协议、完整回合/法术/Reaction、正式非战斗检定、完整声明式条件/奖励链、Quest/Inventory 操作、NPC Meta/完整感知传播、Gate、EVA、LLM Host、视觉系统、活跃战斗安全恢复、通用脚本或插件框架。
+这些文档的 `[PROPOSED]` / `[OPEN]` 不因本实现自动冻结。本轮继续以本地 `D:\Projects\agentic-trpg\agentic-trpg\docs` 为最高开发依据，以上链接保留初始文档基线。当前支持受限真实基础攻击、胜利/TPK 关闭和通用 Ability/Skill Check，不是完整 MVP：**未实现** 通用 PC 构建验证、完整 Combat 启动/终局协议、完整回合/法术/Reaction、Saving Throw、完整声明式条件/奖励链、Quest/Inventory 操作、NPC Meta/完整感知传播、Gate、EVA、LLM Host、视觉系统、活跃战斗安全恢复、通用脚本或插件框架。
 
 仍为 OPEN 或后续事项：正式跨模块 ABI/跨版本 RNG 回放、事件/Meta-only/未来无随机操作的版本策略、完整规则能力闭包、通用系统来源权限、条件 AST、Pending Choice/Continuation、完整感知传播、备份策略及外部 PC 导入。受限完整 Snapshot/Typed Delta 已实际实现和验证，不能等同于所有规则机制均已支持。
 
@@ -229,7 +230,9 @@ were known follow-up work at stabilization. SM-9 links new trigger sources and
 records F6's scoped acceptance matrix; old unavailable sources remain audited.
 The stabilization itself added no real D&D Adapter or NPC EVA.
 
-## Real Engine integration (SM-6)
+## Real Engine integration history (SM-6–SM-9)
+
+以下记录原批次边界；当前固定版本与 B1 进展以上文及 [支持矩阵](docs/SM13_SUPPORT_MATRIX.md) 为准。
 
 The candidate D&D Engine and SRD data dependencies are pinned to
 `a7225ebaa4914f6db4ae72f3f6454c355ea7baac`. Schema 7 persists complete restricted
@@ -259,4 +262,15 @@ Committed basic attacks feed only a generic visible Signal through the existing
 Perception/Inbox pipeline. Integration tests verify real state, RNG, receipts and
 observations in a fresh process. They explicitly refuse active-combat continuation;
 the candidate has no stateless combat.end, so completed-combat safe save/resume
-remains **Blocked**. See [hardening evidence and F6 scope](docs/SM9_INTEGRATION_HARDENING.md).
+was **Blocked** at SM-9. SM-11 now resolves this for bounded victory/TPK closure. See [historical hardening evidence and F6 scope](docs/SM9_INTEGRATION_HARDENING.md).
+
+## 可执行跨阶段示例（SM-13）
+
+```powershell
+uv run --locked python examples/real_cross_phase.py --directory .test-tmp/demo-new
+```
+
+使用尚不存在的目录。示例保留原创 Package 与实际 SQLite 数据，并启动新 Python
+进程完成关闭后的恢复和下一次真实检定。完整流程覆盖探索、检定、世界命令、NPC/PC
+攻击、战斗关闭、XP 和 RNG 连续性。示例中的 TrustedContext 是本地受信 Host 演示，
+生产身份认证和 GM 授权必须由集成层提供。

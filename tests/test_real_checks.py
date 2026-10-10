@@ -7,7 +7,7 @@ from dataclasses import asdict, replace
 from pathlib import Path
 
 import pytest
-from dnd5e_engine.evaluation_contracts import CheckPayload
+from dnd5e_engine.evaluation_contracts import CheckPayload, RuleEvaluationResult
 from dnd_support import NPC, create
 from modern_support import modern_data, modern_loader
 from test_dnd_ledger_scope import stored_state
@@ -230,7 +230,7 @@ def test_invalid_real_check_result_no_rows_no_receipt_safe_retry(
                 result["rng_transition"]["state_changed"] = False
             elif fault == "binding":
                 result["input_ruleset_binding"]["evaluator_version"] = "wrong"
-            return result
+            return RuleEvaluationResult.model_validate_json(json.dumps(result))
 
         sm._evaluate_dnd = corrupt
         for _ in range(2):

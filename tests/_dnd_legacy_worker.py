@@ -6,7 +6,8 @@ from pathlib import Path
 
 import yaml
 
-source, database = map(Path, sys.argv[1:])
+source, database = map(Path, sys.argv[1:3])
+expected_schema = int(sys.argv[3]) if len(sys.argv) > 3 else 7
 sys.path.insert(0, str(source / "tests"))
 sys.path.insert(0, str(source / "src"))
 from dnd5e_engine.evaluation_contracts import CombatIntentPayload  # noqa: E402
@@ -34,7 +35,7 @@ with StateMachine(database, dnd_loader=assets) as sm:
         before.world_version,
     )
     assert sm.submit_command(command, package, context=context).status == "committed"
-    assert sm._conn.execute("PRAGMA user_version").fetchone()[0] == 7
+    assert sm._conn.execute("PRAGMA user_version").fetchone()[0] == expected_schema
     print(
         json.dumps(
             {

@@ -5,7 +5,11 @@ from dataclasses import asdict, replace
 from pathlib import Path
 
 import pytest
-from dnd5e_engine.evaluation_contracts import CombatClosePayload, CombatIntentPayload
+from dnd5e_engine.evaluation_contracts import (
+    CombatClosePayload,
+    CombatIntentPayload,
+    RuleEvaluationResult,
+)
 from dnd_support import NPC, create, initialize
 from modern_support import modern_data, modern_loader
 from test_dnd_ledger_scope import stored_state
@@ -195,7 +199,7 @@ def test_malformed_real_closure_leaves_all_sqlite_rows_and_allows_retry(
                         "resulting_hp": 7,
                     }
                 )
-            return raw
+            return RuleEvaluationResult.model_validate_json(json.dumps(raw))
 
         sm._evaluate_dnd = corrupt
         for _ in range(2):

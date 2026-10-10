@@ -254,8 +254,15 @@ def test_noncombat_discriminator_is_not_forged_into_combat(tmp_path, package_dat
             CombatSnapshot.model_validate_json(actual.model_dump_json())
 
 
-def test_actual_schema7_combat_upgrade_preserves_mechanics_rng_receipt(
-    tmp_path, package_data, context, legacy_python
+@pytest.mark.parametrize(
+    "legacy_schema,commit",
+    [
+        (7, "8f24ca03e6037428bbc559d50e91bcd57669a0ed"),
+        (8, "a00854374a38b01a13cc0fbfa089ef6e0b709cef"),
+    ],
+)
+def test_actual_legacy_combat_upgrade_preserves_mechanics_rng_receipt(
+    tmp_path, package_data, context, legacy_python, legacy_schema, commit
 ):
     source = tmp_path / "sm7-source"
     archived = subprocess.run(
@@ -263,7 +270,7 @@ def test_actual_schema7_combat_upgrade_preserves_mechanics_rng_receipt(
             "git",
             "archive",
             "--format=zip",
-            "8f24ca03e6037428bbc559d50e91bcd57669a0ed",
+            commit,
             "src",
             "tests/fixtures",
             "tests/dnd_support.py",
@@ -276,7 +283,7 @@ def test_actual_schema7_combat_upgrade_preserves_mechanics_rng_receipt(
     database = tmp_path / "real-old.db"
     worker = Path(__file__).with_name("_dnd_legacy_worker.py")
     completed = subprocess.run(
-        [legacy_python, str(worker), str(source), str(database)],
+        [legacy_python, str(worker), str(source), str(database), str(legacy_schema)],
         capture_output=True,
         text=True,
         encoding="utf-8",

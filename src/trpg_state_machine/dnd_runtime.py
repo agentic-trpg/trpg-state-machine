@@ -433,6 +433,12 @@ class DndRuntime:
         sid = row["session_id"]
         for component, identity, field, value in changes:
             if component == "xp":
+                current = self._conn.execute(
+                    "SELECT xp FROM characters WHERE session_id=? AND actor_id=?", (sid, identity)
+                ).fetchone()
+                # SQLite integer representation, not an XP rule or reward calculation.
+                if current is None or not 0 < value <= (2**63 - 1) - current[0]:
+                    _invalid("XP increment cannot be represented in authoritative storage")
                 self._conn.execute(
                     "UPDATE characters SET xp=xp+? WHERE session_id=? AND actor_id=?",
                     (value, sid, identity),
