@@ -18,6 +18,7 @@ from ._operations import (
 )
 from .combat import DND_RULESET, CombatRuntime
 from .commands import OPERATIONS, CommandRuntime, TypedCommand
+from .dnd_runtime import DndRuntime
 from .errors import StateMachineError
 from .events import EventRuntime
 from .mechanical_runtime import MechanicalRuntime
@@ -89,7 +90,7 @@ def _migration_statements(script: str) -> tuple[str, ...]:
 
 
 class StateMachine(
-    CommandRuntime, EventRuntime, MechanicalRuntime, PerceptionRuntime, CombatRuntime
+    CommandRuntime, EventRuntime, MechanicalRuntime, PerceptionRuntime, CombatRuntime, DndRuntime
 ):
     """Trusted in-process runtime. One connection per instance/thread; close explicitly.
 

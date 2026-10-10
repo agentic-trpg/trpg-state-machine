@@ -221,5 +221,13 @@ The candidate D&D Engine and SRD data dependencies are pinned to
 mechanical components and separate RNG. `combat.initialize` accepts only the
 reviewed encounter embedded in a D&D-bound Package; trusted audit reads rebuild
 actual upstream `CombatSnapshot` / `RNGContext` from SQLite. Active combat
-save/resume is explicitly refused under SM-02. Attack execution is not yet
-implemented in SM-6. See [the mapping and compatibility notes](docs/SM6_COMBAT_FOUNDATION.md).
+save/resume is explicitly refused under SM-02. See
+[the mapping and compatibility notes](docs/SM6_COMBAT_FOUNDATION.md).
+
+SM-7 adds real PC `combat.intent` evaluation and closed Typed Delta/RNG/Event/
+Receipt/Outbox atomic commits. Sync callers use `submit_command`; async callers
+use `submit_command_async`. Supported tests cover ordinary explicit basic attacks,
+misses, Temp HP and damage resistance/immunity/vulnerability. Choice, complex
+mechanics and the unimplemented upstream `combat.end` remain restricted. Read
+[the execution and error boundaries](docs/SM7_REAL_ATTACK.md); active combat
+audit recovery must not be described as safe continuation.

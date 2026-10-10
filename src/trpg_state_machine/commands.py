@@ -2,7 +2,11 @@
 
 import hashlib
 import json
+from copy import deepcopy
 from dataclasses import asdict, dataclass
+
+from dnd5e_engine.evaluation_contracts import CombatIntentPayload
+from pydantic import ValidationError
 
 from ._operations import EnterScene, MoveActor, SetObjectState, SetSceneFlag
 from .combat import InitializeCombat
@@ -11,6 +15,7 @@ from .mechanics import RuleOperation
 from .package import canonical_json
 
 OPERATIONS = {
+    "combat.intent": CombatIntentPayload,
     "combat.initialize": InitializeCombat,
     "rule_operation": RuleOperation,
     "enter_scene": EnterScene,
@@ -27,7 +32,13 @@ class TypedCommand:
     actor_id: str
     command_type: str
     payload: (
-        EnterScene | SetSceneFlag | SetObjectState | MoveActor | RuleOperation | InitializeCombat
+        EnterScene
+        | SetSceneFlag
+        | SetObjectState
+        | MoveActor
+        | RuleOperation
+        | InitializeCombat
+        | CombatIntentPayload
     )
     expected_world_version: int
     schema_version: str = "sm-command/1"
@@ -63,6 +74,14 @@ def validate_command(command: TypedCommand) -> None:
     operation_type = OPERATIONS.get(command.command_type)
     if operation_type is None or type(command.payload) is not operation_type:
         raise StateMachineError("unsupported_operation", "Unknown command or payload type")
+    if type(command.payload) is CombatIntentPayload:
+        try:
+            CombatIntentPayload.model_validate(deepcopy(command.payload))
+        except ValidationError as exc:
+            raise StateMachineError("invalid_command", "Invalid Engine intent schema") from exc
+        if command.payload.source_id not in (None, command.actor_id):
+            raise StateMachineError("invalid_actor", "Intent source differs from trusted actor")
+        return
     if type(command.payload) is RuleOperation:
         operation = command.payload
         if operation.difficulty is not None and (
@@ -81,6 +100,23 @@ def validate_command(command: TypedCommand) -> None:
                 raise StateMachineError("invalid_operation", "Flag must be boolean")
         elif not isinstance(value, str) or not value or len(value) > 256:
             raise StateMachineError("invalid_operation", "Invalid operation field")
+
+
+def command_fingerprint(command, package, context):
+    data = asdict(command)
+    if type(command.payload) is CombatIntentPayload:
+        data["payload"] = command.payload.model_dump(mode="json")
+    return hashlib.sha256(
+        canonical_json(
+            {
+                "command": data,
+                "principal": context.principal_id,
+                "player": context.player_id,
+                "package": package.package_digest,
+                "binding": asdict(package.ruleset_binding),
+            }
+        ).encode()
+    ).hexdigest()
 
 
 class CommandRuntime:
@@ -114,17 +150,15 @@ class CommandRuntime:
     def submit_command(self, command: TypedCommand, package, *, context) -> CommandReceipt:
         validate_command(command)
         self.read_session(command.session_id, package, context=context)
-        fingerprint = hashlib.sha256(
-            canonical_json(
-                {
-                    "command": asdict(command),
-                    "principal": context.principal_id,
-                    "player": context.player_id,
-                    "package": package.package_digest,
-                    "binding": asdict(package.ruleset_binding),
-                }
-            ).encode()
-        ).hexdigest()
+        fingerprint = command_fingerprint(command, package, context)
+        if type(command.payload) is CombatIntentPayload:
+            import asyncio
+
+            try:
+                asyncio.get_running_loop()
+            except RuntimeError:
+                return asyncio.run(self._submit_dnd(command, package, context, fingerprint))
+            raise StateMachineError("async_context_required", "Use await submit_command_async")
         if type(command.payload) is RuleOperation:
             return self._submit_mechanical(command, package, context, fingerprint)
         prepared = None
