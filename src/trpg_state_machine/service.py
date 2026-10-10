@@ -153,7 +153,7 @@ class StateMachine(
 
     def _migrate(self):
         scripts = [Path(__file__).with_name("_schema.sql")] + [
-            Path(__file__).with_name(f"_migration_{v}.sql") for v in range(2, 9)
+            Path(__file__).with_name(f"_migration_{v}.sql") for v in range(2, 10)
         ]
         steps = [_migration_statements(path.read_text("utf-8")) for path in scripts]
         # Migration 4 rebuilds a referenced table. Disable FK enforcement only on
@@ -163,7 +163,7 @@ class StateMachine(
             self._conn.execute("BEGIN IMMEDIATE")
             # Read AFTER acquiring the cross-process SQLite migration write lock.
             version = self._conn.execute("PRAGMA user_version").fetchone()[0]
-            if version not in range(9):
+            if version not in range(10):
                 raise StateMachineError(
                     "unsupported_storage_schema", f"Unsupported storage version: {version}"
                 )
@@ -176,7 +176,7 @@ class StateMachine(
                 raise StateMachineError(
                     "unsupported_storage_schema", "Unversioned nonempty database"
                 )
-            for target in range(version + 1, 9):
+            for target in range(version + 1, 10):
                 for statement in steps[target - 1]:
                     self._conn.execute(statement)
                 if self._conn.execute("PRAGMA user_version").fetchone()[0] != target:
@@ -377,7 +377,7 @@ class StateMachine(
                 return replay
             # All authority and creation deduplication share this transaction.
             self._conn.execute(
-                "INSERT INTO sessions VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, 0)",
+                "INSERT INTO sessions VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, 0, NULL)",
                 (
                     session_id,
                     package.adventure_id,
@@ -427,6 +427,8 @@ class StateMachine(
             initial_row = self._conn.execute(
                 "SELECT * FROM sessions WHERE session_id=?", (session_id,)
             ).fetchone()
+            if package.noncombat_foundation_json is not None:
+                self._initialize_noncombat(initial_row, package)
             initial_events = self._expand_events(
                 initial_row,
                 package,
@@ -476,6 +478,7 @@ class StateMachine(
                     "(SELECT 1 FROM actors WHERE session_id = ? AND actor_id = ?)",
                     (session_id, actor.actor_id, scene_id, session_id, actor.actor_id),
                 )
+        self._initialize_mechanical_scene(session_id, scene_id, package)
 
     def _append_events(
         self,
@@ -735,6 +738,7 @@ class StateMachine(
                 json.loads(pc["resources_json"]),
                 tuple(json.loads(pc["inventory_json"])),
                 tuple(json.loads(pc["effects_json"])),
+                pc["xp"],
             ),
             RNGState(
                 rng["state_id"],

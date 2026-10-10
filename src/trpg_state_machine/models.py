@@ -74,6 +74,7 @@ class CharacterState:
     resources: dict
     inventory: tuple
     effects: tuple = ()
+    xp: int = 0
 
 
 @dataclass(frozen=True, slots=True)

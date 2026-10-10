@@ -11,7 +11,7 @@ from dnd5e_engine.evaluation_contracts import (
     RuleEvaluationRequest,
     RuleEvaluationResult,
 )
-from dnd5e_engine.evaluation_ruleset import RulesetBinding, RulesetBindingError
+from dnd5e_engine.evaluation_ruleset import EVALUATOR_VERSION, RulesetBinding, RulesetBindingError
 from dnd5e_engine.evaluation_state import CombatSnapshot
 from pydantic import ValidationError
 
@@ -258,6 +258,10 @@ class DndRuntime:
             self._authorize_command(row, command.actor_id, command.payload, context)
             if replay := self._command_replay(command, fingerprint):
                 return replay
+            if row["evaluator_version"] != EVALUATOR_VERSION:
+                raise StateMachineError(
+                    "ruleset_binding_mismatch", "Pinned evaluator version is not installed"
+                )
             snapshot = self._combat_snapshot(row)
             rng = self._rng_context(row)
             combat = self._conn.execute(
@@ -268,7 +272,11 @@ class DndRuntime:
                     "combat_unrestorable", "Interrupted combat requires explicit recovery support"
                 )
         request = RuleEvaluationRequest(
-            schema_version="engine-evaluation/1",
+            schema_version=(
+                "engine-evaluation/4"
+                if snapshot.snapshot_schema_version == "engine-snapshot/2"
+                else "engine-evaluation/1"
+            ),
             session_id=command.session_id,
             command_id=command.command_id,
             operation_kind="combat.intent",

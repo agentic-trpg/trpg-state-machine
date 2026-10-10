@@ -31,7 +31,11 @@ class AvailabilityRuntime:
         self._verify_dnd_binding(package)
         try:
             request = ActionAvailabilityRequest(
-                schema_version="engine-availability/1",
+                schema_version=(
+                    "engine-availability/2"
+                    if snapshot.snapshot_schema_version == "engine-snapshot/2"
+                    else "engine-availability/1"
+                ),
                 session_id=session_id,
                 operation_kind="combat.intent",
                 actor_id=actor_id,

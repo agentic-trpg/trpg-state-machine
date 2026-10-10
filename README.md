@@ -6,6 +6,12 @@ State Machine 是全部已实现可变游戏状态的唯一权威拥有者和提
 
 ## 安装与验证
 
+SM-10 已固定 Engine/SRD 候选 `602dcb8d448e670049427bbb751d6ed226005298`
+（Evaluator `/8`），加入首次 Combat 前的 `read_noncombat_snapshot(...)`、
+完整 Snapshot V2 机械事实及唯一存储的 XP。Schema 9 不静默升级旧 Session 的
+RulesetBinding；旧 `/4` 环境用于真实历史存档迁移测试。
+详见 [版本与字段归属](docs/SM10_VERSIONED_STATE.md)。本批完整测试 326 项通过。
+
 需要 Python 3.12+ 和 [uv](https://docs.astral.sh/uv/)。运行时依赖 PyYAML、固定 Git SHA 的 dnd5e-engine / dnd5e-srd-data 及其必要依赖；SQLite 使用 Python 标准库，pytest/Ruff 是开发依赖。`uv.lock` 固定完整解析结果。真实异步 Engine 测试在 Windows 需要事件循环使用的本地 socketpair；受限环境须允许该 OS 功能，测试不调用外部服务。
 
 ```powershell

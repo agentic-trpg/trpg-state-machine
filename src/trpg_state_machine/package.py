@@ -115,6 +115,7 @@ class AdventurePackage:
     pc_templates: tuple[PCTemplate, ...]
     events: tuple[EventDefinition, ...] = ()
     combat_foundation_json: str | None = None
+    noncombat_foundation_json: str | None = None
 
     def scene(self, scene_id: str) -> SceneDefinition:
         for scene in self.scenes:
@@ -264,7 +265,7 @@ def _validate(data: dict) -> AdventurePackage:
     if dnd and (
         not isinstance(binding.data_revision, str)
         or not re.fullmatch(r"sha256:[0-9a-f]{64}", binding.data_revision)
-        or binding.evaluator_version != "dnd5e-evaluation/4"
+        or binding.evaluator_version not in ("dnd5e-evaluation/4", "dnd5e-evaluation/8")
     ):
         _fail("unsupported_ruleset", "manifest.ruleset_binding", "Invalid pinned D&D binding")
     if not dnd and binding not in (SYNTHETIC_RULESET, SYNTHETIC_EVALUATION_RULESET):
@@ -292,13 +293,25 @@ def _validate(data: dict) -> AdventurePackage:
     )
     for key in compatibility:
         _empty(compatibility[key], [], f"manifest.compatibility.{key}")
-    foundation = None
+    foundation = noncombat = None
     if dnd:
-        from .combat import validate_foundation
+        from .combat import validate_foundation, validate_noncombat_foundation
 
-        rules = _mapping(root["rule_bindings"], "combat_foundation", "rule_bindings")
-        validate_foundation(rules["combat_foundation"])
-        foundation = canonical_json(rules["combat_foundation"])
+        rules = root["rule_bindings"]
+        if (
+            type(rules) is not dict
+            or not rules
+            or set(rules) - {"combat_foundation", "noncombat_foundation"}
+        ):
+            _fail("schema_error", "rule_bindings", "Expected reviewed mechanical foundations")
+        if "combat_foundation" in rules:
+            validate_foundation(rules["combat_foundation"])
+            foundation = canonical_json(rules["combat_foundation"])
+        if "noncombat_foundation" in rules:
+            if binding.evaluator_version != "dnd5e-evaluation/8":
+                _fail("unsupported_ruleset", "rule_bindings", "Noncombat requires evaluator /8")
+            validate_noncombat_foundation(rules["noncombat_foundation"])
+            noncombat = canonical_json(rules["noncombat_foundation"])
     else:
         _empty(root["rule_bindings"], {}, "rule_bindings")
 
@@ -466,7 +479,12 @@ def _validate(data: dict) -> AdventurePackage:
                 if type(count) is not int or not 0 <= count <= 1_000_000:
                     _fail("schema_error", path, "Invalid synthetic resource count")
             resources = tuple(sorted(char["resources"].items()))
-            inventory = tuple(_identifier(v, path, "item") for v in _list(char["inventory"], path))
+            inventory = tuple(
+                _text(v, path) if dnd else _identifier(v, path, "item")
+                for v in _list(char["inventory"], path)
+            )
+            if dnd and any(not re.fullmatch(r"[a-z][a-z0-9_.-]{0,127}", v) for v in inventory):
+                _fail("invalid_id", path, "Expected a canonical or reviewed item identity")
             _unique(inventory, path)
         templates.append(
             PCTemplate(
@@ -496,8 +514,10 @@ def _validate(data: dict) -> AdventurePackage:
         }
         if set(ids) != expected_ids:
             _fail("invalid_reference", "scenes.event_definition_ids", "Event membership mismatch")
-    if foundation is not None:
-        initial = json.loads(foundation)["snapshot"]
+    for encoded in (foundation, noncombat):
+        if encoded is None:
+            continue
+        initial = json.loads(encoded)["snapshot"]
         known = {a.actor_id for a in actors} | {p.pc_template_id for p in templates}
         for actor in initial["character_states"]:
             _reference(actor["entity_id"], known, "rule_bindings.combat_foundation.actor")
@@ -506,6 +526,40 @@ def _validate(data: dict) -> AdventurePackage:
             {s.scene_id for s in scenes},
             "rule_bindings.combat_foundation.scene",
         )
+    if noncombat is not None:
+        initial = json.loads(noncombat)
+        snapshot = initial["snapshot"]
+        if snapshot["scene_state"]["scene_id"] != entry:
+            _fail("invalid_reference", "rule_bindings.noncombat_foundation", "Expected entry scene")
+        for scene in initial["additional_scenes"]:
+            _reference(scene["scene_id"], scene_ids, "rule_bindings.noncombat_foundation.scenes")
+        for actor in snapshot["character_states"]:
+            pc = next((p for p in templates if p.pc_template_id == actor["entity_id"]), None)
+            if pc is not None and (
+                actor["entity_type"] != "Character"
+                or (pc.current_hp, pc.max_hp, list(pc.inventory))
+                != (actor["hp_current"], actor["hp_max"], actor["carried_item_slugs"])
+                or pc.resources
+            ):
+                _fail("invalid_reference", "pc_templates", "Core and mechanical facts disagree")
+            if (
+                pc is None
+                and next(a for a in actors if a.actor_id == actor["entity_id"]).initial_scene_id
+                != entry
+            ):
+                _fail(
+                    "invalid_reference",
+                    "rule_bindings.noncombat_foundation",
+                    "Initial actors must be present",
+                )
+        if foundation is not None:
+            combat_initial = json.loads(foundation)["snapshot"]
+            if (
+                combat_initial["snapshot_schema_version"] != snapshot["snapshot_schema_version"]
+                or combat_initial["character_states"] != snapshot["character_states"]
+                or combat_initial["scene_state"] != snapshot["scene_state"]
+            ):
+                _fail("invalid_reference", "rule_bindings", "Initial mechanical facts disagree")
     return AdventurePackage(
         adventure_id,
         version,
@@ -518,6 +572,7 @@ def _validate(data: dict) -> AdventurePackage:
         tuple(templates),
         definitions,
         foundation,
+        noncombat,
     )
 
 
