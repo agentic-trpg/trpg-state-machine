@@ -317,3 +317,22 @@ attack, damage or action-economy formula is implemented here.
 Real attacks still run outside SQLite write transactions. A fresh process may reconcile
 an already committed command/handoff; it cannot resume an interrupted active combat.
 No new table, ACK, executor, continuation or second receipt store was added.
+
+## SM-20: authorized scene reads
+
+`get_scene_view(..., context=GameViewContext(principal_id, session_id, player_id, role))`
+accepts adapter-authenticated `gm`, `player`, or `narrator` roles. SM checks the actual
+Session owner/player, scope and Package pins without casting these callers to the
+internal TrustedContext. The adapter must authenticate role grants; request payloads
+are never credentials. These read-only contexts cannot call commands or full snapshot/event
+reads. GM gets Session world facts and current scene flags; Player gets visible current
+objects/actors and its own CharacterState; Narrator gets current visible committed state.
+No static scene prose, secret flags, NPC cognition or raw event payload is exposed to the
+player-facing roles. Public fact discovery/history is not yet a separate capability.
+
+NPC reads keep existing NPCContext/npc_access, NPC Meta and Inbox. Current scene views
+now carry view_world_version; unknown mechanical visibility fails closed, including
+unsupported lighting, concealment, obstacles and conditions. Event-time observations
+remain independent historical evidence. observation_signal_sources retains only actual
+positive Signal provenance internally; source event semantics stay out of NPC input.
+No reads ACK, consume observations, advance completion, or change state/RNG.

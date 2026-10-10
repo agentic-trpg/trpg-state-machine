@@ -261,6 +261,10 @@ class StateMachine(
             raise StateMachineError("session_not_found", "Unknown session")
         if (row["principal_id"], row["player_id"]) != (context.principal_id, context.player_id):
             raise StateMachineError("unauthorized", "Context does not control this session")
+        self._check_package_pin(row, package)
+        return row
+
+    def _check_package_pin(self, row, package):
         if (row["adventure_id"], row["package_version"]) != (
             package.adventure_id,
             package.package_version,
@@ -276,7 +280,6 @@ class StateMachine(
             raise StateMachineError(
                 "ruleset_mismatch", "Session's fixed RulesetBinding does not match"
             )
-        return row
 
     def _replay(self, context: TrustedContext, command_id: str, fingerprint: str):
         row = self._conn.execute(

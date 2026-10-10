@@ -5,7 +5,38 @@ import json
 from dataclasses import asdict, dataclass
 
 from .errors import StateMachineError
-from .package import Signal, canonical_json
+from .models import CharacterState
+from .npc_state import KnownFact
+from .package import AdventurePackage, Signal, canonical_json
+
+
+@dataclass(frozen=True, slots=True)
+class GameViewContext:
+    """Adapter-authenticated role; never construct from untrusted request fields.
+
+    The current local adapter must bind the Session owner's principal/player to
+    gm, player or narrator. This grants reads only, never command control.
+    """
+
+    principal_id: str
+    session_id: str
+    player_id: str
+    role: str
+
+
+@dataclass(frozen=True, slots=True)
+class GameSceneView:
+    schema_version: str
+    role: str
+    session_id: str
+    scene_id: str
+    view_world_version: int
+    status: str
+    visible_actor_ids: tuple[str, ...]
+    visible_objects: tuple[tuple[str, str], ...]
+    own_character: CharacterState | None
+    gm_facts: tuple[KnownFact, ...]
+    gm_scene_flags: tuple[tuple[str, bool], ...]
 
 
 @dataclass(frozen=True, slots=True)
@@ -37,6 +68,7 @@ class CurrentPerceptualView:
     status: str
     visible_actor_ids: tuple[str, ...]
     visible_objects: tuple[tuple[str, str], ...]
+    view_world_version: int = 0
 
 
 @dataclass(frozen=True, slots=True)
@@ -322,6 +354,8 @@ class PerceptionRuntime:
         if type(context) is TrustedContext:
             snapshot = self.read_session(session_id, package, context=context)
             return snapshot.scenes[snapshot.current_scene_id]
+        if type(context) is GameViewContext:
+            return self._game_scene_view(session_id, package, context)
         with self._transaction():
             observer_id = self._npc_authorized(session_id, package, context)
             actor = self._conn.execute(
@@ -330,8 +364,12 @@ class PerceptionRuntime:
             ).fetchone()
             scene_id = actor[0]
             definition = next(a for a in package.actors if a.actor_id == observer_id)
-            if definition.senses is None:
-                return CurrentPerceptualView(observer_id, scene_id, "unresolved", (), ())
+            version = self._conn.execute(
+                "SELECT world_version FROM sessions WHERE session_id=?", (session_id,)
+            ).fetchone()[0]
+            clear = self._scene_perception_clear(session_id, scene_id)
+            if definition.senses is None or not clear:
+                return CurrentPerceptualView(observer_id, scene_id, "unresolved", (), (), version)
             can_see = dict(definition.senses)["visual"]
             actors = (
                 tuple(
@@ -357,4 +395,131 @@ class PerceptionRuntime:
                 if can_see
                 else ()
             )
-            return CurrentPerceptualView(observer_id, scene_id, "resolved", actors, objects)
+            return CurrentPerceptualView(
+                observer_id, scene_id, "resolved", actors, objects, version
+            )
+
+    def _scene_perception_clear(self, sid, scene):
+        """No mechanical visibility calculation: unsupported environments stay unknown."""
+        stored = self._conn.execute(
+            "SELECT state_json FROM mechanical_scenes WHERE session_id=? AND scene_id=?",
+            (sid, scene),
+        ).fetchone()
+        if stored:
+            grid = json.loads(stored[0])["grid"]
+            if grid["default_lighting"] != "bright" or any(
+                grid[key]
+                for key in (
+                    "lighting",
+                    "obscurement_cells",
+                    "wall_segments",
+                    "blocked_cells",
+                    "cover_cells",
+                )
+            ):
+                return False
+            states = self._conn.execute(
+                "SELECT m.state_json FROM mechanical_actors m JOIN actors a "
+                "USING(session_id,actor_id) WHERE m.session_id=? AND a.current_scene_id=?",
+                (sid, scene),
+            ).fetchall()
+            if any(json.loads(r[0])["conditions"] for r in states):
+                return False
+        return True
+
+    def _game_scene_view(self, sid, package, context):
+        if (
+            context.session_id != sid
+            or context.role not in ("gm", "player", "narrator")
+            or not isinstance(package, AdventurePackage)
+        ):
+            raise StateMachineError("unauthorized", "Invalid scoped game view context")
+        with self._transaction():
+            row = self._conn.execute("SELECT * FROM sessions WHERE session_id=?", (sid,)).fetchone()
+            if row is None or (row["principal_id"], row["player_id"]) != (
+                context.principal_id,
+                context.player_id,
+            ):
+                raise StateMachineError("unauthorized", "No authorized Session view")
+            self._check_package_pin(row, package)
+            gm = context.role == "gm"
+            scene = row["current_scene_id"]
+            clear = gm or self._scene_perception_clear(sid, scene)
+            actors = (
+                tuple(
+                    r[0]
+                    for r in self._conn.execute(
+                        "SELECT actor_id FROM actors WHERE session_id=? AND current_scene_id=? "
+                        "ORDER BY actor_id",
+                        (sid, scene),
+                    )
+                )
+                if clear
+                else ()
+            )
+            objects = (
+                tuple(
+                    tuple(r)
+                    for r in self._conn.execute(
+                        "SELECT object_id,state FROM objects WHERE session_id=? AND scene_id=? "
+                        "ORDER BY object_id",
+                        (sid, scene),
+                    )
+                )
+                if clear
+                else ()
+            )
+            own = None
+            if context.role == "player":
+                character = self._conn.execute(
+                    "SELECT * FROM characters WHERE session_id=? AND actor_id=?",
+                    (sid, row["pc_actor_id"]),
+                ).fetchone()
+                own = CharacterState(
+                    row["pc_actor_id"],
+                    character["current_hp"],
+                    character["max_hp"],
+                    json.loads(character["resources_json"]),
+                    tuple(json.loads(character["inventory_json"])),
+                    tuple(json.loads(character["effects_json"])),
+                    character["xp"],
+                )
+            facts = (
+                tuple(
+                    KnownFact(r[0], r[1])
+                    for r in self._conn.execute(
+                        "SELECT fact_id,text FROM world_facts WHERE session_id=? ORDER BY fact_id",
+                        (sid,),
+                    )
+                )
+                if gm
+                else ()
+            )
+            flags = (
+                tuple(
+                    sorted(
+                        json.loads(
+                            self._conn.execute(
+                                "SELECT flags_json FROM scene_instances "
+                                "WHERE session_id=? AND scene_id=?",
+                                (sid, scene),
+                            ).fetchone()[0]
+                        ).items()
+                    )
+                )
+                if gm
+                else ()
+            )
+            return GameSceneView(
+                "game-view/1",
+                context.role,
+                sid,
+                scene,
+                row["world_version"],
+                "resolved" if clear else "unresolved",
+                actors,
+                objects,
+                own,
+                facts,
+                flags,
+            )
