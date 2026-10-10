@@ -86,7 +86,7 @@ def stored_rows(database):
         tables = conn.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()
         return {
             name: (
-                [r[1] for r in conn.execute(f"PRAGMA table_info({name})")],
+                [r[1] for r in conn.execute(f"PRAGMA table_xinfo({name})")],
                 set(conn.execute(f"SELECT * FROM {name}").fetchall()),
             )
             for (name,) in tables
@@ -98,7 +98,7 @@ def assert_preserved(database, original):
         for table, (columns, rows) in original.items():
             after = set(conn.execute(f"SELECT {','.join(columns)} FROM {table}").fetchall())
             assert rows <= after, table
-        assert conn.execute("PRAGMA user_version").fetchone()[0] == 10
+        assert conn.execute("PRAGMA user_version").fetchone()[0] == 14
         assert conn.execute("PRAGMA integrity_check").fetchone()[0] == "ok"
         assert conn.execute("PRAGMA foreign_key_check").fetchall() == []
 
@@ -282,7 +282,7 @@ def test_concurrent_initialization_and_upgrade(tmp_path, version, monkeypatch):
             )
 
     with ThreadPoolExecutor(max_workers=4) as workers:
-        assert list(workers.map(open_runtime, range(4))) == [(10, 1, "wal")] * 4
+        assert list(workers.map(open_runtime, range(4))) == [(14, 1, "wal")] * 4
     assert len(version_reads) >= 4 and all(version_reads)
     monkeypatch.undo()
     assert_preserved(database, original)
