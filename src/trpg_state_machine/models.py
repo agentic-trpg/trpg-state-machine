@@ -15,6 +15,7 @@ class TrustedContext:
 
     principal_id: str
     player_id: str
+    controlled_npc_ids: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)

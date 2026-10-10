@@ -94,7 +94,9 @@ with StateMachine("demo.sqlite3") as restarted:
 
 ## 状态修改与持久化边界
 
-`_operations.py` 的 `EnterScene / SetSceneFlag / SetObjectState / MoveActor` 和 `StateMachine._apply(...)` 是供合成集成验证使用的**内部封闭操作**，不从包或客户端反序列化，不作为普通游戏提交 API。它们验证主体、预期 `world_version`、Scene/对象/Actor 范围及类型；只能修改已声明当前 Scene 的布尔标志/门状态，或移动已存在合成 NPC 到已初始化 Scene。PC 移动须经过合法 Scene 出口。没有任意 JSON Patch、SQL、HP 写接口或公开 `submit_command`。
+SM-2 adds `submit_command(TypedCommand, package, *, context)` and authorized `get_command_receipt(session_id, command_id, package, *, context)`. Local schema `sm-command/1` accepts only enter_scene, set_scene_flag, set_object_state and move_actor with matching typed payloads. PC operations require the selected PC. NPC movement additionally requires the adapter-issued `TrustedContext.controlled_npc_ids` grant. The compatibility `_apply` routes through this same pipeline.
+
+Receipts use durable `(session_id, command_id)` keys and a canonical fingerprint binding command, principal/player, package digest and ruleset. Replays reauthorize, same key/different content raises idempotency_conflict. Business rejections/version conflicts persist rejected/conflict receipts; commits persist committed receipts. Schema/auth/storage errors remain structured exceptions. State/version/events/receipt and event-time position evidence commit atomically. No-op commands save receipts without advancing world_version or event_seq.
 
 - SQLite 使用 **WAL、foreign_keys=ON、synchronous=FULL、busy_timeout=5000ms**。创建在一个 `BEGIN IMMEDIATE` 短事务内写入 Session、World、入口 Scene、必要 Actor、选中 Character、独立 RNG、内部审计记录和创建键/原结果；任何阶段乃至延迟外键提交失败均全部回滚。
 - Package 读取/验证、指纹计算、UUID 准备在写事务外进行；写事务内没有网络/模型/规则求值。持久唯一键和事务内再查创建键处理并发重入；失败不保留占位 Session 或幂等 claim。
@@ -102,7 +104,7 @@ with StateMachine("demo.sqlite3") as restarted:
 - 初始 `world_version=0`。每次实际状态修改成功提交推进一次；无变化操作不推进。`event_seq` 是独立的内部审计序号：创建产生两条记录，Scene 转移产生 exit/enter 两条记录，因此不等于 world_version。
 - 当前审计表仅覆盖本 Batch 生命周期/修改，不是完整 WorldEvent/Signal/Perception/Outbox 协议。没有 event-only 或 Meta-only 提交能力，未冻结它们的 world_version 策略。
 - RNG 单独持久保存 `state_id / algorithm=unselected / encoding=foundation-placeholder/1 / position=0`，Session 保存引用。没有掷骰、随机流消耗或规则 RNG 协议，也不宣称确定性机械 Replay。
-- 所有修改立即提交；`save_session` 不创建第二份权威快照/检查点。存储 Schema `user_version=1`，未知版本/已有无版本数据库拒绝；目前没有数据迁移或在线备份工具。
+- 所有修改立即提交；`save_session` 不创建第二份权威快照/检查点。Storage schema 2 automatically migrates Batch 1 schema 1 while preserving package pins/digests and state. Legacy events have no fabricated historical evidence. Unknown schemas are refused. No online backup tool.
 
 ## 自动化验收证据
 
@@ -119,14 +121,17 @@ create → enter workshop → mutate door/flag/NPC → leave → revisit → sav
 
 ## 架构依据与未完成范围
 
-2026-10-10 读取总控仓库最新 main，并核对以下五份文件均对应提交 [`fe6a1e9edeaf2a3e120aa669b6abfe1e819d87f1`](https://github.com/agentic-trpg/agentic-trpg/commit/fe6a1e9edeaf2a3e120aa669b6abfe1e819d87f1)：
+2026-10-10 读取总控仓库最新 main，并核对以下六份文件均对应提交 [`fe6a1e9edeaf2a3e120aa669b6abfe1e819d87f1`](https://github.com/agentic-trpg/agentic-trpg/commit/fe6a1e9edeaf2a3e120aa669b6abfe1e819d87f1)：
 
 - [ADR-001：统一权威状态所有权](https://github.com/agentic-trpg/agentic-trpg/blob/fe6a1e9edeaf2a3e120aa669b6abfe1e819d87f1/docs/ADR-001-UNIFIED-STATE-OWNERSHIP.md)，最高架构约束。
 - [State Machine Architecture v0.10](https://github.com/agentic-trpg/agentic-trpg/blob/fe6a1e9edeaf2a3e120aa669b6abfe1e819d87f1/docs/STATE_MACHINE_ARCHITECTURE.md)，重点 §3–§5、§8、§11。
 - [Module Contracts v0.8](https://github.com/agentic-trpg/agentic-trpg/blob/fe6a1e9edeaf2a3e120aa669b6abfe1e819d87f1/docs/MODULE_CONTRACTS.md)，重点 §2、§10。
 - [Adventure Package Schema v0.6](https://github.com/agentic-trpg/agentic-trpg/blob/fe6a1e9edeaf2a3e120aa669b6abfe1e819d87f1/docs/ADVENTURE_PACKAGE_SCHEMA.md)。
+- [Agent Architecture v0.9](https://github.com/agentic-trpg/agentic-trpg/blob/fe6a1e9edeaf2a3e120aa669b6abfe1e819d87f1/docs/AGENT_ARCHITECTURE.md)。
 - [MVP Scope v0.11](https://github.com/agentic-trpg/agentic-trpg/blob/fe6a1e9edeaf2a3e120aa669b6abfe1e819d87f1/docs/MVP_SCOPE.md)。
 
-这些文档的 `[PROPOSED]` / `[OPEN]` 不因本实现自动冻结。当前是 SM-1 Foundation，不是完整 MVP：**未实现** Rule Engine Adapter、D&D PC 机械验证、Combat/正式规则检定、公开普通命令协议、声明式事件/条件/奖励链、Quest/Inventory 操作、NPC Meta/Perception/Observation、Gate、EVA、LLM Host、视觉系统、活跃战斗恢复、通用脚本或插件框架。
+这些文档的 `[PROPOSED]` / `[OPEN]` 不因本实现自动冻结。当前是 SM-2 Foundation，不是完整 MVP：**未实现** Rule Engine Adapter、D&D PC 机械验证、Combat/正式规则检定、声明式事件/条件/奖励链、Quest/Inventory 操作、NPC Meta/Perception/Observation、Gate、EVA、LLM Host、视觉系统、活跃战斗恢复、通用脚本或插件框架。
 
-仍为 OPEN 或后续批次事项：规则 RNG 算法/编码与回放、事件/Meta-only 版本策略、完整规则 CharacterState/CombatState/Typed Delta、公开 TypedCommand/Receipt/Actor 与系统来源权限、条件 AST、Pending Choice、Perception/Outbox、数据迁移/备份策略及外部 PC 导入。本批没有以空类或 Stub 宣称这些能力完成。
+仍为 OPEN 或后续批次事项：规则 RNG 算法/编码与回放、事件/Meta-only 版本策略、完整规则 CharacterState/CombatState/Typed Delta、通用系统来源权限、条件 AST、Pending Choice、Perception/Outbox、更复杂的数据迁移/备份策略及外部 PC 导入。本批没有以空类或 Stub 宣称这些能力完成。
+
+SM-2: 112 tests passed, including durable retry after lost response, revoked authorization, concurrent writers, injected transaction rollback and Batch 1 migration. See `docs/batches/SM2.md`.

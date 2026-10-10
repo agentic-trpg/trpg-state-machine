@@ -15,6 +15,7 @@ from ._operations import (
     SetObjectState,
     SetSceneFlag,
 )
+from .commands import OPERATIONS, CommandRuntime, TypedCommand
 from .errors import StateMachineError
 from .models import (
     ActorState,
@@ -47,9 +48,13 @@ def _trusted(context: TrustedContext) -> None:
         for v in (context.principal_id, context.player_id)
     ):
         raise StateMachineError("invalid_context", "A trusted principal/player context is required")
+    if type(context.controlled_npc_ids) is not tuple or any(
+        type(v) is not str or not v or len(v) > 256 for v in context.controlled_npc_ids
+    ):
+        raise StateMachineError("invalid_context", "NPC grants must be trusted identity tuples")
 
 
-class StateMachine:
+class StateMachine(CommandRuntime):
     """Trusted in-process runtime. One connection per instance/thread; close explicitly.
 
     All writes commit immediately. Public lifecycle methods are not HTTP endpoints
@@ -83,9 +88,13 @@ class StateMachine:
                         "unsupported_storage_schema", "Unversioned nonempty database"
                     )
                 self._conn.executescript(Path(__file__).with_name("_schema.sql").read_text("utf-8"))
-            elif version != 1:
+            elif version not in (1, 2):
                 raise StateMachineError(
                     "unsupported_storage_schema", f"Unsupported storage version: {version}"
+                )
+            if version in (0, 1):
+                self._conn.executescript(
+                    Path(__file__).with_name("_migration_2.sql").read_text("utf-8")
                 )
         except sqlite3.Error as exc:
             self._conn.close()
@@ -338,11 +347,25 @@ class StateMachine:
         seq = self._conn.execute(
             "SELECT event_seq FROM sessions WHERE session_id = ?", (session_id,)
         ).fetchone()[0]
+        evidence = {
+            "schema": "event-evidence/1",
+            "actors": [
+                dict(actor)
+                for actor in self._conn.execute(
+                    "SELECT actor_id, kind, current_scene_id FROM actors WHERE session_id=?",
+                    (session_id,),
+                ).fetchall()
+            ],
+        }
         for event_type, payload in events:
             seq += 1
             self._conn.execute(
                 "INSERT INTO events VALUES (?, ?, ?, ?, ?)",
                 (session_id, seq, event_type, version, canonical_json(payload)),
+            )
+            self._conn.execute(
+                "INSERT INTO event_evidence VALUES (?, ?, ?)",
+                (session_id, seq, canonical_json(evidence)),
             )
         self._conn.execute(
             "UPDATE sessions SET event_seq = ? WHERE session_id = ?", (seq, session_id)
@@ -357,33 +380,22 @@ class StateMachine:
         expected_world_version: int,
         context: TrustedContext,
     ) -> SessionSnapshot:
-        """Internal foundation-only write path. No command receipt/retry protocol.
-
-        Every real change advances world_version once, emits internal audit records,
-        and commits atomically. Reapplying a stale version rejects without writing.
-        """
-        if type(expected_world_version) is not int or expected_world_version < 0:
-            raise StateMachineError("invalid_operation", "Expected a nonnegative integer version")
-        if type(operation) not in (EnterScene, SetSceneFlag, SetObjectState, MoveActor):
-            raise StateMachineError(
-                "unsupported_operation", "Operation is outside the internal allowlist"
-            )
-        with self._transaction(write=True):
-            row = self._session(session_id, package, context)
-            if row["world_version"] != expected_world_version:
-                raise StateMachineError(
-                    "version_conflict", "Session changed; refresh the authoritative snapshot"
-                )
-            events = self._operate(row, package, operation)
-            if events:
-                version = row["world_version"] + 1
-                self._conn.execute(
-                    "UPDATE sessions SET world_version = ? WHERE session_id = ?",
-                    (version, session_id),
-                )
-                self._append_events(session_id, version, events)
-            snapshot = self._snapshot(self._session(session_id, package, context))
-        return snapshot
+        """Compatibility helper routed through the same authorized command pipeline."""
+        if type(operation) not in OPERATIONS.values():
+            raise StateMachineError("unsupported_operation", "Unknown operation")
+        snapshot = self.read_session(session_id, package, context=context)
+        actor_id = operation.actor_id if isinstance(operation, MoveActor) else snapshot.pc_actor_id
+        kind = next(key for key, value in OPERATIONS.items() if type(operation) is value)
+        receipt = self.submit_command(
+            TypedCommand(
+                session_id, str(uuid4()), actor_id, kind, operation, expected_world_version
+            ),
+            package,
+            context=context,
+        )
+        if receipt.status != "committed":
+            raise StateMachineError(receipt.error_code, "Command did not commit")
+        return self.read_session(session_id, package, context=context)
 
     def _operate(self, row, package: AdventurePackage, operation: FoundationOperation):
         sid = row["session_id"]

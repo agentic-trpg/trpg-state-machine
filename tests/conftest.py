@@ -28,7 +28,7 @@ def package_data():
 
 @pytest.fixture
 def context():
-    return TrustedContext("authenticated:alice", "player.alice")
+    return TrustedContext("authenticated:alice", "player.alice", ("npc.caretaker", "npc.attendant"))
 
 
 @pytest.fixture

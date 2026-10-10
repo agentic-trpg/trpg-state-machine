@@ -25,7 +25,7 @@ def run():
     mode, database, package_path = sys.argv[1:4]
     package = load_adventure_package(package_path).package
     assert package is not None
-    context = TrustedContext("authenticated:integration", "player.integration")
+    context = TrustedContext("authenticated:integration", "player.integration", ("npc.caretaker",))
     request = CreateSessionRequest(
         "cmd.integration.create",
         package.adventure_id,
