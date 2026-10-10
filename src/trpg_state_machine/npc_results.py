@@ -329,6 +329,7 @@ class NPCResultRuntime:
                     "UPDATE npc_evaluation_tasks SET status='completed' WHERE evaluation_id=?",
                     (evaluation_id,),
                 )
+                self._complete_npc_evaluation_work(row)
         if error:
             raise error
         return receipt

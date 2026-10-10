@@ -201,6 +201,7 @@ class CommandRuntime:
         with self._transaction(write=True):
             row = self._session(command.session_id, package, context)
             self._authorize_command(row, command.actor_id, command.payload, context)
+            self._npc_handoff_command_guard(command)
             replay = self._command_replay(command, fingerprint)
             if replay is not None:
                 return replay

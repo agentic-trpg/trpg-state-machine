@@ -259,6 +259,7 @@ class NPCModeRuntime:
                 "UPDATE npc_observation_work SET status='completed',disposition=? WHERE work_id=?",
                 (classification, wid),
             )
+        self._refresh_npc_completion(session_id)
         return NPCObservationRoute(classification, None, work_ids)
 
     def report_npc_evaluation_failure(

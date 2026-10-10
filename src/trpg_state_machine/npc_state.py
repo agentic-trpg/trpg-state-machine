@@ -168,6 +168,12 @@ class NPCRuntime:
             ),
         )
         self._conn.execute("INSERT INTO npc_modes VALUES (?,?,'inactive')", (sid, actor.actor_id))
+        self._conn.execute(
+            "INSERT INTO npc_completion_cursors VALUES (?,?,coalesce("
+            "(SELECT event_seq FROM projection_cursors WHERE session_id=? "
+            "AND consumer='perception'),0))",
+            (sid, actor.actor_id, sid),
+        )
         if initial is None:
             return
         self._conn.executemany(

@@ -289,6 +289,7 @@ class PerceptionRuntime:
             if pending:
                 return "unresolved"
             self._complete_work(session_id, event_seq, "perception")
+            self._refresh_npc_completion(session_id)
         return "resolved"
 
     def read_observations(self, session_id, package, *, context):

@@ -34,7 +34,7 @@ uv run --locked python -m pytest -q --basetemp=.test-tmp/run
 
 ## 已实现的接口
 
-以下是受信 Python 进程内接口，不是冻结的跨模块网络协议或玩家/NPC View。
+以下是由可信适配层提供上下文的 Python 进程内接口，不是冻结的跨模块网络协议；NPC 读取入口按当前授权过滤。
 
 | 接口 | 行为 |
 |---|---|
@@ -42,6 +42,11 @@ uv run --locked python -m pytest -q --basetemp=.test-tmp/run
 | `StateMachine(database_path)` | 打开/初始化 SQLite 文件，支持上下文管理器与显式 `close()`；每实例一个连接，只在创建它的线程中使用 |
 | `create_session(request, package, *, context)` | 可信 `(principal_id, command_id)` 持久幂等；返回原始 `CreationResult` 有限元数据；同键不同 Fingerprint 抛出 `idempotency_conflict` |
 | `get_npc_view(session_id, npc_id, package, *, context)` | 复用 NPCContext / npc_access，读取完整授权 NPC Meta 与历史；不消费 Observation、不授予战斗控制权；详见 [SM-14](docs/SM14_NPC_STATE.md) |
+| `create_npc_evaluation_task / get_npc_evaluation_task / list_npc_evaluation_tasks` | 持久授权 Task、完整授权输入及重启发现；Background 须经过 Inactive 路由 |
+| `submit_npc_evaluation_result / get_npc_evaluation_receipt` | 七字段本地 Typed Result、五类 Meta 整批原子提交、唯一 Result/回执/可靠输出 |
+| `request_npc_interaction / set_npc_inactive / route_npc_observations` | 原子模式切换、取消旧资格、Lightweight Gate 与未完成 Work 保留 |
+| `get_npc_mode / report_npc_evaluation_failure` | 持久模式读取与有界、带版本前置条件的失败报告；不执行模型重试 |
+| `dispatch_npc_output / get_npc_output_status / npc_completed_cursor` | 独立场景移动 Command、受众校验的 Dialogue 发布、原回执对账与连续完成前缀 |
 | `read_session(session_id, package, *, context)` | 在一致的读事务中验证主体、玩家控制关联和 Package/Ruleset 固定值，返回独立运行态 Snapshot |
 | `save_session(...)` | 所有修改已同步提交；校验并读取非活跃战斗存档，不接收整份状态覆盖，不额外推进版本；活跃 Combat 明确拒绝 |
 | `resume_session(...)` | 恢复非活跃战斗 Session；不重放初始模板，不迁移 Package；身份/Digest/Ruleset 不一致或活跃 Combat 时明确拒绝 |
@@ -119,7 +124,7 @@ Receipts use durable `(session_id, command_id)` keys and a canonical fingerprint
 - 初始 `world_version=0`。每次实际状态修改成功提交推进一次；无变化操作不推进。`event_seq` 是独立的内部审计序号：创建产生两条记录，Scene 转移产生 exit/enter 两条记录，因此不等于 world_version。
 - 事件保存稳定 ID、来源命令及受限 Signals，事件时位置证据与持久 Outbox 同事务提交；当前提供受限 Perception 投影，完整规则/传播协议未实现。真实检定提交 RNG 后推进一次 world_version；通用 event-only/Meta-only 策略仍为 OPEN。
 - RNG 单独持久保存，Session 仅保存引用。Foundation 使用占位编码且不掷骰，synthetic.atomic 使用独立合成计数 RNG，真实攻击使用候选 Engine 的 `stdlib-mt19937/1` 状态及独立流版本；不把候选实现宣称为已冻结的通用跨版本规则 RNG 协议。
-- 所有修改立即提交；`save_session` 不创建第二份权威快照/检查点。Storage schema 10 automatically migrates schemas 1–9 while preserving package pins/digests and state. Migration locks cover version recheck, all steps, FK validation and commit; interrupted upgrades roll back together. Legacy events/trigger sources have no fabricated historical evidence. Unknown schemas are refused. No online backup tool.
+- 所有修改立即提交；`save_session` 不创建第二份权威快照/检查点。Storage schema 14 automatically migrates schemas 1–13 while preserving package pins/digests and state. Migration locks cover version recheck, all steps, FK validation and commit; interrupted upgrades roll back together. Legacy events/trigger sources have no fabricated historical evidence. Unknown schemas are refused. No online backup tool.
 
 ## 自动化验收证据
 
@@ -138,9 +143,9 @@ create → enter workshop → mutate door/flag/NPC → leave → revisit → sav
 
 2026-10-10 核验 Meta 最新 main 为 [`fc41d3c584816198ba4f23bb4d326655ea3c774d`](https://github.com/agentic-trpg/agentic-trpg/commit/fc41d3c584816198ba4f23bb4d326655ea3c774d)。当前以 [Module Contracts 的 DECIDED](https://github.com/agentic-trpg/agentic-trpg/blob/fc41d3c584816198ba4f23bb4d326655ea3c774d/docs/MODULE_CONTRACTS.md) 为最高架构依据；旧 ADR 已删除，不覆盖最新契约。
 
-本批核对 Module Contracts §7/§9/§10、State Machine Architecture §3.4/§3.8–3.9/§6、Agent Architecture §4–§6/§8、Adventure Package Schema §5/§9 和 MVP Scope。本地 Meta 文档仅作为只读依据，未修改其他仓库。PROPOSED / OPEN 字段不会因本地实现自动冻结。
+SM-15～SM-18 核对 Module Contracts §3/§7/§9/§10、State Machine Architecture §3.4/§3.7–3.9/§6/§8、Agent Architecture §4–§6/§8–§10、Adventure Package Schema §5/§9 和 MVP Scope。本地及远程 Meta 文档仅作为只读依据，未修改其他仓库。PROPOSED / OPEN 字段不会因本地实现自动冻结。
 
-当前支持受限真实基础攻击、胜利/TPK 关闭、通用 Ability/Skill Check，以及 [NPC 持久领域状态与授权读取](docs/SM14_NPC_STATE.md)。这不是完整 MVP：**未实现** 通用 PC 构建验证、完整 Combat 启动/终局协议、完整回合/法术/Reaction、Saving Throw、完整声明式条件/奖励链、Quest/Inventory 操作、运行时 NPC Meta 提交、Evaluation Task / Mode Switching、完整感知传播、Gate、EVA、LLM Host、视觉系统、活跃战斗安全恢复、通用脚本或插件框架。
+当前支持受限真实基础攻击、胜利/TPK 关闭、通用 Ability/Skill Check、[NPC 持久领域状态与授权读取](docs/SM14_NPC_STATE.md)，以及下述 SM-15～SM-18 的 Task、原子 Meta Result、Mode/Gate、可靠输出和处理完成闭环。测试使用手工 Typed Result，不代表 NPC 已具备真实模型决策能力。**未实现** 通用 PC 构建验证、完整 Combat 启动/终局协议、完整回合/法术/Reaction、Saving Throw、完整声明式条件/奖励链、Quest/Inventory 操作、NPC 战斗 Action Intent 映射、完整感知传播、LLM Host/Prompt/Context、视觉系统、活跃战斗安全恢复、通用脚本或插件框架。
 
 仍为 OPEN 或后续事项：正式跨模块 ABI/跨版本 RNG 回放、事件/Meta-only/未来无随机操作的版本策略、完整规则能力闭包、通用系统来源权限、条件 AST、Pending Choice/Continuation、完整感知传播、备份策略及外部 PC 导入。受限完整 Snapshot/Typed Delta 已实际实现和验证，不能等同于所有规则机制均已支持。
 
@@ -292,3 +297,7 @@ Configured NPCs can receive persistent, controller-bound `npc-evaluation/1` task
 ## SM-17 modes and Gate
 
 Persistent Interactive/Inactive scheduling now serializes task authorization, nonblocking mode cancellation and Result commit. `request_npc_interaction`, `set_npc_inactive`, `route_npc_observations`, `get_npc_mode` and bounded `report_npc_evaluation_failure` reuse the existing NPC authority and Work. Schema 13 records safe retention/no-op without inventing Meta; Interactive mode excludes Background even while idle. See [SM-17](docs/SM17_NPC_MODE_GATE.md).
+
+## SM-18 output and processing recovery
+
+`dispatch_npc_output`, `get_npc_output_status` and `npc_completed_cursor` complete the local NPC domain transaction loop. Reliable action handoffs use the existing `move_actor` TypedCommand subset and original CommandReceipt; authorized local speech publishes one observable event. Schema 14 persists a per-NPC continuous processing cursor. Completed EVA does not wait for action success, and real-process crash recovery avoids duplicate cognition/actions. This remains hand-built Result integration, not a real Agent Host/LLM MVP. See [SM-18](docs/SM18_NPC_OUTPUT_COMPLETION.md).

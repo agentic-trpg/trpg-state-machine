@@ -83,7 +83,7 @@ def test_five_meta_types_history_sources_world_isolation_and_replay(
             assert after[table] == before[table]
         assert (
             sm._conn.execute("SELECT DISTINCT status FROM npc_observation_work").fetchone()[0]
-            == "pending"
+            == "completed"
         )
         assert (
             sm.get_npc_evaluation_receipt(task.evaluation_id, evaluation_package, context=npc)
