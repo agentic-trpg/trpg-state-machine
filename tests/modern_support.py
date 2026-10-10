@@ -46,7 +46,7 @@ def modern_data(base, assets, *, npc_hp=1, weapon="rapier", grip="one_handed"):
         skill_proficiencies=["athletics"],
         skill_expertise=[],
     )
-    npc.update(hp_current=npc_hp, hp_max=npc_hp, ac=1)
+    npc.update(hp_current=npc_hp, hp_max=npc_hp, ac=1, carried_item_slugs=[])
     data["pc_templates"][0]["character"]["inventory"] = [weapon]
     foundation["rng_state"] = RNGState.capture(random.Random(0)).model_dump(mode="json")
     noncombat = deepcopy(snapshot)

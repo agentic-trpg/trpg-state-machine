@@ -68,6 +68,10 @@ def _trusted(context: TrustedContext) -> None:
         type(v) is not str or not v or len(v) > 256 for v in context.controlled_npc_ids
     ):
         raise StateMachineError("invalid_context", "NPC grants must be trusted identity tuples")
+    if type(context.can_adjudicate_checks) is not bool:
+        raise StateMachineError(
+            "invalid_context", "GM adjudication grant must be a trusted boolean"
+        )
 
 
 def _migration_statements(script: str) -> tuple[str, ...]:

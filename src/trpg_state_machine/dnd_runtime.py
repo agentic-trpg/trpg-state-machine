@@ -6,6 +6,7 @@ from dataclasses import asdict
 from dnd5e_engine import evaluation_delta as delta
 from dnd5e_engine.evaluation import evaluate
 from dnd5e_engine.evaluation_contracts import (
+    CheckPayload,
     CombatClosePayload,
     CombatIntentPayload,
     ReadVersion,
@@ -18,6 +19,7 @@ from pydantic import ValidationError
 
 from .combat import process_id
 from .commands import CommandReceipt, command_fingerprint, validate_command
+from .dnd_checks import check_changes
 from .dnd_closure import closure_changes
 from .errors import StateMachineError
 from .package import canonical_json
@@ -221,6 +223,8 @@ def validate_dnd_result(request, result):
                 _invalid("Proposed mechanical event refers to an actor outside the encounter")
     if result.status != "accepted":
         return result, ()
+    if request.operation_kind == "rules.check":
+        return result, check_changes(request, result)
     return result, (
         closure_changes(request, result)
         if request.operation_kind == "combat.close"
@@ -232,9 +236,9 @@ class DndRuntime:
     async def submit_command_async(self, command, package, *, context):
         """Async entry for the same TypedCommand and persistent receipt protocol."""
         validate_command(command)
-        if type(command.payload) not in (CombatIntentPayload, CombatClosePayload):
+        if type(command.payload) not in (CombatIntentPayload, CombatClosePayload, CheckPayload):
             raise StateMachineError(
-                "unsupported_operation", "Async entry currently supports combat.intent"
+                "unsupported_operation", "Expected an admitted real Engine command"
             )
         self.read_session(command.session_id, package, context=context)
         return await self._submit_dnd(
@@ -245,6 +249,8 @@ class DndRuntime:
         return await evaluate(request, loader=self._dnd_loader)
 
     def _dnd_capability(self, payload, actor_id, snapshot):
+        if type(payload) is CheckPayload:
+            return "pending_choice_unsupported" if payload.dc is None else None
         if type(payload) is CombatClosePayload:
             return None
         if (
@@ -263,6 +269,11 @@ class DndRuntime:
         return None
 
     async def _submit_dnd(self, command, package, context, fingerprint):
+        build_snapshot = (
+            self._noncombat_snapshot
+            if type(command.payload) is CheckPayload
+            else self._combat_snapshot
+        )
         with self._transaction():
             row = self._session(command.session_id, package, context)
             self._authorize_command(row, command.actor_id, command.payload, context)
@@ -272,15 +283,17 @@ class DndRuntime:
                 raise StateMachineError(
                     "ruleset_binding_mismatch", "Pinned evaluator version is not installed"
                 )
-            snapshot = self._combat_snapshot(row)
+            snapshot = build_snapshot(row)
             rng = self._rng_context(row)
-            combat = self._conn.execute(
-                "SELECT process_id FROM combats WHERE session_id=?", (command.session_id,)
-            ).fetchone()
-            if combat[0] != process_id() and not snapshot.combat_state.ended:
-                raise StateMachineError(
-                    "combat_unrestorable", "Interrupted combat requires explicit recovery support"
-                )
+            if type(command.payload) is not CheckPayload:
+                combat = self._conn.execute(
+                    "SELECT process_id FROM combats WHERE session_id=?", (command.session_id,)
+                ).fetchone()
+                if combat[0] != process_id() and not snapshot.combat_state.ended:
+                    raise StateMachineError(
+                        "combat_unrestorable",
+                        "Interrupted combat requires explicit recovery support",
+                    )
         request = RuleEvaluationRequest(
             schema_version=(
                 "engine-evaluation/4"
@@ -328,7 +341,7 @@ class DndRuntime:
             status, error = "committed", None
             if (
                 version != command.expected_world_version
-                or self._combat_snapshot(row) != snapshot
+                or build_snapshot(row) != snapshot
                 or self._rng_context(row) != rng
             ):
                 status, error = "conflict", "version_conflict"
@@ -343,9 +356,20 @@ class DndRuntime:
                     self._apply_dnd_changes(row, changes)
                     events = [
                         (
-                            "combat.engine_event",
+                            "rules.check_rolled"
+                            if type(command.payload) is CheckPayload
+                            else "combat.engine_event",
                             {
-                                "combat_id": snapshot.combat_state.combat_id,
+                                **(
+                                    {
+                                        "adjudication": {
+                                            "principal_id": context.principal_id,
+                                            "payload": command.payload.model_dump(mode="json"),
+                                        }
+                                    }
+                                    if type(command.payload) is CheckPayload
+                                    else {"combat_id": snapshot.combat_state.combat_id}
+                                ),
                                 "scene_id": snapshot.scene_state.scene_id,
                                 "engine_event": event.model_dump(mode="json"),
                             },

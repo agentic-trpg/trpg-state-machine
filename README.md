@@ -45,6 +45,7 @@ uv run --locked python -m pytest -q --basetemp=.test-tmp/run
 | `resume_session(...)` | 恢复非活跃战斗 Session；不重放初始模板，不迁移 Package；身份/Digest/Ruleset 不一致或活跃 Combat 时明确拒绝 |
 | `combat.initialize / combat.intent` | 同一个 TypedCommand / Receipt 入口；只初始化受审 Package Encounter，再调用真实 Engine 基础攻击 |
 | `combat.close` | 提交真实 Engine 的受限终局、XP 和 CombatEnded；完整原子性与持久幂等，详见 [SM-11](docs/SM11_COMBAT_CLOSURE.md) |
+| `rules.check` | 上游 CheckPayload，可信 GM 裁决授权，真实非战斗 Ability/Skill 检定；空 Delta、RNG、CheckRolled 与回执原子提交，详见 [SM-12](docs/SM12_REAL_CHECKS.md) |
 | `submit_command_async(...)` | 真实 combat.intent 的异步入口；复用相同幂等键与提交逻辑 |
 | `read_combat_snapshot(...) / read_rng_context(...)` | 从 SQLite 重建实际上游类型，供受信审计；不等于活跃战斗续玩许可 |
 | `query_action_availability(...)` | 授权、过滤的真实只读可用性查询；无 RNG、Receipt 或写入 |
