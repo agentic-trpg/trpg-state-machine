@@ -268,6 +268,19 @@ class PerceptionRuntime:
                         "INSERT OR IGNORE INTO npc_inbox VALUES (?, ?, ?)",
                         (session_id, observer_id, oid),
                     )
+                    self._conn.execute(
+                        "INSERT OR IGNORE INTO npc_observation_work"
+                        "(work_id,session_id,npc_id,observation_id) VALUES (?,?,?,?)",
+                        ("work." + oid, session_id, observer_id, oid),
+                    )
+                    self._conn.executemany(
+                        "INSERT OR IGNORE INTO observation_signal_sources VALUES (?,?,?)",
+                        [
+                            (oid, event.event_id, s.signal_id)
+                            for s in event.signals
+                            if decisions.get(s.signal_id) is True
+                        ],
+                    )
             pending = self._conn.execute(
                 "SELECT 1 FROM perception_results "
                 "WHERE session_id=? AND event_seq=? AND complete=0",

@@ -36,6 +36,7 @@ from .models import (
     TrustedContext,
     WorldState,
 )
+from .npc_evaluation import NPCEvaluationRuntime
 from .npc_state import NPCRuntime
 from .package import (
     SYNTHETIC_EVALUATION_RULESET,
@@ -104,6 +105,7 @@ class StateMachine(
     DndRuntime,
     AvailabilityRuntime,
     NPCRuntime,
+    NPCEvaluationRuntime,
 ):
     """Trusted in-process runtime. One connection per instance/thread; close explicitly.
 
@@ -159,7 +161,7 @@ class StateMachine(
 
     def _migrate(self):
         scripts = [Path(__file__).with_name("_schema.sql")] + [
-            Path(__file__).with_name(f"_migration_{v}.sql") for v in range(2, 11)
+            Path(__file__).with_name(f"_migration_{v}.sql") for v in range(2, 12)
         ]
         steps = [_migration_statements(path.read_text("utf-8")) for path in scripts]
         # Migration 4 rebuilds a referenced table. Disable FK enforcement only on
@@ -169,7 +171,7 @@ class StateMachine(
             self._conn.execute("BEGIN IMMEDIATE")
             # Read AFTER acquiring the cross-process SQLite migration write lock.
             version = self._conn.execute("PRAGMA user_version").fetchone()[0]
-            if version not in range(11):
+            if version not in range(12):
                 raise StateMachineError(
                     "unsupported_storage_schema", f"Unsupported storage version: {version}"
                 )
@@ -182,7 +184,7 @@ class StateMachine(
                 raise StateMachineError(
                     "unsupported_storage_schema", "Unversioned nonempty database"
                 )
-            for target in range(version + 1, 11):
+            for target in range(version + 1, 12):
                 for statement in steps[target - 1]:
                     self._conn.execute(statement)
                 if self._conn.execute("PRAGMA user_version").fetchone()[0] != target:

@@ -280,3 +280,7 @@ SQLite Schema 10 在现有 actors 身份下保存唯一 NPCState、静态 Profil
 实现、大小/引用限制、迁移与下一阶段边界见 [SM-14](docs/SM14_NPC_STATE.md)；Batch 验收证据和审阅结论见 [SM-14 Review](docs/reviews/SM14_NPC_STATE_REVIEW.md)。
 
 SM-14 最终全量回归：**462 passed（396 既有 + 66 新增）**；Ruff 检查、格式检查和 `git diff --check` 通过。测试包含真实 Schema 1–9 建库/升级、并发创建、迁移异常退出、私有来源约束和新进程恢复。
+
+## SM-15 durable evaluation authorization
+
+Configured NPCs can receive persistent, controller-bound `npc-evaluation/1` tasks via `create_npc_evaluation_task`, read complete authorized inputs via `get_npc_evaluation_task`, and discover tasks after restart via `list_npc_evaluation_tasks`. Migration 11 preserves existing Inbox observations and adds Work/provenance references. Reads do not complete cognition. This batch does not run a model or submit Meta/results. See [SM-15](docs/SM15_NPC_EVALUATION_TASKS.md).

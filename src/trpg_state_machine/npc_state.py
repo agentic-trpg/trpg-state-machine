@@ -238,74 +238,77 @@ class NPCRuntime:
         change, semantic selection, mechanical control grant or model execution.
         """
         with self._transaction():
-            observer = self._npc_authorized(session_id, package, context)
-            if npc_id != observer:
-                raise StateMachineError("unauthorized", "NPC private state belongs to the observer")
-            row = self._conn.execute(
-                "SELECT n.*,a.current_scene_id FROM npc_states n JOIN actors a "
-                "ON a.session_id=n.session_id AND a.actor_id=n.npc_id "
-                "WHERE n.session_id=? AND n.npc_id=? AND a.kind='npc'",
-                (session_id, npc_id),
-            ).fetchone()
-            if row is None:
-                raise StateMachineError("npc_state_unavailable", "NPC persistent state is missing")
-            records = {kind: [] for kind in RECORD_TYPES}
-            for stored in self._conn.execute(
-                "SELECT * FROM npc_private_records WHERE session_id=? AND npc_id=? "
-                "ORDER BY record_kind,record_id,content_version",
-                (session_id, npc_id),
-            ).fetchall():
-                sources = tuple(
-                    SourceReference(s["source_kind"], s["reference_id"], s["reference_version"])
-                    for s in self._conn.execute(
-                        "SELECT * FROM npc_record_sources WHERE session_id=? AND npc_id=? "
-                        "AND record_kind=? AND record_id=? AND content_version=? ORDER BY ordinal",
-                        (
-                            session_id,
-                            npc_id,
-                            stored["record_kind"],
-                            stored["record_id"],
-                            stored["content_version"],
-                        ),
-                    ).fetchall()
-                )
-                data = json.loads(stored["payload_json"])
-                data.update(
-                    record_id=stored["record_id"],
-                    version=stored["content_version"],
-                    is_current=bool(stored["is_current"]),
-                )
-                if stored["record_kind"] == "plan":
-                    data["steps"] = tuple(data["steps"])
-                records[stored["record_kind"]].append(
-                    RECORD_TYPES[stored["record_kind"]](**data, sources=sources)
-                )
-            known = tuple(
-                KnownFact(f["fact_id"], f["text"])
-                for f in self._conn.execute(
-                    "SELECT f.fact_id,f.text FROM npc_known_facts k JOIN world_facts f "
-                    "USING(session_id,fact_id) WHERE k.session_id=? AND k.npc_id=? "
-                    "AND f.visibility='npc_authorized' ORDER BY f.fact_id",
-                    (session_id, npc_id),
+            return self._npc_view(session_id, npc_id, package, context=context)
+
+    def _npc_view(self, session_id, npc_id, package, *, context):
+        observer = self._npc_authorized(session_id, package, context)
+        if npc_id != observer:
+            raise StateMachineError("unauthorized", "NPC private state belongs to the observer")
+        row = self._conn.execute(
+            "SELECT n.*,a.current_scene_id FROM npc_states n JOIN actors a "
+            "ON a.session_id=n.session_id AND a.actor_id=n.npc_id "
+            "WHERE n.session_id=? AND n.npc_id=? AND a.kind='npc'",
+            (session_id, npc_id),
+        ).fetchone()
+        if row is None:
+            raise StateMachineError("npc_state_unavailable", "NPC persistent state is missing")
+        records = {kind: [] for kind in RECORD_TYPES}
+        for stored in self._conn.execute(
+            "SELECT * FROM npc_private_records WHERE session_id=? AND npc_id=? "
+            "ORDER BY record_kind,record_id,content_version",
+            (session_id, npc_id),
+        ).fetchall():
+            sources = tuple(
+                SourceReference(s["source_kind"], s["reference_id"], s["reference_version"])
+                for s in self._conn.execute(
+                    "SELECT * FROM npc_record_sources WHERE session_id=? AND npc_id=? "
+                    "AND record_kind=? AND record_id=? AND content_version=? ORDER BY ordinal",
+                    (
+                        session_id,
+                        npc_id,
+                        stored["record_kind"],
+                        stored["record_id"],
+                        stored["content_version"],
+                    ),
                 ).fetchall()
             )
-            return NPCView(
-                row["schema_version"],
-                package.package_digest,
-                session_id,
-                npc_id,
-                row["name"],
-                row["controller_kind"],
-                row["configuration"],
-                row["initialization_origin"],
-                row["npc_state_version"],
-                row["current_scene_id"],
-                _profile(json.loads(row["profile_json"])) if row["profile_json"] else None,
-                known,
-                tuple(records["memory"]),
-                tuple(records["belief"]),
-                tuple(records["relationship"]),
-                tuple(records["goal"]),
-                tuple(records["plan"]),
-                _runtime(json.loads(row["runtime_json"])) if row["runtime_json"] else None,
+            data = json.loads(stored["payload_json"])
+            data.update(
+                record_id=stored["record_id"],
+                version=stored["content_version"],
+                is_current=bool(stored["is_current"]),
             )
+            if stored["record_kind"] == "plan":
+                data["steps"] = tuple(data["steps"])
+            records[stored["record_kind"]].append(
+                RECORD_TYPES[stored["record_kind"]](**data, sources=sources)
+            )
+        known = tuple(
+            KnownFact(f["fact_id"], f["text"])
+            for f in self._conn.execute(
+                "SELECT f.fact_id,f.text FROM npc_known_facts k JOIN world_facts f "
+                "USING(session_id,fact_id) WHERE k.session_id=? AND k.npc_id=? "
+                "AND f.visibility='npc_authorized' ORDER BY f.fact_id",
+                (session_id, npc_id),
+            ).fetchall()
+        )
+        return NPCView(
+            row["schema_version"],
+            package.package_digest,
+            session_id,
+            npc_id,
+            row["name"],
+            row["controller_kind"],
+            row["configuration"],
+            row["initialization_origin"],
+            row["npc_state_version"],
+            row["current_scene_id"],
+            _profile(json.loads(row["profile_json"])) if row["profile_json"] else None,
+            known,
+            tuple(records["memory"]),
+            tuple(records["belief"]),
+            tuple(records["relationship"]),
+            tuple(records["goal"]),
+            tuple(records["plan"]),
+            _runtime(json.loads(row["runtime_json"])) if row["runtime_json"] else None,
+        )
