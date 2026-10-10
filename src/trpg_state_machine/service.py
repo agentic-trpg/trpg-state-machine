@@ -748,7 +748,14 @@ class StateMachine(
                 rng["rng_version"],
                 rng["state_json"],
             ),
+            "combat" if self._active_combat(sid) else "exploration",
         )
+
+    def _active_combat(self, session_id):
+        combat = self._conn.execute(
+            "SELECT state_json FROM combats WHERE session_id=?", (session_id,)
+        ).fetchone()
+        return bool(combat and not json.loads(combat[0])["ended"])
 
     def read_session(
         self, session_id: str, package: AdventurePackage, *, context: TrustedContext

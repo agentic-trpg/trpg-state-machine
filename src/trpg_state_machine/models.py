@@ -106,3 +106,4 @@ class SessionSnapshot:
     actors: dict[str, ActorState]
     character: CharacterState
     rng: RNGState
+    phase: str = "exploration"

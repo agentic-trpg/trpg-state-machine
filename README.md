@@ -2,7 +2,7 @@
 
 Batch 1 实现了一个可运行的本地闭环：**验证原创合成 Adventure Package → 创建隔离 Session → 初始化/重访 Scene → 修改实际状态 → SQLite 持久化 → 新进程恢复**。
 
-State Machine 是全部已实现可变游戏状态的唯一权威拥有者和提交者。Package 是不可变模板；返回的 Snapshot 是独立副本，修改副本不会写入数据库。SM-6～SM-9 已接入固定候选 SHA 的真实 D&D 基础攻击，同时保留隔离的合成测试路径；没有第二份运行态权威。正常战斗结束后的安全续玩仍受上游接口缺口阻塞，详见文末。
+State Machine 是全部已实现可变游戏状态的唯一权威拥有者和提交者。Package 是不可变模板；返回的 Snapshot 是独立副本，修改副本不会写入数据库。已接入固定候选 SHA 的真实 D&D 基础攻击及受限胜利/TPK 关闭，同时保留隔离的合成测试路径；没有第二份运行态权威。正常关闭后可以保存并在新进程恢复；活跃战斗跨进程精确续玩仍不支持。
 
 ## 安装与验证
 
@@ -44,6 +44,7 @@ uv run --locked python -m pytest -q --basetemp=.test-tmp/run
 | `save_session(...)` | 所有修改已同步提交；校验并读取非活跃战斗存档，不接收整份状态覆盖，不额外推进版本；活跃 Combat 明确拒绝 |
 | `resume_session(...)` | 恢复非活跃战斗 Session；不重放初始模板，不迁移 Package；身份/Digest/Ruleset 不一致或活跃 Combat 时明确拒绝 |
 | `combat.initialize / combat.intent` | 同一个 TypedCommand / Receipt 入口；只初始化受审 Package Encounter，再调用真实 Engine 基础攻击 |
+| `combat.close` | 提交真实 Engine 的受限终局、XP 和 CombatEnded；完整原子性与持久幂等，详见 [SM-11](docs/SM11_COMBAT_CLOSURE.md) |
 | `submit_command_async(...)` | 真实 combat.intent 的异步入口；复用相同幂等键与提交逻辑 |
 | `read_combat_snapshot(...) / read_rng_context(...)` | 从 SQLite 重建实际上游类型，供受信审计；不等于活跃战斗续玩许可 |
 | `query_action_availability(...)` | 授权、过滤的真实只读可用性查询；无 RNG、Receipt 或写入 |

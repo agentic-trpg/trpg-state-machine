@@ -6,6 +6,7 @@ from dataclasses import asdict
 from dnd5e_engine import evaluation_delta as delta
 from dnd5e_engine.evaluation import evaluate
 from dnd5e_engine.evaluation_contracts import (
+    CombatClosePayload,
     CombatIntentPayload,
     ReadVersion,
     RuleEvaluationRequest,
@@ -17,6 +18,7 @@ from pydantic import ValidationError
 
 from .combat import process_id
 from .commands import CommandReceipt, command_fingerprint, validate_command
+from .dnd_closure import closure_changes
 from .errors import StateMachineError
 from .package import canonical_json
 
@@ -217,14 +219,20 @@ def validate_dnd_result(request, result):
             value = getattr(event, field, None)
             if value is not None and value not in actors:
                 _invalid("Proposed mechanical event refers to an actor outside the encounter")
-    return result, delta_changes(request, result) if result.status == "accepted" else ()
+    if result.status != "accepted":
+        return result, ()
+    return result, (
+        closure_changes(request, result)
+        if request.operation_kind == "combat.close"
+        else delta_changes(request, result)
+    )
 
 
 class DndRuntime:
     async def submit_command_async(self, command, package, *, context):
         """Async entry for the same TypedCommand and persistent receipt protocol."""
         validate_command(command)
-        if type(command.payload) is not CombatIntentPayload:
+        if type(command.payload) not in (CombatIntentPayload, CombatClosePayload):
             raise StateMachineError(
                 "unsupported_operation", "Async entry currently supports combat.intent"
             )
@@ -237,6 +245,8 @@ class DndRuntime:
         return await evaluate(request, loader=self._dnd_loader)
 
     def _dnd_capability(self, payload, actor_id, snapshot):
+        if type(payload) is CombatClosePayload:
+            return None
         if (
             payload.intent_type == "attack"
             and payload.weapon_id is None
@@ -275,11 +285,12 @@ class DndRuntime:
             schema_version=(
                 "engine-evaluation/4"
                 if snapshot.snapshot_schema_version == "engine-snapshot/2"
+                or command.command_type == "combat.close"
                 else "engine-evaluation/1"
             ),
             session_id=command.session_id,
             command_id=command.command_id,
-            operation_kind="combat.intent",
+            operation_kind=command.command_type,
             actor_id=command.actor_id,
             payload=copy.deepcopy(command.payload),
             state_snapshot=snapshot,
@@ -397,7 +408,12 @@ class DndRuntime:
     def _apply_dnd_changes(self, row, changes):
         sid = row["session_id"]
         for component, identity, field, value in changes:
-            if component == "actor" and field == "hp_current":
+            if component == "xp":
+                self._conn.execute(
+                    "UPDATE characters SET xp=xp+? WHERE session_id=? AND actor_id=?",
+                    (value, sid, identity),
+                )
+            elif component == "actor" and field == "hp_current":
                 self._conn.execute(
                     "UPDATE characters SET current_hp=? WHERE session_id=? AND actor_id=?",
                     (value, sid, identity),
