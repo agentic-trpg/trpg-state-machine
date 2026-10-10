@@ -15,6 +15,7 @@ class TrustedContext:
 
     principal_id: str
     player_id: str
+    controlled_npc_ids: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -72,6 +73,7 @@ class CharacterState:
     max_hp: int
     resources: dict
     inventory: tuple
+    effects: tuple = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -80,6 +82,8 @@ class RNGState:
     algorithm: str
     encoding: str
     position: int
+    rng_version: int = 0
+    state_json: str | None = None
 
 
 @dataclass(frozen=True, slots=True)

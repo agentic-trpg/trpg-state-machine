@@ -9,6 +9,7 @@ from typing import Literal
 
 import yaml
 
+from ._operations import ObjectState, SetObjectState, SetSceneFlag
 from .errors import Issue, StateMachineError
 
 SCHEMA_VERSION = "state-machine-foundation/1"
@@ -36,6 +37,9 @@ class RulesetBinding:
 
 # This is a fixture data contract, NOT an Engine evaluator or D&D ruleset.
 SYNTHETIC_RULESET = RulesetBinding("synthetic.foundation", "synthetic-data/1", "none/1")
+SYNTHETIC_EVALUATION_RULESET = RulesetBinding(
+    "synthetic.atomic", "synthetic-data/1", "synthetic-evaluator/1"
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -59,6 +63,7 @@ class ActorDefinition:
     actor_id: str
     name: str
     initial_scene_id: str
+    senses: tuple[tuple[str, bool], ...] | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -67,6 +72,34 @@ class PCTemplate:
     name: str
     current_hp: int
     max_hp: int
+    resources: tuple[tuple[str, int], ...] = ()
+    inventory: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True, slots=True)
+class SignalScope:
+    scene_id: str
+    visibility: str
+    kind: str = "scene"
+
+
+@dataclass(frozen=True, slots=True)
+class Signal:
+    signal_id: str
+    channel: str
+    content: str
+    scope: SignalScope
+
+
+@dataclass(frozen=True, slots=True)
+class EventDefinition:
+    event_definition_id: str
+    trigger_type: str
+    scene_id: str
+    condition_flag: str
+    condition_value: bool
+    effect: SetSceneFlag | SetObjectState
+    signals: tuple[Signal, ...]
 
 
 @dataclass(frozen=True, slots=True)
@@ -80,6 +113,7 @@ class AdventurePackage:
     scenes: tuple[SceneDefinition, ...]
     actors: tuple[ActorDefinition, ...]
     pc_templates: tuple[PCTemplate, ...]
+    events: tuple[EventDefinition, ...] = ()
 
     def scene(self, scene_id: str) -> SceneDefinition:
         for scene in self.scenes:
@@ -200,7 +234,7 @@ def _unique(values, path: str) -> None:
 
 
 def _reference(value, targets, path: str) -> None:
-    if value not in targets:
+    if not isinstance(value, str) or value not in targets:
         _fail("invalid_reference", path, f"Unknown reference: {value}")
 
 
@@ -225,7 +259,7 @@ def _validate(data: dict) -> AdventurePackage:
             "manifest.ruleset_binding",
         )
     )
-    if binding != SYNTHETIC_RULESET:
+    if binding not in (SYNTHETIC_RULESET, SYNTHETIC_EVALUATION_RULESET):
         _fail(
             "unsupported_ruleset",
             "manifest.ruleset_binding",
@@ -250,7 +284,6 @@ def _validate(data: dict) -> AdventurePackage:
     )
     for key in compatibility:
         _empty(compatibility[key], [], f"manifest.compatibility.{key}")
-    _empty(root["events"], [], "events")
     _empty(root["rule_bindings"], {}, "rule_bindings")
 
     world = _mapping(
@@ -291,7 +324,7 @@ def _validate(data: dict) -> AdventurePackage:
                 path + ".access_policy",
                 "No player/NPC projection API in this batch",
             )
-        _empty(s["event_definition_ids"], [], path + ".event_definition_ids")
+        _list(s["event_definition_ids"], path + ".event_definition_ids")
         initial = _mapping(s["initial_state"], "local_flags", path + ".initial_state")
         exits = []
         for j, value in enumerate(_list(s["exits"], path + ".exits")):
@@ -363,7 +396,10 @@ def _validate(data: dict) -> AdventurePackage:
     actors = []
     for i, value in enumerate(_list(root["actors"], "actors")):
         path = f"actors[{i}]"
-        a = _mapping(value, "actor_id name kind controller initial_scene_id", path)
+        fields = "actor_id name kind controller initial_scene_id"
+        if isinstance(value, dict) and "senses" in value:
+            fields += " senses"
+        a = _mapping(value, fields, path)
         key = _identifier(a["actor_id"], path + ".actor_id", "npc")
         initial_scene = _identifier(a["initial_scene_id"], path + ".initial_scene_id", "scene")
         _reference(initial_scene, scene_ids, path + ".initial_scene_id")
@@ -373,7 +409,13 @@ def _validate(data: dict) -> AdventurePackage:
             )
         if key not in next(s for s in scenes if s.scene_id == initial_scene).actor_ids:
             _fail("invalid_reference", path, "Actor must be listed in its initial scene")
-        actors.append(ActorDefinition(key, _text(a["name"], path + ".name"), initial_scene))
+        senses = None
+        if "senses" in a:
+            sense_data = _mapping(a["senses"], "visual auditory", path + ".senses")
+            if any(type(v) is not bool for v in sense_data.values()):
+                _fail("schema_error", path + ".senses", "Senses must be explicit booleans")
+            senses = tuple(sorted(sense_data.items()))
+        actors.append(ActorDefinition(key, _text(a["name"], path + ".name"), initial_scene, senses))
     _unique([a.actor_id for a in actors], "actors")
     for scene in scenes:
         for actor in scene.actor_ids:
@@ -396,12 +438,48 @@ def _validate(data: dict) -> AdventurePackage:
                 path + ".character.hp",
                 "Expected 0 <= current <= max <= 1000000, max > 0",
             )
-        _empty(char["resources"], {}, path + ".character.resources")
-        _empty(char["inventory"], [], path + ".character.inventory")
+        resources, inventory = (), ()
+        if binding == SYNTHETIC_RULESET:
+            _empty(char["resources"], {}, path + ".character.resources")
+            _empty(char["inventory"], [], path + ".character.inventory")
+        else:
+            if not isinstance(char["resources"], dict):
+                _fail("schema_error", path, "Expected declared synthetic resource counters")
+            for resource, count in char["resources"].items():
+                _identifier(resource, path, "resource")
+                if type(count) is not int or not 0 <= count <= 1_000_000:
+                    _fail("schema_error", path, "Invalid synthetic resource count")
+            resources = tuple(sorted(char["resources"].items()))
+            inventory = tuple(_identifier(v, path, "item") for v in _list(char["inventory"], path))
+            _unique(inventory, path)
         templates.append(
-            PCTemplate(key, _text(pc["name"], path + ".name"), hp["current"], hp["max"])
+            PCTemplate(
+                key,
+                _text(pc["name"], path + ".name"),
+                hp["current"],
+                hp["max"],
+                resources,
+                inventory,
+            )
         )
     _unique([pc.pc_template_id for pc in templates], "pc_templates")
+    definitions = _event_definitions(root["events"], scenes)
+    for scene_data in root["scenes"]:
+        ids = scene_data["event_definition_ids"]
+        for event_id in ids:
+            _identifier(event_id, "scenes.event_definition_ids", "event")
+        _unique(ids, "scenes.event_definition_ids")
+        for event_id in ids:
+            _reference(
+                event_id,
+                {e.event_definition_id for e in definitions},
+                "scenes.event_definition_ids",
+            )
+        expected_ids = {
+            e.event_definition_id for e in definitions if e.scene_id == scene_data["scene_id"]
+        }
+        if set(ids) != expected_ids:
+            _fail("invalid_reference", "scenes.event_definition_ids", "Event membership mismatch")
     return AdventurePackage(
         adventure_id,
         version,
@@ -412,7 +490,85 @@ def _validate(data: dict) -> AdventurePackage:
         tuple(scenes),
         tuple(actors),
         tuple(templates),
+        definitions,
     )
+
+
+def _event_definitions(raw, scenes):
+    definitions = []
+    for index, value in enumerate(_list(raw, "events")):
+        path = f"events[{index}]"
+        event = _mapping(value, "event_definition_id trigger condition effect signals once", path)
+        eid = _identifier(event["event_definition_id"], path, "event")
+        if event["once"] != "per_session":
+            _fail("unsupported_mechanism", path, "Only once-per-session events")
+        trigger = _mapping(event["trigger"], "event_type scene_id", path + ".trigger")
+        if trigger["event_type"] not in (
+            "scene.entered",
+            "scene.flag_changed",
+            "object.state_changed",
+            "actor.moved",
+        ):
+            _fail("unsupported_mechanism", path, "Unknown authoritative event trigger")
+        scene = next((s for s in scenes if s.scene_id == trigger["scene_id"]), None)
+        if scene is None:
+            _fail("invalid_reference", path, "Unknown event scene")
+        condition = _mapping(event["condition"], "kind flag_id value", path + ".condition")
+        if condition["kind"] != "flag_equals" or type(condition["value"]) is not bool:
+            _fail("unsupported_mechanism", path, "Only typed flag_equals conditions")
+        _reference(condition["flag_id"], dict(scene.flags), path)
+        effect_data = event["effect"]
+        if isinstance(effect_data, dict) and effect_data.get("kind") == "set_scene_flag":
+            effect_data = _mapping(effect_data, "kind flag_id value", path + ".effect")
+            _reference(effect_data["flag_id"], dict(scene.flags), path)
+            if type(effect_data["value"]) is not bool:
+                _fail("schema_error", path, "Effect flag must be boolean")
+            effect = SetSceneFlag(scene.scene_id, effect_data["flag_id"], effect_data["value"])
+        elif isinstance(effect_data, dict) and effect_data.get("kind") == "set_object_state":
+            effect_data = _mapping(effect_data, "kind object_id state", path + ".effect")
+            _reference(effect_data["object_id"], {o.object_id for o in scene.objects}, path)
+            if effect_data["state"] not in ("closed", "open"):
+                _fail("unsupported_mechanism", path, "Unknown object state")
+            effect = SetObjectState(
+                scene.scene_id, effect_data["object_id"], ObjectState(effect_data["state"])
+            )
+        else:
+            _fail("unsupported_mechanism", path, "Only closed world effects; no downstream rules")
+        signals = []
+        for signal_data in _list(event["signals"], path + ".signals"):
+            signal_data = _mapping(
+                signal_data, "signal_id channel content scope", path + ".signals"
+            )
+            scope = _mapping(signal_data["scope"], "kind scene_id visibility", path + ".scope")
+            if (
+                scope["kind"] != "scene"
+                or scope["scene_id"] != scene.scene_id
+                or scope["visibility"] not in ("clear", "blocked", "undetermined")
+                or signal_data["channel"] not in ("visual", "auditory")
+            ):
+                _fail("unsupported_mechanism", path, "Unsupported signal scope/channel")
+            signals.append(
+                Signal(
+                    _identifier(signal_data["signal_id"], path, "signal"),
+                    signal_data["channel"],
+                    _text(signal_data["content"], path),
+                    SignalScope(scene.scene_id, scope["visibility"]),
+                )
+            )
+        _unique([s.signal_id for s in signals], path + ".signals")
+        definitions.append(
+            EventDefinition(
+                eid,
+                trigger["event_type"],
+                scene.scene_id,
+                condition["flag_id"],
+                condition["value"],
+                effect,
+                tuple(signals),
+            )
+        )
+    _unique([e.event_definition_id for e in definitions], "events")
+    return tuple(definitions)
 
 
 def load_adventure_package(source: str | Path) -> PackageLoadResult:

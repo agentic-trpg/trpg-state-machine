@@ -3,8 +3,9 @@
 import json
 import sqlite3
 from contextlib import contextmanager
-from dataclasses import asdict
+from dataclasses import asdict, replace
 from pathlib import Path
+from time import monotonic, sleep
 from uuid import uuid4
 
 from ._operations import (
@@ -15,7 +16,11 @@ from ._operations import (
     SetObjectState,
     SetSceneFlag,
 )
+from .commands import OPERATIONS, CommandRuntime, TypedCommand
 from .errors import StateMachineError
+from .events import EventRuntime
+from .mechanical_runtime import MechanicalRuntime
+from .mechanics import SyntheticEvaluator
 from .models import (
     ActorState,
     CharacterState,
@@ -28,7 +33,16 @@ from .models import (
     TrustedContext,
     WorldState,
 )
-from .package import AdventurePackage, RulesetBinding, _creation_fingerprint, canonical_json
+from .package import (
+    SYNTHETIC_EVALUATION_RULESET,
+    AdventurePackage,
+    RulesetBinding,
+    Signal,
+    SignalScope,
+    _creation_fingerprint,
+    canonical_json,
+)
+from .perception import PerceptionRuntime
 
 
 def _binding(row: sqlite3.Row) -> RulesetBinding:
@@ -47,16 +61,41 @@ def _trusted(context: TrustedContext) -> None:
         for v in (context.principal_id, context.player_id)
     ):
         raise StateMachineError("invalid_context", "A trusted principal/player context is required")
+    if type(context.controlled_npc_ids) is not tuple or any(
+        type(v) is not str or not v or len(v) > 256 for v in context.controlled_npc_ids
+    ):
+        raise StateMachineError("invalid_context", "NPC grants must be trusted identity tuples")
 
 
-class StateMachine:
+def _migration_statements(script: str) -> tuple[str, ...]:
+    """Read our bundled SQL without executescript's implicit transaction commits."""
+    statements, pending = [], ""
+    for line in script.splitlines(keepends=True):
+        pending += line
+        if sqlite3.complete_statement(pending):
+            normalized = " ".join(pending.split()).upper()
+            if normalized not in (
+                "BEGIN IMMEDIATE;",
+                "COMMIT;",
+                "PRAGMA FOREIGN_KEYS = OFF;",
+                "PRAGMA FOREIGN_KEYS = ON;",
+            ):
+                statements.append(pending)
+            pending = ""
+    if pending.strip():
+        raise StateMachineError("storage_error", "Incomplete bundled migration SQL")
+    return tuple(statements)
+
+
+class StateMachine(CommandRuntime, EventRuntime, MechanicalRuntime, PerceptionRuntime):
     """Trusted in-process runtime. One connection per instance/thread; close explicitly.
 
     All writes commit immediately. Public lifecycle methods are not HTTP endpoints
     or player/NPC views. Only an authenticated adapter may supply TrustedContext.
     """
 
-    def __init__(self, database: str | Path) -> None:
+    def __init__(self, database: str | Path, *, evaluator=None) -> None:
+        self._evaluator = evaluator if evaluator is not None else SyntheticEvaluator()
         if str(database) == ":memory:":
             raise StateMachineError(
                 "unsupported_storage", "A local file database with WAL is required"
@@ -70,23 +109,25 @@ class StateMachine:
         try:
             self._conn.execute("PRAGMA foreign_keys = ON")
             self._conn.execute("PRAGMA busy_timeout = 5000")
-            if self._conn.execute("PRAGMA journal_mode = WAL").fetchone()[0] != "wal":
+            self._migrate()
+            # Journal-mode changes cannot run in the migration transaction. SQLite
+            # can report BUSY immediately when simultaneous openers change the mode.
+            deadline = monotonic() + 5.0
+            while True:
+                try:
+                    mode = self._conn.execute("PRAGMA journal_mode = WAL").fetchone()[0]
+                    break
+                except sqlite3.OperationalError as exc:
+                    if exc.sqlite_errorcode != sqlite3.SQLITE_BUSY or monotonic() >= deadline:
+                        raise
+                    sleep(0.01)
+            if mode != "wal":
                 raise StateMachineError("unsupported_storage", "Database must support WAL")
             self._conn.execute("PRAGMA synchronous = FULL")
-            version = self._conn.execute("PRAGMA user_version").fetchone()[0]
-            if version == 0:
-                tables = self._conn.execute(
-                    "SELECT name FROM sqlite_master WHERE type = 'table'"
-                ).fetchall()
-                if tables:
-                    raise StateMachineError(
-                        "unsupported_storage_schema", "Unversioned nonempty database"
-                    )
-                self._conn.executescript(Path(__file__).with_name("_schema.sql").read_text("utf-8"))
-            elif version != 1:
-                raise StateMachineError(
-                    "unsupported_storage_schema", f"Unsupported storage version: {version}"
-                )
+            if not self._conn.execute("PRAGMA foreign_keys").fetchone()[0]:
+                raise StateMachineError("storage_error", "Foreign keys must be enabled")
+            if self._conn.execute("PRAGMA foreign_key_check").fetchone():
+                raise StateMachineError("storage_error", "Database contains invalid references")
         except sqlite3.Error as exc:
             self._conn.close()
             self._closed = True
@@ -95,6 +136,61 @@ class StateMachine:
             self._conn.close()
             self._closed = True
             raise
+
+    def _migrate(self):
+        scripts = [Path(__file__).with_name("_schema.sql")] + [
+            Path(__file__).with_name(f"_migration_{v}.sql") for v in range(2, 7)
+        ]
+        steps = [_migration_statements(path.read_text("utf-8")) for path in scripts]
+        # Migration 4 rebuilds a referenced table. Disable FK enforcement only on
+        # this unopened runtime connection, then validate all references before commit.
+        self._conn.execute("PRAGMA foreign_keys = OFF")
+        try:
+            self._conn.execute("BEGIN IMMEDIATE")
+            # Read AFTER acquiring the cross-process SQLite migration write lock.
+            version = self._conn.execute("PRAGMA user_version").fetchone()[0]
+            if version not in range(7):
+                raise StateMachineError(
+                    "unsupported_storage_schema", f"Unsupported storage version: {version}"
+                )
+            if (
+                version == 0
+                and self._conn.execute(
+                    "SELECT name FROM sqlite_master WHERE type='table'"
+                ).fetchone()
+            ):
+                raise StateMachineError(
+                    "unsupported_storage_schema", "Unversioned nonempty database"
+                )
+            for target in range(version + 1, 7):
+                for statement in steps[target - 1]:
+                    self._conn.execute(statement)
+                if self._conn.execute("PRAGMA user_version").fetchone()[0] != target:
+                    raise StateMachineError("storage_error", "Non-contiguous schema migration")
+            if version < 5:
+                # The locked source version proves ALL existing events predate
+                # perception, even if a user command used the legacy source sentinel.
+                self._conn.execute(
+                    "INSERT INTO legacy_perception_boundaries "
+                    "SELECT session_id,event_seq,'legacy_event_evidence_unavailable' "
+                    "FROM sessions WHERE event_seq>0 "
+                    "ON CONFLICT(session_id) DO UPDATE SET "
+                    "through_event_seq=excluded.through_event_seq"
+                )
+                self._conn.execute(
+                    "INSERT INTO projection_cursors "
+                    "SELECT session_id,'perception',through_event_seq "
+                    "FROM legacy_perception_boundaries WHERE true "
+                    "ON CONFLICT(session_id,consumer) DO UPDATE SET event_seq=excluded.event_seq"
+                )
+            if self._conn.execute("PRAGMA foreign_key_check").fetchone():
+                raise StateMachineError("storage_error", "Migration contains invalid references")
+            self._conn.commit()
+        except BaseException:
+            self._conn.rollback()
+            raise
+        finally:
+            self._conn.execute("PRAGMA foreign_keys = ON")
 
     def __enter__(self):
         self._ensure_open()
@@ -289,21 +385,52 @@ class StateMachine:
                 (session_id, pc_actor_id, package.entry_scene_id),
             )
             self._conn.execute(
-                "INSERT INTO characters VALUES (?, ?, ?, ?, '{}', '[]')",
-                (session_id, pc_actor_id, pc.current_hp, pc.max_hp),
+                "INSERT INTO characters(session_id,actor_id,current_hp,max_hp,"
+                "resources_json,inventory_json) "
+                "VALUES (?, ?, ?, ?, ?, ?)",
+                (
+                    session_id,
+                    pc_actor_id,
+                    pc.current_hp,
+                    pc.max_hp,
+                    canonical_json(dict(pc.resources)),
+                    canonical_json(pc.inventory),
+                ),
             )
             self._conn.execute(
-                "INSERT INTO rng_states VALUES (?, ?, 'unselected', 'foundation-placeholder/1', 0)",
+                "INSERT INTO rng_states(session_id,state_id,algorithm,encoding,position) "
+                "VALUES (?, ?, 'unselected', 'foundation-placeholder/1', 0)",
                 (session_id, rng_ref),
+            )
+            if package.ruleset_binding == SYNTHETIC_EVALUATION_RULESET:
+                self._conn.execute(
+                    "UPDATE rng_states SET algorithm='synthetic-sha256-counter/1', "
+                    "encoding='synthetic-counter-json/1', state_json=? WHERE session_id=?",
+                    (canonical_json({"counter": 0}), session_id),
+                )
+            initial_row = self._conn.execute(
+                "SELECT * FROM sessions WHERE session_id=?", (session_id,)
+            ).fetchone()
+            initial_events = self._expand_events(
+                initial_row,
+                package,
+                [("session.created", {}), ("scene.entered", {"scene_id": package.entry_scene_id})],
+                request.command_id,
             )
             self._append_events(
                 session_id,
                 0,
-                [
-                    ("session.created", {}),
-                    ("scene.entered", {"scene_id": package.entry_scene_id}),
-                ],
+                initial_events,
+                source_command_id=request.command_id,
+                package=package,
             )
+            result = replace(
+                result,
+                event_seq=self._conn.execute(
+                    "SELECT event_seq FROM sessions WHERE session_id=?", (session_id,)
+                ).fetchone()[0],
+            )
+            result_json = canonical_json(asdict(result))
             self._conn.execute(
                 "INSERT INTO creation_commands VALUES (?, ?, ?, ?, ?)",
                 (context.principal_id, request.command_id, fingerprint, session_id, result_json),
@@ -334,15 +461,85 @@ class StateMachine:
                     (session_id, actor.actor_id, scene_id, session_id, actor.actor_id),
                 )
 
-    def _append_events(self, session_id: str, version: int, events: list[tuple[str, dict]]) -> None:
+    def _append_events(
+        self,
+        session_id: str,
+        version: int,
+        events: list[tuple[str, dict]],
+        *,
+        source_command_id: str,
+        package: AdventurePackage,
+    ) -> None:
         seq = self._conn.execute(
             "SELECT event_seq FROM sessions WHERE session_id = ?", (session_id,)
         ).fetchone()[0]
+        evidence = {
+            "schema": "event-evidence/2",
+            "actors": [
+                dict(actor)
+                for actor in self._conn.execute(
+                    "SELECT actor_id, kind, current_scene_id FROM actors WHERE session_id=?",
+                    (session_id,),
+                ).fetchall()
+            ],
+        }
+        for actor in evidence["actors"]:
+            definition = next((a for a in package.actors if a.actor_id == actor["actor_id"]), None)
+            actor["senses"] = (
+                dict(definition.senses) if definition and definition.senses is not None else None
+            )
         for event_type, payload in events:
             seq += 1
             self._conn.execute(
                 "INSERT INTO events VALUES (?, ?, ?, ?, ?)",
                 (session_id, seq, event_type, version, canonical_json(payload)),
+            )
+            self._conn.execute(
+                "INSERT INTO event_evidence VALUES (?, ?, ?)",
+                (session_id, seq, canonical_json(evidence)),
+            )
+            signals = []
+            scene_id = payload.get("scene_id", payload.get("to_scene_id"))
+            descriptions = {
+                "scene.entered": "Someone enters the scene.",
+                "scene.exited": "Someone leaves the scene.",
+                "actor.moved": "Someone moves into view.",
+                "object.state_changed": "An object changes position.",
+            }
+            if event_type in descriptions and scene_id:
+                signals = [
+                    Signal(
+                        "signal.visible",
+                        "visual",
+                        descriptions[event_type],
+                        SignalScope(scene_id, "clear"),
+                    )
+                ]
+            elif event_type == "package.event_fired":
+                definition = next(
+                    e
+                    for e in package.events
+                    if e.event_definition_id == payload["event_definition_id"]
+                )
+                signals = list(definition.signals)
+            self._conn.execute(
+                "INSERT INTO event_records VALUES (?, ?, ?, ?, ?)",
+                (
+                    session_id,
+                    seq,
+                    f"event.{session_id}.{seq}",
+                    source_command_id,
+                    canonical_json([asdict(signal) for signal in signals]),
+                ),
+            )
+            self._conn.execute(
+                "INSERT INTO event_outbox(session_id,event_seq,consumer) VALUES (?, ?, 'delivery')",
+                (session_id, seq),
+            )
+            self._conn.execute(
+                "INSERT INTO event_outbox(session_id,event_seq,consumer) "
+                "VALUES (?, ?, 'perception')",
+                (session_id, seq),
             )
         self._conn.execute(
             "UPDATE sessions SET event_seq = ? WHERE session_id = ?", (seq, session_id)
@@ -357,33 +554,22 @@ class StateMachine:
         expected_world_version: int,
         context: TrustedContext,
     ) -> SessionSnapshot:
-        """Internal foundation-only write path. No command receipt/retry protocol.
-
-        Every real change advances world_version once, emits internal audit records,
-        and commits atomically. Reapplying a stale version rejects without writing.
-        """
-        if type(expected_world_version) is not int or expected_world_version < 0:
-            raise StateMachineError("invalid_operation", "Expected a nonnegative integer version")
-        if type(operation) not in (EnterScene, SetSceneFlag, SetObjectState, MoveActor):
-            raise StateMachineError(
-                "unsupported_operation", "Operation is outside the internal allowlist"
-            )
-        with self._transaction(write=True):
-            row = self._session(session_id, package, context)
-            if row["world_version"] != expected_world_version:
-                raise StateMachineError(
-                    "version_conflict", "Session changed; refresh the authoritative snapshot"
-                )
-            events = self._operate(row, package, operation)
-            if events:
-                version = row["world_version"] + 1
-                self._conn.execute(
-                    "UPDATE sessions SET world_version = ? WHERE session_id = ?",
-                    (version, session_id),
-                )
-                self._append_events(session_id, version, events)
-            snapshot = self._snapshot(self._session(session_id, package, context))
-        return snapshot
+        """Compatibility helper routed through the same authorized command pipeline."""
+        if type(operation) not in OPERATIONS.values():
+            raise StateMachineError("unsupported_operation", "Unknown operation")
+        snapshot = self.read_session(session_id, package, context=context)
+        actor_id = operation.actor_id if isinstance(operation, MoveActor) else snapshot.pc_actor_id
+        kind = next(key for key, value in OPERATIONS.items() if type(operation) is value)
+        receipt = self.submit_command(
+            TypedCommand(
+                session_id, str(uuid4()), actor_id, kind, operation, expected_world_version
+            ),
+            package,
+            context=context,
+        )
+        if receipt.status != "committed":
+            raise StateMachineError(receipt.error_code, "Command did not commit")
+        return self.read_session(session_id, package, context=context)
 
     def _operate(self, row, package: AdventurePackage, operation: FoundationOperation):
         sid = row["session_id"]
@@ -525,8 +711,16 @@ class StateMachine:
                 pc["max_hp"],
                 json.loads(pc["resources_json"]),
                 tuple(json.loads(pc["inventory_json"])),
+                tuple(json.loads(pc["effects_json"])),
             ),
-            RNGState(rng["state_id"], rng["algorithm"], rng["encoding"], rng["position"]),
+            RNGState(
+                rng["state_id"],
+                rng["algorithm"],
+                rng["encoding"],
+                rng["position"],
+                rng["rng_version"],
+                rng["state_json"],
+            ),
         )
 
     def read_session(
