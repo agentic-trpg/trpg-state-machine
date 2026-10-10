@@ -336,3 +336,12 @@ unsupported lighting, concealment, obstacles and conditions. Event-time observat
 remain independent historical evidence. observation_signal_sources retains only actual
 positive Signal provenance internally; source event semantics stay out of NPC input.
 No reads ACK, consume observations, advance completion, or change state/RNG.
+### SM-21 conditional world effects
+
+An authenticated GM may attach local `CheckWorldEffects` to a `rules.check`
+TypedCommand: bounded source reference, exact flag/object preconditions, and fixed
+success/failure operations. The pinned Engine's structured `CheckRolled.succeeded`
+selects the branch; accepted does not mean success. Existing world operations,
+RNG, events/outbox and receipt commit atomically. No HP/resource/inventory writes,
+new trigger engine, tool checks or continuation support are introduced. See
+`docs/reviews/SM21_CONDITIONAL_WORLD_EFFECTS_REVIEW.md` for evidence and limits.

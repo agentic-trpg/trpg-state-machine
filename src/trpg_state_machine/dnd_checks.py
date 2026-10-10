@@ -1,8 +1,50 @@
 """Result admission for the Engine's empty-delta generic check slice."""
 
+import json
+
 from dnd5e_engine.events import CheckRolled
 
+from ._operations import SetSceneFlag
 from .errors import StateMachineError
+
+
+def world_effects_ready(runtime, row, command):
+    effects = command.check_world_effects
+    if effects is None:
+        return True
+    if command.actor_id != row["pc_actor_id"]:
+        raise StateMachineError(
+            "unsupported_operation", "Conditional effects require the selected PC"
+        )
+    ready = True
+    for index, operations in enumerate(
+        (effects.preconditions, effects.on_success, effects.on_failure)
+    ):
+        for operation in operations:
+            runtime._world_operation_capability(row, operation)
+            if operation.scene_id != row["current_scene_id"]:
+                raise StateMachineError("invalid_target", "World effects require the current scene")
+            if type(operation) is SetSceneFlag:
+                flags = json.loads(
+                    runtime._conn.execute(
+                        "SELECT flags_json FROM scene_instances WHERE session_id=? AND scene_id=?",
+                        (row["session_id"], operation.scene_id),
+                    ).fetchone()[0]
+                )
+                if operation.flag_id not in flags:
+                    raise StateMachineError("invalid_target", "Unknown declared scene flag")
+                actual, expected = flags[operation.flag_id], operation.value
+            else:
+                obj = runtime._conn.execute(
+                    "SELECT state FROM objects WHERE session_id=? AND scene_id=? AND object_id=?",
+                    (row["session_id"], operation.scene_id, operation.object_id),
+                ).fetchone()
+                if obj is None:
+                    raise StateMachineError("invalid_target", "Unknown scene object")
+                actual, expected = obj[0], operation.state.value
+            if index == 0 and actual != expected:
+                ready = False
+    return ready
 
 
 def check_changes(request, result):

@@ -2,13 +2,14 @@
 
 import hashlib
 import json
+import re
 from copy import deepcopy
 from dataclasses import asdict, dataclass
 
 from dnd5e_engine.evaluation_contracts import CheckPayload, CombatClosePayload, CombatIntentPayload
 from pydantic import ValidationError
 
-from ._operations import EnterScene, MoveActor, SetObjectState, SetSceneFlag
+from ._operations import EnterScene, MoveActor, ObjectState, SetObjectState, SetSceneFlag
 from .combat import InitializeCombat
 from .errors import StateMachineError
 from .mechanics import RuleOperation
@@ -25,6 +26,16 @@ OPERATIONS = {
     "set_object_state": SetObjectState,
     "move_actor": MoveActor,
 }
+
+
+@dataclass(frozen=True, slots=True)
+class CheckWorldEffects:
+    """Local conditional-world-effects/1, fixed before any rule evaluation."""
+
+    source_ref: str
+    preconditions: tuple[SetSceneFlag | SetObjectState, ...] = ()
+    on_success: tuple[SetSceneFlag | SetObjectState, ...] = ()
+    on_failure: tuple[SetSceneFlag | SetObjectState, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -46,6 +57,7 @@ class TypedCommand:
     )
     expected_world_version: int
     schema_version: str = "sm-command/1"
+    check_world_effects: CheckWorldEffects | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -75,6 +87,41 @@ def validate_command(command: TypedCommand) -> None:
         raise StateMachineError("invalid_command", "Command identities must be bounded strings")
     if type(command.expected_world_version) is not int or command.expected_world_version < 0:
         raise StateMachineError("invalid_operation", "Expected a nonnegative integer version")
+    effects = command.check_world_effects
+    if effects is not None:
+        if (
+            command.command_type != "rules.check"
+            or type(effects) is not CheckWorldEffects
+            or type(effects.source_ref) is not str
+            or not re.fullmatch(r"gm\.[a-zA-Z0-9_.-]{1,120}", effects.source_ref)
+        ):
+            raise StateMachineError(
+                "invalid_command", "Expected a fixed trusted GM effect proposal"
+            )
+        for operations in (effects.preconditions, effects.on_success, effects.on_failure):
+            if type(operations) is not tuple or len(operations) > 16:
+                raise StateMachineError("invalid_command", "At most sixteen typed world operations")
+            for operation in operations:
+                if type(operation) not in (SetSceneFlag, SetObjectState):
+                    raise StateMachineError("invalid_command", "Conditional effects are world-only")
+                if any(
+                    type(v) is not str or not v or len(v) > 256
+                    for k, v in asdict(operation).items()
+                    if k not in ("value", "state")
+                ):
+                    raise StateMachineError("invalid_command", "Invalid world operation reference")
+                try:
+                    for value in asdict(operation).values():
+                        if isinstance(value, str):
+                            value.encode("utf-8", errors="strict")
+                except UnicodeEncodeError as exc:
+                    raise StateMachineError("invalid_command", "Invalid Unicode reference") from exc
+                if (type(operation) is SetSceneFlag and type(operation.value) is not bool) or (
+                    type(operation) is SetObjectState and type(operation.state) is not ObjectState
+                ):
+                    raise StateMachineError(
+                        "invalid_command", "Invalid typed world operation value"
+                    )
     operation_type = OPERATIONS.get(command.command_type)
     if operation_type is None or type(command.payload) is not operation_type:
         raise StateMachineError("unsupported_operation", "Unknown command or payload type")
@@ -116,6 +163,9 @@ def validate_command(command: TypedCommand) -> None:
 
 def command_fingerprint(command, package, context):
     data = asdict(command)
+    if command.check_world_effects is None:
+        # Preserve canonical fingerprints of all pre-SM21 stored commands.
+        data.pop("check_world_effects")
     if type(command.payload) in (CombatIntentPayload, CombatClosePayload, CheckPayload):
         data["payload"] = command.payload.model_dump(mode="json")
     return hashlib.sha256(

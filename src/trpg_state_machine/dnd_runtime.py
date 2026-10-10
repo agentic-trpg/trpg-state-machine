@@ -19,7 +19,7 @@ from pydantic import ValidationError
 
 from .combat import process_id
 from .commands import CommandReceipt, command_fingerprint, validate_command
-from .dnd_checks import check_changes
+from .dnd_checks import check_changes, world_effects_ready
 from .dnd_closure import closure_changes
 from .errors import StateMachineError
 from .package import canonical_json
@@ -286,6 +286,11 @@ class DndRuntime:
                 )
             snapshot = build_snapshot(row)
             self._npc_combat_target_guard(command, package, snapshot)
+            world_ready = (
+                world_effects_ready(self, row, command)
+                if row["world_version"] == command.expected_world_version
+                else True
+            )
             rng = self._rng_context(row)
             if type(command.payload) is not CheckPayload:
                 combat = self._conn.execute(
@@ -313,6 +318,8 @@ class DndRuntime:
             rng_context=rng,
         )
         capability = self._dnd_capability(command.payload, command.actor_id, snapshot)
+        if capability is None and not world_ready:
+            capability = "world_precondition_failed"
         result, changes = None, ()
         if snapshot.world_version == command.expected_world_version:
             self._verify_dnd_binding(package)
@@ -350,6 +357,8 @@ class DndRuntime:
                 status, error = "conflict", "version_conflict"
             elif capability is not None:
                 status, error = "rejected", capability
+            elif not world_effects_ready(self, row, command):
+                status, error = "rejected", "world_precondition_failed"
             elif result.status != "accepted":
                 status, error = "rejected", result.error.code
             else:
@@ -369,6 +378,15 @@ class DndRuntime:
                                         "adjudication": {
                                             "principal_id": context.principal_id,
                                             "payload": command.payload.model_dump(mode="json"),
+                                            **(
+                                                {
+                                                    "world_effects": asdict(
+                                                        command.check_world_effects
+                                                    )
+                                                }
+                                                if command.check_world_effects
+                                                else {}
+                                            ),
                                         }
                                     }
                                     if type(command.payload) is CheckPayload
@@ -380,6 +398,16 @@ class DndRuntime:
                         )
                         for event in result.proposed_events
                     ]
+                    if command.check_world_effects is not None:
+                        # check_changes already validated the sole official CheckRolled.
+                        # accepted is NOT the success predicate; the Engine owns succeeded.
+                        branch = (
+                            command.check_world_effects.on_success
+                            if result.proposed_events[0].succeeded
+                            else command.check_world_effects.on_failure
+                        )
+                        for operation in branch:
+                            events.extend(self._operate(row, package, operation))
                     events = self._expand_events(row, package, events, command.command_id)
                     version += 1
                     transition = result.rng_transition
