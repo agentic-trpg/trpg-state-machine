@@ -86,7 +86,7 @@ with StateMachine("demo.sqlite3") as restarted:
 - `RulesetBinding` 必须精确等于 `synthetic.foundation / synthetic-data/1 / none/1`。这个合成数据契约仅包含 HP 初值及空 resources/inventory；它没有 D&D 属性、检定、构建合法性或 Rule Engine 求值能力。
 - World/Scene flags 仅允许命名空间为 `flag.` 的布尔值。对象状态仅支持合成 `closed/open`。出口只能是无条件的已定义 Scene 连接。
 - NPC 是无自主行为的合成身份，`controller.kind=scripted_event` 仅保存静态策略标记，不执行脚本。按初始 Scene 首次需要时创建一次；另一 Scene 的身份引用不会克隆或重置 NPC。PC 的实际 Actor ID 由 State Machine 分配。
-- `events/world_facts/event_definition_ids` 必须为空列表；`rule_bindings/resources` 必须为空映射，inventory 必须为空列表。Compatibility 的未解决项/适配说明也须为空。Conditions、Encounter、脚本、机械数据、秘密/NPC Meta 等额外字段或非空机制明确拒绝。
+- `world_facts` 必须为空列表；`rule_bindings/resources` 必须为空映射，inventory 必须为空列表。Compatibility 的未解决项/适配说明也须为空。Conditions、Encounter、脚本、机械数据、秘密/NPC Meta 等额外字段或非空机制明确拒绝。
 - 必需来源/许可/审阅元数据只做结构检查，不证明版权合法、剧情可通关、规则正确或战斗平衡。
 - SafeLoader 禁用类实例化、重复键、别名/合并；只接受普通字符串、整数、布尔、null、列表/映射。时间戳、浮点数、二进制等拒绝；大小上限 1 MiB、嵌套上限 32 层、节点上限 20,000。
 
@@ -102,9 +102,9 @@ Receipts use durable `(session_id, command_id)` keys and a canonical fingerprint
 - Package 读取/验证、指纹计算、UUID 准备在写事务外进行；写事务内没有网络/模型/规则求值。持久唯一键和事务内再查创建键处理并发重入；失败不保留占位 Session 或幂等 claim。
 - Scene 主键是 `(session_id, scene_id)`，首次初始化对象与 flags；重访只更新访问次数和 PC 位置。Actor 位置只由 Session 内唯一 Actor 行记录。全部运行态表按 Session 隔离。
 - 初始 `world_version=0`。每次实际状态修改成功提交推进一次；无变化操作不推进。`event_seq` 是独立的内部审计序号：创建产生两条记录，Scene 转移产生 exit/enter 两条记录，因此不等于 world_version。
-- 当前审计表仅覆盖本 Batch 生命周期/修改，不是完整 WorldEvent/Signal/Perception/Outbox 协议。没有 event-only 或 Meta-only 提交能力，未冻结它们的 world_version 策略。
+- 事件保存稳定 ID、来源命令及受限 Signals，事件时位置证据与持久 Outbox 同事务提交；当前没有完整 Perception 协议。没有 event-only 或 Meta-only 提交能力，未冻结它们的 world_version 策略。
 - RNG 单独持久保存 `state_id / algorithm=unselected / encoding=foundation-placeholder/1 / position=0`，Session 保存引用。没有掷骰、随机流消耗或规则 RNG 协议，也不宣称确定性机械 Replay。
-- 所有修改立即提交；`save_session` 不创建第二份权威快照/检查点。Storage schema 2 automatically migrates Batch 1 schema 1 while preserving package pins/digests and state. Legacy events have no fabricated historical evidence. Unknown schemas are refused. No online backup tool.
+- 所有修改立即提交；`save_session` 不创建第二份权威快照/检查点。Storage schema 3 automatically migrates schema 1/2 while preserving package pins/digests and state. Legacy events have no fabricated historical evidence. Unknown schemas are refused. No online backup tool.
 
 ## 自动化验收证据
 
@@ -130,8 +130,16 @@ create → enter workshop → mutate door/flag/NPC → leave → revisit → sav
 - [Agent Architecture v0.9](https://github.com/agentic-trpg/agentic-trpg/blob/fe6a1e9edeaf2a3e120aa669b6abfe1e819d87f1/docs/AGENT_ARCHITECTURE.md)。
 - [MVP Scope v0.11](https://github.com/agentic-trpg/agentic-trpg/blob/fe6a1e9edeaf2a3e120aa669b6abfe1e819d87f1/docs/MVP_SCOPE.md)。
 
-这些文档的 `[PROPOSED]` / `[OPEN]` 不因本实现自动冻结。当前是 SM-2 Foundation，不是完整 MVP：**未实现** Rule Engine Adapter、D&D PC 机械验证、Combat/正式规则检定、声明式事件/条件/奖励链、Quest/Inventory 操作、NPC Meta/Perception/Observation、Gate、EVA、LLM Host、视觉系统、活跃战斗恢复、通用脚本或插件框架。
+这些文档的 `[PROPOSED]` / `[OPEN]` 不因本实现自动冻结。当前是 SM-3 Foundation，不是完整 MVP：**未实现** Rule Engine Adapter、D&D PC 机械验证、Combat/正式规则检定、完整声明式事件/条件/奖励链、Quest/Inventory 操作、NPC Meta/Perception/Observation、Gate、EVA、LLM Host、视觉系统、活跃战斗恢复、通用脚本或插件框架。
 
-仍为 OPEN 或后续批次事项：规则 RNG 算法/编码与回放、事件/Meta-only 版本策略、完整规则 CharacterState/CombatState/Typed Delta、通用系统来源权限、条件 AST、Pending Choice、Perception/Outbox、更复杂的数据迁移/备份策略及外部 PC 导入。本批没有以空类或 Stub 宣称这些能力完成。
+仍为 OPEN 或后续批次事项：规则 RNG 算法/编码与回放、事件/Meta-only 版本策略、完整规则 CharacterState/CombatState/Typed Delta、通用系统来源权限、条件 AST、Pending Choice、完整 Perception/Outbox 协议、更复杂的数据迁移/备份策略及外部 PC 导入。本批没有以空类或 Stub 宣称这些能力完成。
 
 SM-2: 112 tests passed, including durable retry after lost response, revoked authorization, concurrent writers, injected transaction rollback and Batch 1 migration. See `docs/batches/SM2.md`.
+
+## SM-3 event pipeline
+
+`read_events(..., after_seq=0)` is an owner-only ordered committed-event query. Each event has a stable SM-owned event_id, event_seq, source_command_id, type, payload and typed Signals. `deliver_event(..., event_seq, sink=...)` executes the sink outside the write transaction and records durable completion; delivery is at least once, so sinks must deduplicate event_id. `delivery_cursor(...)` cannot cross an older incomplete work item. A delivered event is not completed NPC cognition.
+
+Package events support only authoritative event-type/scene triggers, a typed flag_equals condition, set_scene_flag or set_object_state effects, per_session once and explicit visual/auditory scene-scoped Signals (clear/blocked/undetermined evidence). Scene event_definition_ids must match declared definitions. Conditions and effects run synchronously within the command transaction, including first-entry creation. Cycles are bounded by once history and a 32-consequence limit; exceeding the bound rejects and rolls back. No rule effects, downstream rule commands, arbitrary scripts or asynchronous cross-transaction atomicity are claimed. Signal visibility is authored synthetic evidence, not D&D perception rules or physical propagation.
+
+123 tests passed for SM-3. Tests cover restart, signal/event/outbox atomicity, initial-entry triggers, once/cycle/cascade protection, failed delivery after sink acceptance, stable retry IDs, session isolation and cursor gaps. Schema migration preserves old events with legacy.unavailable source and no invented Signals. See docs/batches/SM3.md.

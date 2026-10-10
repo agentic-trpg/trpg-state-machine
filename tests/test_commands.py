@@ -209,11 +209,13 @@ def test_upgrade_batch1_preserves_real_database(tmp_path, package, context, requ
     # Remove only schema-2 additions, reproducing an actual persisted Batch-1 schema.
     with sqlite3.connect(database) as conn:
         conn.executescript(
-            "DROP TABLE event_evidence; DROP TABLE command_receipts; PRAGMA user_version=1;"
+            "DROP TABLE event_outbox; DROP TABLE event_records; DROP TABLE projection_cursors; "
+            "DROP TABLE trigger_history; DROP TABLE event_evidence; DROP TABLE command_receipts; "
+            "PRAGMA user_version=1;"
         )
     with StateMachine(database) as sm:
         assert sm.resume_session(created.session_id, package, context=context) == before
-        assert sm._conn.execute("PRAGMA user_version").fetchone()[0] == 2
+        assert sm._conn.execute("PRAGMA user_version").fetchone()[0] == 3
         assert sm._conn.execute("SELECT COUNT(*) FROM event_evidence").fetchone()[0] == 0
         assert (
             sm.submit_command(

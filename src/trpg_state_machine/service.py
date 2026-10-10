@@ -3,7 +3,7 @@
 import json
 import sqlite3
 from contextlib import contextmanager
-from dataclasses import asdict
+from dataclasses import asdict, replace
 from pathlib import Path
 from uuid import uuid4
 
@@ -17,6 +17,7 @@ from ._operations import (
 )
 from .commands import OPERATIONS, CommandRuntime, TypedCommand
 from .errors import StateMachineError
+from .events import EventRuntime
 from .models import (
     ActorState,
     CharacterState,
@@ -29,7 +30,14 @@ from .models import (
     TrustedContext,
     WorldState,
 )
-from .package import AdventurePackage, RulesetBinding, _creation_fingerprint, canonical_json
+from .package import (
+    AdventurePackage,
+    RulesetBinding,
+    Signal,
+    SignalScope,
+    _creation_fingerprint,
+    canonical_json,
+)
 
 
 def _binding(row: sqlite3.Row) -> RulesetBinding:
@@ -54,7 +62,7 @@ def _trusted(context: TrustedContext) -> None:
         raise StateMachineError("invalid_context", "NPC grants must be trusted identity tuples")
 
 
-class StateMachine(CommandRuntime):
+class StateMachine(CommandRuntime, EventRuntime):
     """Trusted in-process runtime. One connection per instance/thread; close explicitly.
 
     All writes commit immediately. Public lifecycle methods are not HTTP endpoints
@@ -88,13 +96,17 @@ class StateMachine(CommandRuntime):
                         "unsupported_storage_schema", "Unversioned nonempty database"
                     )
                 self._conn.executescript(Path(__file__).with_name("_schema.sql").read_text("utf-8"))
-            elif version not in (1, 2):
+            elif version not in (1, 2, 3):
                 raise StateMachineError(
                     "unsupported_storage_schema", f"Unsupported storage version: {version}"
                 )
             if version in (0, 1):
                 self._conn.executescript(
                     Path(__file__).with_name("_migration_2.sql").read_text("utf-8")
+                )
+            if version < 3:
+                self._conn.executescript(
+                    Path(__file__).with_name("_migration_3.sql").read_text("utf-8")
                 )
         except sqlite3.Error as exc:
             self._conn.close()
@@ -305,14 +317,29 @@ class StateMachine(CommandRuntime):
                 "INSERT INTO rng_states VALUES (?, ?, 'unselected', 'foundation-placeholder/1', 0)",
                 (session_id, rng_ref),
             )
+            initial_row = self._conn.execute(
+                "SELECT * FROM sessions WHERE session_id=?", (session_id,)
+            ).fetchone()
+            initial_events = self._expand_events(
+                initial_row,
+                package,
+                [("session.created", {}), ("scene.entered", {"scene_id": package.entry_scene_id})],
+                request.command_id,
+            )
             self._append_events(
                 session_id,
                 0,
-                [
-                    ("session.created", {}),
-                    ("scene.entered", {"scene_id": package.entry_scene_id}),
-                ],
+                initial_events,
+                source_command_id=request.command_id,
+                package=package,
             )
+            result = replace(
+                result,
+                event_seq=self._conn.execute(
+                    "SELECT event_seq FROM sessions WHERE session_id=?", (session_id,)
+                ).fetchone()[0],
+            )
+            result_json = canonical_json(asdict(result))
             self._conn.execute(
                 "INSERT INTO creation_commands VALUES (?, ?, ?, ?, ?)",
                 (context.principal_id, request.command_id, fingerprint, session_id, result_json),
@@ -343,7 +370,15 @@ class StateMachine(CommandRuntime):
                     (session_id, actor.actor_id, scene_id, session_id, actor.actor_id),
                 )
 
-    def _append_events(self, session_id: str, version: int, events: list[tuple[str, dict]]) -> None:
+    def _append_events(
+        self,
+        session_id: str,
+        version: int,
+        events: list[tuple[str, dict]],
+        *,
+        source_command_id: str,
+        package: AdventurePackage,
+    ) -> None:
         seq = self._conn.execute(
             "SELECT event_seq FROM sessions WHERE session_id = ?", (session_id,)
         ).fetchone()[0]
@@ -366,6 +401,44 @@ class StateMachine(CommandRuntime):
             self._conn.execute(
                 "INSERT INTO event_evidence VALUES (?, ?, ?)",
                 (session_id, seq, canonical_json(evidence)),
+            )
+            signals = []
+            scene_id = payload.get("scene_id", payload.get("to_scene_id"))
+            descriptions = {
+                "scene.entered": "Someone enters the scene.",
+                "scene.exited": "Someone leaves the scene.",
+                "actor.moved": "Someone moves into view.",
+                "object.state_changed": "An object changes position.",
+            }
+            if event_type in descriptions and scene_id:
+                signals = [
+                    Signal(
+                        "signal.visible",
+                        "visual",
+                        descriptions[event_type],
+                        SignalScope(scene_id, "clear"),
+                    )
+                ]
+            elif event_type == "package.event_fired":
+                definition = next(
+                    e
+                    for e in package.events
+                    if e.event_definition_id == payload["event_definition_id"]
+                )
+                signals = list(definition.signals)
+            self._conn.execute(
+                "INSERT INTO event_records VALUES (?, ?, ?, ?, ?)",
+                (
+                    session_id,
+                    seq,
+                    f"event.{session_id}.{seq}",
+                    source_command_id,
+                    canonical_json([asdict(signal) for signal in signals]),
+                ),
+            )
+            self._conn.execute(
+                "INSERT INTO event_outbox(session_id,event_seq,consumer) VALUES (?, ?, 'delivery')",
+                (session_id, seq),
             )
         self._conn.execute(
             "UPDATE sessions SET event_seq = ? WHERE session_id = ?", (seq, session_id)

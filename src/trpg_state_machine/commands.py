@@ -123,13 +123,20 @@ class CommandRuntime:
                 self._conn.execute("SAVEPOINT command_effects")
                 try:
                     events = self._operate(row, package, command.payload)
+                    events = self._expand_events(row, package, events, command.command_id)
                     if events:
                         version += 1
                         self._conn.execute(
                             "UPDATE sessions SET world_version = ? WHERE session_id = ?",
                             (version, command.session_id),
                         )
-                        self._append_events(command.session_id, version, events)
+                        self._append_events(
+                            command.session_id,
+                            version,
+                            events,
+                            source_command_id=command.command_id,
+                            package=package,
+                        )
                 except StateMachineError as exc:
                     if exc.code == "storage_error":
                         raise
