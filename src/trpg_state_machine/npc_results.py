@@ -92,9 +92,13 @@ def _result_json(result):
             _invalid("Each update/output list must be a tuple of at most 100 items")
     try:
         raw = canonical_json(asdict(result))
+        # UnicodeError is a ValueError; reject before selecting or writing a Result.
+        encoded_size = len(raw.encode("utf-8"))
     except (TypeError, ValueError, RecursionError) as exc:
-        raise StateMachineError("invalid_npc_result", "Result is not bounded typed data") from exc
-    if len(raw.encode("utf-8")) > 262144:
+        raise StateMachineError(
+            "invalid_npc_result", "Result must be UTF-8 encodable bounded typed data"
+        ) from exc
+    if encoded_size > 262144:
         _invalid("Result exceeds 256 KiB")
     return raw
 

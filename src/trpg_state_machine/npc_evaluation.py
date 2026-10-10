@@ -39,6 +39,10 @@ class NPCEvaluationInput:
 def _text(value, maximum=4096):
     if type(value) is not str or not value.strip() or len(value) > maximum:
         raise StateMachineError("invalid_evaluation", "Expected bounded nonempty text")
+    try:
+        value.encode("utf-8")
+    except UnicodeError as exc:
+        raise StateMachineError("invalid_evaluation", "Expected UTF-8 encodable text") from exc
     return value
 
 

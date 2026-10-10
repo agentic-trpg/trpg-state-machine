@@ -139,3 +139,45 @@ git diff --check
 建议后续 State Machine 工作顺序：先以独立小修关闭 GR-01 并补回归；再和 Host 审阅本地 wire/schema/输入与反馈恢复契约、撤销输出处置政策；按一个受审操作一次的方式扩展 Action Intent 映射，复用现有 Typed Command/Rule Evaluation；最后安排真实 Host 调用及获授权素材的联合验收。不要为这些准备工作添加新状态权威、Proposal/ACK 或规则计算。
 
 **本轮四个 Batch 与报告已分别交付；SM-16 的 GR-01 仍为 Partial，合并建议为暂缓。没有 Merge main、创建 PR 或修改其他仓库；停止，等待人工审阅及下一轮修复授权。**
+
+## 8. GR-01 Pre-Merge Fix 验证补记（2026-10-11，当前结论）
+
+本节追加修复证据，保留 §1–§7 在 `ffded8e7ee7c10a8e2afe356d7aff0781eb3c961` 时的原始发现、Partial 和暂缓合并结论作为审计历史。本次修复以该提交为基线，仍在 `feat/sm-b15-b18-npc-evaluation-runtime`；修复提交主题为 `fix: validate npc evaluation text encoding before commit`，最终 SHA 由 Git 交付记录给出。
+
+### 实际修复与边界审计
+
+- `npc_results.py::_result_json` 将原有严格 UTF-8 编码/字节大小计算移入异常转换范围。UnicodeError 是 ValueError 的子类，因此未配对 surrogate 被转换为 `StateMachineError("invalid_npc_result", ...)`，保留异常 cause。`submit_npc_evaluation_result` 原有 `_record_evaluation_failure` 路径负责同事务记账：有效任务预算内继续 running，耗尽后 failed；没有重写预算或 Result 提交流程。
+- 编码检查针对完整规范 JSON，涵盖 Dialogue 和五类私有 Meta 的嵌套文本/步骤/来源字段，在 Meta、Result、交接和完成状态写入之前发生。非法 UTF-8 是整个候选 Result 的编码错误；可编码但领域非法的 Action/Dialogue 仍沿用原有独立输出拒绝语义。
+- 实库复现了 Task `player_input`、`reason` 在请求 Fingerprint 编码时的同类逃逸。`npc_evaluation.py::_text` 增加严格 UTF-8 可编码性检查，统一返回既有 `invalid_evaluation`；覆盖其既有调用处的 Task 创建、Interaction 输入、Mode/Gate request_id、Observation 引用和 Evaluation ID。拒绝新输入不会取消现有 Task、切换 Mode 或消耗其失败预算。
+- 没有更改 `canonical_json`、ensure_ascii、排序/分隔符、Unicode 归一化、Fingerprint 算法、Package Digest、Schema 14、SQL、历史记录或固定依赖。没有 replace/ignore 非法字符；合法中文、Emoji/ZWJ、阿拉伯语、日语、韩语、组合/预组合字符保持原值。
+- 业务源码只改上述两个编码边界。Task/Meta/Mode/Output/Observation/RNG/Command 的事务、授权、幂等和提交顺序保持不变；没有 ACK、Proposal、Context 管理、语义判断或规则计算。
+
+### 新增真实 SQLite 回归
+
+新增 `tests/test_npc_text_encoding.py`，共 **22 项**，所有状态比较均读取真实 SQLite 行，不以 Mock 替代：
+
+| 覆盖项 | 数量 | 实测断言 |
+|---|---:|---|
+| Memory/Dialogue 高、低 surrogate；其余四类 Meta 文本及 Plan 步骤 | 9 | 结构化 invalid_npc_result；仅目标 Task 的 attempts/last_error 改变；全部其他表无部分写；关闭重开后可用原任务纠错，已选结果/交接重试不重复 |
+| Memory/Dialogue 预算耗尽 | 2 | 每次重开运行实例后计数仍递增，第三次 failed；此后合法或非法 Result 都不能新提交，原观察保持未完成 |
+| Task/Interaction/Mode/Gate/查询的非法文本 | 9 | invalid_evaluation；全部数据库行保持原值，包括原 running Task、Mode、Meta、Work、Cursor、世界、RNG 与 Receipt |
+| 失败预算写入时 SQLite 故障 | 1 | storage_error，整个事务回滚且不计失败；解除 SQL 故障后可正确记账并纠错 |
+| 正常多语言、原始编码/Fingerprint、已选回执重试 | 1 | Task 输入和 Meta 持久值不变；合法 Result 的 SHA-256 与修复前 ffded8e 捕获的 golden `5147a408201bb1c47744c8a5db84c1803f2a3f0806f9a927c7152a15550250ff` 相同；组合字符不被静默归一化；完成后非法新候选不改变任何已提交行 |
+
+修复前先运行新增测试：Memory 的原始 UnicodeEncodeError 在 1.08 s 的首例失败中被捕获；Task player_input/reason 在另一轮 1.10 s 的两个失败中独立复现。修复后专项 **22 passed in 3.79 s**；无历史测试删除或跳过。
+
+### 独立复核、完整回归与合并意见
+
+修复后重读最终两处源码 Diff，并用原 Global Review 的 Memory 探针重新运行实际临时 SQLite 流程，查询连接显式关闭。退出 0，输出与断言为：
+
+```text
+domain_code=invalid_npc_result
+authority_unchanged_except_failure=true; attempts=1; status=running
+corrected_same_task=completed; replay_unchanged=true
+```
+
+最终完整锁定回归：**585 passed, 2 warnings in 156.79 s**（563 既有 + 22 新增）。`uv sync --locked --group dev`、`uv run --locked python -m pytest -q`、`uv run --locked python -m ruff check .`、`uv run --locked python -m ruff format --check .`（86 files already formatted）和 `git diff --check` 全部通过。两条既有上游 Lark 弃用提示不变。
+
+最终范围检查：仅两个上述源码文件、新回归测试文件、本报告追加记录共四个路径；Package/SQL/Schema/规则依赖/Command/Perception/Mode/输出代码无 Diff，无数据库或缓存进入版本控制。验证代码运行期间未修改业务源码。原报告的复现及历史结论完整保留。
+
+**当前结论：GR-01 Closed。SM-16 从原历史 Partial 更新为本任务受限范围 Fully，SM-17 的 GR-01 预算关联风险解除；未发现残留或新增 P0/P1，也未确认新的 P2。本次建议在人工审阅后将受限 NPC Evaluation 领域闭环合并 main。** 这一建议不代表真实 Agent Host/LLM、完整 Action Intent 映射或所有 Proposed ABI 已验收；§7 其他 OPEN/显式排除项仍然有效。本次只 Commit + Push，不 Merge、不创建 PR、不修改其他仓库。
