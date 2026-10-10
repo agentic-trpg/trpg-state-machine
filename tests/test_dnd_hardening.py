@@ -12,7 +12,7 @@ import pytest
 import yaml
 from dnd5e_engine.evaluation_contracts import CombatIntentPayload, PreflightChoice
 from dnd5e_engine.evaluation_state import CombatSnapshot, NonCombatSnapshot
-from dnd_support import NPC, loader, make_package
+from dnd_support import NPC, loader
 from dnd_support import package_data as dnd_package_data
 from pydantic import ValidationError
 from test_dnd_npc_availability import npc_command
@@ -254,8 +254,15 @@ def test_noncombat_discriminator_is_not_forged_into_combat(tmp_path, package_dat
             CombatSnapshot.model_validate_json(actual.model_dump_json())
 
 
-def test_actual_schema7_combat_upgrade_preserves_mechanics_rng_receipt(
-    tmp_path, package_data, context
+@pytest.mark.parametrize(
+    "legacy_schema,commit",
+    [
+        (7, "8f24ca03e6037428bbc559d50e91bcd57669a0ed"),
+        (8, "a00854374a38b01a13cc0fbfa089ef6e0b709cef"),
+    ],
+)
+def test_actual_legacy_combat_upgrade_preserves_mechanics_rng_receipt(
+    tmp_path, package_data, context, legacy_python, legacy_schema, commit
 ):
     source = tmp_path / "sm7-source"
     archived = subprocess.run(
@@ -263,7 +270,7 @@ def test_actual_schema7_combat_upgrade_preserves_mechanics_rng_receipt(
             "git",
             "archive",
             "--format=zip",
-            "8f24ca03e6037428bbc559d50e91bcd57669a0ed",
+            commit,
             "src",
             "tests/fixtures",
             "tests/dnd_support.py",
@@ -276,7 +283,7 @@ def test_actual_schema7_combat_upgrade_preserves_mechanics_rng_receipt(
     database = tmp_path / "real-old.db"
     worker = Path(__file__).with_name("_dnd_legacy_worker.py")
     completed = subprocess.run(
-        [sys.executable, str(worker), str(source), str(database)],
+        [legacy_python, str(worker), str(source), str(database), str(legacy_schema)],
         capture_output=True,
         text=True,
         encoding="utf-8",
@@ -288,7 +295,9 @@ def test_actual_schema7_combat_upgrade_preserves_mechanics_rng_receipt(
 
     original = stored_rows(database)
     assets = loader()
-    package = make_package(package_data, assets)
+    from trpg_state_machine.package import _validate
+
+    package = _validate(old["package_data"])
     sid = old["session_id"]
     with StateMachine(database, dnd_loader=assets) as sm:
         snapshot = sm.read_combat_snapshot(sid, package, context=context)
@@ -301,8 +310,16 @@ def test_actual_schema7_combat_upgrade_preserves_mechanics_rng_receipt(
             sm.get_command_receipt(sid, "old.real.attack", package, context=context).status
             == "committed"
         )
-        assert sm._conn.execute("PRAGMA user_version").fetchone()[0] == 8
+        assert sm._conn.execute("PRAGMA user_version").fetchone()[0] == 9
         assert sm._conn.execute("PRAGMA foreign_key_check").fetchall() == []
+        before = sm.read_session(sid, package, context=context)
+        assert before.ruleset_binding.evaluator_version == "dnd5e-evaluation/4"
+        command = attack(sm, sid, package, context, key="old.unsupported")
+        with pytest.raises(StateMachineError) as caught:
+            sm.submit_command(command, package, context=context)
+        assert caught.value.code == "ruleset_binding_mismatch"
+        assert sm.get_command_receipt(sid, command.command_id, package, context=context) is None
+        assert sm.read_session(sid, package, context=context) == before
     with sqlite3.connect(database) as db:
         for table, (columns, rows) in original.items():
             assert rows <= set(db.execute(f"SELECT {','.join(columns)} FROM {table}").fetchall())

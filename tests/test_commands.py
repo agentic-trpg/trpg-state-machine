@@ -220,7 +220,7 @@ def test_upgrade_batch1_preserves_real_database(tmp_path, package, context, requ
     database = legacy
     with StateMachine(database) as sm:
         assert sm.resume_session(created.session_id, package, context=context) == before
-        assert sm._conn.execute("PRAGMA user_version").fetchone()[0] == 8
+        assert sm._conn.execute("PRAGMA user_version").fetchone()[0] == 9
         assert sm._conn.execute("SELECT COUNT(*) FROM event_evidence").fetchone()[0] == 0
         assert (
             sm.submit_command(

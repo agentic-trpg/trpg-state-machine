@@ -16,6 +16,7 @@ class TrustedContext:
     principal_id: str
     player_id: str
     controlled_npc_ids: tuple[str, ...] = ()
+    can_adjudicate_checks: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -74,6 +75,7 @@ class CharacterState:
     resources: dict
     inventory: tuple
     effects: tuple = ()
+    xp: int = 0
 
 
 @dataclass(frozen=True, slots=True)
@@ -105,3 +107,4 @@ class SessionSnapshot:
     actors: dict[str, ActorState]
     character: CharacterState
     rng: RNGState
+    phase: str = "exploration"

@@ -5,7 +5,7 @@ import json
 from copy import deepcopy
 from dataclasses import asdict, dataclass
 
-from dnd5e_engine.evaluation_contracts import CombatIntentPayload
+from dnd5e_engine.evaluation_contracts import CheckPayload, CombatClosePayload, CombatIntentPayload
 from pydantic import ValidationError
 
 from ._operations import EnterScene, MoveActor, SetObjectState, SetSceneFlag
@@ -15,6 +15,8 @@ from .mechanics import RuleOperation
 from .package import canonical_json
 
 OPERATIONS = {
+    "rules.check": CheckPayload,
+    "combat.close": CombatClosePayload,
     "combat.intent": CombatIntentPayload,
     "combat.initialize": InitializeCombat,
     "rule_operation": RuleOperation,
@@ -39,6 +41,8 @@ class TypedCommand:
         | RuleOperation
         | InitializeCombat
         | CombatIntentPayload
+        | CombatClosePayload
+        | CheckPayload
     )
     expected_world_version: int
     schema_version: str = "sm-command/1"
@@ -74,13 +78,21 @@ def validate_command(command: TypedCommand) -> None:
     operation_type = OPERATIONS.get(command.command_type)
     if operation_type is None or type(command.payload) is not operation_type:
         raise StateMachineError("unsupported_operation", "Unknown command or payload type")
-    if type(command.payload) is CombatIntentPayload:
+    if type(command.payload) in (CombatIntentPayload, CombatClosePayload, CheckPayload):
         try:
-            CombatIntentPayload.model_validate(deepcopy(command.payload))
+            type(command.payload).model_validate(deepcopy(command.payload))
         except ValidationError as exc:
             raise StateMachineError("invalid_command", "Invalid Engine intent schema") from exc
-        if command.payload.source_id not in (None, command.actor_id):
+        if isinstance(command.payload, CombatIntentPayload) and command.payload.source_id not in (
+            None,
+            command.actor_id,
+        ):
             raise StateMachineError("invalid_actor", "Intent source differs from trusted actor")
+        if (
+            isinstance(command.payload, CheckPayload)
+            and command.payload.actor_id != command.actor_id
+        ):
+            raise StateMachineError("invalid_actor", "Check subject differs from trusted actor")
         return
     if type(command.payload) is RuleOperation:
         operation = command.payload
@@ -104,7 +116,7 @@ def validate_command(command: TypedCommand) -> None:
 
 def command_fingerprint(command, package, context):
     data = asdict(command)
-    if type(command.payload) is CombatIntentPayload:
+    if type(command.payload) in (CombatIntentPayload, CombatClosePayload, CheckPayload):
         data["payload"] = command.payload.model_dump(mode="json")
     return hashlib.sha256(
         canonical_json(
@@ -121,8 +133,11 @@ def command_fingerprint(command, package, context):
 
 class CommandRuntime:
     def _authorize_command(self, row, actor_id, payload, context):
+        if isinstance(payload, CheckPayload) and not context.can_adjudicate_checks:
+            raise StateMachineError("unauthorized", "Trusted GM adjudication grant required")
         if isinstance(payload, MoveActor) or (
-            isinstance(payload, CombatIntentPayload) and actor_id != row["pc_actor_id"]
+            isinstance(payload, (CombatIntentPayload, CombatClosePayload, CheckPayload))
+            and actor_id != row["pc_actor_id"]
         ):
             if isinstance(payload, MoveActor) and actor_id != payload.actor_id:
                 raise StateMachineError("invalid_actor", "Envelope and payload actors differ")
@@ -164,7 +179,7 @@ class CommandRuntime:
         validate_command(command)
         self.read_session(command.session_id, package, context=context)
         fingerprint = command_fingerprint(command, package, context)
-        if type(command.payload) is CombatIntentPayload:
+        if type(command.payload) in (CombatIntentPayload, CombatClosePayload, CheckPayload):
             import asyncio
 
             try:
