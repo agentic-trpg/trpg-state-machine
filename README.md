@@ -17,6 +17,13 @@ Schema 16 在既有 Observation Work 上保存本地候选 `ob-retention/1`：�
 **既有 `PER-19-22-01` P1 仍未解决，继续是 Global Merge Blocker。**
 本轮不修改 Event-time Evidence / Perception 判断，不实现模型或 Context 管理。
 
+OB-2 / Schema 17 增加本地 `npc-memory-gate/2`：
+`get_npc_memory_gate_input` 固定授权批次，原 `route_npc_observations(..., judgments=...)`
+采用四类结构化候选；错误或不确定不完成 Work。`get_npc_evaluation_eligibility`
+提供持久领域期限：周期 20、最长等待 60、余量 10 tick（TTL 100），合批不重置。
+旧 Gate 输入路径保持显式兼容。没有模型、轮询或执行队列；详见
+[OB-2 Review](docs/reviews/OB2_MEMORY_GATE_REVIEW.md)。
+
 ## 安装与验证
 
 SM-10 已固定 Engine/SRD 候选 `602dcb8d448e670049427bbb751d6ed226005298`
