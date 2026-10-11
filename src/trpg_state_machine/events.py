@@ -1,10 +1,10 @@
 """Committed facts, bounded package effects and one durable delivery outbox."""
 
 import json
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 
 from .errors import StateMachineError
-from .package import Signal, SignalScope
+from .package import Signal, SignalOrigin, SignalScope, SignalStimulus
 
 
 @dataclass(frozen=True, slots=True)
@@ -19,6 +19,80 @@ class CommittedWorldEvent:
 
 
 class EventRuntime:
+    def _event_perception_evidence(self, sid, package, version):
+        """Copy only committed sensory inputs in the existing Event transaction."""
+        actors = [
+            dict(r)
+            for r in self._conn.execute(
+                "SELECT actor_id,kind,current_scene_id FROM actors WHERE session_id=?", (sid,)
+            )
+        ]
+        combat = self._conn.execute(
+            "SELECT scene_id,state_json FROM combats WHERE session_id=?", (sid,)
+        ).fetchone()
+        state = json.loads(combat["state_json"]) if combat else None
+        active = state is not None and not state["ended"]
+        for actor in actors:
+            definition = next((a for a in package.actors if a.actor_id == actor["actor_id"]), None)
+            actor["senses"] = dict(definition.senses) if definition and definition.senses else None
+            stored = self._conn.execute(
+                "SELECT state_json FROM mechanical_actors WHERE session_id=? AND actor_id=?",
+                (sid, actor["actor_id"]),
+            ).fetchone()
+            data = json.loads(stored[0]) if stored else None
+            actor["mechanical"] = (
+                None
+                if data is None
+                else {
+                    "conditions": [c["condition"] for c in data["conditions"]],
+                    "senses": data["senses"],
+                    "traits": data["trait_mechanics"],
+                    "is_alive": data["is_alive"],
+                    "dead_recorded": bool(
+                        state is not None and actor["actor_id"] in state["dead_ids"]
+                    ),
+                    "cell": state["actor_zone"].get(actor["actor_id"])
+                    if active and actor["current_scene_id"] == combat["scene_id"]
+                    else None,
+                }
+            )
+        scenes = {}
+        for row in self._conn.execute(
+            "SELECT scene_id FROM scene_instances WHERE session_id=?", (sid,)
+        ):
+            stored = self._conn.execute(
+                "SELECT state_json FROM mechanical_scenes WHERE session_id=? AND scene_id=?",
+                (sid, row[0]),
+            ).fetchone()
+            scenes[row[0]] = {
+                "grid": json.loads(stored[0])["grid"] if stored else None,
+                "unsupported_effects": bool(
+                    active
+                    and combat["scene_id"] == row[0]
+                    and (
+                        state["persistent_areas"]["areas"]
+                        or state["conditions_by_effect"]
+                        or state["effect_lifecycles"]
+                    )
+                ),
+            }
+        return {
+            "schema": "event-evidence/3",
+            "world_version": version,
+            "game_tick": self._conn.execute(
+                "SELECT game_tick FROM world_states WHERE session_id=?", (sid,)
+            ).fetchone()[0],
+            "ruleset_binding": asdict(package.ruleset_binding),
+            "actors": actors,
+            "scenes": scenes,
+            "objects": {
+                r[0]: r[1]
+                for r in self._conn.execute(
+                    "SELECT object_id,scene_id FROM objects WHERE session_id=?", (sid,)
+                )
+            },
+        }
+
     def _expand_events(self, row, package, events, command_id):
         """Only world effects computable now. No async mechanical commands or scripts."""
         queue = list(events)
@@ -81,10 +155,52 @@ class EventRuntime:
         ).fetchone()
         if row is None:
             raise StateMachineError("event_not_found", "Unknown committed event")
-        signals = tuple(
-            Signal(s["signal_id"], s["channel"], s["content"], SignalScope(**s["scope"]))
-            for s in json.loads(row["signals_json"])
-        )
+        try:
+            data = json.loads(row["signals_json"])
+            if type(data) is not list or any(
+                type(s) is not dict
+                or set(s) - {"signal_id", "channel", "content", "scope", "origin", "stimulus"}
+                for s in data
+            ):
+                raise ValueError("Unknown Signal fields")
+            signals = tuple(
+                Signal(
+                    s["signal_id"],
+                    s["channel"],
+                    s["content"],
+                    SignalScope(**s["scope"]),
+                    SignalOrigin(**s["origin"]) if s.get("origin") is not None else None,
+                    SignalStimulus(**s["stimulus"]) if s.get("stimulus") is not None else None,
+                )
+                for s in data
+            )
+            if any(
+                type(s.signal_id) is not str
+                or type(s.content) is not str
+                or s.scope.kind != "scene"
+                or type(s.scope.scene_id) is not str
+                or s.scope.visibility not in ("clear", "blocked", "undetermined")
+                or s.channel not in ("visual", "auditory")
+                or s.origin is not None
+                and (
+                    s.origin.scene_id != s.scope.scene_id
+                    or any(
+                        v is not None and type(v) is not str
+                        for v in (s.origin.entity_id, s.origin.cell)
+                    )
+                )
+                or s.stimulus is not None
+                and s.stimulus.kind
+                not in (
+                    ("sound",)
+                    if s.channel == "auditory"
+                    else ("ordinary_activity", "light_emission")
+                )
+                for s in signals
+            ) or len({s.signal_id for s in signals}) != len(signals):
+                raise ValueError("Unsupported stored scope/channel")
+        except (KeyError, TypeError, ValueError) as exc:
+            raise StateMachineError("invalid_event", "Unsupported stored Signal schema") from exc
         return CommittedWorldEvent(
             row["event_id"],
             seq,

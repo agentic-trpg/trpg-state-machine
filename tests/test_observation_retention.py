@@ -13,6 +13,7 @@ from threading import Barrier
 
 import pytest
 import yaml
+from perception_support import synthetic_notice
 from test_game_time import tick, tick_command
 from test_migrations import assert_preserved, stored_rows
 from test_npc_evaluation_tasks import create_task, prepare
@@ -168,7 +169,9 @@ def test_reprojection_no_ttl_reset_and_cross_npc_session_authorization(
         advance(sm, sid, ob_package, context, 50)
         before = stored_rows(db)
         for event in sm.read_events(sid, ob_package, context=context):
-            sm.project_event(sid, event.event_seq, ob_package, context=context)
+            sm.project_event(
+                sid, event.event_seq, ob_package, context=context, judgment=synthetic_notice
+            )
         assert stored_rows(db)["npc_observation_work"] == before["npc_observation_work"]
         assert set(ids).isdisjoint(
             x.observation.observation_id
@@ -270,7 +273,9 @@ def test_projection_adoption_failure_atomic_retry(tmp_path, ob_package, context)
             "BEGIN SELECT RAISE(ABORT,'fault'); END"
         )
         with pytest.raises(StateMachineError) as error:
-            sm.project_event(sid, event.event_seq, ob_package, context=context)
+            sm.project_event(
+                sid, event.event_seq, ob_package, context=context, judgment=synthetic_notice
+            )
         assert error.value.code == "storage_error"
         after = stored_rows(db)
         assert {k: v for k, v in after.items() if k != "event_outbox"} == {
@@ -286,7 +291,12 @@ def test_projection_adoption_failure_atomic_retry(tmp_path, ob_package, context)
         }
         assert after["event_outbox"][1] == expected
         sm._conn.execute("DROP TRIGGER inject")
-        assert sm.project_event(sid, event.event_seq, ob_package, context=context) == "resolved"
+        assert (
+            sm.project_event(
+                sid, event.event_seq, ob_package, context=context, judgment=synthetic_notice
+            )
+            == "resolved"
+        )
         assert sm.get_pending_npc_observation_work(sid, ob_package, context=npc)
 
 

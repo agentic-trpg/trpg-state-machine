@@ -14,6 +14,7 @@ from threading import Barrier
 
 import pytest
 import yaml
+from perception_support import synthetic_notice
 from test_mechanics import mechanical_package as mechanical_package
 
 from trpg_state_machine import (
@@ -117,7 +118,10 @@ def test_actual_old_runtime_upgrade_preserves_authority_and_audits_history(
             assert snapshot.character.current_hp == 11
             assert snapshot.rng.position == snapshot.rng.rng_version == 0
             assert sm.perception_cursor(sid, package, context=context) == snapshot.event_seq
-            assert sm.project_event(sid, 1, package, context=context) == "legacy_unavailable"
+            assert (
+                sm.project_event(sid, 1, package, context=context, judgment=synthetic_notice)
+                == "legacy_unavailable"
+            )
         assert sm.resume_session(sessions[0], package, context=context).world_version == 3
         assert sm.resume_session(sessions[1], package, context=context).world_version == 0
         assert (
@@ -138,7 +142,10 @@ def test_actual_old_runtime_upgrade_preserves_authority_and_audits_history(
     for _ in range(2):
         with StateMachine(database) as sm:
             assert (
-                sm.project_event(sessions[0], 1, package, context=context) == "legacy_unavailable"
+                sm.project_event(
+                    sessions[0], 1, package, context=context, judgment=synthetic_notice
+                )
+                == "legacy_unavailable"
             )
         assert stored_rows(database) == audit
 
@@ -217,15 +224,28 @@ def test_legacy_boundary_allows_same_session_new_observations_but_holds_new_gaps
         )
         r1 = sm.submit_command(first, package, context=context)
         r2 = sm.submit_command(second, package, context=context)
-        assert sm.project_event(sid, r2.event_seqs[0], package, context=context) == "resolved"
+        assert (
+            sm.project_event(
+                sid, r2.event_seqs[0], package, context=context, judgment=synthetic_notice
+            )
+            == "resolved"
+        )
         assert sm.read_observations(sid, package, context=npc) == ()
         assert sm.perception_cursor(sid, package, context=context) == boundary
-        assert sm.project_event(sid, r1.event_seqs[0], package, context=context) == "resolved"
+        assert (
+            sm.project_event(
+                sid, r1.event_seqs[0], package, context=context, judgment=synthetic_notice
+            )
+            == "resolved"
+        )
         observations = sm.read_observations(sid, package, context=npc)
         assert len(observations) == 2
         assert sm.perception_cursor(sid, package, context=context) == r2.event_seqs[0]
         assert sm.perception_cursor(other, package, context=context) == 2
-        assert sm.project_event(sid, 1, package, context=context) == "legacy_unavailable"
+        assert (
+            sm.project_event(sid, 1, package, context=context, judgment=synthetic_notice)
+            == "legacy_unavailable"
+        )
         assert (
             sm._conn.execute(
                 "SELECT count(*) FROM perception_results WHERE event_seq<=? AND session_id=?",
@@ -244,7 +264,10 @@ def test_legacy_boundary_allows_same_session_new_observations_but_holds_new_gaps
     with StateMachine(database) as sm:
         assert sm.read_observations(sid, package, context=npc) == observations
         assert (
-            sm.project_event(sid, r1.event_seqs[0], package, context=context) == "already_complete"
+            sm.project_event(
+                sid, r1.event_seqs[0], package, context=context, judgment=synthetic_notice
+            )
+            == "already_complete"
         )
         assert sm._conn.execute("SELECT count(*) FROM npc_inbox").fetchone()[0] == 2
 
@@ -361,7 +384,9 @@ with StateMachine(sys.argv[2]) as sm:
             ).fetchone()[0]
             == 1
         )
-        status = sm.project_event(sid, saved["first"], package, context=context)
+        status = sm.project_event(
+            sid, saved["first"], package, context=context, judgment=synthetic_notice
+        )
         assert status == ("unresolved" if missing_evidence else "resolved")
         if missing_evidence:
             assert sm.perception_cursor(sid, package, context=context) == saved["boundary"]

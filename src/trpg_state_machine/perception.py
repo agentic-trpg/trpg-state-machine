@@ -8,6 +8,12 @@ from .errors import StateMachineError
 from .models import CharacterState
 from .npc_state import KnownFact
 from .package import AdventurePackage, Signal, canonical_json
+from .perception_conditions import (
+    PerceptionOutcome,
+    discover_signals,
+    judge_signal,
+    signal_environment,
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -78,6 +84,7 @@ class JudgmentRequest:
     scene_id: str
     senses: tuple[tuple[str, bool], ...]
     signals: tuple[Signal, ...]
+    evidence: dict | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -114,6 +121,68 @@ def _judge(request, judgment):
             return None
         answers[item.signal_id] = item.perceived
     return answers if set(answers) == set(ids) else None
+
+
+def _evidence_v3(evidence, event, package):
+    if not isinstance(evidence, dict) or set(evidence) != {
+        "schema",
+        "world_version",
+        "game_tick",
+        "ruleset_binding",
+        "actors",
+        "scenes",
+        "objects",
+    }:
+        return False
+    if (
+        evidence["schema"] != "event-evidence/3"
+        or type(evidence["world_version"]) is not int
+        or evidence["world_version"] != event.world_version
+        or type(evidence["game_tick"]) is not int
+        or evidence["game_tick"] < 0
+        or evidence["ruleset_binding"] != asdict(package.ruleset_binding)
+        or type(evidence["actors"]) is not list
+        or type(evidence["scenes"]) is not dict
+        or type(evidence["objects"]) is not dict
+    ):
+        return False
+    ids = set()
+    for actor in evidence["actors"]:
+        if (
+            type(actor) is not dict
+            or set(actor) != {"actor_id", "kind", "current_scene_id", "senses", "mechanical"}
+            or any(type(actor[k]) is not str for k in ("actor_id", "kind", "current_scene_id"))
+        ):
+            return False
+        if actor["actor_id"] in ids:
+            return False
+        ids.add(actor["actor_id"])
+        senses, mechanical = actor["senses"], actor["mechanical"]
+        if senses is not None and (
+            type(senses) is not dict
+            or set(senses) != {"visual", "auditory"}
+            or any(type(v) is not bool for v in senses.values())
+        ):
+            return False
+        if mechanical is not None and (
+            type(mechanical) is not dict
+            or set(mechanical)
+            != {"conditions", "senses", "traits", "cell", "is_alive", "dead_recorded"}
+            or type(mechanical["traits"]) is not list
+            or type(mechanical["conditions"]) is not list
+            or any(type(c) is not str for c in mechanical["conditions"])
+            or type(mechanical["is_alive"]) is not bool
+            or type(mechanical["dead_recorded"]) is not bool
+            or mechanical["cell"] is not None
+            and type(mechanical["cell"]) is not str
+        ):
+            return False
+    return all(
+        type(s) is dict
+        and set(s) == {"grid", "unsupported_effects"}
+        and type(s["unsupported_effects"]) is bool
+        for s in evidence["scenes"].values()
+    )
 
 
 class PerceptionRuntime:
@@ -202,7 +271,10 @@ class PerceptionRuntime:
                 "SELECT evidence_json FROM event_evidence WHERE session_id=? AND event_seq=?",
                 (session_id, event_seq),
             ).fetchone()
-            evidence = json.loads(saved[0]) if saved else None
+            try:
+                evidence = json.loads(saved[0]) if saved else None
+            except (TypeError, ValueError):
+                evidence = None
             self._conn.execute(
                 "UPDATE event_outbox SET attempts=attempts+1 WHERE session_id=? "
                 "AND event_seq=? AND consumer='perception'",
@@ -215,10 +287,19 @@ class PerceptionRuntime:
                     (session_id, event_seq),
                 )
             }
-        if evidence is None or (
-            event.source_command_id == "legacy.unavailable"
-            and evidence.get("schema") != "event-evidence/2"
-        ):
+        # Historical incomplete projections lack mechanical evidence. Never
+        # consult current state or reuse unsafe legacy partial positive answers.
+        # Already completed historical OB/receipts remain immutable audit data.
+        if not _evidence_v3(evidence, event, package):
+            if (
+                isinstance(evidence, dict)
+                and evidence.get("schema") in ("event-evidence/1", "event-evidence/2")
+                and not event.signals
+            ):
+                with self._transaction(write=True):
+                    self._complete_work(session_id, event_seq, "perception")
+                    self._refresh_npc_completion(session_id)
+                return "resolved"
             return "unresolved"
         computed = {}
         for observer in evidence["actors"]:
@@ -227,39 +308,78 @@ class PerceptionRuntime:
             observer_id = observer["actor_id"]
             if observer_id in prior and prior[observer_id][1]:
                 continue
-            decisions = prior.get(observer_id, ({}, False))[0]
-            senses = observer.get("senses")
+            saved = prior.get(observer_id, ({}, False))[0]
+            decisions = (
+                dict(saved.get("answers", {}))
+                if saved.get("schema") == "perception-decisions/2"
+                else {}
+            )
+            reasons = (
+                dict(saved.get("reasons", {}))
+                if saved.get("schema") == "perception-decisions/2"
+                else {}
+            )
+            candidates = {s.signal_id for s in discover_signals(event.signals, observer)}
+            undecidable = []
+            environments = {}
             for signal in event.signals:
                 if signal.signal_id in decisions:
                     continue
-                if (
-                    observer["current_scene_id"] != signal.scope.scene_id
-                    or senses is not None
-                    and not senses[signal.channel]
-                    or signal.scope.visibility == "blocked"
-                ):
+                if signal.signal_id not in candidates:
                     decisions[signal.signal_id] = False
-                elif senses is not None and signal.scope.visibility == "clear":
-                    decisions[signal.signal_id] = True
-            undecidable = tuple(s for s in event.signals if s.signal_id not in decisions)
-            # Unknown senses are missing evidence, not a judgment question or false.
-            if undecidable and senses is not None:
+                    reasons[signal.signal_id] = {
+                        "state": "negative",
+                        "reason": "outside_scene_scope",
+                    }
+                    continue
+                environment = signal_environment(signal, evidence)
+                decision = judge_signal(signal, observer, environment)
+                reasons[signal.signal_id] = {
+                    "state": decision.outcome.value,
+                    "reason": decision.reason,
+                }
+                if decision.outcome != PerceptionOutcome.UNRESOLVED:
+                    decisions[signal.signal_id] = decision.outcome == PerceptionOutcome.POSITIVE
+                elif decision.judgment_allowed:
+                    undecidable.append(signal)
+                    environments[signal.signal_id] = environment
+            if undecidable:
                 answers = _judge(
                     JudgmentRequest(
                         observer_id,
                         event.event_id,
                         observer["current_scene_id"],
-                        tuple(sorted(senses.items())),
-                        undecidable,
+                        tuple(sorted(observer["senses"].items())),
+                        tuple(undecidable),
+                        json.loads(
+                            canonical_json(
+                                {
+                                    "schema": "perception-judgment-evidence/1",
+                                    "observer": observer,
+                                    "environments": environments,
+                                    "reasons": {
+                                        s.signal_id: reasons[s.signal_id] for s in undecidable
+                                    },
+                                    "ruleset_binding": evidence["ruleset_binding"],
+                                    "world_version": evidence["world_version"],
+                                    "game_tick": evidence["game_tick"],
+                                }
+                            )
+                        ),
                     ),
                     judgment,
                 )
                 if answers is not None:
                     decisions.update(answers)
-            computed[observer_id] = decisions
+                    for signal_id, answer in answers.items():
+                        reasons[signal_id] = {
+                            "state": "positive" if answer else "negative",
+                            "reason": "validated_judgment",
+                        }
+            computed[observer_id] = (decisions, reasons)
         with self._transaction(write=True):
             self._session(session_id, package, context)
-            for observer_id, decisions in computed.items():
+            for observer_id, (decisions, reasons) in computed.items():
                 complete = len(decisions) == len(event.signals)
                 existing = self._conn.execute(
                     "SELECT complete FROM perception_results "
@@ -272,7 +392,19 @@ class PerceptionRuntime:
                     "INSERT INTO perception_results VALUES (?, ?, ?, ?, ?) "
                     "ON CONFLICT(session_id,event_seq,observer_id) DO UPDATE SET "
                     "decisions_json=excluded.decisions_json, complete=excluded.complete",
-                    (session_id, event_seq, observer_id, canonical_json(decisions), int(complete)),
+                    (
+                        session_id,
+                        event_seq,
+                        observer_id,
+                        canonical_json(
+                            {
+                                "schema": "perception-decisions/2",
+                                "answers": decisions,
+                                "reasons": reasons,
+                            }
+                        ),
+                        int(complete),
+                    ),
                 )
                 perceived = tuple(
                     PerceivedSignal(s.channel, s.content)

@@ -89,11 +89,25 @@ class SignalScope:
 
 
 @dataclass(frozen=True, slots=True)
+class SignalOrigin:
+    scene_id: str
+    entity_id: str | None = None
+    cell: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class SignalStimulus:
+    kind: Literal["ordinary_activity", "light_emission", "sound"]
+
+
+@dataclass(frozen=True, slots=True)
 class Signal:
     signal_id: str
     channel: str
     content: str
     scope: SignalScope
+    origin: SignalOrigin | None = None
+    stimulus: SignalStimulus | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -652,9 +666,11 @@ def _event_definitions(raw, scenes):
             _fail("unsupported_mechanism", path, "Only closed world effects; no downstream rules")
         signals = []
         for signal_data in _list(event["signals"], path + ".signals"):
-            signal_data = _mapping(
-                signal_data, "signal_id channel content scope", path + ".signals"
-            )
+            fields = "signal_id channel content scope"
+            if isinstance(signal_data, dict):
+                fields += " origin" if "origin" in signal_data else ""
+                fields += " stimulus" if "stimulus" in signal_data else ""
+            signal_data = _mapping(signal_data, fields, path + ".signals")
             scope = _mapping(signal_data["scope"], "kind scene_id visibility", path + ".scope")
             if (
                 scope["kind"] != "scene"
@@ -663,12 +679,50 @@ def _event_definitions(raw, scenes):
                 or signal_data["channel"] not in ("visual", "auditory")
             ):
                 _fail("unsupported_mechanism", path, "Unsupported signal scope/channel")
+            origin = None
+            if "origin" in signal_data:
+                raw = signal_data["origin"]
+                fields = "scene_id"
+                if isinstance(raw, dict):
+                    fields += " entity_id" if "entity_id" in raw else ""
+                    fields += " cell" if "cell" in raw else ""
+                raw = _mapping(raw, fields, path + ".origin")
+                if raw["scene_id"] != scene.scene_id:
+                    _fail("invalid_reference", path, "Signal origin must be in its Scene scope")
+                entity = raw.get("entity_id")
+                if entity is not None:
+                    _reference(
+                        entity, {*scene.actor_ids, *(o.object_id for o in scene.objects)}, path
+                    )
+                cell = raw.get("cell")
+                if cell is not None:
+                    from dnd5e_engine.spatial import canonical_cell_id
+
+                    try:
+                        if type(cell) is not str or canonical_cell_id(cell) != cell:
+                            raise ValueError("Expected canonical grid cell")
+                    except ValueError:
+                        _fail("schema_error", path + ".origin.cell", "Expected canonical grid cell")
+                origin = SignalOrigin(scene.scene_id, entity, cell)
+            stimulus = None
+            if "stimulus" in signal_data:
+                raw = _mapping(signal_data["stimulus"], "kind", path + ".stimulus")
+                allowed = (
+                    ("sound",)
+                    if signal_data["channel"] == "auditory"
+                    else ("ordinary_activity", "light_emission")
+                )
+                if raw["kind"] not in allowed:
+                    _fail("unsupported_mechanism", path + ".stimulus", "Channel/stimulus mismatch")
+                stimulus = SignalStimulus(raw["kind"])
             signals.append(
                 Signal(
                     _identifier(signal_data["signal_id"], path, "signal"),
                     signal_data["channel"],
                     _text(signal_data["content"], path),
                     SignalScope(scene.scene_id, scope["visibility"]),
+                    origin,
+                    stimulus,
                 )
             )
         _unique([s.signal_id for s in signals], path + ".signals")

@@ -13,6 +13,7 @@ import pytest
 from dnd5e_engine.evaluation_contracts import CombatIntentPayload, RuleEvaluationResult
 from dnd_support import NPC, create, initialize
 from modern_support import modern_data, modern_loader, modern_package
+from perception_support import synthetic_notice
 from test_combat_closure import close_command, modern_setup, pc_attack
 from test_dnd_ledger_scope import stored_state
 from test_dnd_npc_availability import npc_command
@@ -159,12 +160,41 @@ def test_complete_real_cross_phase_pipeline_and_new_process(tmp_path, package_da
         assert saved.scenes["scene.platform"].local_flags["flag.lamp_checked"]
         sm.grant_npc_access(sid, NPC, "agent:caretaker", package, context=context)
         for event in sm.read_events(sid, package, context=context):
-            assert sm.project_event(sid, event.event_seq, package, context=context) == "resolved"
+            # The workshop NPC has no mechanical foundation. Its Scene events
+            # cannot complete by asking Host to invent historical senses/state.
+            # The lethal attack's committed evidence records the observer dead;
+            # it cannot reconstruct noticing before death within that command.
+            expected = "unresolved" if event.event_seq in (4, 5, 19) else "resolved"
+            assert (
+                sm.project_event(
+                    sid, event.event_seq, package, context=context, judgment=synthetic_notice
+                )
+                == expected
+            )
         observed = sm.read_observations(
             sid, package, context=NPCContext("agent:caretaker", sid, NPC)
         )
-        contents = [s.content for o in observed for s in o.perceived_signals]
-        assert contents.count("Someone makes an attack.") == 2
+        assert all("attack" not in s.content for o in observed for s in o.perceived_signals)
+        assert sm.perception_cursor(sid, package, context=context) == 3
+        contents = [
+            s["content"]
+            for (raw,) in sm._conn.execute(
+                "SELECT content_json FROM event_observations WHERE session_id=? AND observer_id=?",
+                (sid, NPC),
+            )
+            for s in json.loads(raw)
+        ]  # Later correctly projected records are retained behind the gap.
+        assert contents.count("Someone makes an attack.") == 1
+        lethal = json.loads(
+            sm._conn.execute(
+                "SELECT decisions_json FROM perception_results "
+                "WHERE session_id=? AND event_seq=19 AND observer_id=?",
+                (sid, NPC),
+            ).fetchone()[0]
+        )
+        assert lethal["reasons"]["signal.visible"]["reason"] == (
+            "inactive_observer_requires_temporal_evidence"
+        )
         assert all(
             "roll" not in content.lower() and "xp" not in content.lower() for content in contents
         )

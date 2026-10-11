@@ -14,8 +14,8 @@ Schema 16 在既有 Observation Work 上保存本地候选 `ob-retention/1`：�
 多来源/历史 Meta、任务、回执或 Cursor。详细候选策略及验收见
 [OB-1 Review](docs/reviews/OB1_OBSERVATION_RETENTION_REVIEW.md)。
 
-**既有 `PER-19-22-01` P1 仍未解决，继续是 Global Merge Blocker。**
-本轮不修改 Event-time Evidence / Perception 判断，不实现模型或 Context 管理。
+OB 批次交付时保留了 `PER-19-22-01` P1；该阶段的原始审计记录仍保留。
+后续 SM-PER-1 的修复与存档限制见下节，不实现模型或 Context 管理。
 
 OB-2 / Schema 17 增加本地 `npc-memory-gate/2`：
 `get_npc_memory_gate_input` 固定授权批次，原 `route_npc_observations(..., judgments=...)`
@@ -31,6 +31,26 @@ OB-3 / Schema 18 通过原 `route_npc_observations(..., classification="eligible
 `get_npc_evaluation_recovery_input` 获取；`get_npc_observation_expiry` 提供下一次
 Invocation 的元数据同步。均不操作模型、Context/KV 或 ACK；详见
 [OB-3 Review](docs/reviews/OB3_EVA_LIFECYCLE_REVIEW.md)。
+
+## SM-PER-1：事件时感知条件树
+
+新 Signal 在四个既有字段之外支持受限 `origin`（Scene、可选实体/格子）和
+`stimulus`（普通视觉活动、自身发光现象、一般声音）。旧 Package 仍可加载，Digest
+算法不变；只在新事件提交时绑定明确默认值，不回填历史 Signal。
+`event-evidence/3` 与事件/Outbox 同事务保存感官、Conditions、Grid、可用空间证据
+和规则绑定。SQLite 表结构仍为 Schema 18。Scope Discovery 与独立的 Visual /
+Auditory 三态条件树分开，内部 reason code 随判断持久化。
+
+条件树复用安装版 Engine 的 `GridTopology.can_see()`、LoS / Cover 和
+`conditions_auto_fail_check()`；`clear` 与机械可见都不直接等于实际察觉。
+确定性阻断返回 Negative，信息或规则不足保持 Unresolved，Positive 仅来自既有
+受限 Judgment 结果采用，不宣称 Engine 已提供自动察觉能力。没有真实 JEV 或新
+模型接口、感知检定、距离公式、声学传播、半径 Scope 或其他 Channel。
+
+`PER-19-22-01` 的新事件错误 Positive 已转为真实 SQLite 黑暗场景回归。
+旧版未完成事件缺少机械证据时保持 Unresolved，不用当前环境重建过去；此前已经
+提交的 Observation / Meta / Receipt 不静默改写，旧存档可能仍需独立审计及受控恢复。
+测试证据、具体条件与剩余限制见 [SM-PER-1 Review](docs/reviews/SM_PER1_REVIEW.md)。
 
 ## 安装与验证
 

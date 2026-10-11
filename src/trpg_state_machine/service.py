@@ -48,7 +48,9 @@ from .package import (
     AdventurePackage,
     RulesetBinding,
     Signal,
+    SignalOrigin,
     SignalScope,
+    SignalStimulus,
     _creation_fingerprint,
     canonical_json,
 )
@@ -533,21 +535,7 @@ class StateMachine(
         seq = self._conn.execute(
             "SELECT event_seq FROM sessions WHERE session_id = ?", (session_id,)
         ).fetchone()[0]
-        evidence = {
-            "schema": "event-evidence/2",
-            "actors": [
-                dict(actor)
-                for actor in self._conn.execute(
-                    "SELECT actor_id, kind, current_scene_id FROM actors WHERE session_id=?",
-                    (session_id,),
-                ).fetchall()
-            ],
-        }
-        for actor in evidence["actors"]:
-            definition = next((a for a in package.actors if a.actor_id == actor["actor_id"]), None)
-            actor["senses"] = (
-                dict(definition.senses) if definition and definition.senses is not None else None
-            )
+        evidence = self._event_perception_evidence(session_id, package, version)
         for event_type, payload in events:
             seq += 1
             self._conn.execute(
@@ -597,6 +585,24 @@ class StateMachine(
                     if e.event_definition_id == payload["event_definition_id"]
                 )
                 signals = list(definition.signals)
+            # Backward-compatible authored Signals acquire explicit objective
+            # defaults at NEW commit only. Historical JSON is never backfilled.
+            signals = [
+                replace(
+                    signal,
+                    origin=signal.origin
+                    or SignalOrigin(
+                        signal.scope.scene_id,
+                        payload.get("actor_id", payload.get("object_id"))
+                        or payload.get("engine_event", {}).get("actor_id"),
+                    ),
+                    stimulus=signal.stimulus
+                    or SignalStimulus(
+                        "sound" if signal.channel == "auditory" else "ordinary_activity"
+                    ),
+                )
+                for signal in signals
+            ]
             self._conn.execute(
                 "INSERT INTO event_records VALUES (?, ?, ?, ?, ?)",
                 (

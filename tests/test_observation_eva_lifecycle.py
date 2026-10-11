@@ -12,6 +12,7 @@ from pathlib import Path
 from threading import Barrier
 
 import pytest
+from perception_support import synthetic_notice
 from test_memory_gate import classify
 from test_migrations import assert_preserved, stored_rows
 from test_npc_evaluation_tasks import create_task, prepare
@@ -120,7 +121,9 @@ def test_new_urgent_during_task_never_expands_input_or_completion_scope(
             context=context,
         )
         for event in sm.read_events(sid, ob_package, context=context):
-            sm.project_event(sid, event.event_seq, ob_package, context=context)
+            sm.project_event(
+                sid, event.event_seq, ob_package, context=context, judgment=synthetic_notice
+            )
         data, _, _ = classify(sm, sid, ob_package, npc, "urgent", "during")
         later_ids = {x.observation.observation_id for x in data.observations}
         assert later_ids.isdisjoint(ids)

@@ -7,6 +7,7 @@ from dataclasses import asdict, replace
 
 import pytest
 import yaml
+from perception_support import synthetic_notice
 from test_commands import make_command
 from test_events import create_request, event_data
 
@@ -86,7 +87,7 @@ def npc_context(created, observer="npc.caretaker"):
     return NPCContext("agent:" + observer, created.session_id, observer)
 
 
-def project_prefix(sm, sid, package, context, judgment=None):
+def project_prefix(sm, sid, package, context, judgment=synthetic_notice):
     events = sm.read_events(sid, package, context=context)
     return [
         sm.project_event(sid, event.event_seq, package, context=context, judgment=judgment)
@@ -115,7 +116,9 @@ def test_two_observers_multiple_signals_and_restart(
         assert len(lamp) == len(chime) == 1
         assert len(lamp[0].perceived_signals) == 2 and len(chime[0].perceived_signals) == 1
         assert (
-            sm.project_event(created.session_id, seq, package, context=context)
+            sm.project_event(
+                created.session_id, seq, package, context=context, judgment=synthetic_notice
+            )
             == "already_complete"
         )
         assert sm.perception_cursor(created.session_id, package, context=context) == seq
@@ -350,7 +353,13 @@ def test_projection_inbox_failure_atomic_and_retry(
             "BEGIN SELECT RAISE(ABORT, 'fault'); END"
         )
         with pytest.raises(StateMachineError):
-            sm.project_event(created.session_id, seq, perception_package, context=context)
+            sm.project_event(
+                created.session_id,
+                seq,
+                perception_package,
+                context=context,
+                judgment=synthetic_notice,
+            )
         assert (
             sm._conn.execute(
                 "SELECT COUNT(*) FROM perception_results WHERE event_seq=?", (seq,)
@@ -365,7 +374,13 @@ def test_projection_inbox_failure_atomic_and_retry(
         )
         sm._conn.execute("DROP TRIGGER fail_inbox")
         assert (
-            sm.project_event(created.session_id, seq, perception_package, context=context)
+            sm.project_event(
+                created.session_id,
+                seq,
+                perception_package,
+                context=context,
+                judgment=synthetic_notice,
+            )
             == "resolved"
         )
 
@@ -373,8 +388,18 @@ def test_projection_inbox_failure_atomic_and_retry(
 def test_unknown_senses_and_legacy_evidence_not_false(tmp_path, package, context, request_for):
     with StateMachine(tmp_path / "state.db") as sm:
         created = sm.create_session(request_for(), package, context=context)
-        assert sm.project_event(created.session_id, 1, package, context=context) == "resolved"
-        assert sm.project_event(created.session_id, 2, package, context=context) == "unresolved"
+        assert (
+            sm.project_event(
+                created.session_id, 1, package, context=context, judgment=synthetic_notice
+            )
+            == "resolved"
+        )
+        assert (
+            sm.project_event(
+                created.session_id, 2, package, context=context, judgment=synthetic_notice
+            )
+            == "unresolved"
+        )
         sm.grant_npc_access(
             created.session_id, "npc.caretaker", "agent:npc.caretaker", package, context=context
         )
@@ -383,7 +408,12 @@ def test_unknown_senses_and_legacy_evidence_not_false(tmp_path, package, context
             == "unresolved"
         )
         sm._conn.execute("DELETE FROM event_evidence WHERE event_seq=2")
-        assert sm.project_event(created.session_id, 2, package, context=context) == "unresolved"
+        assert (
+            sm.project_event(
+                created.session_id, 2, package, context=context, judgment=synthetic_notice
+            )
+            == "unresolved"
+        )
         assert sm.perception_cursor(created.session_id, package, context=context) == 1
 
 
@@ -394,7 +424,13 @@ def test_concurrent_projection_deduplicates(tmp_path, perception_package, contex
 
     def project(_):
         with StateMachine(database) as sm:
-            return sm.project_event(created.session_id, seq, perception_package, context=context)
+            return sm.project_event(
+                created.session_id,
+                seq,
+                perception_package,
+                context=context,
+                judgment=synthetic_notice,
+            )
 
     with ThreadPoolExecutor(max_workers=2) as executor:
         assert set(executor.map(project, (1, 2))) <= {"resolved", "already_complete"}
@@ -482,7 +518,13 @@ def test_hidden_flag_activity_does_not_reveal_actor(
             make_command(sm, created, package, context), package, context=context
         )
         assert (
-            sm.project_event(created.session_id, receipt.event_seqs[0], package, context=context)
+            sm.project_event(
+                created.session_id,
+                receipt.event_seqs[0],
+                package,
+                context=context,
+                judgment=synthetic_notice,
+            )
             == "resolved"
         )
         assert (
@@ -546,7 +588,9 @@ def test_event_sequence_types(tmp_path, package, context, request_for, seq):
     with StateMachine(tmp_path / "state.db") as sm:
         created = sm.create_session(request_for(), package, context=context)
         with pytest.raises(StateMachineError) as error:
-            sm.project_event(created.session_id, seq, package, context=context)
+            sm.project_event(
+                created.session_id, seq, package, context=context, judgment=synthetic_notice
+            )
         assert error.value.code == "invalid_event"
         with pytest.raises(StateMachineError) as error:
             sm.deliver_event(

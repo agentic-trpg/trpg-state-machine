@@ -14,6 +14,7 @@ from threading import Barrier
 
 import pytest
 import yaml
+from perception_support import synthetic_notice
 from test_events import event_data
 from test_migrations import assert_preserved, stored_rows
 from test_npc_state import SOURCE, enter, grant, request
@@ -51,7 +52,12 @@ def prepare(sm, package, context, key="create.eval"):
         context=context,
     )
     for event in sm.read_events(sid, package, context=context):
-        assert sm.project_event(sid, event.event_seq, package, context=context) == "resolved"
+        assert (
+            sm.project_event(
+                sid, event.event_seq, package, context=context, judgment=synthetic_notice
+            )
+            == "resolved"
+        )
     observations = sm.read_observations(sid, package, context=npc)
     assert observations
     return sid, npc, tuple(o.observation_id for o in observations)

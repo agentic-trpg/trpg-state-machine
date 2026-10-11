@@ -15,6 +15,7 @@ from threading import Barrier
 
 import pytest
 import yaml
+from perception_support import synthetic_notice
 from test_migrations import assert_preserved, historical_database, stored_rows
 
 from trpg_state_machine import (
@@ -277,7 +278,9 @@ def test_view_does_not_ack_observations_or_grant_command_control(tmp_path, npc_p
         sid = sm.create_session(request(npc_package, owner), npc_package, context=owner).session_id
         nc = grant(sm, sid, npc_package, owner)
         for event in sm.read_events(sid, npc_package, context=owner):
-            sm.project_event(sid, event.event_seq, npc_package, context=owner)
+            sm.project_event(
+                sid, event.event_seq, npc_package, context=owner, judgment=synthetic_notice
+            )
         inbox = sm.read_observations(sid, npc_package, context=nc)
         assert inbox
         before = stored_rows(database)

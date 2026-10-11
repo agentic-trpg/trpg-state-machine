@@ -12,6 +12,7 @@ from pathlib import Path
 from threading import Barrier
 
 import pytest
+from perception_support import synthetic_notice
 from test_migrations import assert_preserved, stored_rows
 from test_npc_evaluation_tasks import create_task, prepare
 from test_npc_evaluation_tasks import evaluation_package as evaluation_package
@@ -362,10 +363,12 @@ def test_real_projection_then_cognition_gaps_cannot_advance_continuous_cursor(
             context=context,
         )
         end = sm.read_events(sid, evaluation_package, context=context)[-1].event_seq
-        sm.project_event(sid, end, evaluation_package, context=context)
+        sm.project_event(sid, end, evaluation_package, context=context, judgment=synthetic_notice)
         assert sm.perception_cursor(sid, evaluation_package, context=context) == prefix
         assert sm.npc_completed_cursor(sid, evaluation_package, context=npc) == prefix
-        sm.project_event(sid, end - 1, evaluation_package, context=context)
+        sm.project_event(
+            sid, end - 1, evaluation_package, context=context, judgment=synthetic_notice
+        )
         fresh = [
             o.observation_id
             for o in sm.read_observations(sid, evaluation_package, context=npc)
@@ -688,7 +691,9 @@ def test_mode_switch_keeps_committed_action_and_cancelled_late_result_cannot_com
         ).command_receipt
         saved = sm.read_session(sid, evaluation_package, context=context)
         for event in sm.read_events(sid, evaluation_package, context=context):
-            sm.project_event(sid, event.event_seq, evaluation_package, context=context)
+            sm.project_event(
+                sid, event.event_seq, evaluation_package, context=context, judgment=synthetic_notice
+            )
         pending = sm.route_npc_observations(
             sid, evaluation_package, context=npc, request_id="next"
         ).task

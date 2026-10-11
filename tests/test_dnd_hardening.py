@@ -14,6 +14,7 @@ from dnd5e_engine.evaluation_contracts import CombatIntentPayload, PreflightChoi
 from dnd5e_engine.evaluation_state import CombatSnapshot, NonCombatSnapshot
 from dnd_support import NPC, loader
 from dnd_support import package_data as dnd_package_data
+from perception_support import synthetic_notice
 from pydantic import ValidationError
 from test_dnd_npc_availability import npc_command
 from test_dnd_runtime import attack, authority, setup
@@ -52,18 +53,36 @@ def test_real_vertical_pipeline_committed_observations_fresh_process_audit(
         rng = sm.read_rng_context(sid, package, context=context)
         delivered = []
         for event in sm.read_events(sid, package, context=context):
-            assert sm.project_event(sid, event.event_seq, package, context=context) == "resolved"
+            # The original /1 package has no noncombat mechanical state at its
+            # entry event. That history must remain unknown, even with a callback.
+            expected = "unresolved" if event.event_seq == 2 else "resolved"
+            assert (
+                sm.project_event(
+                    sid, event.event_seq, package, context=context, judgment=synthetic_notice
+                )
+                == expected
+            )
             assert sm.deliver_event(
                 sid, event.event_seq, package, context=context, sink=delivered.append
             )
-        assert sm.delivery_cursor(sid, package, context=context) == sm.perception_cursor(
-            sid, package, context=context
+        assert (
+            sm.delivery_cursor(sid, package, context=context)
+            > sm.perception_cursor(sid, package, context=context)
+            == 1
         )
-        assert sm._conn.execute("SELECT count(*) FROM event_outbox WHERE done=0").fetchone()[0] == 0
-        observations = sm.read_observations(
-            sid, package, context=NPCContext("agent:lantern", sid, NPC)
+        assert (
+            sm._conn.execute("SELECT event_seq FROM event_outbox WHERE done=0").fetchall()[0][0]
+            == 2
         )
-        contents = [[s.content for s in o.perceived_signals] for o in observations]
+        assert (
+            sm.read_observations(sid, package, context=NPCContext("agent:lantern", sid, NPC)) == ()
+        )  # Correctly projected later records cannot cross the old gap.
+        contents = [
+            [s["content"] for s in json.loads(r[0])]
+            for r in sm._conn.execute(
+                "SELECT content_json FROM event_observations WHERE observer_id=?", (NPC,)
+            )
+        ]
         assert sum(c == ["Someone makes an attack."] for c in contents) == 2
         public = json.dumps(contents)
         for hidden in ("damage_applied", "hp_current", "rng", "roll_total", "weapon_id"):
@@ -78,8 +97,7 @@ def test_real_vertical_pipeline_committed_observations_fresh_process_audit(
         assert sm.submit_command(bad, package, context=context).status == "rejected"
         assert sm._conn.execute("SELECT count(*) FROM events").fetchone()[0] == event_count
         assert (
-            sm.read_observations(sid, package, context=NPCContext("agent:lantern", sid, NPC))
-            == observations
+            sm.read_observations(sid, package, context=NPCContext("agent:lantern", sid, NPC)) == ()
         )
         with pytest.raises(StateMachineError) as caught:
             sm.save_session(sid, package, context=context)
@@ -107,8 +125,14 @@ def test_real_vertical_pipeline_committed_observations_fresh_process_audit(
     assert actual["rng"] == json.loads(rng.model_dump_json())
     assert actual["receipt"] == npc.command_id
     assert actual["failures"] == ["combat_unrestorable"] * 3
-    assert actual["observations"] == contents and not actual["new_receipt"]
+    assert actual["observations"] == [] and not actual["new_receipt"]
     with sqlite3.connect(tmp_path / "dnd.db") as db:
+        assert [
+            [s["content"] for s in json.loads(r[0])]
+            for r in db.execute(
+                "SELECT content_json FROM event_observations WHERE observer_id=?", (NPC,)
+            )
+        ] == contents
         assert (
             db.execute("SELECT world_version FROM sessions WHERE session_id=?", (sid,)).fetchone()[
                 0

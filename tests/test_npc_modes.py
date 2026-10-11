@@ -8,6 +8,7 @@ from dataclasses import asdict, replace
 from threading import Barrier
 
 import pytest
+from perception_support import synthetic_notice
 from test_migrations import stored_rows
 from test_npc_evaluation_tasks import create_task, prepare
 from test_npc_evaluation_tasks import evaluation_package as evaluation_package
@@ -27,7 +28,9 @@ def new_observation(sm, sid, package, context, destination="scene.workshop"):
         context=context,
     )
     for event in sm.read_events(sid, package, context=context):
-        assert sm.project_event(sid, event.event_seq, package, context=context) in (
+        assert sm.project_event(
+            sid, event.event_seq, package, context=context, judgment=synthetic_notice
+        ) in (
             "resolved",
             "already_complete",
         )
