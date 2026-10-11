@@ -368,7 +368,9 @@ class DndRuntime:
                 try:
                     self._apply_dnd_changes(row, changes)
                     events = [
-                        (
+                        self._capture_event(
+                            command.session_id,
+                            package,
                             "rules.check_rolled"
                             if type(command.payload) is CheckPayload
                             else "combat.engine_event",
@@ -395,6 +397,8 @@ class DndRuntime:
                                 "scene_id": snapshot.scene_state.scene_id,
                                 "engine_event": event.model_dump(mode="json"),
                             },
+                            phase="engine.intermediate_phase_unavailable",
+                            unresolved=True,
                         )
                         for event in result.proposed_events
                     ]

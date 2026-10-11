@@ -162,9 +162,14 @@ def test_complete_real_cross_phase_pipeline_and_new_process(tmp_path, package_da
         for event in sm.read_events(sid, package, context=context):
             # The workshop NPC has no mechanical foundation. Its Scene events
             # cannot complete by asking Host to invent historical senses/state.
-            # The lethal attack's committed evidence records the observer dead;
-            # it cannot reconstruct noticing before death within that command.
-            expected = "unresolved" if event.event_seq in (4, 5, 19) else "resolved"
+            # Engine Results expose no intermediate attack stages, for either
+            # nonlethal or lethal attacks. Final state cannot supply that history.
+            expected = (
+                "unresolved"
+                if event.event_seq in (4, 5)
+                or (event.event_type == "combat.engine_event" and event.signals)
+                else "resolved"
+            )
             assert (
                 sm.project_event(
                     sid, event.event_seq, package, context=context, judgment=synthetic_notice
@@ -184,17 +189,31 @@ def test_complete_real_cross_phase_pipeline_and_new_process(tmp_path, package_da
             )
             for s in json.loads(raw)
         ]  # Later correctly projected records are retained behind the gap.
-        assert contents.count("Someone makes an attack.") == 1
-        lethal = json.loads(
-            sm._conn.execute(
-                "SELECT decisions_json FROM perception_results "
-                "WHERE session_id=? AND event_seq=19 AND observer_id=?",
-                (sid, NPC),
-            ).fetchone()[0]
-        )
-        assert lethal["reasons"]["signal.visible"]["reason"] == (
-            "inactive_observer_requires_temporal_evidence"
-        )
+        assert "Someone makes an attack." not in contents
+        attack_events = [
+            e
+            for e in sm.read_events(sid, package, context=context)
+            if e.event_type == "combat.engine_event" and e.signals
+        ]
+        assert len(attack_events) == 2
+        for event in attack_events:
+            evidence = json.loads(
+                sm._conn.execute(
+                    "SELECT evidence_json FROM event_evidence WHERE session_id=? AND event_seq=?",
+                    (sid, event.event_seq),
+                ).fetchone()[0]
+            )
+            assert evidence["phase"] == {
+                "status": "unresolved",
+                "code": "engine.intermediate_phase_unavailable",
+            }
+            assert (
+                sm._conn.execute(
+                    "SELECT 1 FROM perception_results WHERE session_id=? AND event_seq=?",
+                    (sid, event.event_seq),
+                ).fetchone()
+                is None
+            )
         assert all(
             "roll" not in content.lower() and "xp" not in content.lower() for content in contents
         )

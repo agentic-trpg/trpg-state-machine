@@ -61,11 +61,20 @@ def signal_environment(signal, evidence):
     if origin is None or origin.scene_id not in evidence.get("scenes", {}):
         return None
     environment = dict(evidence["scenes"][origin.scene_id])
-    source = next((a for a in evidence["actors"] if a["actor_id"] == origin.entity_id), None)
+    source = next(
+        (
+            a
+            for a in [*evidence["actors"], *evidence.get("source_actors", [])]
+            if a["actor_id"] == origin.entity_id
+        ),
+        None,
+    )
+    obj = evidence.get("objects", {}).get(origin.entity_id)
     valid = (
         origin.entity_id is None
         or (source is not None and source["current_scene_id"] == origin.scene_id)
-        or evidence.get("objects", {}).get(origin.entity_id) == origin.scene_id
+        or isinstance(obj, dict)
+        and obj.get("scene_id") == origin.scene_id
     )
     state = source.get("mechanical") if source else None
     cell = state.get("cell") if state else None

@@ -168,8 +168,17 @@ def test_event_time_location_survives_npc_move(tmp_path, perception_package, con
                 "SELECT complete FROM perception_results WHERE event_seq=? "
                 "AND observer_id='npc.attendant'",
                 (seq,),
+            ).fetchone()
+            is None
+        )
+        evidence = json.loads(
+            sm._conn.execute(
+                "SELECT evidence_json FROM event_evidence WHERE event_seq=?", (seq,)
             ).fetchone()[0]
-            == 1
+        )
+        assert evidence["discovery"]["complete"] is True
+        assert all(
+            "npc.attendant" not in ids for ids in evidence["discovery"]["by_signal"].values()
         )
         view = sm.get_scene_view(created.session_id, package, context=npc_context(created))
         assert isinstance(view, CurrentPerceptualView) and view.scene_id == "scene.workshop"

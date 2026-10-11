@@ -37,7 +37,7 @@ Invocation 的元数据同步。均不操作模型、Context/KV 或 ACK；详见
 新 Signal 在四个既有字段之外支持受限 `origin`（Scene、可选实体/格子）和
 `stimulus`（普通视觉活动、自身发光现象、一般声音）。旧 Package 仍可加载，Digest
 算法不变；只在新事件提交时绑定明确默认值，不回填历史 Signal。
-`event-evidence/3` 与事件/Outbox 同事务保存感官、Conditions、Grid、可用空间证据
+SM-PER-1 的 `event-evidence/3` 与事件/Outbox 同事务保存感官、Conditions、Grid、可用空间证据
 和规则绑定。SQLite 表结构仍为 Schema 18。Scope Discovery 与独立的 Visual /
 Auditory 三态条件树分开，内部 reason code 随判断持久化。
 
@@ -51,6 +51,31 @@ Auditory 三态条件树分开，内部 reason code 随判断持久化。
 旧版未完成事件缺少机械证据时保持 Unresolved，不用当前环境重建过去；此前已经
 提交的 Observation / Meta / Receipt 不静默改写，旧存档可能仍需独立审计及受控恢复。
 测试证据、具体条件与剩余限制见 [SM-PER-1 Review](docs/reviews/SM_PER1_REVIEW.md)。
+
+## Batch B：Event-local / Signal-scoped Evidence
+
+新事件使用本地版本 `event-evidence/4`。Producer 先构造实际 Signals，再按各 Signal
+的 Scene Scope 完整发现候选 NPC，冻结该阶段的必要证据；最终写入函数只分配事件
+身份和持久化，不再读取 Command 结束态作为历史。Scene 退出在移动前、进入在到达后、
+对象/NPC 修改在自身修改后、Package 事件在对应效果后采集。Clock、Schedule 和
+Combat 初始化目前没有 Signals，保存明确的空范围。Dialogue 在实际发布点采集。
+
+Evidence 保存逐 Signal 候选关系、完整性标记、候选 NPC 并集及独立的必要来源实体和
+Scene 环境；不复制无关 NPC、Scene 或对象。来源 Actor 可为 PC；来源 NPC 同时为候选
+时复用同一记录。Package 的不同 Signal 可引用不同的已声明 Scene，仍只支持 Scene
+Scope，Origin 的实体引用须属于其 Signal Scene。未实例化的 Scope Scene 保持
+`missing_scope_scene`，不能视为空候选或事后补证据。Signal Schema / Digest 算法不变。
+
+固定 Engine 的 Result 只有最终 Delta 和有序事件，没有逐事件阶段状态；具有 Signals
+的 Engine 事件明确记录 `engine.intermediate_phase_unavailable` 并保持 Unresolved，
+不交 Judgment 猜测机械历史。合成 Evaluator 的无阶段 ProposedEvents 同样保守处理。
+世界效果自身仍在实际执行点取证。没有实现 Action Started 或新的 Engine 阶段协议。
+
+SQLite 仍为 Schema 18，无 DDL 迁移。历史 `/1`～`/3` 已完成的 OB、Meta、Receipt
+不改写；未完成的非空 Signal 事件无法证明阶段时保持 Unresolved，已知旧版本的空
+Signal 可完成。现有历史边界和连续 Cursor 规则不变，因此这些缺口仍可能阻塞后续
+Observation 交付。黑暗场景修复与 Visual/Auditory 判断继续有效，机械可见不自动生成 OB。
+实现、真实 SQLite 测试及未覆盖阶段见 [Batch B Review](docs/reviews/SM_PER2_REVIEW.md)。
 
 ## 安装与验证
 

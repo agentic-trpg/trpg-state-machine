@@ -123,7 +123,7 @@ def _judge(request, judgment):
     return answers if set(answers) == set(ids) else None
 
 
-def _evidence_v3(evidence, event, package):
+def _evidence_v4(evidence, event, package):
     if not isinstance(evidence, dict) or set(evidence) != {
         "schema",
         "world_version",
@@ -132,10 +132,13 @@ def _evidence_v3(evidence, event, package):
         "actors",
         "scenes",
         "objects",
+        "source_actors",
+        "phase",
+        "discovery",
     }:
         return False
     if (
-        evidence["schema"] != "event-evidence/3"
+        evidence["schema"] != "event-evidence/4"
         or type(evidence["world_version"]) is not int
         or evidence["world_version"] != event.world_version
         or type(evidence["game_tick"]) is not int
@@ -144,10 +147,25 @@ def _evidence_v3(evidence, event, package):
         or type(evidence["actors"]) is not list
         or type(evidence["scenes"]) is not dict
         or type(evidence["objects"]) is not dict
+        or type(evidence["source_actors"]) is not list
+    ):
+        return False
+    phase, discovery = evidence["phase"], evidence["discovery"]
+    if (
+        type(phase) is not dict
+        or set(phase) != {"status", "code"}
+        or phase["status"] != "captured"
+        or type(phase["code"]) is not str
+        or type(discovery) is not dict
+        or set(discovery) != {"complete", "by_signal", "reason"}
+        or discovery["complete"] is not True
+        or discovery["reason"] is not None
+        or type(discovery["by_signal"]) is not dict
+        or set(discovery["by_signal"]) != {s.signal_id for s in event.signals}
     ):
         return False
     ids = set()
-    for actor in evidence["actors"]:
+    for actor in [*evidence["actors"], *evidence["source_actors"]]:
         if (
             type(actor) is not dict
             or set(actor) != {"actor_id", "kind", "current_scene_id", "senses", "mechanical"}
@@ -177,11 +195,45 @@ def _evidence_v3(evidence, event, package):
             and type(mechanical["cell"]) is not str
         ):
             return False
-    return all(
+    if not all(
         type(s) is dict
         and set(s) == {"grid", "unsupported_effects"}
         and type(s["unsupported_effects"]) is bool
         for s in evidence["scenes"].values()
+    ):
+        return False
+    if any(a["kind"] != "npc" for a in evidence["actors"]):
+        return False
+    candidates = set()
+    for signal in event.signals:
+        discovered = discovery["by_signal"][signal.signal_id]
+        expected = {
+            a["actor_id"] for a in evidence["actors"] if signal in discover_signals((signal,), a)
+        }
+        if (
+            type(discovered) is not list
+            or any(type(i) is not str for i in discovered)
+            or len(set(discovered)) != len(discovered)
+            or set(discovered) != expected
+        ):
+            return False
+        candidates.update(discovered)
+    if candidates != {a["actor_id"] for a in evidence["actors"]} or set(evidence["scenes"]) != {
+        s.scope.scene_id for s in event.signals
+    }:
+        return False
+    origins = {s.origin.entity_id for s in event.signals if s.origin and s.origin.entity_id}
+    if (
+        not {a["actor_id"] for a in evidence["source_actors"]} <= origins
+        or not set(evidence["objects"]) <= origins
+    ):
+        return False
+    return all(
+        type(o) is dict
+        and set(o) == {"scene_id", "state"}
+        and type(o["scene_id"]) is str
+        and o["state"] in ("closed", "open")
+        for o in evidence["objects"].values()
     )
 
 
@@ -290,10 +342,11 @@ class PerceptionRuntime:
         # Historical incomplete projections lack mechanical evidence. Never
         # consult current state or reuse unsafe legacy partial positive answers.
         # Already completed historical OB/receipts remain immutable audit data.
-        if not _evidence_v3(evidence, event, package):
+        if not _evidence_v4(evidence, event, package):
             if (
                 isinstance(evidence, dict)
-                and evidence.get("schema") in ("event-evidence/1", "event-evidence/2")
+                and evidence.get("schema")
+                in ("event-evidence/1", "event-evidence/2", "event-evidence/3")
                 and not event.signals
             ):
                 with self._transaction(write=True):
@@ -319,7 +372,11 @@ class PerceptionRuntime:
                 if saved.get("schema") == "perception-decisions/2"
                 else {}
             )
-            candidates = {s.signal_id for s in discover_signals(event.signals, observer)}
+            candidates = {
+                signal_id
+                for signal_id, ids in evidence["discovery"]["by_signal"].items()
+                if observer_id in ids
+            }
             undecidable = []
             environments = {}
             for signal in event.signals:

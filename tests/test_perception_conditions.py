@@ -295,7 +295,7 @@ def test_per_19_22_01_dark_scene_no_false_positive_sqlite_restart(tmp_path, cont
         evidence = json.loads(
             conn.execute("SELECT evidence_json FROM event_evidence WHERE event_seq=3").fetchone()[0]
         )
-        assert evidence["schema"] == "event-evidence/3"
+        assert evidence["schema"] == "event-evidence/4"
         assert evidence["scenes"]["scene.platform"]["grid"]["default_lighting"] == "dark"
         pending = conn.execute(
             "SELECT event_seq FROM event_outbox WHERE consumer='perception' "

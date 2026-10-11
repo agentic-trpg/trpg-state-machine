@@ -200,7 +200,15 @@ class MechanicalRuntime:
                 try:
                     events, changed = self._apply_delta(row, package, result.delta)
                     events.extend(
-                        (event.event_type, event.payload) for event in result.proposed_events
+                        self._capture_event(
+                            command.session_id,
+                            package,
+                            event.event_type,
+                            event.payload,
+                            phase="synthetic.intermediate_phase_unavailable",
+                            unresolved=True,
+                        )
+                        for event in result.proposed_events
                     )
                     events = self._expand_events(row, package, events, command.command_id)
                     if not changed:

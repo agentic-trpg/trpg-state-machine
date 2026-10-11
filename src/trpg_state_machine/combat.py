@@ -372,7 +372,15 @@ class CombatRuntime:
             "position=0,state_json=? WHERE session_id=? AND algorithm='unselected'",
             (rng.model_dump_json(), sid),
         )
-        return [("combat.initialized", {"scene_id": snapshot.scene_state.scene_id})]
+        return [
+            self._capture_event(
+                sid,
+                package,
+                "combat.initialized",
+                {"scene_id": snapshot.scene_state.scene_id},
+                phase="combat.after_initialization",
+            )
+        ]
 
     def _combat_snapshot(self, row):
         sid = row["session_id"]

@@ -285,7 +285,9 @@ class CommandRuntime:
                     events = self._expand_events(row, package, events, command.command_id)
                     if type(command.payload) is not InitializeCombat:
                         events.extend(
-                            sync_npc_schedules(self, command.session_id, command.command_id)
+                            sync_npc_schedules(
+                                self, command.session_id, command.command_id, package
+                            )
                         )
                         if len(events) > 32:
                             raise StateMachineError(

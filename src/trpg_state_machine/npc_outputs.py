@@ -268,7 +268,9 @@ class NPCOutputRuntime:
                     row["session_id"],
                     session["world_version"],
                     [
-                        (
+                        self._capture_event(
+                            row["session_id"],
+                            package,
                             "npc.dialogue_published",
                             {
                                 "scene_id": scene,
@@ -276,6 +278,8 @@ class NPCOutputRuntime:
                                 "text": dialogue.text,
                                 "audience_ids": sorted(audience),
                             },
+                            phase="dialogue.at_publication",
+                            source_actor_id=row["npc_id"],
                         )
                     ],
                     source_command_id=f"dialogue.{row['evaluation_id']}.{row['ordinal']}",
