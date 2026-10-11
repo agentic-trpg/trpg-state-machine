@@ -4,6 +4,19 @@ Batch 1 实现了一个可运行的本地闭环：**验证原创合成 Adventure
 
 State Machine 是全部已实现可变游戏状态的唯一权威拥有者和提交者。Package 是不可变模板；返回的 Snapshot 是独立副本，修改副本不会写入数据库。已接入固定候选 SHA 的真实 D&D 基础攻击及受限胜利/TPK 关闭，同时保留隔离的合成测试路径；没有第二份运行态权威。正常关闭后可以保存并在新进程恢复；活跃战斗跨进程精确续玩仍不支持。
 
+## NPC Observation Lifecycle（OB-1）
+
+Schema 16 在既有 Observation Work 上保存本地候选 `ob-retention/1`：首次持久接纳后
+100 个权威游戏 tick 内为 Recent；旧数据时间未知，不补造历史。Pending/Completed
+与 Recent/Expired 独立，Completed 在期限内仍可读取。`get_recent_npc_observations`、
+`get_pending_npc_observation_work`、`get_npc_observation_retention` 复用 NPC 授权；
+原 `read_observations` 保持返回类型并只提供 Recent。过期只影响投影，不删除证据、
+多来源/历史 Meta、任务、回执或 Cursor。详细候选策略及验收见
+[OB-1 Review](docs/reviews/OB1_OBSERVATION_RETENTION_REVIEW.md)。Gate/EVA 集成属后续 Batch。
+
+**既有 `PER-19-22-01` P1 仍未解决，继续是 Global Merge Blocker。**
+本轮不修改 Event-time Evidence / Perception 判断，不实现模型或 Context 管理。
+
 ## 安装与验证
 
 SM-10 已固定 Engine/SRD 候选 `602dcb8d448e670049427bbb751d6ed226005298`
