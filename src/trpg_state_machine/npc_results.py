@@ -130,7 +130,7 @@ def _result_json(result):
 class NPCResultRuntime:
     def _validate_meta(self, row, result):
         sid, npc = row["session_id"], row["npc_id"]
-        observations = set(self._task(row).source_observation_ids)
+        observations = self._meta_observation_scope(row)
         approved = []
         goals = {
             (r[0], r[1])

@@ -7,6 +7,45 @@ from dataclasses import asdict, dataclass
 from .errors import StateMachineError
 from .npc_evaluation import NPCEvaluationTask, _text
 from .package import canonical_json
+from .perception import EventObservation, PerceivedSignal
+
+
+@dataclass(frozen=True, slots=True)
+class MemoryGateJudgment:
+    work_id: str
+    classification: str
+
+
+@dataclass(frozen=True, slots=True)
+class MemoryGateObservation:
+    work_id: str
+    observation: EventObservation
+    accepted_game_tick: int
+    expires_game_tick: int
+    eligible_game_tick: int
+    latest_start_game_tick: int
+
+
+@dataclass(frozen=True, slots=True)
+class MemoryGateInput:
+    schema_version: str
+    session_id: str
+    npc_id: str
+    request_id: str
+    mode: str
+    observations: tuple[MemoryGateObservation, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class NPCWorkEligibility:
+    work_id: str
+    observation_id: str
+    classification: str
+    eligible_game_tick: int | None
+    latest_start_game_tick: int | None
+    retention_status: str
+    reason: str
+    occupied: bool
 
 
 @dataclass(frozen=True, slots=True)
@@ -23,11 +62,285 @@ class NPCObservationRoute:
 
 
 class NPCModeRuntime:
+    def get_npc_memory_gate_input(
+        self, session_id, package, *, context, request_id, observation_work_ids=None
+    ):
+        """Authorize classification over an exact persisted subset; no model invocation."""
+        _text(request_id, 128)
+        if observation_work_ids is not None and (
+            type(observation_work_ids) is not tuple
+            or not 1 <= len(observation_work_ids) <= 100
+            or any(type(w) is not str for w in observation_work_ids)
+            or len(set(observation_work_ids)) != len(observation_work_ids)
+        ):
+            raise StateMachineError("invalid_gate", "Expected a unique bounded Work scope")
+        for wid in observation_work_ids or ():
+            try:
+                _text(wid, 128)
+            except StateMachineError as exc:
+                raise StateMachineError("invalid_gate", "Invalid Work identity") from exc
+        with self._transaction(write=True):
+            self._evaluation_actor(session_id, package, context)
+            key = (session_id, context.observer_id, context.principal_id, request_id)
+            saved = self._conn.execute(
+                "SELECT * FROM npc_routing_requests WHERE session_id=? AND npc_id=? "
+                "AND principal_id=? AND request_id=?",
+                key,
+            ).fetchone()
+            if saved:
+                if saved["classification"] != "memory_gate":
+                    raise StateMachineError("idempotency_conflict", "Gate request key already used")
+                data = json.loads(saved["response_json"])
+                if data["requested_scope"] != (
+                    list(observation_work_ids) if observation_work_ids is not None else None
+                ):
+                    raise StateMachineError("idempotency_conflict", "Gate scope changed")
+                current = {
+                    r["work_id"]: r for r in self._observation_rows(session_id, context.observer_id)
+                }
+                if any(
+                    item["work_id"] not in current
+                    or self._retention(current[item["work_id"]]).retention_status != "recent"
+                    for item in data["input"]["observations"]
+                ):
+                    raise StateMachineError("stale_gate", "Expired input needs Work recovery")
+                return self._memory_gate_input(data["input"])
+            rows = self._observation_rows(session_id, context.observer_id)
+            available = {
+                r["work_id"]: r
+                for r in rows
+                if r["status"] == "pending"
+                and self._retention(r).retention_status == "recent"
+                and not self._work_occupied(r["work_id"])
+            }
+            scope = (
+                observation_work_ids if observation_work_ids is not None else tuple(available)[:100]
+            )
+            if not scope or any(w not in available for w in scope):
+                raise StateMachineError("invalid_gate", "Work is unavailable, expired or occupied")
+            selected = [r for r in rows if r["work_id"] in scope]
+            data = MemoryGateInput(
+                "npc-memory-gate/2",
+                session_id,
+                context.observer_id,
+                request_id,
+                self._mode(session_id, context.observer_id),
+                tuple(
+                    MemoryGateObservation(
+                        r["work_id"],
+                        self._observation(r),
+                        r["accepted_game_tick"],
+                        r["expires_game_tick"],
+                        r["eligible_game_tick"],
+                        r["latest_start_game_tick"],
+                    )
+                    for r in selected
+                ),
+            )
+            raw = canonical_json(
+                {
+                    "input": asdict(data),
+                    "requested_scope": observation_work_ids,
+                    "fingerprint": None,
+                    "result": None,
+                }
+            )
+            if len(raw) > 131072:
+                raise StateMachineError("invalid_gate", "Gate batch exceeds local size limit")
+            self._conn.execute(
+                "INSERT INTO npc_routing_requests VALUES (?,?,?,?,?,?)", (*key, "memory_gate", raw)
+            )
+            return data
+
+    def _memory_gate_input(self, data):
+        items = []
+        for item in data["observations"]:
+            observation = item["observation"]
+            observation["perceived_signals"] = tuple(
+                PerceivedSignal(**s) for s in observation["perceived_signals"]
+            )
+            item["observation"] = EventObservation(**observation)
+            items.append(MemoryGateObservation(**item))
+        data["observations"] = tuple(items)
+        return MemoryGateInput(**data)
+
+    def _work_occupied(self, work_id):
+        return (
+            self._conn.execute(
+                "SELECT 1 FROM npc_evaluation_observations o JOIN npc_evaluation_tasks t "
+                "USING(evaluation_id) WHERE o.work_id=? AND t.status='running'",
+                (work_id,),
+            ).fetchone()
+            is not None
+        )
+
+    def _eligible_npc_work(self, sid, npc):
+        occupied = (
+            self._conn.execute(
+                "SELECT 1 FROM npc_evaluation_tasks WHERE session_id=? AND npc_id=? "
+                "AND status='running'",
+                (sid, npc),
+            ).fetchone()
+            is not None
+        )
+        result = []
+        for row in self._observation_rows(sid, npc):
+            if row["status"] != "pending":
+                continue
+            retention = self._retention(row).retention_status
+            due = row["eligible_game_tick"]
+            if due is not None and row["game_tick"] < due:
+                continue
+            classification = row["gate_classification"] or "unclassified"
+            reason = (
+                "recovery"
+                if retention != "recent"
+                else "urgent"
+                if classification == "urgent"
+                else "maximum_wait"
+                if row["game_tick"] >= row["latest_start_game_tick"]
+                else "periodic"
+            )
+            result.append(
+                NPCWorkEligibility(
+                    row["work_id"],
+                    row["observation_id"],
+                    classification,
+                    due,
+                    row["latest_start_game_tick"],
+                    retention,
+                    reason,
+                    occupied,
+                )
+            )
+        return tuple(
+            sorted(
+                result,
+                key=lambda w: (
+                    w.classification != "urgent",
+                    w.latest_start_game_tick or -1,
+                    w.eligible_game_tick or -1,
+                    w.work_id,
+                ),
+            )
+        )
+
+    def get_npc_evaluation_eligibility(self, session_id, package, *, context):
+        """Domain eligibility only; Host discovers tasks, SM has no polling worker."""
+        with self._transaction():
+            npc = self._npc_authorized(session_id, package, context)
+            return self._eligible_npc_work(session_id, npc)
+
+    def _adopt_memory_gate(self, sid, package, context, request_id, judgments):
+        self._evaluation_actor(sid, package, context)
+        key = (sid, context.observer_id, context.principal_id, request_id)
+        saved = self._conn.execute(
+            "SELECT * FROM npc_routing_requests WHERE session_id=? AND npc_id=? "
+            "AND principal_id=? AND request_id=?",
+            key,
+        ).fetchone()
+        if saved is None or saved["classification"] != "memory_gate":
+            raise StateMachineError("invalid_gate", "No authorized Memory Gate scope")
+        data = json.loads(saved["response_json"])
+        scope = {r["work_id"] for r in data["input"]["observations"]}
+        if type(judgments) is not tuple or len(judgments) != len(scope):
+            raise StateMachineError("invalid_gate", "Every requested Work needs one judgment")
+        answers = {}
+        for judgment in judgments:
+            if (
+                type(judgment) is not MemoryGateJudgment
+                or type(judgment.work_id) is not str
+                or judgment.work_id not in scope
+                or judgment.work_id in answers
+                or type(judgment.classification) is not str
+                or judgment.classification not in ("urgent", "deferred", "irrelevant", "uncertain")
+            ):
+                raise StateMachineError("invalid_gate", "Invalid, duplicate or unknown Gate item")
+            answers[judgment.work_id] = judgment.classification
+        fingerprint = hashlib.sha256(canonical_json(answers).encode()).hexdigest()
+        if data["fingerprint"]:
+            if data["fingerprint"] != fingerprint:
+                raise StateMachineError("idempotency_conflict", "Gate judgments changed")
+            return NPCObservationRoute(
+                data["result"]["status"], None, tuple(data["result"]["observation_work_ids"])
+            )
+        rows = {r["work_id"]: r for r in self._observation_rows(sid, context.observer_id)}
+        for wid in scope:
+            row = rows.get(wid)
+            if (
+                row is None
+                or row["status"] != "pending"
+                or self._work_occupied(wid)
+                or self._retention(row).retention_status != "recent"
+            ):
+                raise StateMachineError("stale_gate", "Work is no longer classifiable")
+        for wid, classification in answers.items():
+            row = rows[wid]
+            self._conn.execute(
+                "UPDATE npc_observation_work SET gate_classification=?,eligible_game_tick=? "
+                "WHERE work_id=?",
+                (
+                    classification,
+                    min(row["eligible_game_tick"], row["game_tick"])
+                    if classification == "urgent"
+                    else row["eligible_game_tick"],
+                    wid,
+                ),
+            )
+            if classification == "irrelevant":
+                self._conn.execute(
+                    "INSERT INTO npc_gate_decisions VALUES (?,?,'npc-gate/1','no_op')",
+                    (wid, context.principal_id),
+                )
+                self._conn.execute(
+                    "UPDATE npc_observation_work SET status='completed',"
+                    "disposition='no_op' WHERE work_id=?",
+                    (wid,),
+                )
+        self._refresh_npc_completion(sid)
+        result = NPCObservationRoute(
+            "classified", None, tuple(r["work_id"] for r in data["input"]["observations"])
+        )
+        data.update(fingerprint=fingerprint, judgments=answers, result=asdict(result))
+        self._conn.execute(
+            "UPDATE npc_routing_requests SET response_json=? WHERE session_id=? "
+            "AND npc_id=? AND principal_id=? AND request_id=?",
+            (canonical_json(data), *key),
+        )
+        return result
+
     def _mode(self, sid, npc):
         row = self._conn.execute(
             "SELECT mode FROM npc_modes WHERE session_id=? AND npc_id=?", (sid, npc)
         ).fetchone()
         return row[0] if row else "inactive"
+
+    def _route_eligible_observations(self, sid, package, context, request_id):
+        actor = self._evaluation_actor(sid, package, context)
+        due = self._eligible_npc_work(sid, context.observer_id)
+        if due and due[0].occupied:
+            return NPCObservationRoute("queued", None, tuple(w.work_id for w in due))
+        if not due:
+            return NPCObservationRoute("no_eligible_work", None, ())
+        selected = {w.work_id for w in due[:100]}
+        # Priority chooses the bounded set; original committed order determines
+        # Task's immutable Work ordering, completion and evidence provenance.
+        works = [
+            r for r in self._observation_rows(sid, context.observer_id) if r["work_id"] in selected
+        ]
+        interactive = self._mode(sid, context.observer_id) == "interactive"
+        task = self._create_evaluation(
+            sid,
+            package,
+            context=context,
+            request_id=request_id,
+            mode="interactive" if interactive else "background",
+            reason="observation_eligibility",
+            expected_npc_state_version=actor["npc_state_version"],
+            source_observation_ids=tuple(r["observation_id"] for r in works),
+            gate_authorized=not interactive,
+        )
+        return NPCObservationRoute("evaluation", task, task.observation_work_ids)
 
     def _set_mode(self, sid, npc, mode):
         self._conn.execute(
@@ -143,14 +456,27 @@ class NPCModeRuntime:
             )
 
     def route_npc_observations(
-        self, session_id, package, *, context, request_id, classification="uncertain"
+        self,
+        session_id,
+        package,
+        *,
+        context,
+        request_id,
+        classification="uncertain",
+        judgments=None,
     ):
         _text(request_id, 128)
+        if judgments is not None:
+            if classification != "uncertain":
+                raise StateMachineError("invalid_gate", "Cannot mix legacy and Memory Gate inputs")
+            with self._transaction(write=True):
+                return self._adopt_memory_gate(session_id, package, context, request_id, judgments)
         if type(classification) is not str or classification not in (
             "safe_retention",
             "no_op",
             "background",
             "uncertain",
+            "eligible",
         ):
             raise StateMachineError("invalid_gate", "Unknown classification; evidence retained")
         with self._transaction(write=True):
@@ -199,9 +525,12 @@ class NPCModeRuntime:
             "no_op",
             "background",
             "uncertain",
+            "eligible",
         ):
             raise StateMachineError("invalid_gate", "Unknown classification; evidence retained")
         actor = self._evaluation_actor(session_id, package, context)
+        if classification == "eligible":
+            return self._route_eligible_observations(session_id, package, context, request_id)
         npc = context.observer_id
         # Request replay is independent of newly arrived Work and NPC version.
         prior = self._conn.execute(

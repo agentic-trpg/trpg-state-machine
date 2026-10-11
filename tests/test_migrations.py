@@ -98,7 +98,7 @@ def assert_preserved(database, original):
         for table, (columns, rows) in original.items():
             after = set(conn.execute(f"SELECT {','.join(columns)} FROM {table}").fetchall())
             assert rows <= after, table
-        assert conn.execute("PRAGMA user_version").fetchone()[0] == 15
+        assert conn.execute("PRAGMA user_version").fetchone()[0] == 18
         assert conn.execute("PRAGMA integrity_check").fetchone()[0] == "ok"
         assert conn.execute("PRAGMA foreign_key_check").fetchall() == []
 
@@ -282,7 +282,7 @@ def test_concurrent_initialization_and_upgrade(tmp_path, version, monkeypatch):
             )
 
     with ThreadPoolExecutor(max_workers=4) as workers:
-        assert list(workers.map(open_runtime, range(4))) == [(15, 1, "wal")] * 4
+        assert list(workers.map(open_runtime, range(4))) == [(18, 1, "wal")] * 4
     assert len(version_reads) >= 4 and all(version_reads)
     monkeypatch.undo()
     assert_preserved(database, original)
@@ -376,9 +376,14 @@ with StateMachine(sys.argv[2]) as sm:
             )
         else:
             assert sm.perception_cursor(sid, package, context=context) == saved["later"]
-            assert len(sm.read_observations(sid, package, context=npc)) == 1
+            # The old Observation is still visible behind the correct watermark,
+            # but has no recoverable game-time lifetime, so is not Recent.
+            assert sm.read_observations(sid, package, context=npc) == ()
+            retained = sm.get_pending_npc_observation_work(sid, package, context=npc)
+            assert len(retained) == 1 and retained[0].retention_status == "legacy_unknown"
     with StateMachine(database) as sm:
-        assert len(sm.read_observations(sid, package, context=npc)) == (
+        assert sm.read_observations(sid, package, context=npc) == ()
+        assert len(sm.get_pending_npc_observation_work(sid, package, context=npc)) == (
             0 if missing_evidence else 1
         )
 

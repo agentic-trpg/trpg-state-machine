@@ -121,7 +121,7 @@ def test_complete_manual_result_vertical_slice_and_fresh_process_resume(
     assert resumed.returncode == 0, resumed.stderr
     assert json.loads(resumed.stdout) == executed
     with sqlite3.connect(db) as conn:
-        assert conn.execute("PRAGMA user_version").fetchone()[0] == 15
+        assert conn.execute("PRAGMA user_version").fetchone()[0] == 18
         assert conn.execute("PRAGMA foreign_key_check").fetchall() == []
         assert conn.execute("SELECT COUNT(*) FROM npc_evaluation_receipts").fetchone()[0] == 1
         assert (
@@ -579,7 +579,20 @@ with StateMachine(sys.argv[2]) as sm:
         task = sm.get_npc_evaluation_task(eid, evaluation_package, context=npc).task
         assert task.status == ("running" if version == 11 else "completed")
         if version == 11:
-            assert stored_rows(db)["npc_observation_work"] == original_work
+            columns, rows = original_work
+            assert {
+                tuple(r)
+                for r in sm._conn.execute(
+                    f"SELECT {','.join(columns)} FROM npc_observation_work"
+                ).fetchall()
+            } == rows
+            assert (
+                sm._conn.execute(
+                    "SELECT 1 FROM npc_observation_work WHERE accepted_game_tick IS NOT NULL "
+                    "OR expires_game_tick IS NOT NULL"
+                ).fetchone()
+                is None
+            )
             assert sm.npc_completed_cursor(
                 sid, evaluation_package, context=npc
             ) < sm.perception_cursor(sid, evaluation_package, context=context)
