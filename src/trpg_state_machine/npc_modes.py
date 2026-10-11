@@ -315,6 +315,33 @@ class NPCModeRuntime:
         ).fetchone()
         return row[0] if row else "inactive"
 
+    def _route_eligible_observations(self, sid, package, context, request_id):
+        actor = self._evaluation_actor(sid, package, context)
+        due = self._eligible_npc_work(sid, context.observer_id)
+        if due and due[0].occupied:
+            return NPCObservationRoute("queued", None, tuple(w.work_id for w in due))
+        if not due:
+            return NPCObservationRoute("no_eligible_work", None, ())
+        selected = {w.work_id for w in due[:100]}
+        # Priority chooses the bounded set; original committed order determines
+        # Task's immutable Work ordering, completion and evidence provenance.
+        works = [
+            r for r in self._observation_rows(sid, context.observer_id) if r["work_id"] in selected
+        ]
+        interactive = self._mode(sid, context.observer_id) == "interactive"
+        task = self._create_evaluation(
+            sid,
+            package,
+            context=context,
+            request_id=request_id,
+            mode="interactive" if interactive else "background",
+            reason="observation_eligibility",
+            expected_npc_state_version=actor["npc_state_version"],
+            source_observation_ids=tuple(r["observation_id"] for r in works),
+            gate_authorized=not interactive,
+        )
+        return NPCObservationRoute("evaluation", task, task.observation_work_ids)
+
     def _set_mode(self, sid, npc, mode):
         self._conn.execute(
             "INSERT INTO npc_modes VALUES (?,?,?) ON CONFLICT(session_id,npc_id) "
@@ -449,6 +476,7 @@ class NPCModeRuntime:
             "no_op",
             "background",
             "uncertain",
+            "eligible",
         ):
             raise StateMachineError("invalid_gate", "Unknown classification; evidence retained")
         with self._transaction(write=True):
@@ -497,9 +525,12 @@ class NPCModeRuntime:
             "no_op",
             "background",
             "uncertain",
+            "eligible",
         ):
             raise StateMachineError("invalid_gate", "Unknown classification; evidence retained")
         actor = self._evaluation_actor(session_id, package, context)
+        if classification == "eligible":
+            return self._route_eligible_observations(session_id, package, context, request_id)
         npc = context.observer_id
         # Request replay is independent of newly arrived Work and NPC version.
         prior = self._conn.execute(

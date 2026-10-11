@@ -4,7 +4,7 @@ Batch 1 实现了一个可运行的本地闭环：**验证原创合成 Adventure
 
 State Machine 是全部已实现可变游戏状态的唯一权威拥有者和提交者。Package 是不可变模板；返回的 Snapshot 是独立副本，修改副本不会写入数据库。已接入固定候选 SHA 的真实 D&D 基础攻击及受限胜利/TPK 关闭，同时保留隔离的合成测试路径；没有第二份运行态权威。正常关闭后可以保存并在新进程恢复；活跃战斗跨进程精确续玩仍不支持。
 
-## NPC Observation Lifecycle（OB-1）
+## NPC Observation Lifecycle（OB-1～OB-3）
 
 Schema 16 在既有 Observation Work 上保存本地候选 `ob-retention/1`：首次持久接纳后
 100 个权威游戏 tick 内为 Recent；旧数据时间未知，不补造历史。Pending/Completed
@@ -12,7 +12,7 @@ Schema 16 在既有 Observation Work 上保存本地候选 `ob-retention/1`：�
 `get_pending_npc_observation_work`、`get_npc_observation_retention` 复用 NPC 授权；
 原 `read_observations` 保持返回类型并只提供 Recent。过期只影响投影，不删除证据、
 多来源/历史 Meta、任务、回执或 Cursor。详细候选策略及验收见
-[OB-1 Review](docs/reviews/OB1_OBSERVATION_RETENTION_REVIEW.md)。Gate/EVA 集成属后续 Batch。
+[OB-1 Review](docs/reviews/OB1_OBSERVATION_RETENTION_REVIEW.md)。
 
 **既有 `PER-19-22-01` P1 仍未解决，继续是 Global Merge Blocker。**
 本轮不修改 Event-time Evidence / Perception 判断，不实现模型或 Context 管理。
@@ -23,6 +23,14 @@ OB-2 / Schema 17 增加本地 `npc-memory-gate/2`：
 提供持久领域期限：周期 20、最长等待 60、余量 10 tick（TTL 100），合批不重置。
 旧 Gate 输入路径保持显式兼容。没有模型、轮询或执行队列；详见
 [OB-2 Review](docs/reviews/OB2_MEMORY_GATE_REVIEW.md)。
+
+OB-3 / Schema 18 通过原 `route_npc_observations(..., classification="eligible")`
+按当前模式授权单一 EVA，固定 Task 的 Recent 来源范围，保持 Pending 完成范围独立。
+`NPCEvaluationInput.recent_observations` 包括仍有效的 Completed 背景；Meta 引用需同时
+符合 Task 授权与提交时有效性。过期 Pending 只可通过显式
+`get_npc_evaluation_recovery_input` 获取；`get_npc_observation_expiry` 提供下一次
+Invocation 的元数据同步。均不操作模型、Context/KV 或 ACK；详见
+[OB-3 Review](docs/reviews/OB3_EVA_LIFECYCLE_REVIEW.md)。
 
 ## 安装与验证
 

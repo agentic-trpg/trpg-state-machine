@@ -1,14 +1,14 @@
 """Local npc-evaluation/1 durable authorization; no model runtime or ACK."""
 
 import hashlib
-import json
 from dataclasses import dataclass
 from uuid import uuid4
 
 from .errors import StateMachineError
 from .npc_state import NPCView
+from .observation_lifecycle import RecentObservation
 from .package import canonical_json
-from .perception import EventObservation, NPCContext, PerceivedSignal
+from .perception import EventObservation, NPCContext
 
 
 @dataclass(frozen=True, slots=True)
@@ -34,6 +34,7 @@ class NPCEvaluationInput:
     task: NPCEvaluationTask
     npc_meta: NPCView
     observations: tuple[EventObservation, ...]
+    recent_observations: tuple[RecentObservation, ...] = ()
 
 
 def _text(value, maximum=4096):
@@ -230,6 +231,13 @@ class NPCEvaluationRuntime:
             "INSERT INTO npc_evaluation_observations VALUES (?,?,?)",
             [(eid, i, wid) for i, wid in enumerate(works)],
         )
+        self._conn.executemany(
+            "INSERT INTO npc_evaluation_recent_scope VALUES (?,?,?,?)",
+            [
+                (eid, sid, context.observer_id, item.observation.observation_id)
+                for item in self._recent_observations(sid, context.observer_id)
+            ],
+        )
         return self._task(
             self._conn.execute(
                 "SELECT * FROM npc_evaluation_tasks WHERE evaluation_id=?", (eid,)
@@ -241,24 +249,58 @@ class NPCEvaluationRuntime:
             row = self._evaluation_row(evaluation_id, package, context)
             task = self._task(row)
             meta = self._npc_view(row["session_id"], row["npc_id"], package, context=context)
+            recent = self._task_recent_observations(row)
+            # Existing field continues to describe Task Work, now only valid OB.
+            # Expired/unknown Work content is available through explicit recovery.
+            current = {
+                r["observation_id"]: r
+                for r in self._observation_rows(row["session_id"], row["npc_id"])
+            }
             observations = tuple(
-                EventObservation(
-                    oid,
-                    row["npc_id"],
-                    tuple(
-                        PerceivedSignal(**s)
-                        for s in json.loads(
-                            self._conn.execute(
-                                "SELECT content_json FROM event_observations WHERE "
-                                "observation_id=?",
-                                (oid,),
-                            ).fetchone()[0]
-                        )
-                    ),
-                )
+                self._observation(current[oid])
                 for oid in task.source_observation_ids
+                if oid in current and self._retention(current[oid]).retention_status == "recent"
             )
-            return NPCEvaluationInput(task, meta, observations)
+            return NPCEvaluationInput(task, meta, observations, recent)
+
+    def _task_recent_observations(self, row):
+        authorized = {
+            r[0]
+            for r in self._conn.execute(
+                "SELECT observation_id FROM npc_evaluation_recent_scope WHERE evaluation_id=?",
+                (row["evaluation_id"],),
+            )
+        }
+        return tuple(
+            item
+            for item in self._recent_observations(row["session_id"], row["npc_id"])
+            if item.observation.observation_id in authorized
+        )
+
+    def _meta_observation_scope(self, row):
+        # Original Work grants survive TTL for safe in-flight/recovery processing.
+        # Completed background OB requires both immutable Task grant and validity now.
+        return set(self._task(row).source_observation_ids) | {
+            item.observation.observation_id for item in self._task_recent_observations(row)
+        }
+
+    def get_npc_evaluation_recovery_input(self, evaluation_id, package, *, context):
+        """Explicit, own active Task's expired/unknown Pending evidence; never Recent."""
+        with self._transaction():
+            row = self._evaluation_row(evaluation_id, package, context)
+            if row["status"] != "running":
+                raise StateMachineError("evaluation_inactive", "Recovery requires a valid Task")
+            actor = self._evaluation_actor(row["session_id"], package, context)
+            if actor["npc_state_version"] != row["expected_npc_state_version"]:
+                raise StateMachineError("npc_version_conflict", "Task version is no longer current")
+            scope = set(self._task(row).source_observation_ids)
+            return tuple(
+                RecentObservation(self._observation(item), self._retention(item))
+                for item in self._observation_rows(row["session_id"], row["npc_id"])
+                if item["observation_id"] in scope
+                and item["status"] == "pending"
+                and self._retention(item).retention_status != "recent"
+            )
 
     def list_npc_evaluation_tasks(self, session_id, package, *, context):
         with self._transaction():

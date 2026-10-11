@@ -7,6 +7,7 @@ candidate does not freeze the architecture's OPEN TTL policy or invent event tim
 import json
 from dataclasses import dataclass
 
+from .errors import StateMachineError
 from .perception import EventObservation, PerceivedSignal
 
 
@@ -106,3 +107,28 @@ class ObservationLifecycleRuntime:
             for item in self.get_npc_observation_retention(session_id, package, context=context)
             if item.processing_status == "pending"
         )
+
+    def get_npc_observation_expiry(self, session_id, package, *, context, observation_ids=None):
+        """Idempotent metadata query for Host's next invocation; no Context/ACK writes."""
+        if observation_ids is not None and (
+            type(observation_ids) is not tuple
+            or len(observation_ids) > 1000
+            or any(type(oid) is not str for oid in observation_ids)
+            or len(set(observation_ids)) != len(observation_ids)
+        ):
+            raise StateMachineError("invalid_observation", "Expected a bounded unique OB scope")
+        with self._transaction():
+            npc = self._npc_authorized(session_id, package, context)
+            retained = tuple(self._retention(r) for r in self._observation_rows(session_id, npc))
+            if observation_ids is not None and not set(observation_ids) <= {
+                r.observation_id for r in retained
+            }:
+                raise StateMachineError(
+                    "invalid_observation", "OB is outside authorized visible scope"
+                )
+            return tuple(
+                r
+                for r in retained
+                if r.retention_status != "recent"
+                and (observation_ids is None or r.observation_id in observation_ids)
+            )
