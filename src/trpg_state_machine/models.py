@@ -17,6 +17,7 @@ class TrustedContext:
     player_id: str
     controlled_npc_ids: tuple[str, ...] = ()
     can_adjudicate_checks: bool = False
+    can_advance_time: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -50,6 +51,7 @@ class CreationResult:
 @dataclass(frozen=True, slots=True)
 class WorldState:
     flags: dict[str, bool]
+    game_tick: int = 0
 
 
 @dataclass(frozen=True, slots=True)

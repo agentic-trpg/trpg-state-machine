@@ -12,10 +12,12 @@ from pydantic import ValidationError
 from ._operations import EnterScene, MoveActor, ObjectState, SetObjectState, SetSceneFlag
 from .combat import InitializeCombat
 from .errors import StateMachineError
+from .game_time import AdvanceGameTime, sync_npc_schedules
 from .mechanics import RuleOperation
 from .package import canonical_json
 
 OPERATIONS = {
+    "world.advance_time": AdvanceGameTime,
     "rules.check": CheckPayload,
     "combat.close": CombatClosePayload,
     "combat.intent": CombatIntentPayload,
@@ -54,6 +56,7 @@ class TypedCommand:
         | CombatIntentPayload
         | CombatClosePayload
         | CheckPayload
+        | AdvanceGameTime
     )
     expected_world_version: int
     schema_version: str = "sm-command/1"
@@ -125,6 +128,14 @@ def validate_command(command: TypedCommand) -> None:
     operation_type = OPERATIONS.get(command.command_type)
     if operation_type is None or type(command.payload) is not operation_type:
         raise StateMachineError("unsupported_operation", "Unknown command or payload type")
+    if type(command.payload) is AdvanceGameTime:
+        if any(
+            type(v) is not int or not 0 <= v <= 2147483647 for v in asdict(command.payload).values()
+        ):
+            raise StateMachineError("invalid_operation", "Expected bounded abstract game ticks")
+        if command.payload.next_tick < command.payload.expected_tick:
+            raise StateMachineError("invalid_operation", "Game time cannot move backwards")
+        return
     if type(command.payload) in (CombatIntentPayload, CombatClosePayload, CheckPayload):
         try:
             type(command.payload).model_validate(deepcopy(command.payload))
@@ -183,6 +194,8 @@ def command_fingerprint(command, package, context):
 
 class CommandRuntime:
     def _authorize_command(self, row, actor_id, payload, context):
+        if type(payload) is AdvanceGameTime and not context.can_advance_time:
+            raise StateMachineError("unauthorized", "Trusted game-time grant required")
         if isinstance(payload, CheckPayload) and not context.can_adjudicate_checks:
             raise StateMachineError("unauthorized", "Trusted GM adjudication grant required")
         if isinstance(payload, MoveActor) or (
@@ -203,7 +216,7 @@ class CommandRuntime:
             raise StateMachineError("invalid_actor", "Command requires the selected PC")
 
     def _world_operation_capability(self, row, payload):
-        if isinstance(payload, (EnterScene, MoveActor, SetObjectState)):
+        if isinstance(payload, (EnterScene, MoveActor, SetObjectState, AdvanceGameTime)):
             combat = self._conn.execute(
                 "SELECT state_json FROM combats WHERE session_id=?", (row["session_id"],)
             ).fetchone()
@@ -270,6 +283,14 @@ class CommandRuntime:
                         else self._operate(row, package, command.payload)
                     )
                     events = self._expand_events(row, package, events, command.command_id)
+                    if type(command.payload) is not InitializeCombat:
+                        events.extend(
+                            sync_npc_schedules(self, command.session_id, command.command_id)
+                        )
+                        if len(events) > 32:
+                            raise StateMachineError(
+                                "event_cascade_limit", "Bounded schedule cascade exceeded"
+                            )
                     if events:
                         version += 1
                         self._conn.execute(

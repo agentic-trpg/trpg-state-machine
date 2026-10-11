@@ -82,6 +82,15 @@ class NPCRuntimeState:
 
 
 @dataclass(frozen=True, slots=True)
+class NPCScheduleRun:
+    schedule_id: str
+    status: Literal["active", "completed", "interrupted", "missed"]
+    started_tick: int | None
+    finished_tick: int | None
+    updated_tick: int
+
+
+@dataclass(frozen=True, slots=True)
 class WorldFactDefinition:
     fact_id: str
     text: str
@@ -127,6 +136,7 @@ class NPCView:
     goals: tuple[Goal, ...]
     plans: tuple[Plan, ...]
     runtime: NPCRuntimeState | None
+    schedule_runs: tuple[NPCScheduleRun, ...] = ()
 
 
 RECORD_TYPES = {
@@ -318,4 +328,18 @@ class NPCRuntime:
             tuple(records["goal"]),
             tuple(records["plan"]),
             _runtime(json.loads(row["runtime_json"])) if row["runtime_json"] else None,
+            tuple(
+                NPCScheduleRun(
+                    r["schedule_id"],
+                    r["status"],
+                    r["started_tick"],
+                    r["finished_tick"],
+                    r["updated_tick"],
+                )
+                for r in self._conn.execute(
+                    "SELECT * FROM npc_schedule_runs WHERE session_id=? AND npc_id=? "
+                    "ORDER BY schedule_id",
+                    (session_id, npc_id),
+                ).fetchall()
+            ),
         )

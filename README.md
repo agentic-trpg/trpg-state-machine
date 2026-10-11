@@ -345,3 +345,21 @@ selects the branch; accepted does not mean success. Existing world operations,
 RNG, events/outbox and receipt commit atomically. No HP/resource/inventory writes,
 new trigger engine, tool checks or continuation support are introduced. See
 `docs/reviews/SM21_CONDITIONAL_WORLD_EFFECTS_REVIEW.md` for evidence and limits.
+
+### SM-22 game time and NPC schedule
+
+SM-22 is independently delivered under the user's batch-only authorization.
+Existing Event-time Perception P1 `PER-19-22-01` remains unresolved and is a
+**Global Merge Blocker**. This delivery does not include its repair or a formal
+four-batch Global Review; see the SM-22 review for the preserved evidence.
+
+Schema 15 adds the single `WorldState.game_tick` (local abstract `game-clock/1`)
+and `npc_schedule_runs` lifecycle. Trusted adapters grant `can_advance_time` for
+`world.advance_time` / `AdvanceGameTime(expected_tick, next_tick)`. Existing command
+idempotency and transactions cover clock, NPC runtime/version, stale Task
+cancellation, bounded events/outbox and receipt. Authorized NPC Views include
+their own runs. Declared windows and actual location govern start/continue/end or
+interruption; missed windows never pretend to have run. No teleport, cognition
+update, automatic EVA or D&D time calculation occurs. Active combat advancement,
+overlap priority, recurrence and arbitrary schedule-condition AST are unsupported.
+See `docs/reviews/SM22_GAME_TIME_SCHEDULE_REVIEW.md` for migration and test evidence.

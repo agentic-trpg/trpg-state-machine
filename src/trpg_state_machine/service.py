@@ -22,6 +22,7 @@ from .commands import OPERATIONS, CommandRuntime, TypedCommand
 from .dnd_runtime import DndRuntime
 from .errors import StateMachineError
 from .events import EventRuntime
+from .game_time import AdvanceGameTime, advance_game_time
 from .mechanical_runtime import MechanicalRuntime
 from .mechanics import SyntheticEvaluator
 from .models import (
@@ -73,7 +74,10 @@ def _trusted(context: TrustedContext) -> None:
         type(v) is not str or not v or len(v) > 256 for v in context.controlled_npc_ids
     ):
         raise StateMachineError("invalid_context", "NPC grants must be trusted identity tuples")
-    if type(context.can_adjudicate_checks) is not bool:
+    if (
+        type(context.can_adjudicate_checks) is not bool
+        or type(context.can_advance_time) is not bool
+    ):
         raise StateMachineError(
             "invalid_context", "GM adjudication grant must be a trusted boolean"
         )
@@ -167,7 +171,7 @@ class StateMachine(
 
     def _migrate(self):
         scripts = [Path(__file__).with_name("_schema.sql")] + [
-            Path(__file__).with_name(f"_migration_{v}.sql") for v in range(2, 15)
+            Path(__file__).with_name(f"_migration_{v}.sql") for v in range(2, 16)
         ]
         steps = [_migration_statements(path.read_text("utf-8")) for path in scripts]
         # Migration 4 rebuilds a referenced table. Disable FK enforcement only on
@@ -177,7 +181,7 @@ class StateMachine(
             self._conn.execute("BEGIN IMMEDIATE")
             # Read AFTER acquiring the cross-process SQLite migration write lock.
             version = self._conn.execute("PRAGMA user_version").fetchone()[0]
-            if version not in range(15):
+            if version not in range(16):
                 raise StateMachineError(
                     "unsupported_storage_schema", f"Unsupported storage version: {version}"
                 )
@@ -190,7 +194,7 @@ class StateMachine(
                 raise StateMachineError(
                     "unsupported_storage_schema", "Unversioned nonempty database"
                 )
-            for target in range(version + 1, 15):
+            for target in range(version + 1, 16):
                 for statement in steps[target - 1]:
                     self._conn.execute(statement)
                 if self._conn.execute("PRAGMA user_version").fetchone()[0] != target:
@@ -411,7 +415,10 @@ class StateMachine(
                     rng_ref,
                 ),
             )
-            self._conn.execute("INSERT INTO world_states VALUES (?, ?)", (session_id, flags_json))
+            self._conn.execute(
+                "INSERT INTO world_states(session_id,flags_json) VALUES (?, ?)",
+                (session_id, flags_json),
+            )
             self._conn.executemany(
                 "INSERT INTO world_facts VALUES (?, ?, ?, ?, ?)",
                 [
@@ -640,6 +647,8 @@ class StateMachine(
     def _operate(self, row, package: AdventurePackage, operation: FoundationOperation):
         self._world_operation_capability(row, operation)
         sid = row["session_id"]
+        if type(operation) is AdvanceGameTime:
+            return advance_game_time(self, row, operation)
         if isinstance(operation, EnterScene):
             target = package.scene(operation.scene_id)
             if target.scene_id == row["current_scene_id"]:
@@ -730,7 +739,7 @@ class StateMachine(
     def _snapshot(self, row) -> SessionSnapshot:
         sid = row["session_id"]
         world = self._conn.execute(
-            "SELECT flags_json FROM world_states WHERE session_id = ?", (sid,)
+            "SELECT flags_json,game_tick FROM world_states WHERE session_id = ?", (sid,)
         ).fetchone()
         scenes = {}
         for s in self._conn.execute(
@@ -769,7 +778,7 @@ class StateMachine(
             row["current_scene_id"],
             row["world_version"],
             row["event_seq"],
-            WorldState(json.loads(world[0])),
+            WorldState(json.loads(world[0]), world[1]),
             scenes,
             actors,
             CharacterState(
