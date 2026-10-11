@@ -115,7 +115,14 @@ def test_scene_crossing_real_before_after_restart_scope_cursor_and_replay(
                 == "resolved"
             )
         assert sm.perception_cursor(sid, package, context=context) == 2
-        assert sm.read_observations(sid, package, context=NPCContext(N2, sid, N2)) == ()
+        # Its own entry is complete; the other NPC's exit gap is unrelated.
+        assert sm.npc_perception_cursor(sid, package, context=NPCContext(N2, sid, N2)) == 4
+        assert (
+            sm.read_observations(sid, package, context=NPCContext(N2, sid, N2))[0]
+            .perceived_signals[0]
+            .content
+            == "Someone enters the scene."
+        )
         assert (
             sm.project_event(sid, 3, package, context=context, judgment=synthetic_notice)
             == "resolved"
@@ -710,7 +717,7 @@ with StateMachine(sys.argv[1]) as sm:
             assert sm.perception_cursor(complete, package, context=context) == 2
             assert sm.perception_cursor(pending, package, context=context) == 0
     after = stored_rows(db)
-    assert {k: v for k, v in after.items() if k != "event_outbox"} == {
+    assert {k: v for k, v in after.items() if k in before and k != "event_outbox"} == {
         k: v for k, v in before.items() if k != "event_outbox"
     }
     with StateMachine(db) as sm:
@@ -731,7 +738,7 @@ with StateMachine(sys.argv[1]) as sm:
         for sid in (complete, pending):
             assert evidence(db, sid, 2) == samples[sid]
     with sqlite3.connect(db) as conn:
-        assert conn.execute("PRAGMA user_version").fetchone()[0] == 18
+        assert conn.execute("PRAGMA user_version").fetchone()[0] == 19
         assert conn.execute("PRAGMA foreign_key_check").fetchall() == []
         assert conn.execute("SELECT session_id FROM event_observations").fetchall() == [(complete,)]
 

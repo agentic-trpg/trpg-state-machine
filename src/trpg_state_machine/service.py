@@ -51,6 +51,7 @@ from .package import (
     canonical_json,
 )
 from .perception import PerceptionRuntime
+from .perception_queue import PerceptionQueueRuntime
 
 
 def _binding(row: sqlite3.Row) -> RulesetBinding:
@@ -107,6 +108,7 @@ class StateMachine(
     EventRuntime,
     MechanicalRuntime,
     ObservationLifecycleRuntime,
+    PerceptionQueueRuntime,
     PerceptionRuntime,
     CombatRuntime,
     DndRuntime,
@@ -171,7 +173,7 @@ class StateMachine(
 
     def _migrate(self):
         scripts = [Path(__file__).with_name("_schema.sql")] + [
-            Path(__file__).with_name(f"_migration_{v}.sql") for v in range(2, 19)
+            Path(__file__).with_name(f"_migration_{v}.sql") for v in range(2, 20)
         ]
         steps = [_migration_statements(path.read_text("utf-8")) for path in scripts]
         # Migration 4 rebuilds a referenced table. Disable FK enforcement only on
@@ -181,7 +183,7 @@ class StateMachine(
             self._conn.execute("BEGIN IMMEDIATE")
             # Read AFTER acquiring the cross-process SQLite migration write lock.
             version = self._conn.execute("PRAGMA user_version").fetchone()[0]
-            if version not in range(19):
+            if version not in range(20):
                 raise StateMachineError(
                     "unsupported_storage_schema", f"Unsupported storage version: {version}"
                 )
@@ -194,7 +196,7 @@ class StateMachine(
                 raise StateMachineError(
                     "unsupported_storage_schema", "Unversioned nonempty database"
                 )
-            for target in range(version + 1, 19):
+            for target in range(version + 1, 20):
                 for statement in steps[target - 1]:
                     self._conn.execute(statement)
                 if self._conn.execute("PRAGMA user_version").fetchone()[0] != target:
@@ -215,6 +217,8 @@ class StateMachine(
                     "FROM legacy_perception_boundaries WHERE true "
                     "ON CONFLICT(session_id,consumer) DO UPDATE SET event_seq=excluded.event_seq"
                 )
+            if version < 19:
+                self._migrate_perception_queues()
             if self._conn.execute("PRAGMA foreign_key_check").fetchone():
                 raise StateMachineError("storage_error", "Migration contains invalid references")
             self._conn.commit()
@@ -579,9 +583,12 @@ class StateMachine(
                 "INSERT INTO event_outbox(session_id,event_seq,consumer) VALUES (?, ?, ?)",
                 [(session_id, seq, "delivery"), (session_id, seq, "perception")],
             )
+            self._enqueue_perception(session_id, seq, package.ruleset_binding)
         self._conn.execute(
             "UPDATE sessions SET event_seq = ? WHERE session_id = ?", (seq, session_id)
         )
+        self._refresh_npc_perception(session_id)
+        self._refresh_npc_completion(session_id)
 
     def _apply(
         self,

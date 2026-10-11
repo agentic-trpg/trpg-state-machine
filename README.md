@@ -71,11 +71,37 @@ Scope，Origin 的实体引用须属于其 Signal Scene。未实例化的 Scope 
 不交 Judgment 猜测机械历史。合成 Evaluator 的无阶段 ProposedEvents 同样保守处理。
 世界效果自身仍在实际执行点取证。没有实现 Action Started 或新的 Engine 阶段协议。
 
-SQLite 仍为 Schema 18，无 DDL 迁移。历史 `/1`～`/3` 已完成的 OB、Meta、Receipt
+Batch B 使用 Schema 18，无 DDL 迁移。历史 `/1`～`/3` 已完成的 OB、Meta、Receipt
 不改写；未完成的非空 Signal 事件无法证明阶段时保持 Unresolved，已知旧版本的空
 Signal 可完成。现有历史边界和连续 Cursor 规则不变，因此这些缺口仍可能阻塞后续
-Observation 交付。黑暗场景修复与 Visual/Auditory 判断继续有效，机械可见不自动生成 OB。
+Observation 交付；Batch C 的 NPC 独立放行见下节。黑暗场景修复与 Visual/Auditory
+判断继续有效，机械可见不自动生成 OB。
 实现、真实 SQLite 测试及未覆盖阶段见 [Batch B Review](docs/reviews/SM_PER2_REVIEW.md)。
+
+## Batch C：NPC 独立感知队列与水位
+
+SQLite **Schema 19** 增加 `npc_perception_queue`、`npc_perception_cursors` 和
+`perception_event_barriers`。队列只保存 Session/NPC/Event 引用、该 NPC 的候选
+Signal IDs、完成状态及来源，不复制 WorldEvent / Evidence。新事件提交时从 `/4`
+冻结的 Discovery 同事务建立队列，不在异步阶段查询当前位置恢复候选。
+
+`project_npc_event(session_id, event_seq, package, context=NPCContext, judgment=...)`
+只处理获授权的该 NPC；`get_npc_perception_queue(...)` 和
+`npc_perception_cursor(...)` 提供同一授权边界下的 Worker 元数据。它们不是供 LLM
+直接读取的事件正文接口。原 `project_event(...)` 保留可信 Owner 的事件整体处理接口，
+`perception_cursor(...)` / Outbox Done 只反映全局整体完成审计，不是 NPC 完成证明。
+
+Recent OB、Pending Work、Memory Gate、模式路由、EVA 来源及 Recent Scope 都使用
+对应 NPC 的水位。同一 NPC 较晚事件可以先判断并保存 OB，但较早候选未完成前不可
+读取或送入 EVA；无关 NPC 的缺口不再拦截。NPC Completion Cursor 表示认知工作完成，
+受自身感知水位和 Pending Work 限制；它与感知完成、读取和 TTL 继续独立。
+
+完整 Discovery 的零 Signal / 零候选不建队列。无法证明阶段或范围的事件保存一份
+共享隔离记录，保守阻塞没有自身完成证明的 NPC，包括后来实例化的 NPC，不把未知
+当作不在 Scope。迁移仅使用冻结 `/4` 或已有逐 NPC 完成记录；历史全局 Done 不作为
+NPC 证明，旧 OB / Inbox / Meta / Task / Receipt / 完成记录保留。可判断的 `/4` 工作
+可重试恢复；不可恢复历史与 Engine 阶段缺口仍需未来可信证据或受控迁移，不提供
+任意跳过/清除 API，也不补造历史。详见 [Batch C Review](docs/reviews/SM_PER3_REVIEW.md)。
 
 ## 安装与验证
 

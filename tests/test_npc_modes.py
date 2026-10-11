@@ -106,9 +106,8 @@ def test_gate_uncertain_invalid_unauthorized_and_projection_gap_preserve_work(
                 )
             assert stored_rows(db) == before
         sm._conn.execute(
-            "UPDATE projection_cursors SET event_seq=0 WHERE session_id=? "
-            "AND consumer='perception'",
-            (sid,),
+            "UPDATE npc_perception_cursors SET event_seq=0 WHERE session_id=? AND npc_id=?",
+            (sid, npc.observer_id),
         )
         routed = sm.route_npc_observations(
             sid, evaluation_package, context=npc, request_id="gap", classification="background"

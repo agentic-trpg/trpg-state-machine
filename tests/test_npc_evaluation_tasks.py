@@ -178,9 +178,8 @@ def test_dual_npc_session_isolation_and_missing_projection(tmp_path, evaluation_
                 create_task(sm, bound_sid, evaluation_package, bound_context, ids)
             assert error.value.code == "invalid_observation"
         sm._conn.execute(
-            "UPDATE projection_cursors SET event_seq=0 WHERE session_id=? AND "
-            "consumer='perception'",
-            (sid,),
+            "UPDATE npc_perception_cursors SET event_seq=0 WHERE session_id=? AND npc_id=?",
+            (sid, npc.observer_id),
         )
         with pytest.raises(StateMachineError) as error:
             create_task(sm, sid, evaluation_package, npc, ids)
