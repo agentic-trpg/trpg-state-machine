@@ -45,24 +45,25 @@ class NPCOutputDelivery:
 
 
 class NPCOutputRuntime:
-    def _refresh_npc_completion(self, sid):
-        for actor in self._conn.execute(
-            "SELECT npc_id,event_seq FROM npc_perception_cursors WHERE session_id=?", (sid,)
-        ).fetchall():
-            end = actor[1]
-            pending = self._conn.execute(
-                "SELECT MIN(o.event_seq) FROM npc_observation_work w "
-                "JOIN event_observations o USING(observation_id) "
-                "WHERE w.session_id=? AND w.npc_id=? AND w.status='pending' AND o.event_seq<=?",
-                (sid, actor[0], end),
-            ).fetchone()[0]
-            cursor = pending - 1 if pending is not None else end
-            self._conn.execute(
-                "INSERT INTO npc_completion_cursors VALUES (?,?,?) "
-                "ON CONFLICT(session_id,npc_id) DO UPDATE SET "
-                "event_seq=max(npc_completion_cursors.event_seq,excluded.event_seq)",
-                (sid, actor[0], cursor),
-            )
+    def _npc_completed_cursor(self, sid, npc):
+        end = self._npc_perception_cursor(sid, npc)
+        pending = self._conn.execute(
+            "SELECT MIN(o.event_seq) FROM npc_observation_work w "
+            "JOIN event_observations o USING(observation_id) "
+            "WHERE w.session_id=? AND w.npc_id=? AND w.status='pending' AND o.event_seq<=?",
+            (sid, npc, end),
+        ).fetchone()[0]
+        return pending - 1 if pending is not None else end
+
+    def _refresh_npc_completion(self, sid, npc):
+        # Retain the legacy cognition checkpoint on that NPC's completion writes.
+        # Reads derive the current prefix; an unrelated event needs no checkpoint write.
+        self._conn.execute(
+            "INSERT INTO npc_completion_cursors VALUES (?,?,?) "
+            "ON CONFLICT(session_id,npc_id) DO UPDATE SET "
+            "event_seq=max(npc_completion_cursors.event_seq,excluded.event_seq)",
+            (sid, npc, self._npc_completed_cursor(sid, npc)),
+        )
 
     def _complete_npc_evaluation_work(self, row):
         self._conn.execute(
@@ -71,17 +72,13 @@ class NPCOutputRuntime:
             "(SELECT work_id FROM npc_evaluation_observations WHERE evaluation_id=?)",
             (row["evaluation_id"],),
         )
-        self._refresh_npc_completion(row["session_id"])
+        self._refresh_npc_completion(row["session_id"], row["npc_id"])
 
     def npc_completed_cursor(self, session_id, package, *, context):
         """Internal processing prefix in event order, independent of read/delivery cursors."""
         with self._transaction():
             npc = self._npc_authorized(session_id, package, context)
-            row = self._conn.execute(
-                "SELECT event_seq FROM npc_completion_cursors WHERE session_id=? AND npc_id=?",
-                (session_id, npc),
-            ).fetchone()
-            return row[0] if row else 0
+            return self._npc_completed_cursor(session_id, npc)
 
     def _output_delivery(self, row):
         receipt = self._conn.execute(

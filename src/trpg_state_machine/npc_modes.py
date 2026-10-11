@@ -297,7 +297,7 @@ class NPCModeRuntime:
                     "disposition='no_op' WHERE work_id=?",
                     (wid,),
                 )
-        self._refresh_npc_completion(sid)
+        self._refresh_npc_completion(sid, context.observer_id)
         result = NPCObservationRoute(
             "classified", None, tuple(r["work_id"] for r in data["input"]["observations"])
         )
@@ -366,15 +366,14 @@ class NPCModeRuntime:
     def _pending_npc_observations(self, sid, npc):
         return self._conn.execute(
             "SELECT w.work_id,w.observation_id FROM npc_observation_work w "
-            "JOIN event_observations o USING(observation_id) JOIN npc_perception_cursors c "
-            "ON c.session_id=w.session_id AND c.npc_id=w.npc_id "
+            "JOIN event_observations o USING(observation_id) "
             "WHERE w.session_id=? AND w.npc_id=? AND w.status='pending' "
-            "AND o.event_seq<=c.event_seq "
+            "AND o.event_seq<=? "
             "AND NOT EXISTS (SELECT 1 FROM npc_evaluation_observations e "
             "JOIN npc_evaluation_tasks t USING(evaluation_id) "
             "WHERE e.work_id=w.work_id AND t.status='completed') "
             "ORDER BY o.event_seq,w.observation_id LIMIT 100",
-            (sid, npc),
+            (sid, npc, self._npc_perception_cursor(sid, npc)),
         ).fetchall()
 
     def _switch_mode(self, sid, package, context, request_id, mode, player_input, background):
@@ -588,7 +587,7 @@ class NPCModeRuntime:
                 "UPDATE npc_observation_work SET status='completed',disposition=? WHERE work_id=?",
                 (classification, wid),
             )
-        self._refresh_npc_completion(session_id)
+        self._refresh_npc_completion(session_id, context.observer_id)
         return NPCObservationRoute(classification, None, work_ids)
 
     def report_npc_evaluation_failure(

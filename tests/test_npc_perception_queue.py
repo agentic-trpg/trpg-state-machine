@@ -394,9 +394,7 @@ def test_unknown_engine_phase_is_durable_quarantine_not_scope_exclusion(
         assert stored_rows(db) == before
 
 
-@pytest.mark.parametrize(
-    "table", ["npc_perception_queue", "npc_perception_cursors", "perception_event_barriers"]
-)
+@pytest.mark.parametrize("table", ["npc_perception_queue", "perception_event_barriers"])
 def test_event_queue_capture_failure_rolls_back_whole_command(tmp_path, queue_data, context, table):
     if table == "perception_event_barriers":
         definition = event_data()
@@ -442,10 +440,8 @@ def test_event_queue_capture_failure_rolls_back_whole_command(tmp_path, queue_da
     "table,action",
     [
         ("npc_perception_queue", "UPDATE"),
-        ("npc_perception_cursors", "UPDATE"),
         ("npc_inbox", "INSERT"),
         ("npc_observation_work", "INSERT"),
-        ("npc_completion_cursors", "UPDATE"),
         ("event_outbox", "UPDATE"),
     ],
 )
@@ -597,7 +593,7 @@ def test_real_schema18_upgrade_uses_own_proofs_preserves_all_old_rows_concurrent
             return sm._conn.execute("PRAGMA user_version").fetchone()[0]
 
     with ThreadPoolExecutor(3) as pool:
-        assert list(pool.map(upgrade, range(3))) == [19] * 3
+        assert list(pool.map(upgrade, range(3))) == [20] * 3
     for _ in range(2):
         with StateMachine(db) as sm:
             for sid in (complete, partial):
@@ -687,7 +683,7 @@ def test_interrupted_schema19_migration_rolls_back_and_recovers(
     with sqlite3.connect(db) as conn:
         assert conn.execute("PRAGMA user_version").fetchone()[0] == 18
     with StateMachine(db) as sm:
-        assert sm._conn.execute("PRAGMA user_version").fetchone()[0] == 19
+        assert sm._conn.execute("PRAGMA user_version").fetchone()[0] == 20
         assert sm._conn.execute("PRAGMA foreign_key_check").fetchall() == []
 
 

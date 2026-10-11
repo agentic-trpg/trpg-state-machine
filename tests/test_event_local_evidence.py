@@ -738,7 +738,7 @@ with StateMachine(sys.argv[1]) as sm:
         for sid in (complete, pending):
             assert evidence(db, sid, 2) == samples[sid]
     with sqlite3.connect(db) as conn:
-        assert conn.execute("PRAGMA user_version").fetchone()[0] == 19
+        assert conn.execute("PRAGMA user_version").fetchone()[0] == 20
         assert conn.execute("PRAGMA foreign_key_check").fetchall() == []
         assert conn.execute("SELECT session_id FROM event_observations").fetchall() == [(complete,)]
 
