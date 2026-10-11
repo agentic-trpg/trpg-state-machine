@@ -46,14 +46,10 @@ class NPCOutputDelivery:
 
 class NPCOutputRuntime:
     def _refresh_npc_completion(self, sid):
-        projected = self._conn.execute(
-            "SELECT event_seq FROM projection_cursors WHERE session_id=? AND consumer='perception'",
-            (sid,),
-        ).fetchone()
-        end = projected[0] if projected else 0
         for actor in self._conn.execute(
-            "SELECT npc_id FROM npc_states WHERE session_id=?", (sid,)
+            "SELECT npc_id,event_seq FROM npc_perception_cursors WHERE session_id=?", (sid,)
         ).fetchall():
+            end = actor[1]
             pending = self._conn.execute(
                 "SELECT MIN(o.event_seq) FROM npc_observation_work w "
                 "JOIN event_observations o USING(observation_id) "

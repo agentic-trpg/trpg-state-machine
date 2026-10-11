@@ -30,8 +30,8 @@ class RecentObservation:
 
 class ObservationLifecycleRuntime:
     def _observation_rows(self, sid, npc):
-        # The original projection watermark still fences every read. Neither TTL
-        # nor processing completion may cross a genuine projection gap.
+        # Only this NPC's projection prefix fences reads. Processing and TTL
+        # remain independent, and another NPC's work cannot hold this one.
         return self._conn.execute(
             "SELECT w.*,o.content_json,o.event_seq,s.game_tick,EXISTS ("
             "SELECT 1 FROM npc_record_sources r WHERE r.session_id=w.session_id "
@@ -42,8 +42,8 @@ class ObservationLifecycleRuntime:
             "AND i.observation_id=w.observation_id "
             "JOIN event_observations o USING(observation_id) "
             "JOIN world_states s ON s.session_id=w.session_id "
-            "JOIN projection_cursors c ON c.session_id=w.session_id "
-            "AND c.consumer='perception' WHERE w.session_id=? AND w.npc_id=? "
+            "JOIN npc_perception_cursors c ON c.session_id=w.session_id "
+            "AND c.npc_id=w.npc_id WHERE w.session_id=? AND w.npc_id=? "
             "AND o.event_seq<=c.event_seq ORDER BY o.event_seq,w.observation_id",
             (sid, npc),
         ).fetchall()

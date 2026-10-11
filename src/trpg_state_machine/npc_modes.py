@@ -366,8 +366,8 @@ class NPCModeRuntime:
     def _pending_npc_observations(self, sid, npc):
         return self._conn.execute(
             "SELECT w.work_id,w.observation_id FROM npc_observation_work w "
-            "JOIN event_observations o USING(observation_id) JOIN projection_cursors c "
-            "ON c.session_id=w.session_id AND c.consumer='perception' "
+            "JOIN event_observations o USING(observation_id) JOIN npc_perception_cursors c "
+            "ON c.session_id=w.session_id AND c.npc_id=w.npc_id "
             "WHERE w.session_id=? AND w.npc_id=? AND w.status='pending' "
             "AND o.event_seq<=c.event_seq "
             "AND NOT EXISTS (SELECT 1 FROM npc_evaluation_observations e "

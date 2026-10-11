@@ -115,9 +115,8 @@ def test_expired_pending_running_task_and_projection_gap_are_preserved(
         ):
             assert stored_rows(db)[table] == original[table]
         sm._conn.execute(
-            "UPDATE projection_cursors SET event_seq=0 WHERE session_id=? "
-            "AND consumer='perception'",
-            (sid,),
+            "UPDATE npc_perception_cursors SET event_seq=0 WHERE session_id=? AND npc_id=?",
+            (sid, npc.observer_id),
         )
         assert sm.get_npc_observation_retention(sid, ob_package, context=npc) == ()
 
@@ -335,7 +334,7 @@ def test_actual_schema15_upgrade_unknown_times_concurrent_and_repeat(tmp_path, o
             return sm._conn.execute("PRAGMA user_version").fetchone()[0]
 
     with ThreadPoolExecutor(3) as pool:
-        assert list(pool.map(upgrade, range(3))) == [18] * 3
+        assert list(pool.map(upgrade, range(3))) == [19] * 3
     assert_preserved(db, before)
     npc = NPCContext("agent:npc.caretaker", sid, "npc.caretaker")
     with StateMachine(db) as sm:

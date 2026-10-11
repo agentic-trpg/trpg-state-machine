@@ -123,7 +123,7 @@ def _judge(request, judgment):
     return answers if set(answers) == set(ids) else None
 
 
-def _evidence_v4(evidence, event, package):
+def _evidence_v4(evidence, event, binding):
     if not isinstance(evidence, dict) or set(evidence) != {
         "schema",
         "world_version",
@@ -143,7 +143,7 @@ def _evidence_v4(evidence, event, package):
         or evidence["world_version"] != event.world_version
         or type(evidence["game_tick"]) is not int
         or evidence["game_tick"] < 0
-        or evidence["ruleset_binding"] != asdict(package.ruleset_binding)
+        or evidence["ruleset_binding"] != asdict(binding)
         or type(evidence["actors"]) is not list
         or type(evidence["scenes"]) is not dict
         or type(evidence["objects"]) is not dict
@@ -294,7 +294,25 @@ class PerceptionRuntime:
             return row[0] if row else 0
 
     def project_event(self, session_id, event_seq, package, *, context, judgment=None):
-        """Return resolved/unresolved/already_complete/legacy_unavailable.
+        """Owner-compatible aggregate projection; global completion is audit only."""
+        return self._project_perception(session_id, event_seq, package, context, judgment, None)
+
+    def project_npc_event(self, session_id, event_seq, package, *, context, judgment=None):
+        """Project one authorized NPC; never judges or completes another NPC."""
+        if type(context) is not NPCContext:
+            raise StateMachineError("unauthorized", "Expected an authenticated NPC worker")
+        return self._project_perception(
+            session_id, event_seq, package, context, judgment, context.observer_id
+        )
+
+    def _projection_authorized(self, sid, package, context, npc):
+        if npc is None:
+            self._session(sid, package, context)
+        else:
+            self._npc_authorized(sid, package, context)
+
+    def _project_perception(self, session_id, event_seq, package, context, judgment, npc):
+        """Return resolved/unresolved/already_complete/legacy_unavailable/not_candidate.
 
         Judgment receives only one observer/event's undecidable Signals and evidence,
         outside the write transaction. Immutable event-time evidence remains authority.
@@ -302,7 +320,7 @@ class PerceptionRuntime:
         if type(event_seq) is not int or event_seq <= 0:
             raise StateMachineError("invalid_event", "Expected a positive event sequence")
         with self._transaction(write=True):
-            self._session(session_id, package, context)
+            self._projection_authorized(session_id, package, context, npc)
             work = self._conn.execute(
                 "SELECT done FROM event_outbox WHERE session_id=? "
                 "AND event_seq=? AND consumer='perception'",
@@ -316,7 +334,16 @@ class PerceptionRuntime:
             ).fetchone()
             if boundary is not None and event_seq <= boundary[0]:
                 return "legacy_unavailable"
-            if work[0]:
+            queued = {
+                r["npc_id"]: r
+                for r in self._conn.execute(
+                    "SELECT * FROM npc_perception_queue WHERE session_id=? AND event_seq=?",
+                    (session_id, event_seq),
+                )
+            }
+            if npc in queued and queued[npc]["complete"]:
+                return "already_complete"
+            if npc is None and work[0]:
                 return "already_complete"
             event = self._read_event(session_id, event_seq)
             saved = self._conn.execute(
@@ -342,7 +369,7 @@ class PerceptionRuntime:
         # Historical incomplete projections lack mechanical evidence. Never
         # consult current state or reuse unsafe legacy partial positive answers.
         # Already completed historical OB/receipts remain immutable audit data.
-        if not _evidence_v4(evidence, event, package):
+        if not _evidence_v4(evidence, event, package.ruleset_binding):
             if (
                 isinstance(evidence, dict)
                 and evidence.get("schema")
@@ -350,16 +377,31 @@ class PerceptionRuntime:
                 and not event.signals
             ):
                 with self._transaction(write=True):
+                    self._projection_authorized(session_id, package, context, npc)
                     self._complete_work(session_id, event_seq, "perception")
+                    self._refresh_npc_perception(session_id)
                     self._refresh_npc_completion(session_id)
                 return "resolved"
             return "unresolved"
+        expected = {a["actor_id"] for a in evidence["actors"]}
+        if set(queued) != expected or any(
+            json.loads(queued[observer]["signal_ids_json"])
+            != [
+                s.signal_id
+                for s in event.signals
+                if observer in evidence["discovery"]["by_signal"][s.signal_id]
+            ]
+            for observer in expected
+        ):
+            return "unresolved"
+        if npc is not None and npc not in queued:
+            return "not_candidate"
         computed = {}
         for observer in evidence["actors"]:
             if observer["kind"] != "npc":
                 continue
             observer_id = observer["actor_id"]
-            if observer_id in prior and prior[observer_id][1]:
+            if (npc is not None and observer_id != npc) or queued[observer_id]["complete"]:
                 continue
             saved = prior.get(observer_id, ({}, False))[0]
             decisions = (
@@ -435,7 +477,7 @@ class PerceptionRuntime:
                         }
             computed[observer_id] = (decisions, reasons)
         with self._transaction(write=True):
-            self._session(session_id, package, context)
+            self._projection_authorized(session_id, package, context, npc)
             for observer_id, (decisions, reasons) in computed.items():
                 complete = len(decisions) == len(event.signals)
                 existing = self._conn.execute(
@@ -444,6 +486,11 @@ class PerceptionRuntime:
                     (session_id, event_seq, observer_id),
                 ).fetchone()
                 if existing and existing[0]:
+                    self._conn.execute(
+                        "UPDATE npc_perception_queue SET complete=1 "
+                        "WHERE session_id=? AND npc_id=? AND event_seq=?",
+                        (session_id, observer_id, event_seq),
+                    )
                     continue
                 self._conn.execute(
                     "INSERT INTO perception_results VALUES (?, ?, ?, ?, ?) "
@@ -502,25 +549,44 @@ class PerceptionRuntime:
                             if decisions.get(s.signal_id) is True
                         ],
                     )
+                if complete:
+                    self._conn.execute(
+                        "UPDATE npc_perception_queue SET complete=1 "
+                        "WHERE session_id=? AND npc_id=? AND event_seq=?",
+                        (session_id, observer_id, event_seq),
+                    )
             pending = self._conn.execute(
-                "SELECT 1 FROM perception_results "
+                "SELECT 1 FROM npc_perception_queue "
                 "WHERE session_id=? AND event_seq=? AND complete=0",
                 (session_id, event_seq),
             ).fetchone()
-            if pending:
-                return "unresolved"
-            self._complete_work(session_id, event_seq, "perception")
+            barrier = self._conn.execute(
+                "SELECT 1 FROM perception_event_barriers WHERE session_id=? AND event_seq=?",
+                (session_id, event_seq),
+            ).fetchone()
+            if not pending and not barrier:
+                self._complete_work(session_id, event_seq, "perception")
+            self._refresh_npc_perception(session_id)
             self._refresh_npc_completion(session_id)
-        return "resolved"
+            if npc is not None:
+                return (
+                    "resolved"
+                    if self._conn.execute(
+                        "SELECT complete FROM npc_perception_queue "
+                        "WHERE session_id=? AND npc_id=? AND event_seq=?",
+                        (session_id, npc, event_seq),
+                    ).fetchone()[0]
+                    else "unresolved"
+                )
+        return "unresolved" if pending or barrier else "resolved"
 
     def read_observations(self, session_id, package, *, context):
         """Reads the durable inbox; read does not acknowledge cognition or delete it."""
         with self._transaction():
             observer_id = self._npc_authorized(session_id, package, context)
             cursor = self._conn.execute(
-                "SELECT event_seq FROM projection_cursors WHERE session_id=? "
-                "AND consumer='perception'",
-                (session_id,),
+                "SELECT event_seq FROM npc_perception_cursors WHERE session_id=? AND npc_id=?",
+                (session_id, observer_id),
             ).fetchone()
             end = cursor[0] if cursor else 0
             rows = self._conn.execute(
