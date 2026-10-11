@@ -106,8 +106,9 @@ def test_gate_uncertain_invalid_unauthorized_and_projection_gap_preserve_work(
                 )
             assert stored_rows(db) == before
         sm._conn.execute(
-            "UPDATE npc_perception_cursors SET event_seq=0 WHERE session_id=? AND npc_id=?",
-            (sid, npc.observer_id),
+            # Inject unknown historical membership instead of mutating a cached prefix.
+            "INSERT INTO perception_event_barriers VALUES (?,1,'test_unknown_scope')",
+            (sid,),
         )
         routed = sm.route_npc_observations(
             sid, evaluation_package, context=npc, request_id="gap", classification="background"

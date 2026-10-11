@@ -178,8 +178,9 @@ def test_dual_npc_session_isolation_and_missing_projection(tmp_path, evaluation_
                 create_task(sm, bound_sid, evaluation_package, bound_context, ids)
             assert error.value.code == "invalid_observation"
         sm._conn.execute(
-            "UPDATE npc_perception_cursors SET event_seq=0 WHERE session_id=? AND npc_id=?",
-            (sid, npc.observer_id),
+            # Inject unknown historical membership instead of mutating a cached prefix.
+            "INSERT INTO perception_event_barriers VALUES (?,1,'test_unknown_scope')",
+            (sid,),
         )
         with pytest.raises(StateMachineError) as error:
             create_task(sm, sid, evaluation_package, npc, ids)

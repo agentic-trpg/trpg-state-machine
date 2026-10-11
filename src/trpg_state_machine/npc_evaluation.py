@@ -185,18 +185,17 @@ class NPCEvaluationRuntime:
         ).fetchone():
             raise StateMachineError("evaluation_active", "NPC already has a valid Evaluation")
         works, seqs = [], []
+        end = self._npc_perception_cursor(sid, context.observer_id)
         for oid in source_observation_ids:
             work = self._conn.execute(
                 "SELECT w.*,o.event_seq FROM npc_observation_work w "
                 "JOIN event_observations o USING(observation_id) "
-                "JOIN npc_perception_cursors c ON c.session_id=w.session_id AND "
-                "c.npc_id=w.npc_id "
                 "WHERE w.session_id=? AND w.npc_id=? AND w.observation_id=? "
-                "AND o.event_seq<=c.event_seq AND w.status='pending' "
+                "AND o.event_seq<=? AND w.status='pending' "
                 "AND NOT EXISTS (SELECT 1 FROM npc_evaluation_observations e "
                 "JOIN npc_evaluation_tasks t USING(evaluation_id) "
                 "WHERE e.work_id=w.work_id AND t.status='completed')",
-                (sid, context.observer_id, oid),
+                (sid, context.observer_id, oid, end),
             ).fetchone()
             if work is None:
                 raise StateMachineError(

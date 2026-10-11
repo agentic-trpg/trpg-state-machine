@@ -379,8 +379,6 @@ class PerceptionRuntime:
                 with self._transaction(write=True):
                     self._projection_authorized(session_id, package, context, npc)
                     self._complete_work(session_id, event_seq, "perception")
-                    self._refresh_npc_perception(session_id)
-                    self._refresh_npc_completion(session_id)
                 return "resolved"
             return "unresolved"
         expected = {a["actor_id"] for a in evidence["actors"]}
@@ -566,8 +564,6 @@ class PerceptionRuntime:
             ).fetchone()
             if not pending and not barrier:
                 self._complete_work(session_id, event_seq, "perception")
-            self._refresh_npc_perception(session_id)
-            self._refresh_npc_completion(session_id)
             if npc is not None:
                 return (
                     "resolved"
@@ -584,11 +580,7 @@ class PerceptionRuntime:
         """Reads the durable inbox; read does not acknowledge cognition or delete it."""
         with self._transaction():
             observer_id = self._npc_authorized(session_id, package, context)
-            cursor = self._conn.execute(
-                "SELECT event_seq FROM npc_perception_cursors WHERE session_id=? AND npc_id=?",
-                (session_id, observer_id),
-            ).fetchone()
-            end = cursor[0] if cursor else 0
+            end = self._npc_perception_cursor(session_id, observer_id)
             rows = self._conn.execute(
                 "SELECT o.observation_id,o.content_json FROM event_observations o "
                 "JOIN npc_inbox i USING(session_id,observer_id,observation_id) "

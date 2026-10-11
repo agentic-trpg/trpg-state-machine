@@ -182,9 +182,6 @@ class NPCRuntime:
             "INSERT INTO npc_completion_cursors VALUES (?,?,0)",
             (sid, actor.actor_id),
         )
-        self._conn.execute(
-            "INSERT INTO npc_perception_cursors VALUES (?,?,0)", (sid, actor.actor_id)
-        )
         if initial is None:
             return
         self._conn.executemany(

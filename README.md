@@ -103,6 +103,51 @@ NPC 证明，旧 OB / Inbox / Meta / Task / Receipt / 完成记录保留。可�
 可重试恢复；不可恢复历史与 Engine 阶段缺口仍需未来可信证据或受控迁移，不提供
 任意跳过/清除 API，也不补造历史。详见 [Batch C Review](docs/reviews/SM_PER3_REVIEW.md)。
 
+## PERF-01 / PERF-02：按需水位与 Pending 分页
+
+当前 SQLite **Schema 20** 为 `complete=0` 的 Queue 增加部分索引
+`npc_perception_pending(session_id,npc_id,event_seq)`，删除派生缓存表
+`npc_perception_cursors`。事件提交和感知判断完成不再遍历整个 Session 的 NPC
+刷新感知或认知 Cursor。`npc_perception_cursor(...)` 在当前 SQLite 事务快照中，取
+全局末尾、该 NPC 首个 Pending Event 之前、首个没有该 NPC 自身完成证明的 Barrier
+之前三者的最小值。所有 Recent OB、Pending Work、Memory Gate、模式路由与 EVA
+来源查询共用此水位；无关 Event 可直接越过，较晚 OB 不可越过本 NPC 的缺口。
+`npc_completed_cursor(...)` 同样按需计算，并受 Pending 认知 Work 限制。
+旧 `npc_completion_cursors` 仅保留该 NPC 在 Gate/EVA 完成事务中的检查点，读取
+不以它作为当前水位。Unknown Discovery、历史逐 NPC 证明和后来实例化 NPC 的
+Barrier 规则沿用 Batch C。
+
+Worker 使用以下授权元数据接口，按 `event_seq` 严格升序，只从 SQLite 取本页
+未完成引用，不加载已完成历史，也不依赖交付 Cursor 找工作：
+
+```python
+page = sm.get_pending_npc_perception_queue(
+    session_id,
+    package,
+    context=npc_context,
+    limit=20,
+    after_event_seq=None,
+)
+```
+
+`limit` 默认 20，允许整数 1～1000；`after_event_seq` 是可选的排他扫描位置，允许
+0～`2**63-1` 的整数，拒绝 Boolean。继续本轮扫描可传上一页末尾序号；每轮重试
+扫描须重新从 `None` 开始，保留较早 Unresolved 工作。该位置不代表 ACK。空页也
+不代表未知 Discovery 的共享 Barrier 已解决。并发 Worker 可重复读到同一引用，
+完成仍通过原有幂等 `project_npc_event(...)` 提交。
+`get_npc_perception_queue(...)` 保留原签名、返回类型和完整历史行为，供显式审计；
+不会静默把原接口改为 Pending-only。
+
+Schema 19 及更早存档通过原有迁移写锁原子升级；Queue、Evidence、Event、OB、
+Outbox、Receipt、RNG 与旧认知检查点保留，失败回滚和重复/多进程打开均有真实
+SQLite 测试。Schema 20 不提供降级迁移，旧运行时不能直接打开新版本存档。
+本地合成验证中，200 NPC 的无关事件提交 SQL 从 815 降至 12，Cursor 计算 VM
+指令从 25,511 降至 70；包含 5,001 条完成历史和 40 条 Pending 的 Worker 查询
+返回从 5,041 行降至 20 行，并使用部分索引。这些是合成 SQLite 证据，不代表生产
+延迟或吞吐量；可用 `uv run --locked python examples/benchmark_perception_efficiency.py`
+复现。测试结果、修改文件、迁移审阅及剩余成本见
+[PERF-01 / PERF-02 Review](docs/reviews/SM_PERF01_PERF02_REVIEW.md)。
+
 ## 安装与验证
 
 SM-10 已固定 Engine/SRD 候选 `602dcb8d448e670049427bbb751d6ed226005298`
