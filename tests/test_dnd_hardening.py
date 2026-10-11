@@ -54,8 +54,9 @@ def test_real_vertical_pipeline_committed_observations_fresh_process_audit(
         delivered = []
         for event in sm.read_events(sid, package, context=context):
             # The original /1 package has no noncombat mechanical state at its
-            # entry event. That history must remain unknown, even with a callback.
-            expected = "unresolved" if event.event_seq == 2 else "resolved"
+            # entry event. Engine attack stages are not exposed by its Result
+            # either; neither gap can be guessed by a judgment callback.
+            expected = "unresolved" if event.signals else "resolved"
             assert (
                 sm.project_event(
                     sid, event.event_seq, package, context=context, judgment=synthetic_notice
@@ -83,7 +84,31 @@ def test_real_vertical_pipeline_committed_observations_fresh_process_audit(
                 "SELECT content_json FROM event_observations WHERE observer_id=?", (NPC,)
             )
         ]
-        assert sum(c == ["Someone makes an attack."] for c in contents) == 2
+        attack_events = [
+            e
+            for e in sm.read_events(sid, package, context=context)
+            if e.event_type == "combat.engine_event" and e.signals
+        ]
+        assert len(attack_events) == 2 and contents == []
+        for event in attack_events:
+            assert event.signals[0].content == "Someone makes an attack."
+            evidence = json.loads(
+                sm._conn.execute(
+                    "SELECT evidence_json FROM event_evidence WHERE event_seq=?", (event.event_seq,)
+                ).fetchone()[0]
+            )
+            assert evidence["phase"] == {
+                "status": "unresolved",
+                "code": "engine.intermediate_phase_unavailable",
+            }
+            assert not evidence["discovery"]["complete"]
+            assert (
+                sm._conn.execute(
+                    "SELECT done FROM event_outbox WHERE event_seq=? AND consumer='perception'",
+                    (event.event_seq,),
+                ).fetchone()[0]
+                == 0
+            )
         public = json.dumps(contents)
         for hidden in ("damage_applied", "hp_current", "rng", "roll_total", "weapon_id"):
             assert hidden not in public

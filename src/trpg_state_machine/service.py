@@ -21,7 +21,7 @@ from .combat import DND_RULESET, CombatRuntime
 from .commands import OPERATIONS, CommandRuntime, TypedCommand
 from .dnd_runtime import DndRuntime
 from .errors import StateMachineError
-from .events import EventRuntime
+from .events import EventRuntime, _StagedEvent
 from .game_time import AdvanceGameTime, advance_game_time
 from .mechanical_runtime import MechanicalRuntime
 from .mechanics import SyntheticEvaluator
@@ -47,10 +47,6 @@ from .package import (
     SYNTHETIC_EVALUATION_RULESET,
     AdventurePackage,
     RulesetBinding,
-    Signal,
-    SignalOrigin,
-    SignalScope,
-    SignalStimulus,
     _creation_fingerprint,
     canonical_json,
 )
@@ -473,7 +469,23 @@ class StateMachine(
             initial_events = self._expand_events(
                 initial_row,
                 package,
-                [("session.created", {}), ("scene.entered", {"scene_id": package.entry_scene_id})],
+                [
+                    self._capture_event(
+                        session_id,
+                        package,
+                        "session.created",
+                        {},
+                        phase="session.after_initialization",
+                    ),
+                    self._capture_event(
+                        session_id,
+                        package,
+                        "scene.entered",
+                        {"scene_id": package.entry_scene_id},
+                        phase="session.after_initialization",
+                        source_actor_id=pc_actor_id,
+                    ),
+                ],
                 request.command_id,
             )
             self._append_events(
@@ -527,82 +539,32 @@ class StateMachine(
         self,
         session_id: str,
         version: int,
-        events: list[tuple[str, dict]],
+        events: list[_StagedEvent],
         *,
         source_command_id: str,
         package: AdventurePackage,
     ) -> None:
+        # Evidence has already been frozen at the producer stage. This method
+        # assigns durable identities and writes; it never samples world state.
         seq = self._conn.execute(
             "SELECT event_seq FROM sessions WHERE session_id = ?", (session_id,)
         ).fetchone()[0]
-        evidence = self._event_perception_evidence(session_id, package, version)
-        for event_type, payload in events:
+        for event in events:
+            if type(event) is not _StagedEvent:
+                raise StateMachineError(
+                    "invalid_event_evidence", "Producer must supply staged evidence"
+                )
             seq += 1
+            evidence = json.loads(event.evidence_json)
+            evidence["world_version"] = version
             self._conn.execute(
                 "INSERT INTO events VALUES (?, ?, ?, ?, ?)",
-                (session_id, seq, event_type, version, canonical_json(payload)),
+                (session_id, seq, event.event_type, version, canonical_json(event.payload)),
             )
             self._conn.execute(
                 "INSERT INTO event_evidence VALUES (?, ?, ?)",
                 (session_id, seq, canonical_json(evidence)),
             )
-            signals = []
-            scene_id = payload.get("scene_id", payload.get("to_scene_id"))
-            descriptions = {
-                "scene.entered": "Someone enters the scene.",
-                "scene.exited": "Someone leaves the scene.",
-                "actor.moved": "Someone moves into view.",
-                "object.state_changed": "An object changes position.",
-            }
-            if (
-                event_type == "combat.engine_event"
-                and payload["engine_event"]["type"] == "intent_submitted"
-                and payload["engine_event"]["intent_type"] == "attack"
-            ):
-                descriptions[event_type] = "Someone makes an attack."
-            if event_type == "npc.dialogue_published":
-                signals.append(
-                    Signal(
-                        "signal.dialogue",
-                        "auditory",
-                        payload["text"],
-                        SignalScope(scene_id, "clear"),
-                    )
-                )
-            elif event_type in descriptions and scene_id:
-                signals = [
-                    Signal(
-                        "signal.visible",
-                        "visual",
-                        descriptions[event_type],
-                        SignalScope(scene_id, "clear"),
-                    )
-                ]
-            elif event_type == "package.event_fired":
-                definition = next(
-                    e
-                    for e in package.events
-                    if e.event_definition_id == payload["event_definition_id"]
-                )
-                signals = list(definition.signals)
-            # Backward-compatible authored Signals acquire explicit objective
-            # defaults at NEW commit only. Historical JSON is never backfilled.
-            signals = [
-                replace(
-                    signal,
-                    origin=signal.origin
-                    or SignalOrigin(
-                        signal.scope.scene_id,
-                        payload.get("actor_id", payload.get("object_id"))
-                        or payload.get("engine_event", {}).get("actor_id"),
-                    ),
-                    stimulus=signal.stimulus
-                    or SignalStimulus(
-                        "sound" if signal.channel == "auditory" else "ordinary_activity"
-                    ),
-                )
-                for signal in signals
-            ]
             self._conn.execute(
                 "INSERT INTO event_records VALUES (?, ?, ?, ?, ?)",
                 (
@@ -610,17 +572,12 @@ class StateMachine(
                     seq,
                     f"event.{session_id}.{seq}",
                     source_command_id,
-                    canonical_json([asdict(signal) for signal in signals]),
+                    canonical_json([asdict(signal) for signal in event.signals]),
                 ),
             )
-            self._conn.execute(
-                "INSERT INTO event_outbox(session_id,event_seq,consumer) VALUES (?, ?, 'delivery')",
-                (session_id, seq),
-            )
-            self._conn.execute(
-                "INSERT INTO event_outbox(session_id,event_seq,consumer) "
-                "VALUES (?, ?, 'perception')",
-                (session_id, seq),
+            self._conn.executemany(
+                "INSERT INTO event_outbox(session_id,event_seq,consumer) VALUES (?, ?, ?)",
+                [(session_id, seq, "delivery"), (session_id, seq, "perception")],
             )
         self._conn.execute(
             "UPDATE sessions SET event_seq = ? WHERE session_id = ?", (seq, session_id)
@@ -656,7 +613,10 @@ class StateMachine(
         self._world_operation_capability(row, operation)
         sid = row["session_id"]
         if type(operation) is AdvanceGameTime:
-            return advance_game_time(self, row, operation)
+            return [
+                self._capture_event(sid, package, kind, payload, phase="clock.after_advance")
+                for kind, payload in advance_game_time(self, row, operation)
+            ]
         if isinstance(operation, EnterScene):
             target = package.scene(operation.scene_id)
             if target.scene_id == row["current_scene_id"]:
@@ -664,6 +624,14 @@ class StateMachine(
             current = package.scene(row["current_scene_id"])
             if target.scene_id not in current.exits:
                 raise StateMachineError("scene_unreachable", "No unconditional exit to this scene")
+            departure = self._capture_event(
+                sid,
+                package,
+                "scene.exited",
+                {"scene_id": current.scene_id},
+                phase="scene.before_departure",
+                source_actor_id=row["pc_actor_id"],
+            )
             existed = self._conn.execute(
                 "SELECT 1 FROM scene_instances WHERE session_id = ? AND scene_id = ?",
                 (sid, target.scene_id),
@@ -684,8 +652,15 @@ class StateMachine(
                 (target.scene_id, sid, row["pc_actor_id"]),
             )
             return [
-                ("scene.exited", {"scene_id": current.scene_id}),
-                ("scene.entered", {"scene_id": target.scene_id}),
+                departure,
+                self._capture_event(
+                    sid,
+                    package,
+                    "scene.entered",
+                    {"scene_id": target.scene_id},
+                    phase="scene.after_arrival",
+                    source_actor_id=row["pc_actor_id"],
+                ),
             ]
         if isinstance(operation, (SetSceneFlag, SetObjectState)):
             if operation.scene_id != row["current_scene_id"]:
@@ -710,7 +685,15 @@ class StateMachine(
                     "WHERE session_id = ? AND scene_id = ?",
                     (canonical_json(flags), sid, operation.scene_id),
                 )
-                return [("scene.flag_changed", asdict(operation))]
+                return [
+                    self._capture_event(
+                        sid,
+                        package,
+                        "scene.flag_changed",
+                        asdict(operation),
+                        phase="world.after_flag_update",
+                    )
+                ]
             if not isinstance(operation.state, ObjectState):
                 raise StateMachineError("invalid_operation", "Expected a typed ObjectState")
             obj = self._conn.execute(
@@ -725,7 +708,15 @@ class StateMachine(
                 "UPDATE objects SET state = ? WHERE session_id = ? AND object_id = ?",
                 (operation.state.value, sid, operation.object_id),
             )
-            return [("object.state_changed", asdict(operation))]
+            return [
+                self._capture_event(
+                    sid,
+                    package,
+                    "object.state_changed",
+                    asdict(operation),
+                    phase="world.after_object_update",
+                )
+            ]
         actor = self._conn.execute(
             "SELECT * FROM actors WHERE session_id = ? AND actor_id = ?", (sid, operation.actor_id)
         ).fetchone()
@@ -742,7 +733,11 @@ class StateMachine(
             "UPDATE actors SET current_scene_id = ? WHERE session_id = ? AND actor_id = ?",
             (operation.to_scene_id, sid, operation.actor_id),
         )
-        return [("actor.moved", asdict(operation))]
+        return [
+            self._capture_event(
+                sid, package, "actor.moved", asdict(operation), phase="world.after_actor_move"
+            )
+        ]
 
     def _snapshot(self, row) -> SessionSnapshot:
         sid = row["session_id"]

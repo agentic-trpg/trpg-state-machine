@@ -28,7 +28,7 @@ def advance_game_time(runtime, row, operation):
     return [("game.time_advanced", {"previous_tick": tick, "game_tick": operation.next_tick})]
 
 
-def sync_npc_schedules(runtime, sid, command_id):
+def sync_npc_schedules(runtime, sid, command_id, package):
     """Called only inside the original world-command savepoint. Never starts EVA."""
     db = runtime._conn
     tick = db.execute("SELECT game_tick FROM world_states WHERE session_id=?", (sid,)).fetchone()[0]
@@ -82,7 +82,9 @@ def sync_npc_schedules(runtime, sid, command_id):
                     (status, tick, tick, command_id, sid, npc["npc_id"], entry["schedule_id"]),
                 )
             events.append(
-                (
+                runtime._capture_event(
+                    sid,
+                    package,
                     "npc.schedule_" + status,
                     {
                         "npc_id": npc["npc_id"],
@@ -90,6 +92,7 @@ def sync_npc_schedules(runtime, sid, command_id):
                         "game_tick": tick,
                         "scene_id": npc["current_scene_id"],
                     },
+                    phase="schedule.after_lifecycle_record",
                 )
             )
             changed = True

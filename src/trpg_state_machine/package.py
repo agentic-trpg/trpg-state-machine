@@ -672,9 +672,10 @@ def _event_definitions(raw, scenes):
                 fields += " stimulus" if "stimulus" in signal_data else ""
             signal_data = _mapping(signal_data, fields, path + ".signals")
             scope = _mapping(signal_data["scope"], "kind scene_id visibility", path + ".scope")
+            signal_scene = next((s for s in scenes if s.scene_id == scope["scene_id"]), None)
             if (
                 scope["kind"] != "scene"
-                or scope["scene_id"] != scene.scene_id
+                or signal_scene is None
                 or scope["visibility"] not in ("clear", "blocked", "undetermined")
                 or signal_data["channel"] not in ("visual", "auditory")
             ):
@@ -687,12 +688,14 @@ def _event_definitions(raw, scenes):
                     fields += " entity_id" if "entity_id" in raw else ""
                     fields += " cell" if "cell" in raw else ""
                 raw = _mapping(raw, fields, path + ".origin")
-                if raw["scene_id"] != scene.scene_id:
+                if raw["scene_id"] != signal_scene.scene_id:
                     _fail("invalid_reference", path, "Signal origin must be in its Scene scope")
                 entity = raw.get("entity_id")
                 if entity is not None:
                     _reference(
-                        entity, {*scene.actor_ids, *(o.object_id for o in scene.objects)}, path
+                        entity,
+                        {*signal_scene.actor_ids, *(o.object_id for o in signal_scene.objects)},
+                        path,
                     )
                 cell = raw.get("cell")
                 if cell is not None:
@@ -703,7 +706,7 @@ def _event_definitions(raw, scenes):
                             raise ValueError("Expected canonical grid cell")
                     except ValueError:
                         _fail("schema_error", path + ".origin.cell", "Expected canonical grid cell")
-                origin = SignalOrigin(scene.scene_id, entity, cell)
+                origin = SignalOrigin(signal_scene.scene_id, entity, cell)
             stimulus = None
             if "stimulus" in signal_data:
                 raw = _mapping(signal_data["stimulus"], "kind", path + ".stimulus")
@@ -720,7 +723,7 @@ def _event_definitions(raw, scenes):
                     _identifier(signal_data["signal_id"], path, "signal"),
                     signal_data["channel"],
                     _text(signal_data["content"], path),
-                    SignalScope(scene.scene_id, scope["visibility"]),
+                    SignalScope(signal_scene.scene_id, scope["visibility"]),
                     origin,
                     stimulus,
                 )
