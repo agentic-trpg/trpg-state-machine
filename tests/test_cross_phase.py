@@ -62,7 +62,7 @@ def audit(database, sid):
 def test_complete_real_cross_phase_pipeline_and_new_process(tmp_path, package_data, context):
     context = replace(context, can_adjudicate_checks=True)
     assets = modern_loader()
-    data = modern_data(package_data, assets)
+    data = modern_data(package_data, assets, spatial=True)
     data["actors"][1]["senses"] = {"visual": True, "auditory": True}
     for name in ("combat_foundation", "noncombat_foundation"):
         pc = data["rule_bindings"][name]["snapshot"]["character_states"][0]
@@ -395,7 +395,7 @@ def test_closure_xp_storage_bounds_reject_without_partial_commit(
         async def overflow(request):
             raw = (await real(request)).model_dump(mode="json")
             op = next(op for op in raw["state_delta"]["operations"] if op["kind"] == "combat.close")
-            op["xp_awarded"] = {command.actor_id: amount}
+            op["xp_increments"] = {command.actor_id: amount}
             return RuleEvaluationResult.model_validate_json(json.dumps(raw))
 
         sm._rules._evaluate_dnd = overflow

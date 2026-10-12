@@ -25,7 +25,7 @@ def test_native_facts_before_combat_and_initialization_preserve_rng(
         sid = create(sm, package, context)
         other = create(sm, package, context, "create.other")
         before = sm.read_noncombat_snapshot(sid, package, context=context)
-        assert before.snapshot_schema_version == "engine-snapshot/2"
+        assert before.snapshot_schema_version == "engine-snapshot/17"
         assert before.snapshot_kind == "non_combat"
         assert "combat_state" not in before.model_dump()
         assert sm._conn.execute("SELECT count(*) FROM combats").fetchone()[0] == 0
@@ -145,7 +145,7 @@ def test_schema9_interrupt_rolls_back_and_restart_completes(tmp_path, monkeypatc
         assert "xp" not in {r[1] for r in db.execute("PRAGMA table_info(characters)")}
     for _ in range(2):
         with StateMachine(database) as sm:
-            assert sm._conn.execute("PRAGMA user_version").fetchone()[0] == 22
+            assert sm._conn.execute("PRAGMA user_version").fetchone()[0] == 23
 
 
 def test_check_only_package_has_no_encounter_dependency(tmp_path, package_data, context):

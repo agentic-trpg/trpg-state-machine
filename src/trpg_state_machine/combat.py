@@ -38,10 +38,8 @@ def validate_foundation(value):
         RNGState.model_validate_json(canonical_json(value["rng_state"]))
     except (ValidationError, ValueError, TypeError) as exc:
         raise StateMachineError("invalid_combat_foundation", "Incomplete Engine state") from exc
-    if snapshot.combat_state.event_log or snapshot.world_version != 0:
-        raise StateMachineError(
-            "invalid_combat_foundation", "Initial history/version must be empty"
-        )
+    if snapshot.world_version != 0:
+        raise StateMachineError("invalid_combat_foundation", "Initial world version must be zero")
     if snapshot.combat_state.ended:
         raise StateMachineError("invalid_combat_foundation", "An initial encounter must be active")
     if reason := snapshot_support_failure(snapshot):
@@ -66,7 +64,7 @@ def validate_noncombat_foundation(value):
         ]
         ids = [snapshot.scene_state.scene_id, *(s.scene_id for s in scenes)]
         if (
-            snapshot.snapshot_schema_version != "engine-snapshot/2"
+            snapshot.snapshot_schema_version != "engine-snapshot/17"
             or snapshot.world_version != 0
             or not snapshot.character_states
             or len(ids) != len(set(ids))
@@ -81,6 +79,10 @@ def validate_noncombat_foundation(value):
         raise StateMachineError(
             "invalid_noncombat_foundation", "Incomplete mechanical facts"
         ) from exc
+    if snapshot.combat_setup is not None:
+        raise StateMachineError(
+            "unsupported_noncombat_foundation", "Combat setup persistence is not admitted"
+        )
     if snapshot.effect_states:
         raise StateMachineError(
             "unsupported_noncombat_foundation", "Effect persistence is not admitted"

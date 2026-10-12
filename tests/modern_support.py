@@ -21,11 +21,11 @@ def modern_loader():
     )
 
 
-def modern_data(base, assets, *, npc_hp=1, weapon="rapier", grip="one_handed"):
+def modern_data(base, assets, *, npc_hp=1, weapon="rapier", grip="one_handed", spatial=False):
     data = legacy_data(deepcopy(base), assets)
     foundation = data["rule_bindings"]["combat_foundation"]
     snapshot = foundation["snapshot"]
-    snapshot["snapshot_schema_version"] = "engine-snapshot/2"
+    snapshot["snapshot_schema_version"] = "engine-snapshot/17"
     for actor in snapshot["character_states"]:
         actor.update(
             weapon_in_hands=None,
@@ -47,11 +47,41 @@ def modern_data(base, assets, *, npc_hp=1, weapon="rapier", grip="one_handed"):
         skill_expertise=[],
     )
     npc.update(hp_current=npc_hp, hp_max=npc_hp, ac=1, carried_item_slugs=[])
+    snapshot["inventory_state"]["entries"][0]["item_slug"] = weapon
     data["pc_templates"][0]["character"]["inventory"] = [weapon]
+    # Cross-phase spatial fixtures explicitly author actual position sources
+    # and a reversible passage. Ordinary fixtures keep their original world semantics.
+    if spatial and data["manifest"]["schema_version"] == "state-machine-foundation/1":
+        data["manifest"]["schema_version"] = "state-machine-foundation/2"
+        for scene in data["scenes"]:
+            scene.update(
+                grid=deepcopy(snapshot["scene_state"]["grid"]), access_policy="public_interactions"
+            )
+            for exit in scene["exits"]:
+                exit["passage_id"] = "passage.mechanical"
+            for obj in scene["objects"]:
+                obj.update(movable=False, blocks_passage=False, initial_cell="2,2")
+        for actor in data["actors"]:
+            actor["initial_cell"] = (
+                "1,0" if actor["initial_scene_id"] == "scene.platform" else "1,1"
+            )
+        for template in data["pc_templates"]:
+            template["initial_cell"] = "0,0"
+        data["passages"] = [
+            {
+                "passage_id": "passage.mechanical",
+                "door_object_id": None,
+                "endpoints": [
+                    {"scene_id": scene["scene_id"], "standing_cell": "0,0", "threshold_cell": "0,1"}
+                    for scene in data["scenes"]
+                ],
+            }
+        ]
     foundation["rng_state"] = RNGState.capture(random.Random(0)).model_dump(mode="json")
     noncombat = deepcopy(snapshot)
     del noncombat["combat_state"]
     noncombat["snapshot_kind"] = "non_combat"
+    noncombat["combat_setup"] = None
     extra = deepcopy(snapshot["scene_state"])
     extra["scene_id"] = "scene.workshop"
     data["rule_bindings"]["noncombat_foundation"] = {

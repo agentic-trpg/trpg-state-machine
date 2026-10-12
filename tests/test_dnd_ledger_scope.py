@@ -60,25 +60,35 @@ def encounter(tmp_path, base, context, case="pc_lethal", *, history=True):
         snapshot["character_states"][0].update(hp_current=1, hp_max=maximum)
         state.update(current_turn_index=1, turn_serial=2, monster_turn_start_done=[2, NPC])
     if history:
-        # Explicit approved input history, including a former participant absent
-        # from this encounter. No runtime SQL or Snapshot overwrite seeds it.
+        # Explicit prior ledger with complete current terminal facts. The retired
+        # Actor has a proven roster, side, position and terminal state.
+        # No runtime SQL or Snapshot overwrite seeds this prior record.
         data["actors"].append(
             {
                 "actor_id": HISTORICAL,
                 "name": "Original historical sentinel",
                 "kind": "npc",
                 "controller": {"kind": "scripted_event"},
-                "initial_scene_id": "scene.workshop",
+                "initial_scene_id": "scene.platform",
             }
         )
-        data["scenes"][1]["actor_ids"].append(HISTORICAL)
+        data["scenes"][0]["actor_ids"].append(HISTORICAL)
+        retired = deepcopy(third)
+        retired.update(entity_id=HISTORICAL, hp_current=0, is_alive=False, temp_hp=0)
+        snapshot["character_states"].append(retired)
+        state["initiative_ids"].append(HISTORICAL)
+        state["encounter_ids"].append(HISTORICAL)
+        state["monster_slug_by_entity"][HISTORICAL] = "bandit"
+        state["xp_value_by_entity"][HISTORICAL] = state["xp_value_by_entity"][NPC]
+        state["actor_zone"][HISTORICAL] = "2,2"
+        state["movement_ledgers"][HISTORICAL] = deepcopy(state["movement_ledgers"][NPC])
         state["processed_zero_hp_damage_instances"] = [[OTHER, "prior:damage"]]
         state["dead_ids"] = [HISTORICAL]
         state["deaths_recorded"] = [
             {
                 "target_id": HISTORICAL,
-                "target_kind": "npc",
-                "location_id": "scene.workshop",
+                "target_kind": retired["entity_type"].lower(),
+                "location_id": "scene.platform",
                 "reason": "damage",
                 "killer_id": OTHER,
             }
@@ -367,7 +377,13 @@ def test_schema_valid_ledger_fault_has_no_writes_and_original_command_retries(
         "death_delete_records",
         "death_rewrite_history",
     }
-    sm, sid, package, assets, command = encounter(tmp_path, package_data, context, history=history)
+    sm, sid, package, assets, command = encounter(
+        tmp_path,
+        package_data,
+        context,
+        case="pc_damage" if fault.startswith("adjacent_") else "pc_lethal",
+        history=history,
+    )
     calls = []
     real = sm._rules._evaluate_dnd
 

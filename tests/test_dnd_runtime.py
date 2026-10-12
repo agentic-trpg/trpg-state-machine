@@ -39,6 +39,7 @@ def authority(sm, sid):
             "sessions",
             "characters",
             "mechanical_actors",
+            "mechanical_components",
             "combats",
             "rng_states",
             "events",
@@ -94,7 +95,7 @@ def test_real_attack_full_delta_rng_and_database_parity(
         before = sm.read_combat_snapshot(sid, package, context=context)
         rng = sm.read_rng_context(sid, package, context=context)
         request = RuleEvaluationRequest(
-            schema_version="engine-evaluation/1",
+            schema_version="engine-evaluation/23",
             session_id=sid,
             command_id=command.command_id,
             operation_kind="combat.intent",
@@ -111,10 +112,12 @@ def test_real_attack_full_delta_rng_and_database_parity(
         after = sm.read_combat_snapshot(sid, package, context=context)
         comparison = after.model_copy(update={"world_version": before.world_version})
         assert attack_delta(before, comparison) == expected.state_delta
-        assert (
-            comparison.combat_state.event_log
-            == before.combat_state.event_log + expected.proposed_events
+        committed = tuple(
+            e.payload["engine_event"]
+            for e in sm.read_events(sid, package, context=context)
+            if e.event_type == "combat.engine_event"
         )
+        assert committed == tuple(e.model_dump(mode="json") for e in expected.proposed_events)
         assert (
             sm.read_rng_context(sid, package, context=context).state
             == expected.rng_transition.next_state
@@ -169,7 +172,9 @@ def test_refusals_do_not_change_rng_or_facts(tmp_path, package_data, context, in
         assert {k: v for k, v in before.items() if k != "command_receipts"} == {
             k: v for k, v in after.items() if k != "command_receipts"
         }
-        assert len(calls) == (0 if code == "pending_choice_unsupported" else 1)
+        assert len(calls) == (
+            0 if code in ("pending_choice_unsupported", "intent.capability") else 1
+        )
         assert sm.submit_command(command, package, context=context) == receipt
         assert authority(sm, sid) == after
 
@@ -320,9 +325,9 @@ def test_lethal_attack_commits_complete_death_state(tmp_path, package_data, cont
         assert snapshot.character_states[1].hp_current == 0
         assert NPC in snapshot.combat_state.dead_ids
         assert snapshot.combat_state.deaths_recorded[0].target_id == NPC
-        # The pinned Engine records monster death in dead_ids, retaining is_alive.
+        # The current Engine commits both the death ledger and the alive flag.
         # SM must apply its actual Delta rather than invent another death formula.
-        assert snapshot.character_states[1].is_alive
+        assert not snapshot.character_states[1].is_alive
         assert not snapshot.combat_state.ended
         with pytest.raises(StateMachineError) as caught:
             sm.save_session(sid, package, context=context)

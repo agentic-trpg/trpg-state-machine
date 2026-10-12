@@ -346,7 +346,10 @@ def test_combat_preparation_occ_uses_new_position(tmp_path, package_data, contex
 
         def change(row, package):
             prepared = prepare(row, package)
-            assert_ok(submit(sm, sid, p, context, StepActor(A, "2,1", "2,2"), "race"))
+            # Preparation now owns a consistent read transaction. A real second
+            # connection commits the concurrent move without nesting that scope.
+            with StateMachine(tmp_path / "occ.db", dnd_loader=assets) as writer:
+                assert_ok(submit(writer, sid, p, context, StepActor(A, "2,1", "2,2"), "race"))
             return prepared
 
         monkeypatch.setattr(sm, "_prepare_combat", change)

@@ -1,4 +1,4 @@
-"""Pinned RE adapter, including complete legacy history (RE-HIST-01)."""
+"""Pinned history-free evaluator projection and controlled component delta adapter."""
 
 import copy
 import json
@@ -23,6 +23,8 @@ from dnd5e_engine.evaluation_preflight import template_support_failure
 from dnd5e_engine.evaluation_rng import RNGContext, RNGState
 from dnd5e_engine.evaluation_ruleset import RulesetBinding, RulesetBindingError, verify_ruleset
 from dnd5e_engine.evaluation_state import CombatSnapshot, NonCombatSnapshot
+from dnd5e_engine.spatial import GridTopology
+from dnd5e_engine.specs import GridScene
 from pydantic import ValidationError
 
 from .combat import DND_RULESET, _remap, process_id, validate_foundation
@@ -188,7 +190,6 @@ def delta_changes(request, result):
             edit("combat", op.combat_id, "deaths_recorded", op.expected_records, op.records)
         else:
             _invalid("Unrecognized delta operation")
-    combat["event_log"] += [_json(e) for e in result.proposed_events]
     data = snapshot.model_dump(mode="json")
     data.update(
         character_states=[actors[a.entity_id] for a in snapshot.character_states],
@@ -239,11 +240,8 @@ def validate_dnd_result(request, result):
     )
 
 
-class LegacyRulesAdapter:
-    """Pinned 0.6.0 translation, no transactions, no independent current state.
-
-    Complete event_log and proposed_events remain required by RE-HIST-01.
-    """
+class RulesAdapter:
+    """Pinned history-free translation; facts and the outer transaction belong to SM."""
 
     def __init__(self, store, loader, characters, facts, records, world):
         self.store = store
@@ -258,6 +256,10 @@ class LegacyRulesAdapter:
         return self.store.connection
 
     def _verify_dnd_binding(self, package):
+        if package.legacy_audit_only:
+            raise StateMachineError(
+                "legacy_rules_audit_only", "Old mechanical facts require explicit migration"
+            )
         if package.ruleset_binding.ruleset_id != DND_RULESET:
             raise StateMachineError("unsupported_ruleset", "Expected a D&D evaluation package")
         try:
@@ -270,7 +272,7 @@ class LegacyRulesAdapter:
     def _noncombat_snapshot(self, row):
         self.records.require_noncombat_save(row)
         sid = row["session_id"]
-        if row["mechanical_schema_version"] != "engine-snapshot/2":
+        if row["mechanical_schema_version"] != "engine-snapshot/17":
             raise StateMachineError(
                 "unsupported_mechanical_version", "Complete noncombat state was not initialized"
             )
@@ -298,7 +300,8 @@ class LegacyRulesAdapter:
                         "session_id": sid,
                         "world_version": row["world_version"],
                         "character_states": [actors[a] for a in present],
-                        "effect_states": [],
+                        **self.characters.rule_components(sid, set(present)),
+                        "combat_setup": None,
                         "scene_state": json.loads(scene[0]),
                     }
                 )
@@ -310,40 +313,33 @@ class LegacyRulesAdapter:
 
     def _combat_snapshot(self, row):
         sid = row["session_id"]
+        if row["mechanical_schema_version"] != "engine-snapshot/17":
+            raise StateMachineError(
+                "unsupported_mechanical_version", "Old save lacks proven current component facts"
+            )
         combat = self._conn.execute("SELECT * FROM combats WHERE session_id=?", (sid,)).fetchone()
         if combat is None:
             raise StateMachineError("combat_not_initialized", "Session has no mechanical encounter")
         state = json.loads(combat["state_json"])
-        if self.facts.spatial_scene(sid, combat["scene_id"]) is not None and (not state["ended"]):
-            state["actor_zone"] = self.world._current_actor_cells(
-                sid, combat["scene_id"], state["initiative_ids"]
-            )
-        state["event_log"] = [
-            json.loads(e[0])["engine_event"]
-            for e in self._conn.execute(
-                (
-                    "SELECT payload_json FROM events WHERE session_id=? AND "
-                    "event_type='combat.engine_event' ORDER BY event_seq"
-                ),
-                (sid,),
-            )
-        ]
         actors = self.characters.rule_actors(sid)
         scene = self._conn.execute(
             "SELECT state_json FROM mechanical_scenes WHERE session_id=? AND scene_id=?",
             (sid, combat["scene_id"]),
         ).fetchone()
+        if not state["ended"]:
+            state["actor_zone"] = self._current_cells(
+                sid, combat["scene_id"], state["initiative_ids"], json.loads(scene[0])["grid"]
+            )
         try:
             return CombatSnapshot.model_validate_json(
                 canonical_json(
                     {
-                        "snapshot_schema_version": row["mechanical_schema_version"]
-                        or "engine-snapshot/1",
+                        "snapshot_schema_version": row["mechanical_schema_version"],
                         "snapshot_kind": "combat",
                         "session_id": sid,
                         "world_version": row["world_version"],
                         "character_states": [actors[a] for a in state["initiative_ids"]],
-                        "effect_states": [],
+                        **self.characters.rule_components(sid, set(state["initiative_ids"])),
                         "scene_state": json.loads(scene[0]),
                         "combat_state": state,
                     }
@@ -353,6 +349,26 @@ class LegacyRulesAdapter:
             raise StateMachineError(
                 "invalid_mechanical_state", "Stored Engine state is incomplete"
             ) from exc
+
+    def _current_cells(self, sid, scene_id, roster, grid):
+        from .spatial import cell_in_bounds
+
+        topology = GridTopology(GridScene.model_validate(grid))
+        positions = {}
+        for actor_id in roster:
+            position = self.characters.position(sid, actor_id)
+            if (
+                position.scene_id != scene_id
+                or not cell_in_bounds(topology, position.cell)
+                or not topology.is_valid_cell(position.cell)
+            ):
+                raise StateMachineError(
+                    "invalid_spatial_state", "Current actor position is incomplete"
+                )
+            positions[actor_id] = position.cell
+        if len(set(positions.values())) != len(positions):
+            raise StateMachineError("invalid_spatial_state", "Encounter occupancy overlaps")
+        return positions
 
     def _rng_context(self, row):
         rng = self._conn.execute(
@@ -401,16 +417,22 @@ class LegacyRulesAdapter:
                 raise StateMachineError(
                     "invalid_spatial_state", "Encounter roster must cover present actors"
                 )
-            data["snapshot"]["combat_state"]["actor_zone"] = self.world._current_actor_cells(
-                row["session_id"], row["current_scene_id"], roster
-            )
             data["snapshot"]["scene_state"] = spatial
+        if package.noncombat_foundation_json is None:
+            data["snapshot"]["character_states"] = [
+                self.characters.initial_rule_actor(row["session_id"], actor).model_dump(mode="json")
+                for actor in CombatSnapshot.model_validate_json(
+                    canonical_json(data["snapshot"])
+                ).character_states
+            ]
         if package.noncombat_foundation_json is not None:
             actors = self.characters.rule_actors(row["session_id"])
             try:
-                data["snapshot"]["character_states"] = [
-                    actors[a] for a in data["snapshot"]["combat_state"]["initiative_ids"]
-                ]
+                roster = data["snapshot"]["combat_state"]["initiative_ids"]
+                data["snapshot"]["character_states"] = [actors[a] for a in roster]
+                data["snapshot"].update(
+                    self.characters.rule_components(row["session_id"], set(roster))
+                )
                 scene = self._conn.execute(
                     "SELECT state_json FROM mechanical_scenes WHERE session_id=? AND scene_id=?",
                     (row["session_id"], row["current_scene_id"]),
@@ -420,6 +442,12 @@ class LegacyRulesAdapter:
                 raise StateMachineError(
                     "invalid_mechanical_state", "Encounter dependencies are missing"
                 ) from exc
+        data["snapshot"]["combat_state"]["actor_zone"] = self._current_cells(
+            row["session_id"],
+            row["current_scene_id"],
+            data["snapshot"]["combat_state"]["initiative_ids"],
+            data["snapshot"]["scene_state"]["grid"],
+        )
         snapshot = CombatSnapshot.model_validate_json(canonical_json(data["snapshot"]))
         if snapshot.scene_state.scene_id != row["current_scene_id"]:
             raise StateMachineError(
@@ -437,11 +465,9 @@ class LegacyRulesAdapter:
             return "pending_choice_unsupported" if payload.dc is None else None
         if type(payload) is CombatClosePayload:
             return None
-        if (
-            payload.intent_type == "attack"
-            and payload.weapon_id is None
-            and payload.stat_block_action_id is None
-        ):
+        if payload.intent_type != "attack":
+            return "intent.capability"
+        if payload.weapon_id is None and payload.stat_block_action_id is None:
             return "pending_choice_unsupported"
         if payload.stat_block_action_id is not None:
             slug = snapshot.combat_state.monster_slug_by_entity.get(actor_id)
@@ -467,10 +493,16 @@ class LegacyRulesAdapter:
                     combat = self._conn.execute(
                         "SELECT scene_id,state_json FROM combats WHERE session_id=?", (sid,)
                     ).fetchone()
-                    if self.facts.spatial_scene(sid, combat["scene_id"]) is not None:
-                        roster = json.loads(combat["state_json"])["initiative_ids"]
-                        cells = self.world._current_actor_cells(sid, combat["scene_id"], roster)
-                        self.records.freeze_positions(sid, cells)
+                    roster = json.loads(combat["state_json"])["initiative_ids"]
+                    scene = self._conn.execute(
+                        "SELECT state_json FROM mechanical_scenes "
+                        "WHERE session_id=? AND scene_id=?",
+                        (sid, combat["scene_id"]),
+                    ).fetchone()
+                    cells = self._current_cells(
+                        sid, combat["scene_id"], roster, json.loads(scene[0])["grid"]
+                    )
+                    self.records.freeze_positions(sid, cells)
                 self.records.update_rule_state(sid, field, value)
             elif component == "ledger":
                 self.records.update_ledger(sid, identity, value)
@@ -479,12 +511,7 @@ class LegacyRulesAdapter:
 
     def request(self, command, package, snapshot, rng):
         return RuleEvaluationRequest(
-            schema_version=(
-                "engine-evaluation/4"
-                if snapshot.snapshot_schema_version == "engine-snapshot/2"
-                or command.command_type == "combat.close"
-                else "engine-evaluation/1"
-            ),
+            schema_version="engine-evaluation/23",
             session_id=command.session_id,
             command_id=command.command_id,
             operation_kind=command.command_type,
@@ -499,11 +526,7 @@ class LegacyRulesAdapter:
         self._verify_dnd_binding(package)
         try:
             request = ActionAvailabilityRequest(
-                schema_version=(
-                    "engine-availability/2"
-                    if snapshot.snapshot_schema_version == "engine-snapshot/2"
-                    else "engine-availability/1"
-                ),
+                schema_version="engine-availability/13",
                 session_id=session_id,
                 operation_kind="combat.intent",
                 actor_id=actor_id,
