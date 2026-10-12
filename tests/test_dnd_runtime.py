@@ -155,14 +155,14 @@ def test_refusals_do_not_change_rng_or_facts(tmp_path, package_data, context, in
         command = replace(attack(sm, sid, package, context), payload=intent)
         before = authority(sm, sid)
         calls = []
-        original = sm._evaluate_dnd
+        original = sm._rules._evaluate_dnd
 
         async def tracked(request):
             calls.append(request)
             assert not sm._conn.in_transaction
             return await original(request)
 
-        sm._evaluate_dnd = tracked
+        sm._rules._evaluate_dnd = tracked
         receipt = sm.submit_command(command, package, context=context)
         assert (receipt.status, receipt.error_code) == ("rejected", code)
         after = authority(sm, sid)
@@ -184,7 +184,7 @@ def test_nonbusiness_fault_has_no_receipt_and_original_request_can_retry(
     with sm:
         command = attack(sm, sid, package, context)
         before = authority(sm, sid)
-        original = sm._evaluate_dnd
+        original = sm._rules._evaluate_dnd
 
         async def faulty(request):
             assert not sm._conn.in_transaction
@@ -221,7 +221,7 @@ def test_nonbusiness_fault_has_no_receipt_and_original_request_can_retry(
                 )
             return result
 
-        sm._evaluate_dnd = faulty
+        sm._rules._evaluate_dnd = faulty
         if fault in ("sql", "receipt_sql"):
             table = "events" if fault == "sql" else "command_receipts"
             sm._conn.execute(
@@ -236,7 +236,7 @@ def test_nonbusiness_fault_has_no_receipt_and_original_request_can_retry(
             "storage_error",
         }
         assert authority(sm, sid) == before
-        sm._evaluate_dnd = original
+        sm._rules._evaluate_dnd = original
         if fault in ("sql", "receipt_sql"):
             sm._conn.execute("DROP TRIGGER fail")
         assert sm.submit_command(command, package, context=context).status == "committed"
@@ -266,14 +266,14 @@ def test_concurrent_same_command_commits_once(tmp_path, package_data, context, s
 
     def worker(index):
         with StateMachine(tmp_path / "dnd.db", dnd_loader=assets) as instance:
-            original = instance._evaluate_dnd
+            original = instance._rules._evaluate_dnd
 
             async def evaluated(request):
                 result = await original(request)
                 barrier.wait(timeout=15)
                 return result
 
-            instance._evaluate_dnd = evaluated
+            instance._rules._evaluate_dnd = evaluated
             selected = command if same_key else replace(command, command_id=f"attack.race.{index}")
             return instance.submit_command(selected, package, context=context)
 
@@ -299,12 +299,12 @@ def test_real_binding_configuration_failure_can_retry(tmp_path, package_data, co
     with sm:
         command = attack(sm, sid, package, context)
         before = authority(sm, sid)
-        sm._dnd_loader = MemoryAssetLoader()
+        sm._rules.loader = MemoryAssetLoader()
         with pytest.raises(StateMachineError) as caught:
             sm.submit_command(command, package, context=context)
         assert caught.value.code == "ruleset_binding_mismatch"
         assert authority(sm, sid) == before
-        sm._dnd_loader = assets
+        sm._rules.loader = assets
         assert sm.submit_command(command, package, context=context).status == "committed"
 
 

@@ -270,29 +270,7 @@ class PerceptionRuntime:
             )
 
     def _npc_authorized(self, session_id, package, context):
-        if (
-            type(context) is not NPCContext
-            or context.session_id != session_id
-            or any(
-                type(v) is not str or not v
-                for v in (context.principal_id, context.session_id, context.observer_id)
-            )
-        ):
-            raise StateMachineError("unauthorized", "Expected a session-bound NPC context")
-        row = self._conn.execute(
-            "SELECT * FROM sessions WHERE session_id=?", (session_id,)
-        ).fetchone()
-        grant = self._conn.execute(
-            "SELECT principal_id FROM npc_access WHERE session_id=? AND observer_id=?",
-            (session_id, context.observer_id),
-        ).fetchone()
-        if row is None or grant is None or grant[0] != context.principal_id:
-            raise StateMachineError("unauthorized", "No NPC observation access grant")
-        # Use the owner check only for package pins, never expose its snapshot to NPC.
-        from .models import TrustedContext
-
-        self._session(session_id, package, TrustedContext(row["principal_id"], row["player_id"]))
-        return context.observer_id
+        return self._sessions._npc_authorized(session_id, package, context)
 
     def perception_cursor(self, session_id, package, *, context):
         with self._transaction():

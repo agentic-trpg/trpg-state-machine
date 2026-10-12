@@ -216,71 +216,13 @@ def command_fingerprint(command, package, context):
 
 class CommandRuntime:
     def _authorize_command(self, row, actor_id, payload, context):
-        if type(payload) is AdvanceGameTime and not context.can_advance_time:
-            raise StateMachineError("unauthorized", "Trusted game-time grant required")
-        if isinstance(payload, CheckPayload) and not context.can_adjudicate_checks:
-            raise StateMachineError("unauthorized", "Trusted GM adjudication grant required")
-        if isinstance(payload, MoveActor) or (
-            isinstance(
-                payload,
-                (
-                    CombatIntentPayload,
-                    CombatClosePayload,
-                    CheckPayload,
-                    StepActor,
-                    TraversePassage,
-                    PlaceObject,
-                    SetObjectState,
-                ),
-            )
-            and actor_id != row["pc_actor_id"]
-        ):
-            if isinstance(payload, MoveActor) and actor_id != payload.actor_id:
-                raise StateMachineError("invalid_actor", "Envelope and payload actors differ")
-            actor = self._conn.execute(
-                "SELECT kind FROM actors WHERE session_id=? AND actor_id=?",
-                (row["session_id"], actor_id),
-            ).fetchone()
-            if actor is None or actor[0] != "npc":
-                raise StateMachineError("invalid_target", "Expected an existing NPC")
-            if actor_id not in context.controlled_npc_ids:
-                raise StateMachineError("unauthorized", "Trusted NPC control grant required")
-        elif actor_id != row["pc_actor_id"]:
-            raise StateMachineError("invalid_actor", "Command requires the selected PC")
+        return self._sessions._authorize_command(row, actor_id, payload, context)
 
     def _world_operation_capability(self, row, payload):
-        if isinstance(
-            payload,
-            (
-                EnterScene,
-                MoveActor,
-                SetObjectState,
-                AdvanceGameTime,
-                StepActor,
-                TraversePassage,
-                PlaceObject,
-            ),
-        ):
-            combat = self._conn.execute(
-                "SELECT state_json FROM combats WHERE session_id=?", (row["session_id"],)
-            ).fetchone()
-            if combat and not json.loads(combat[0])["ended"]:
-                raise StateMachineError(
-                    "unsupported_combat_world_operation",
-                    "This world operation has no represented mechanical Delta during combat",
-                )
+        return self._sessions._world_operation_capability(row, payload)
 
     def _command_replay(self, command, fingerprint):
-        stored = self._conn.execute(
-            "SELECT fingerprint, receipt_json FROM command_receipts "
-            "WHERE session_id = ? AND command_id = ?",
-            (command.session_id, command.command_id),
-        ).fetchone()
-        if stored is None:
-            return None
-        if stored["fingerprint"] != fingerprint:
-            raise StateMachineError("idempotency_conflict", "Command key has different content")
-        return receipt_from_json(stored["receipt_json"])
+        return self._sessions._command_replay(command, fingerprint)
 
     def submit_command(self, command: TypedCommand, package, *, context) -> CommandReceipt:
         validate_command(command)
@@ -340,10 +282,7 @@ class CommandRuntime:
                     if events:
                         self._assert_spatial_consistency(command.session_id, package)
                         version += 1
-                        self._conn.execute(
-                            "UPDATE sessions SET world_version = ? WHERE session_id = ?",
-                            (version, command.session_id),
-                        )
+                        self._sessions.set_world_version(command.session_id, version)
                         self._append_events(
                             command.session_id,
                             version,
@@ -371,16 +310,7 @@ class CommandRuntime:
                 tuple(range(seq + 1, end_seq + 1)),
                 error,
             )
-            self._conn.execute(
-                "INSERT INTO command_receipts VALUES (?, ?, ?, ?, ?)",
-                (
-                    command.session_id,
-                    command.command_id,
-                    context.principal_id,
-                    fingerprint,
-                    canonical_json(asdict(receipt)),
-                ),
-            )
+            self._sessions.record_receipt(command, context, fingerprint, receipt)
         return receipt
 
     def get_command_receipt(self, session_id, command_id, package, *, context):

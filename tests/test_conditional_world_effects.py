@@ -44,7 +44,7 @@ def test_real_outcome_selects_world_branch_and_atomic_order(tmp_path, package_da
     with sm:
         command = conditional(sm, sid, package, context, dc=dc)
         before = sm.read_session(sid, package, context=context)
-        real, results = sm._evaluate_dnd, []
+        real, results = sm._rules._evaluate_dnd, []
 
         async def capture(request):
             assert not sm._conn.in_transaction
@@ -52,7 +52,7 @@ def test_real_outcome_selects_world_branch_and_atomic_order(tmp_path, package_da
             results.append(result)
             return result
 
-        sm._evaluate_dnd = capture
+        sm._rules._evaluate_dnd = capture
         receipt = sm.submit_command(command, package, context=context)
         assert receipt.status == "committed" and results[0].status == "accepted"
         assert results[0].proposed_events[0].succeeded is (dc == 1)
@@ -121,7 +121,7 @@ def test_candidates_rejected_before_rng_even_in_unselected_branch(
         async def forbidden(request):
             pytest.fail("Invalid proposal must never reach the evaluator")
 
-        sm._evaluate_dnd = forbidden
+        sm._rules._evaluate_dnd = forbidden
         with pytest.raises(StateMachineError) as error:
             sm.submit_command(
                 replace(command, check_world_effects=effects), package, context=context
@@ -151,7 +151,7 @@ def test_precondition_rejection_is_durable_and_gm_grant_checked(tmp_path, packag
         async def forbidden(request):
             pytest.fail("Failed precondition must not consume a roll")
 
-        sm._evaluate_dnd = forbidden
+        sm._rules._evaluate_dnd = forbidden
         receipt = sm.submit_command(command, package, context=gm)
         assert (receipt.status, receipt.error_code, receipt.event_seqs) == (
             "rejected",
@@ -196,7 +196,7 @@ def test_real_check_concurrent_world_change_cannot_apply_candidates(
     sm, sid, package, _, _ = check_setup(tmp_path, package_data, context)
     with sm:
         command = conditional(sm, sid, package, context)
-        rng, real = sm.read_rng_context(sid, package, context=context), sm._evaluate_dnd
+        rng, real = sm.read_rng_context(sid, package, context=context), sm._rules._evaluate_dnd
 
         async def concurrent(request):
             result = await real(request)
@@ -217,7 +217,7 @@ def test_real_check_concurrent_world_change_cannot_apply_candidates(
             )
             return result
 
-        sm._evaluate_dnd = concurrent
+        sm._rules._evaluate_dnd = concurrent
         receipt = sm.submit_command(command, package, context=context)
         assert receipt.status == "conflict" and not receipt.event_seqs
         assert sm.read_rng_context(sid, package, context=context) == rng
@@ -305,6 +305,6 @@ def test_real_check_cascade_rejection_rolls_back_world_and_rng_keeps_receipt(
         async def forbidden(request):
             pytest.fail("Rejected retry cannot roll again")
 
-        sm._evaluate_dnd = forbidden
+        sm._rules._evaluate_dnd = forbidden
         assert sm.submit_command(command, package, context=context) == receipt
         assert stored_state(tmp_path / "checks.db") == after

@@ -1,8 +1,6 @@
 """Evaluate detached inputs, then validate and commit to the sole SQLite authority."""
 
-import json
 from copy import deepcopy
-from dataclasses import asdict
 
 from ._execution import _WorldEffectKind, _WorldEffectOrigin
 from ._operations import SetSceneFlag
@@ -220,16 +218,9 @@ class MechanicalRuntime:
                             "unsupported_delta", "An actual mechanical change is required"
                         )
                     version += 1
-                    self._conn.execute(
-                        "UPDATE sessions SET world_version=? WHERE session_id=?",
-                        (version, command.session_id),
-                    )
+                    self._sessions.set_world_version(command.session_id, version)
                     rng = result.rng_transition.after
-                    self._conn.execute(
-                        "UPDATE rng_states SET position=?,rng_version=?,state_json=? "
-                        "WHERE session_id=?",
-                        (rng.position, rng.rng_version, rng.state_json, command.session_id),
-                    )
+                    self._sessions.advance_synthetic_rng(command.session_id, rng)
                     self._append_events(
                         command.session_id,
                         version,
@@ -259,16 +250,7 @@ class MechanicalRuntime:
                 tuple(range(seq + 1, end + 1)),
                 error,
             )
-            self._conn.execute(
-                "INSERT INTO command_receipts VALUES (?, ?, ?, ?, ?)",
-                (
-                    command.session_id,
-                    command.command_id,
-                    context.principal_id,
-                    fingerprint,
-                    canonical_json(asdict(receipt)),
-                ),
-            )
+            self._sessions.record_receipt(command, context, fingerprint, receipt)
         return receipt
 
     def _validate_delta(self, request, delta):
@@ -313,25 +295,14 @@ class MechanicalRuntime:
             seen.add(key)
 
     def _apply_delta(self, row, package, delta, command_id):
-        events, changed = [], False
+        events, changed = ([], False)
         for change in delta.operations:
             if type(change) is HPChange:
-                self._conn.execute(
-                    "UPDATE characters SET current_hp=? WHERE session_id=? AND actor_id=?",
-                    (change.after, row["session_id"], change.actor_id),
-                )
+                self._characters.set_hp(row["session_id"], change.actor_id, change.after)
                 changed |= change.before != change.after
             elif type(change) is ResourceSpend:
-                resources = json.loads(
-                    self._conn.execute(
-                        "SELECT resources_json FROM characters WHERE session_id=? AND actor_id=?",
-                        (row["session_id"], change.actor_id),
-                    ).fetchone()[0]
-                )
-                resources[change.resource_id] -= change.amount
-                self._conn.execute(
-                    "UPDATE characters SET resources_json=? WHERE session_id=? AND actor_id=?",
-                    (canonical_json(resources), row["session_id"], change.actor_id),
+                self._characters.spend_resource(
+                    row["session_id"], change.actor_id, change.resource_id, change.amount
                 )
                 changed = True
             else:
@@ -343,4 +314,4 @@ class MechanicalRuntime:
                 )
                 changed |= bool(consequences)
                 events.extend(consequences)
-        return events, changed
+        return (events, changed)

@@ -295,7 +295,7 @@ def test_real_weapon_input_output_persisted_parity(
             ),
             state.world_version,
         )
-        real = sm._evaluate_dnd
+        real = sm._rules._evaluate_dnd
         proposals = []
 
         async def capture(request):
@@ -313,7 +313,7 @@ def test_real_weapon_input_output_persisted_parity(
             proposals.append(result)
             return result
 
-        sm._evaluate_dnd = capture
+        sm._rules._evaluate_dnd = capture
         before = stored_state(database)
         receipt = sm.submit_command(command, package, context=context)
         if weapon == "dagger":
@@ -390,7 +390,7 @@ def test_closure_xp_storage_bounds_reject_without_partial_commit(
     sm, sid, package, _, _ = modern_setup(tmp_path, package_data, context)
     with sm:
         command = close_command(sm, sid, package, context)
-        real = sm._evaluate_dnd
+        real = sm._rules._evaluate_dnd
 
         async def overflow(request):
             raw = (await real(request)).model_dump(mode="json")
@@ -398,13 +398,13 @@ def test_closure_xp_storage_bounds_reject_without_partial_commit(
             op["xp_awarded"] = {command.actor_id: amount}
             return RuleEvaluationResult.model_validate_json(json.dumps(raw))
 
-        sm._evaluate_dnd = overflow
+        sm._rules._evaluate_dnd = overflow
         before = stored_state(tmp_path / "modern.db")
         with pytest.raises(StateMachineError) as error:
             sm.submit_command(command, package, context=context)
         assert error.value.code == "invalid_rule_result"
         assert stored_state(tmp_path / "modern.db") == before
-        sm._evaluate_dnd = real
+        sm._rules._evaluate_dnd = real
         assert sm.submit_command(command, package, context=context).status == "committed"
 
 
@@ -425,14 +425,14 @@ def test_response_loss_after_commit_replays_without_second_evaluation(
         sid = create(sm, package, context)
         command = check_command(sm, sid, package, context, skill=None)
     with sm:
-        real = sm._evaluate_dnd
+        real = sm._rules._evaluate_dnd
         calls = []
 
         async def capture(request):
             calls.append(request.command_id)
             return await real(request)
 
-        sm._evaluate_dnd = capture
+        sm._rules._evaluate_dnd = capture
 
         async def lost_response():
             await sm.submit_command_async(command, package, context=context)

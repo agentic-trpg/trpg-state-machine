@@ -185,19 +185,19 @@ def test_missing_required_result_fields_never_persist_rejection(
     with sm:
         command = attack(sm, sid, package, context)
         before = authority(sm, sid)
-        real = sm._evaluate_dnd
+        real = sm._rules._evaluate_dnd
 
         async def invalid(request):
             result = await real(request)
             result.__dict__.pop(field)
             return result
 
-        sm._evaluate_dnd = invalid
+        sm._rules._evaluate_dnd = invalid
         with pytest.raises(StateMachineError) as caught:
             sm.submit_command(command, package, context=context)
         assert caught.value.code == "invalid_rule_result"
         assert authority(sm, sid) == before
-        sm._evaluate_dnd = real
+        sm._rules._evaluate_dnd = real
         assert sm.submit_command(command, package, context=context).status == "committed"
 
 
@@ -206,7 +206,7 @@ def test_unexpected_choice_is_independent_protocol_error(tmp_path, package_data,
     with sm:
         command = attack(sm, sid, package, context)
         before = authority(sm, sid)
-        real = sm._evaluate_dnd
+        real = sm._rules._evaluate_dnd
 
         async def unexpected(request):
             result = await real(request)
@@ -224,12 +224,12 @@ def test_unexpected_choice_is_independent_protocol_error(tmp_path, package_data,
                 }
             )
 
-        sm._evaluate_dnd = unexpected
+        sm._rules._evaluate_dnd = unexpected
         with pytest.raises(StateMachineError) as caught:
             sm.submit_command(command, package, context=context)
         assert caught.value.code == "invalid_rule_result"
         assert authority(sm, sid) == before
-        sm._evaluate_dnd = real
+        sm._rules._evaluate_dnd = real
         assert sm.submit_command(command, package, context=context).status == "committed"
 
 
@@ -237,7 +237,7 @@ def test_rng_revalidation_detects_independent_stream_conflict(tmp_path, package_
     sm, sid, package, _ = setup(tmp_path, package_data, context)
     with sm:
         command = attack(sm, sid, package, context)
-        real = sm._evaluate_dnd
+        real = sm._rules._evaluate_dnd
 
         async def concurrent(request):
             result = await real(request)
@@ -247,7 +247,7 @@ def test_rng_revalidation_detects_independent_stream_conflict(tmp_path, package_
             )
             return result
 
-        sm._evaluate_dnd = concurrent
+        sm._rules._evaluate_dnd = concurrent
         snapshot = sm.read_combat_snapshot(sid, package, context=context)
         original = sm.read_rng_context(sid, package, context=context)
         receipt = sm.submit_command(command, package, context=context)
@@ -416,12 +416,12 @@ def test_delta_and_configuration_faults_remain_retryable(tmp_path, package_data,
     with sm:
         command = attack(sm, sid, package, context)
         before = authority(sm, sid)
-        real = sm._evaluate_dnd
+        real = sm._rules._evaluate_dnd
 
         async def broken(request):
             result = await real(request)
             if fault == "config_changed":
-                sm._dnd_loader = MemoryAssetLoader()
+                sm._rules.loader = MemoryAssetLoader()
                 return result
             operations = list(result.state_delta.operations)
             if fault == "prevalue":
@@ -452,11 +452,11 @@ def test_delta_and_configuration_faults_remain_retryable(tmp_path, package_data,
                 }
             )
 
-        sm._evaluate_dnd = broken
+        sm._rules._evaluate_dnd = broken
         with pytest.raises(StateMachineError) as caught:
             sm.submit_command(command, package, context=context)
         assert caught.value.code in {"invalid_rule_result", "ruleset_binding_mismatch"}
         assert authority(sm, sid) == before
-        sm._dnd_loader = assets
-        sm._evaluate_dnd = real
+        sm._rules.loader = assets
+        sm._rules._evaluate_dnd = real
         assert sm.submit_command(command, package, context=context).status == "committed"
