@@ -230,6 +230,7 @@ class CommandRuntime:
                     StepActor,
                     TraversePassage,
                     PlaceObject,
+                    SetObjectState,
                 ),
             )
             and actor_id != row["pc_actor_id"]
@@ -418,13 +419,17 @@ def world_command_from_data(data):
         "world.place_object",
         "enter_scene",
         "move_actor",
+        "set_object_state",
     ):
         raise StateMachineError("unsupported_operation", "Unregistered world operation")
     if type(data["payload"]) is not dict:
         raise StateMachineError("invalid_command", "Expected a typed payload mapping")
     try:
-        command = TypedCommand(**{**data, "payload": OPERATIONS[kind](**data["payload"])})
-    except TypeError as exc:
+        payload = data["payload"]
+        if kind == "set_object_state":
+            payload = {**payload, "state": ObjectState(payload["state"])}
+        command = TypedCommand(**{**data, "payload": OPERATIONS[kind](**payload)})
+    except (TypeError, ValueError, KeyError) as exc:
         raise StateMachineError("invalid_command", "Unknown or missing payload fields") from exc
     validate_command(command)
     return command

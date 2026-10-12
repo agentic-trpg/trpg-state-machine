@@ -18,6 +18,7 @@ from dnd5e_engine.evaluation_ruleset import EVALUATOR_VERSION, RulesetBinding, R
 from dnd5e_engine.evaluation_state import CombatSnapshot
 from pydantic import ValidationError
 
+from ._execution import _WorldEffectKind, _WorldEffectOrigin
 from .combat import process_id
 from .commands import CommandReceipt, command_fingerprint, validate_command
 from .dnd_checks import check_changes, world_effects_ready
@@ -412,7 +413,16 @@ class DndRuntime:
                             else command.check_world_effects.on_failure
                         )
                         for operation in branch:
-                            events.extend(self._operate(row, package, operation))
+                            events.extend(
+                                self._operate(
+                                    row,
+                                    package,
+                                    operation,
+                                    effect_origin=_WorldEffectOrigin(
+                                        _WorldEffectKind.CHECK, command.command_id
+                                    ),
+                                )
+                            )
                     events = self._expand_events(row, package, events, command.command_id)
                     version += 1
                     transition = result.rng_transition

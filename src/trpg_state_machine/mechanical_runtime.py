@@ -4,6 +4,7 @@ import json
 from copy import deepcopy
 from dataclasses import asdict
 
+from ._execution import _WorldEffectKind, _WorldEffectOrigin
 from ._operations import SetSceneFlag
 from .commands import CommandReceipt
 from .errors import StateMachineError
@@ -198,7 +199,9 @@ class MechanicalRuntime:
                 self._validate_delta(request, result.delta)
                 self._conn.execute("SAVEPOINT mechanical_effects")
                 try:
-                    events, changed = self._apply_delta(row, package, result.delta)
+                    events, changed = self._apply_delta(
+                        row, package, result.delta, command.command_id
+                    )
                     events.extend(
                         self._capture_event(
                             command.session_id,
@@ -309,7 +312,7 @@ class MechanicalRuntime:
                 )
             seen.add(key)
 
-    def _apply_delta(self, row, package, delta):
+    def _apply_delta(self, row, package, delta, command_id):
         events, changed = [], False
         for change in delta.operations:
             if type(change) is HPChange:
@@ -332,7 +335,12 @@ class MechanicalRuntime:
                 )
                 changed = True
             else:
-                consequences = self._operate(row, package, change)
+                consequences = self._operate(
+                    row,
+                    package,
+                    change,
+                    effect_origin=_WorldEffectOrigin(_WorldEffectKind.SYNTHETIC, command_id),
+                )
                 changed |= bool(consequences)
                 events.extend(consequences)
         return events, changed

@@ -373,10 +373,6 @@ def test_gate_multiple_obstacles_and_one_way(tmp_path, package_data, context):
     p = _validate(data)
     with StateMachine(tmp_path / "gates.db") as sm:
         sid = create(sm, p, context)
-        assert_ok(submit(sm, sid, p, context, PlaceObject("object.crate", A, "3,2", "3,1"), "one"))
-        assert_ok(
-            submit(sm, sid, p, context, PlaceObject("object.screen", B, "0,2", "0,1"), "two", NPC)
-        )
         assert_ok(submit(sm, sid, p, context, StepActor(B, "1,2", "1,1"), "approach", NPC))
         assert_ok(
             submit(
@@ -387,6 +383,10 @@ def test_gate_multiple_obstacles_and_one_way(tmp_path, package_data, context):
                 SetObjectState(A, "object.platform_gate", ObjectState.CLOSED),
                 "close",
             )
+        )
+        assert_ok(submit(sm, sid, p, context, PlaceObject("object.crate", A, "3,2", "3,1"), "one"))
+        assert_ok(
+            submit(sm, sid, p, context, PlaceObject("object.screen", B, "0,2", "0,1"), "two", NPC)
         )
         assert_ok(
             submit(sm, sid, p, context, PlaceObject("object.crate", A, "3,1", "3,2"), "clear.one")

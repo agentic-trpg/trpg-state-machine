@@ -8,6 +8,7 @@ from pathlib import Path
 from time import monotonic, sleep
 from uuid import uuid4
 
+from ._execution import _execution_data
 from ._operations import (
     EnterScene,
     FoundationOperation,
@@ -642,8 +643,18 @@ class StateMachine(
         return self.read_session(session_id, package, context=context)
 
     def _operate(
-        self, row, package: AdventurePackage, operation: FoundationOperation, *, actor_id=None
+        self,
+        row,
+        package: AdventurePackage,
+        operation: FoundationOperation,
+        *,
+        actor_id=None,
+        effect_origin=None,
     ):
+        execution = _execution_data(actor_id, effect_origin)
+        automatic = effect_origin is not None
+        if automatic and type(operation) not in (SetSceneFlag, SetObjectState):
+            raise StateMachineError("unsupported_operation", "Unsupported automatic world effect")
         self._world_operation_capability(row, operation)
         sid = row["session_id"]
         if type(operation) is AdvanceGameTime:
@@ -652,9 +663,11 @@ class StateMachine(
                 for kind, payload in advance_game_time(self, row, operation)
             ]
         if isinstance(operation, (EnterScene, MoveActor, StepActor, TraversePassage, PlaceObject)):
-            return self._operate_spatial(row, package, operation, actor_id or row["pc_actor_id"])
+            return self._operate_spatial(row, package, operation, actor_id)
         if isinstance(operation, (SetSceneFlag, SetObjectState)):
-            if operation.scene_id != row["current_scene_id"]:
+            if (automatic or isinstance(operation, SetSceneFlag)) and operation.scene_id != row[
+                "current_scene_id"
+            ]:
                 raise StateMachineError("invalid_target", "Only the current scene can be modified")
             if isinstance(operation, SetSceneFlag):
                 if type(operation.value) is not bool:
@@ -681,25 +694,30 @@ class StateMachine(
                         sid,
                         package,
                         "scene.flag_changed",
-                        asdict(operation),
+                        {**asdict(operation), "execution": execution},
                         phase="world.after_flag_update",
                     )
                 ]
             if not isinstance(operation.state, ObjectState):
                 raise StateMachineError("invalid_operation", "Expected a typed ObjectState")
-            obj = self._conn.execute(
-                "SELECT state FROM objects WHERE session_id = ? AND scene_id = ? AND object_id = ?",
-                (sid, operation.scene_id, operation.object_id),
-            ).fetchone()
-            if obj is None:
-                raise StateMachineError("invalid_target", "Object is not in the current scene")
-            if package.scene(operation.scene_id).grid_json is not None:
-                self._validate_switch_range(sid, actor_id or row["pc_actor_id"], operation, package)
-            if obj[0] is None:
+            passage = None
+            if automatic:
+                # Preserve the existing effect scope: actual storage in the current Scene.
+                obj = self._conn.execute(
+                    "SELECT scene_id,state,cell FROM objects "
+                    "WHERE session_id=? AND scene_id=? AND object_id=?",
+                    (sid, operation.scene_id, operation.object_id),
+                ).fetchone()
+                if obj is None:
+                    raise StateMachineError("invalid_target", "No object in the effect scene")
+            else:
+                obj, passage = self._manual_object_target(sid, actor_id, operation, package)
+            if obj[1] is None:
                 raise StateMachineError(
                     "unsupported_object_capability", "Object has no switch capability"
                 )
-            if obj[0] == operation.state.value:
+            self._validate_door_occupancy(sid, operation, package)
+            if obj[1] == operation.state.value:
                 return []
             self._conn.execute(
                 "UPDATE objects SET state = ? WHERE session_id = ? AND object_id = ?",
@@ -710,8 +728,13 @@ class StateMachine(
                     sid,
                     package,
                     "object.state_changed",
-                    asdict(operation),
+                    {
+                        **asdict(operation),
+                        "execution": execution,
+                        **({"passage_id": passage.passage_id} if passage else {}),
+                    },
                     phase="world.after_object_update",
+                    source_actor_id=actor_id if passage else None,
                 )
             ]
         raise StateMachineError("unsupported_operation", "Unknown world operation")

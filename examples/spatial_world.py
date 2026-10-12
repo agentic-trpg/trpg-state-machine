@@ -39,6 +39,7 @@ def state(sm, sid, package):
         "world_version": snapshot.world_version,
         "actors": {key: asdict(value) for key, value in snapshot.actors.items()},
         "object_cells": snapshot.scenes[A].object_cells,
+        "object_states": {scene_id: scene.objects for scene_id, scene in snapshot.scenes.items()},
         "rng": asdict(snapshot.rng),
     }
 
@@ -108,6 +109,13 @@ def run(directory, object_name):
                 },
             )
 
+        def door(scene, value, actor=pc):
+            execute(
+                "set_object_state",
+                {"scene_id": scene, "object_id": "object.platform_gate", "state": value},
+                actor=actor,
+            )
+
         step(A, "2,1", "2,2")
         step(A, "2,2", "2,1")
         step(B, "1,2", "1,1", NPC)
@@ -126,9 +134,13 @@ def run(directory, object_name):
                 "expected_cell": "2,1",
             },
         )
+        door(B, "closed")
+        door(B, "open")
         step(B, "1,1", "2,1")
         step(B, "1,2", "1,1", NPC)
         execute("move_actor", {"actor_id": NPC, "to_scene_id": A}, actor=NPC)
+        door(A, "closed", NPC)
+        door(A, "open", NPC)
         saved = state(sm, sid, package)
         assert saved["rng"] == rng
         sm.save_session(sid, package, context=CONTEXT)

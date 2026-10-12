@@ -8,6 +8,7 @@ from uuid import uuid4
 
 from dnd5e_engine.evaluation_contracts import CombatIntentPayload
 
+from ._operations import ObjectState
 from .errors import StateMachineError
 from .npc_state import RECORD_TYPES, SourceReference
 from .package import canonical_json
@@ -25,6 +26,16 @@ class NPCCombatIntent:
     """Local handoff envelope reusing the pinned Engine's closed intent payload."""
 
     payload: CombatIntentPayload
+    expected_world_version: int
+
+
+@dataclass(frozen=True, slots=True)
+class NPCDoorIntent:
+    """Only a local shared-passage door; executor rechecks Task identity and grants."""
+
+    scene_id: str
+    object_id: str
+    state: ObjectState
     expected_world_version: int
 
 
@@ -270,7 +281,21 @@ class NPCResultRuntime:
             outputs.append(("dialogue", dialogue, error))
         for intent in result.action_intents:
             error = None
-            if type(intent) is NPCCombatIntent:
+            if type(intent) is NPCDoorIntent:
+                if (
+                    type(intent.expected_world_version) is not int
+                    or intent.expected_world_version < 0
+                    or type(intent.state) is not ObjectState
+                    or type(intent.scene_id) is not str
+                    or type(intent.object_id) is not str
+                    or not any(
+                        p.door_object_id == intent.object_id
+                        and intent.scene_id in {e.scene_id for e in p.endpoints}
+                        for p in package.passages
+                    )
+                ):
+                    error = "invalid_npc_action"
+            elif type(intent) is NPCCombatIntent:
                 if (
                     type(intent.expected_world_version) is not int
                     or intent.expected_world_version < 0

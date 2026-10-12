@@ -10,7 +10,14 @@ from dataclasses import dataclass
 from dnd5e_engine.spatial import GridTopology, canonical_cell_id
 from dnd5e_engine.specs import GridScene
 
-from ._operations import EnterScene, MoveActor, PlaceObject, StepActor, TraversePassage
+from ._operations import (
+    EnterScene,
+    MoveActor,
+    PlaceObject,
+    SetObjectState,
+    StepActor,
+    TraversePassage,
+)
 from .errors import StateMachineError
 from .models import TrustedContext
 
@@ -29,11 +36,21 @@ class WorldActionAvailability:
 
 
 @dataclass(frozen=True, slots=True)
+class SpatialDoor:
+    passage_id: str
+    object_id: str
+    state: str
+    standing_cell: str
+    threshold_cell: str
+
+
+@dataclass(frozen=True, slots=True)
 class SpatialView:
     actor_position: SpatialPosition
     world_version: int
     objects: tuple[tuple[str, str, bool, bool], ...]
     exits: tuple[tuple[str, str, str, str], ...]
+    doors: tuple[SpatialDoor, ...] = ()
 
 
 def cell_in_bounds(topology, cell):
@@ -265,6 +282,64 @@ class SpatialRuntime:
             raise StateMachineError("movement_unavailable", "Object destination is occupied")
         return position
 
+    def _door_ports(self, scene_id, object_id, package):
+        return tuple(
+            (p, e)
+            for p in package.passages
+            if p.door_object_id == object_id
+            for e in p.endpoints
+            if e.scene_id == scene_id
+        )
+
+    def _manual_object_target(self, sid, actor_id, operation, package):
+        """A shared door is addressed at this actor's port, never at a foreign Cell."""
+        position = self._actor_position(sid, actor_id)
+        if operation.scene_id != position.scene_id:
+            raise StateMachineError("invalid_target", "Interaction must be in the actor's scene")
+        fine = package.scene(position.scene_id).grid_json is not None
+        if fine:
+            self._world_actor_ready(sid, actor_id)
+            self._public_scope(sid, actor_id, package)
+        obj = self._conn.execute(
+            "SELECT scene_id,state,cell FROM objects WHERE session_id=? AND object_id=?",
+            (sid, operation.object_id),
+        ).fetchone()
+        if obj is None:
+            raise StateMachineError("invalid_target", "No authorized local object")
+        ports = self._door_ports(position.scene_id, operation.object_id, package)
+        if ports:
+            base = self._base_topology(sid, position.scene_id)
+            visible = [(p, e) for p, e in ports if base.can_see(position.cell, e.threshold_cell)]
+            if not visible:
+                raise StateMachineError("invalid_target", "No authorized local door")
+            matches = [(p, e) for p, e in visible if e.standing_cell == position.cell]
+            if not matches:
+                raise StateMachineError("object_out_of_reach", "Door needs its standing point")
+            for passage, endpoint in matches:
+                handled = {
+                    (p.passage_id, e.threshold_cell)
+                    for p, e in ports
+                    if e.threshold_cell == endpoint.threshold_cell
+                }
+                topology = self._movement_topology(
+                    sid,
+                    position.scene_id,
+                    package,
+                    exclude_actor=actor_id,
+                    handled_thresholds=handled,
+                )
+                if topology.edge_distance(position.cell, endpoint.threshold_cell) is not None:
+                    return obj, passage
+            raise StateMachineError("object_out_of_reach", "Door requires clear adjacent reach")
+        actor = self._conn.execute(
+            "SELECT kind FROM actors WHERE session_id=? AND actor_id=?", (sid, actor_id)
+        ).fetchone()
+        if actor[0] != "pc" or obj[0] != position.scene_id:
+            raise StateMachineError("invalid_target", "No authorized local switch")
+        if fine:
+            self._validate_switch_range(sid, actor_id, operation, package)
+        return obj, None
+
     def _validate_switch_range(self, sid, actor_id, operation, package):
         self._world_actor_ready(sid, actor_id)
         obj = self._conn.execute(
@@ -275,24 +350,16 @@ class SpatialRuntime:
             position = self._visible_target(sid, actor_id, obj[0], package)
         except StateMachineError as exc:
             raise StateMachineError("invalid_target", "No authorized local object") from exc
-        handled_thresholds = {
-            (p.passage_id, e.threshold_cell)
-            for p in package.passages
-            if p.door_object_id == operation.object_id
-            for e in p.endpoints
-            if e.scene_id == position.scene_id
-            and e.standing_cell == position.cell
-            and e.threshold_cell == obj[0]
-        }
         topology = self._movement_topology(
             sid,
             position.scene_id,
             package,
             exclude_actor=actor_id,
-            handled_thresholds=handled_thresholds,
         )
         if obj[0] != position.cell and topology.edge_distance(position.cell, obj[0]) is None:
             raise StateMachineError("object_out_of_reach", "Switch requires clear adjacent reach")
+
+    def _validate_door_occupancy(self, sid, operation, package):
         if operation.state.value == "closed":
             for passage in package.passages:
                 if passage.door_object_id == operation.object_id:
@@ -363,6 +430,16 @@ class SpatialRuntime:
             return self._validate_step(sid, actor_id, operation, package)
         if type(operation) is PlaceObject:
             return self._validate_placement(sid, actor_id, operation, package)
+        if type(operation) is SetObjectState:
+            from ._operations import ObjectState
+
+            if type(operation.state) is not ObjectState:
+                raise StateMachineError("invalid_operation", "Expected a typed ObjectState")
+            obj, _ = self._manual_object_target(sid, actor_id, operation, package)
+            if obj[1] is None:
+                raise StateMachineError("unsupported_object_capability", "Object has no switch")
+            self._validate_door_occupancy(sid, operation, package)
+            return position
         if type(operation) is TraversePassage:
             passage = next(
                 (p for p in package.passages if p.passage_id == operation.passage_id), None
@@ -399,7 +476,14 @@ class SpatialRuntime:
         from .commands import OPERATIONS, TypedCommand, validate_command
 
         kind = next((k for k, v in OPERATIONS.items() if type(operation) is v), None)
-        if type(operation) not in (StepActor, PlaceObject, TraversePassage, EnterScene, MoveActor):
+        if type(operation) not in (
+            StepActor,
+            PlaceObject,
+            TraversePassage,
+            EnterScene,
+            MoveActor,
+            SetObjectState,
+        ):
             raise StateMachineError("unsupported_operation", "Unsupported spatial query")
         validate_command(TypedCommand(session_id, "query", actor_id, kind, operation, 0))
         with self._transaction():
@@ -458,10 +542,27 @@ class SpatialRuntime:
                 if e.scene_id == position.scene_id
                 and topology.can_see(position.cell, e.standing_cell)
             )
+            doors = tuple(
+                SpatialDoor(
+                    p.passage_id,
+                    p.door_object_id,
+                    self._conn.execute(
+                        "SELECT state FROM objects WHERE session_id=? AND object_id=?",
+                        (session_id, p.door_object_id),
+                    ).fetchone()[0],
+                    e.standing_cell,
+                    e.threshold_cell,
+                )
+                for p in package.passages
+                if p.door_object_id
+                for e in p.endpoints
+                if e.scene_id == position.scene_id
+                and topology.can_see(position.cell, e.threshold_cell)
+            )
             version = self._conn.execute(
                 "SELECT world_version FROM sessions WHERE session_id=?", (session_id,)
             ).fetchone()[0]
-            return SpatialView(position, version, tuple(objects), exits)
+            return SpatialView(position, version, tuple(objects), exits, doors)
 
     def _operate_spatial(self, row, package, operation, actor_id):
         sid = row["session_id"]

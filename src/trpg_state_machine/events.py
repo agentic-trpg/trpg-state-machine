@@ -3,6 +3,7 @@
 import json
 from dataclasses import asdict, dataclass, replace
 
+from ._execution import _WorldEffectKind, _WorldEffectOrigin
 from .errors import StateMachineError
 from .package import Signal, SignalOrigin, SignalScope, SignalStimulus, canonical_json
 from .perception_conditions import discover_signals
@@ -273,7 +274,16 @@ class EventRuntime:
                         row["event_seq"] + index,
                     ),
                 )
-                queue.extend(self._operate(current, package, definition.effect))
+                queue.extend(
+                    self._operate(
+                        current,
+                        package,
+                        definition.effect,
+                        effect_origin=_WorldEffectOrigin(
+                            _WorldEffectKind.PACKAGE, definition.event_definition_id
+                        ),
+                    )
+                )
                 queue.append(
                     self._capture_event(
                         row["session_id"],

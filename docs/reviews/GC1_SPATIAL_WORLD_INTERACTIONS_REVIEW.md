@@ -1,5 +1,11 @@
 # GC-1 spatial world interactions review
 
+This is the historical delivery review for commit
+`8fe53d3be6b26a48742a72274a24b7a662535dd6`. Its conclusions and validation counts
+describe that delivery, not the later F01/F02 findings. Both defects were reproduced
+afterwards; see [the premerge fix review](GC1_PREMERGE_FIX_REVIEW.md) for corrected
+door semantics, effect origins and the current validation/review results.
+
 Repository: `D:\Projects\agentic-trpg\trpg-state-machine`.
 Remote: `https://github.com/agentic-trpg/trpg-state-machine.git`.
 Branch: `feat/sm-gc1-world-interactions`; baseline `058e79f300016f7397f0c3401bc03b58554e2b71`.
