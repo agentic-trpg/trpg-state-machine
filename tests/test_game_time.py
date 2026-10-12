@@ -570,7 +570,7 @@ def test_real_dead_actor_is_not_started_and_combat_clock_is_unsupported(
             ).status
             == "committed"
         )
-        assert not sm._mechanical_actor_data(sid)[npc.observer_id]["is_alive"]
+        assert not sm._characters.rule_actors(sid)[npc.observer_id]["is_alive"]
         # Read the real committed death flag, without deriving death from HP in SM.
         assert tick(sm, sid, package, context, 11).status == "committed"
         view = npc_view(sm, sid, package, npc)

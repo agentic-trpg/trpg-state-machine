@@ -134,13 +134,13 @@ def test_real_attack_world_cascade_rejection_rolls_back_and_replays(
         before = authority(sm, sid)
         world = sm.read_session(sid, package, context=context)
         calls = []
-        real = sm._evaluate_dnd
+        real = sm._rules._evaluate_dnd
 
         async def tracked(request):
             calls.append(request.command_id)
             return await real(request)
 
-        sm._evaluate_dnd = tracked
+        sm._rules._evaluate_dnd = tracked
         if fault:
             sm._conn.execute(
                 f"CREATE TEMP TRIGGER fail BEFORE INSERT ON {fault} "

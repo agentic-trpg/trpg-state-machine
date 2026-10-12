@@ -73,7 +73,7 @@ def test_real_check_empty_delta_exact_engine_parity_and_private_event(
         )
         original = sm.read_noncombat_snapshot(sid, package, context=context)
         rng = sm.read_rng_context(sid, package, context=context)
-        real = sm._evaluate_dnd
+        real = sm._rules._evaluate_dnd
         captured = []
 
         async def capture(request):
@@ -82,7 +82,7 @@ def test_real_check_empty_delta_exact_engine_parity_and_private_event(
             captured.append(result)
             return result
 
-        sm._evaluate_dnd = capture
+        sm._rules._evaluate_dnd = capture
         receipt = sm.submit_command(command, package, context=context)
         result = captured[0]
         assert receipt.status == "committed" and result.status == "accepted", result.error
@@ -138,12 +138,12 @@ def test_missing_dc_is_preflight_and_player_cannot_adjudicate_or_replay(
     sm, sid, package, _, _ = check_setup(tmp_path, package_data, context)
     with sm:
         command = check_command(sm, sid, package, context, dc=None)
-        real = sm._evaluate_dnd
+        real = sm._rules._evaluate_dnd
 
         async def forbidden(request):
             raise AssertionError("preflight must not evaluate")
 
-        sm._evaluate_dnd = forbidden
+        sm._rules._evaluate_dnd = forbidden
         before = stored_state(tmp_path / "checks.db")
         with pytest.raises(StateMachineError) as error:
             sm.submit_command(command, package, context=context)
@@ -161,7 +161,7 @@ def test_missing_dc_is_preflight_and_player_cannot_adjudicate_or_replay(
         with pytest.raises(StateMachineError) as error:
             sm.submit_command(supplied, package, context=gm)
         assert error.value.code == "idempotency_conflict"
-        sm._evaluate_dnd = real
+        sm._rules._evaluate_dnd = real
         assert (
             sm.submit_command(
                 replace(supplied, command_id="check.with_dc"), package, context=gm
@@ -196,7 +196,7 @@ def test_invalid_real_check_result_no_rows_no_receipt_safe_retry(
                 command, payload=command.payload.model_copy(update={"tool": "brush", "skill": None})
             )
         before = stored_state(tmp_path / "checks.db")
-        real = sm._evaluate_dnd
+        real = sm._rules._evaluate_dnd
 
         async def corrupt(request):
             if fault == "accepted_tool":
@@ -232,13 +232,13 @@ def test_invalid_real_check_result_no_rows_no_receipt_safe_retry(
                 result["input_ruleset_binding"]["evaluator_version"] = "wrong"
             return RuleEvaluationResult.model_validate_json(json.dumps(result))
 
-        sm._evaluate_dnd = corrupt
+        sm._rules._evaluate_dnd = corrupt
         for _ in range(2):
             with pytest.raises(StateMachineError) as error:
                 sm.submit_command(command, package, context=context)
             assert error.value.code == "invalid_rule_result"
             assert stored_state(tmp_path / "checks.db") == before
-        sm._evaluate_dnd = real
+        sm._rules._evaluate_dnd = real
         retried = sm.submit_command(command, package, context=context)
         assert retried.status == ("rejected" if fault == "accepted_tool" else "committed")
 
@@ -279,12 +279,12 @@ def test_real_unsupported_runtime_failure_and_concurrent_world_change(
         assert sm.read_noncombat_snapshot(sid, package, context=context) == original
         assert sm.read_rng_context(sid, package, context=context) == rng
         command = check_command(sm, sid, package, context, key="runtime.retry", skill=None)
-        real = sm._evaluate_dnd
+        real = sm._rules._evaluate_dnd
 
         async def failed(request):
             raise OSError("injected transport failure")
 
-        sm._evaluate_dnd = failed
+        sm._rules._evaluate_dnd = failed
         before = stored_state(tmp_path / "checks.db")
         with pytest.raises(StateMachineError) as error:
             sm.submit_command(command, package, context=context)
@@ -304,7 +304,7 @@ def test_real_unsupported_runtime_failure_and_concurrent_world_change(
             assert sm.submit_command(world, package, context=context).status == "committed"
             return result
 
-        sm._evaluate_dnd = concurrent
+        sm._rules._evaluate_dnd = concurrent
         conflict = sm.submit_command(command, package, context=context)
         assert conflict.status == "conflict" and not conflict.event_seqs
         assert sm.read_rng_context(sid, package, context=context) == rng
@@ -378,7 +378,7 @@ def test_check_protocol_errors_are_independent(tmp_path, package_data, context, 
             code = "invalid_context"
         else:
             code = "invalid_rule_result"
-            real = sm._evaluate_dnd
+            real = sm._rules._evaluate_dnd
 
             async def choice(request):
                 # Real Engine preflight choice, injected after an already admitted request.
@@ -388,7 +388,7 @@ def test_check_protocol_errors_are_independent(tmp_path, package_data, context, 
                     )
                 )
 
-            sm._evaluate_dnd = choice
+            sm._rules._evaluate_dnd = choice
         with pytest.raises(StateMachineError) as error:
             sm.submit_command(command, package, context=context)
         assert error.value.code == code

@@ -173,8 +173,10 @@ def test_walls_corners_and_movement_only_visibility(tmp_path, package_data, cont
             == "movement_unavailable"
         )
         # Movement projection rejects a diagonal past the object; visual base grid is unchanged.
-        assert sm._base_topology(sid, A).can_see("2,1", "4,1")
-        assert sm._movement_topology(sid, A, p, exclude_actor=pc).shortest_path("2,1", "3,2") != [
+        assert sm._world._base_topology(sid, A).can_see("2,1", "4,1")
+        assert sm._world._movement_topology(sid, A, p, exclude_actor=pc).shortest_path(
+            "2,1", "3,2"
+        ) != [
             "2,1",
             "3,2",
         ]
@@ -293,14 +295,14 @@ def test_real_re_positions_survive_initialize_close_and_exploration(
             submit(sm, sid, p, context, StepActor(A, "2,2", "2,1"), "active").error_code
             == "unsupported_combat_world_operation"
         )
-        real = sm._evaluate_dnd
+        real = sm._rules._evaluate_dnd
         seen = []
 
         async def capture(request):
             seen.append(request.state_snapshot.combat_state.actor_zone.copy())
             return await real(request)
 
-        sm._evaluate_dnd = capture
+        sm._rules._evaluate_dnd = capture
         assert_ok(sm.submit_command(pc_attack(sm, sid, p, context), p, context=context))
         assert seen[0][pc] == "2,2"
         assert_ok(sm.submit_command(close_command(sm, sid, p, context), p, context=context))
@@ -512,10 +514,10 @@ def test_bounds_and_object_source_evidence_are_distinct_from_walkability(
     p = _validate(data)
     with StateMachine(tmp_path / "source.db") as sm:
         sid = create(sm, p, context)
-        assert not sm._base_topology(sid, A).is_valid_cell("4,4")
+        assert not sm._world._base_topology(sid, A).is_valid_cell("4,4")
         from trpg_state_machine.spatial import cell_in_bounds
 
-        assert cell_in_bounds(sm._base_topology(sid, A), "4,4")
+        assert cell_in_bounds(sm._world._base_topology(sid, A), "4,4")
         assert (
             sm.read_session(sid, p, context=context).scenes[A].object_cells["object.platform_gate"]
             == "4,4"

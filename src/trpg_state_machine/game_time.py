@@ -22,9 +22,7 @@ def advance_game_time(runtime, row, operation):
         raise StateMachineError("game_time_conflict", "Game time precondition differs")
     if operation.next_tick == tick:
         return []
-    runtime._conn.execute(
-        "UPDATE world_states SET game_tick=? WHERE session_id=?", (operation.next_tick, sid)
-    )
+    runtime.facts.set_tick(sid, operation.next_tick)
     return [("game.time_advanced", {"previous_tick": tick, "game_tick": operation.next_tick})]
 
 

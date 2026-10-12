@@ -115,7 +115,7 @@ def test_unknown_stat_block_capability_refused_before_evaluation(
         async def forbidden(_):
             raise AssertionError("unsupported action evaluated")
 
-        sm._evaluate_dnd = forbidden
+        sm._rules._evaluate_dnd = forbidden
         before = authority(sm, sid)
         query = sm.query_action_availability(sid, NPC, command.payload, package, context=context)
         assert query.status == "unknown"
@@ -221,7 +221,7 @@ def test_query_revalidates_source_and_binding(tmp_path, package_data, context):
                 context=context,
             )
         assert caught.value.code == "rule_schema_error"
-        sm._dnd_loader = MemoryAssetLoader()
+        sm._rules.loader = MemoryAssetLoader()
         with pytest.raises(StateMachineError) as caught:
             sm.query_action_availability(
                 sid, command.actor_id, command.payload, package, context=context

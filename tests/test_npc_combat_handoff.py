@@ -126,14 +126,14 @@ def test_scope_denial_without_mechanical_side_effects(tmp_path, context, kind):
 def test_revoked_between_evaluation_and_commit(tmp_path, context):
     sm, sid, package, _, _, task, _, _ = prepare(tmp_path, context)
     with sm:
-        real = sm._evaluate_dnd
+        real = sm._rules._evaluate_dnd
 
         async def revoke(request):
             result = await real(request)
             sm.grant_npc_access(sid, NPC, "agent:replacement", package, context=context)
             return result
 
-        sm._evaluate_dnd = revoke
+        sm._rules._evaluate_dnd = revoke
         before = authority(sm, sid)
         with pytest.raises(StateMachineError) as caught:
             sm.dispatch_npc_output(task.evaluation_id, 0, package, context=context)

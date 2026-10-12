@@ -74,7 +74,7 @@ def test_real_closure_atomic_balances_xp_replay_restart(tmp_path, package_data, 
         command = close_command(sm, sid, package, context)
         before = sm.read_combat_snapshot(sid, package, context=context)
         rng = sm.read_rng_context(sid, package, context=context)
-        real = sm._evaluate_dnd
+        real = sm._rules._evaluate_dnd
         results = []
 
         async def capture(request):
@@ -83,7 +83,7 @@ def test_real_closure_atomic_balances_xp_replay_restart(tmp_path, package_data, 
             results.append(result)
             return result
 
-        sm._evaluate_dnd = capture
+        sm._rules._evaluate_dnd = capture
         receipt = sm.submit_command(command, package, context=context)
         assert receipt.status == "committed"
         closure = next(op for op in results[0].state_delta.operations if op.kind == "combat.close")
@@ -162,7 +162,7 @@ def test_malformed_real_closure_leaves_all_sqlite_rows_and_allows_retry(
     with sm:
         command = close_command(sm, sid, package, context)
         before = stored_state(tmp_path / "modern.db")
-        real = sm._evaluate_dnd
+        real = sm._rules._evaluate_dnd
 
         async def corrupt(request):
             result = await real(request)
@@ -200,13 +200,13 @@ def test_malformed_real_closure_leaves_all_sqlite_rows_and_allows_retry(
                 )
             return RuleEvaluationResult.model_validate_json(json.dumps(raw))
 
-        sm._evaluate_dnd = corrupt
+        sm._rules._evaluate_dnd = corrupt
         for _ in range(2):
             with pytest.raises(StateMachineError) as error:
                 sm.submit_command(command, package, context=context)
             assert error.value.code == "invalid_rule_result"
             assert stored_state(tmp_path / "modern.db") == before
-        sm._evaluate_dnd = real
+        sm._rules._evaluate_dnd = real
         assert sm.submit_command(command, package, context=context).status == "committed"
 
 

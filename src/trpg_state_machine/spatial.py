@@ -5,21 +5,27 @@ must never be passed to the Engine or perception as a mechanical Grid.
 """
 
 import json
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 
 from dnd5e_engine.spatial import GridTopology, canonical_cell_id
 from dnd5e_engine.specs import GridScene
 
+from ._execution import _execution_data
 from ._operations import (
     EnterScene,
+    FoundationOperation,
     MoveActor,
+    ObjectState,
     PlaceObject,
     SetObjectState,
+    SetSceneFlag,
     StepActor,
     TraversePassage,
 )
 from .errors import StateMachineError
+from .game_time import AdvanceGameTime, advance_game_time
 from .models import TrustedContext
+from .package import AdventurePackage
 
 
 @dataclass(frozen=True, slots=True)
@@ -65,7 +71,48 @@ def cell_in_bounds(topology, cell):
         return False
 
 
-class SpatialRuntime:
+class WorldHandler:
+    def __init__(self, store, sessions, characters, facts, combats, capture, npc_bootstrap):
+        self.store = store
+        self.sessions = sessions
+        self.characters = characters
+        self.facts = facts
+        self.combats = combats
+        self.capture = capture
+        self.npc_bootstrap = npc_bootstrap
+
+    @property
+    def _conn(self):
+        return self.store.connection
+
+    def _transaction(self, *, write=False):
+        return self.store.transaction(write=write)
+
+    def _session(self, sid, package, context):
+        return self.sessions._session(sid, package, context)
+
+    def _npc_authorized(self, sid, package, context):
+        return self.sessions._npc_authorized(sid, package, context)
+
+    def _active_combat(self, sid):
+        return self.combats.active(sid)
+
+    def _capture_event(self, *args, **kwargs):
+        return self.capture._capture_event(*args, **kwargs)
+
+    def _world_operation_capability(self, row, operation):
+        return self.sessions._world_operation_capability(row, operation)
+
+    def _initialize_scene(self, sid, scene_id, package):
+        if not self.facts.initialize_scene(sid, scene_id, package):
+            return
+        for actor in package.actors:
+            if actor.initial_scene_id == scene_id and self.characters.initialize_npc_actor(
+                sid, actor
+            ):
+                self.npc_bootstrap.initialize(sid, actor)
+        self.facts.initialize_mechanical_scene(sid, scene_id, package)
+
     def _world_actor_ready(self, sid, actor_id):
         core = self._conn.execute(
             "SELECT current_hp,effects_json FROM characters WHERE session_id=? AND actor_id=?",
@@ -483,6 +530,9 @@ class SpatialRuntime:
             EnterScene,
             MoveActor,
             SetObjectState,
+            SetSceneFlag,
+            ObjectState,
+            FoundationOperation,
         ):
             raise StateMachineError("unsupported_operation", "Unsupported spatial query")
         validate_command(TypedCommand(session_id, "query", actor_id, kind, operation, 0))
@@ -494,8 +544,7 @@ class SpatialRuntime:
             if (
                 type(operation) is EnterScene
                 and actor_id != row["pc_actor_id"]
-                or type(operation) is MoveActor
-                and operation.actor_id != actor_id
+                or (type(operation) is MoveActor and operation.actor_id != actor_id)
             ):
                 raise StateMachineError("invalid_actor", "Operation actor differs")
             if (
@@ -571,10 +620,7 @@ class SpatialRuntime:
         if type(operation) is PlaceObject:
             if operation.expected_cell == operation.to_cell:
                 return []
-            self._conn.execute(
-                "UPDATE objects SET cell=? WHERE session_id=? AND object_id=?",
-                (operation.to_cell, sid, operation.object_id),
-            )
+            self.facts.place(sid, operation.object_id, operation.to_cell)
             return [
                 self._capture_event(
                     sid,
@@ -611,21 +657,11 @@ class SpatialRuntime:
             (sid, destination.scene_id),
         ).fetchone()
         self._initialize_scene(sid, destination.scene_id, package)
-        self._conn.execute(
-            "UPDATE actors SET current_scene_id=?,cell=? WHERE session_id=? AND actor_id=?",
-            (destination.scene_id, destination.cell, sid, actor_id),
-        )
+        self.characters.move(sid, actor_id, destination)
         if is_pc:
-            self._conn.execute(
-                "UPDATE sessions SET current_scene_id=? WHERE session_id=?",
-                (destination.scene_id, sid),
-            )
+            self.sessions.move_pc_scene(sid, destination.scene_id)
             if before.scene_id != destination.scene_id and existed:
-                self._conn.execute(
-                    "UPDATE scene_instances SET visited_count=visited_count+1 "
-                    "WHERE session_id=? AND scene_id=?",
-                    (sid, destination.scene_id),
-                )
+                self.facts.visit(sid, destination.scene_id)
         if is_pc and before.scene_id != destination.scene_id:
             events.append(
                 self._capture_event(
@@ -659,21 +695,10 @@ class SpatialRuntime:
         return events
 
     def _actor_position(self, sid, actor_id):
-        actor = self._conn.execute(
-            "SELECT current_scene_id,cell FROM actors WHERE session_id=? AND actor_id=?",
-            (sid, actor_id),
-        ).fetchone()
-        if actor is None:
-            raise StateMachineError("invalid_actor", "No authorized actor")
-        return SpatialPosition(actor[0], actor[1])
+        return self.characters.position(sid, actor_id)
 
     def _spatial_scene(self, sid, scene_id):
-        scene = self._conn.execute(
-            "SELECT state_json FROM mechanical_scenes "
-            "WHERE session_id=? AND scene_id=? AND spatial_enabled=1",
-            (sid, scene_id),
-        ).fetchone()
-        return json.loads(scene[0]) if scene else None
+        return self.facts.spatial_scene(sid, scene_id)
 
     def _base_topology(self, sid, scene_id):
         scene = self._spatial_scene(sid, scene_id)
@@ -781,3 +806,97 @@ class SpatialRuntime:
                     raise StateMachineError("invalid_spatial_state", "Invalid object location")
                 if definitions[obj[0]].blocks_passage and obj[1] in cells:
                     raise StateMachineError("invalid_spatial_state", "Object overlaps an actor")
+
+    def _operate(
+        self,
+        row,
+        package: AdventurePackage,
+        operation: FoundationOperation,
+        *,
+        actor_id=None,
+        effect_origin=None,
+    ):
+        self.store.require_write()
+        execution = _execution_data(actor_id, effect_origin)
+        automatic = effect_origin is not None
+        if automatic and type(operation) not in (SetSceneFlag, SetObjectState):
+            raise StateMachineError("unsupported_operation", "Unsupported automatic world effect")
+        self._world_operation_capability(row, operation)
+        sid = row["session_id"]
+        if type(operation) is AdvanceGameTime:
+            return [
+                self._capture_event(sid, package, kind, payload, phase="clock.after_advance")
+                for kind, payload in advance_game_time(self, row, operation)
+            ]
+        if isinstance(operation, (EnterScene, MoveActor, StepActor, TraversePassage, PlaceObject)):
+            return self._operate_spatial(row, package, operation, actor_id)
+        if isinstance(operation, (SetSceneFlag, SetObjectState)):
+            if (automatic or isinstance(operation, SetSceneFlag)) and operation.scene_id != row[
+                "current_scene_id"
+            ]:
+                raise StateMachineError("invalid_target", "Only the current scene can be modified")
+            if isinstance(operation, SetSceneFlag):
+                if type(operation.value) is not bool:
+                    raise StateMachineError("invalid_operation", "Flag value must be boolean")
+                flags = json.loads(
+                    self._conn.execute(
+                        (
+                            "SELECT flags_json FROM scene_instances WHERE session_id = ? AND "
+                            "scene_id = ?"
+                        ),
+                        (sid, operation.scene_id),
+                    ).fetchone()[0]
+                )
+                if operation.flag_id not in flags:
+                    raise StateMachineError("invalid_target", "Flag must be declared in this scene")
+                if flags[operation.flag_id] == operation.value:
+                    return []
+                flags[operation.flag_id] = operation.value
+                self.facts.set_scene_flags(sid, operation.scene_id, flags)
+                return [
+                    self._capture_event(
+                        sid,
+                        package,
+                        "scene.flag_changed",
+                        {**asdict(operation), "execution": execution},
+                        phase="world.after_flag_update",
+                    )
+                ]
+            if not isinstance(operation.state, ObjectState):
+                raise StateMachineError("invalid_operation", "Expected a typed ObjectState")
+            passage = None
+            if automatic:
+                obj = self._conn.execute(
+                    (
+                        "SELECT scene_id,state,cell FROM objects WHERE session_id=? AND "
+                        "scene_id=? AND object_id=?"
+                    ),
+                    (sid, operation.scene_id, operation.object_id),
+                ).fetchone()
+                if obj is None:
+                    raise StateMachineError("invalid_target", "No object in the effect scene")
+            else:
+                obj, passage = self._manual_object_target(sid, actor_id, operation, package)
+            if obj[1] is None:
+                raise StateMachineError(
+                    "unsupported_object_capability", "Object has no switch capability"
+                )
+            self._validate_door_occupancy(sid, operation, package)
+            if obj[1] == operation.state.value:
+                return []
+            self.facts.switch(sid, operation.object_id, operation.state.value)
+            return [
+                self._capture_event(
+                    sid,
+                    package,
+                    "object.state_changed",
+                    {
+                        **asdict(operation),
+                        "execution": execution,
+                        **({"passage_id": passage.passage_id} if passage else {}),
+                    },
+                    phase="world.after_object_update",
+                    source_actor_id=actor_id if passage else None,
+                )
+            ]
+        raise StateMachineError("unsupported_operation", "Unknown world operation")

@@ -439,7 +439,7 @@ def test_verified_real_check_remote_consequence_and_original_action_rollback(
         )
         before = stored_rows(db)
         snapshot = sm.read_session(sid, p, context=context)
-        real = sm._expand_events
+        real = sm._package_effects._expand_events
 
         def fail_after_effect(*args):
             events = real(*args)
@@ -447,7 +447,7 @@ def test_verified_real_check_remote_consequence_and_original_action_rollback(
             raise StateMachineError("event_cascade_limit", "tail failure after check consequence")
 
         if tail_failure:
-            monkeypatch.setattr(sm, "_expand_events", fail_after_effect)
+            monkeypatch.setattr(sm._package_effects, "_expand_events", fail_after_effect)
         receipt = sm.submit_command(cmd, p, context=context)
         if tail_failure:
             assert receipt.error_code == "event_cascade_limit"

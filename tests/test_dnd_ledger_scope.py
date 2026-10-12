@@ -102,7 +102,7 @@ def test_real_ledger_updates_preserve_prior_history(tmp_path, package_data, cont
         tmp_path, package_data, context, case, history=history
     )
     results = []
-    real = sm._evaluate_dnd
+    real = sm._rules._evaluate_dnd
 
     async def capture(request):
         result = await real(request)
@@ -110,7 +110,7 @@ def test_real_ledger_updates_preserve_prior_history(tmp_path, package_data, cont
         return result
 
     with sm:
-        sm._evaluate_dnd = capture
+        sm._rules._evaluate_dnd = capture
         before = sm.read_combat_snapshot(sid, package, context=context)
         receipt = sm.submit_command(command, package, context=context)
         assert receipt.status == "committed" and results[0].status == "accepted"
@@ -369,7 +369,7 @@ def test_schema_valid_ledger_fault_has_no_writes_and_original_command_retries(
     }
     sm, sid, package, assets, command = encounter(tmp_path, package_data, context, history=history)
     calls = []
-    real = sm._evaluate_dnd
+    real = sm._rules._evaluate_dnd
 
     async def broken(request):
         result = await real(request)
@@ -378,7 +378,7 @@ def test_schema_valid_ledger_fault_has_no_writes_and_original_command_retries(
         return corrupt_ledger(request, result, fault)
 
     with sm:
-        sm._evaluate_dnd = broken
+        sm._rules._evaluate_dnd = broken
         before = stored_state(tmp_path / "ledger.db")
         for _ in range(2):
             with pytest.raises(StateMachineError) as caught:
@@ -389,7 +389,7 @@ def test_schema_valid_ledger_fault_has_no_writes_and_original_command_retries(
             assert stored_state(tmp_path / "ledger.db") == before
             assert sm.get_command_receipt(sid, command.command_id, package, context=context) is None
         assert calls == [command.command_id] * 2
-        sm._evaluate_dnd = real
+        sm._rules._evaluate_dnd = real
         receipt = sm.submit_command(command, package, context=context)
         assert receipt.status == "committed"
         saved = stored_state(tmp_path / "ledger.db")

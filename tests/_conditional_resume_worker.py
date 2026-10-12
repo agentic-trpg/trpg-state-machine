@@ -24,7 +24,7 @@ with StateMachine(sys.argv[1], dnd_loader=modern_loader()) as sm:
     async def forbidden(request):
         raise AssertionError("Replay must not evaluate")
 
-    sm._evaluate_dnd = forbidden
+    sm._rules._evaluate_dnd = forbidden
     receipt = sm.submit_command(command, package, context=context)
     state = sm.resume_session(sid, package, context=context)
     print(

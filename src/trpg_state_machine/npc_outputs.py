@@ -145,25 +145,7 @@ class NPCOutputRuntime:
         return row, session
 
     def _npc_handoff_command_guard(self, command):
-        """Recheck persisted origin under the existing command's world write lock."""
-        row = self._conn.execute(
-            "SELECT h.command_id,h.payload_json,t.session_id,t.npc_id,t.principal_id "
-            "FROM npc_output_handoffs h "
-            "JOIN npc_evaluation_tasks t USING(evaluation_id) WHERE h.command_id=?",
-            (command.command_id,),
-        ).fetchone()
-        if row is None:
-            return
-        grant = self._conn.execute(
-            "SELECT principal_id FROM npc_access WHERE session_id=? AND observer_id=?",
-            (row["session_id"], row["npc_id"]),
-        ).fetchone()
-        if grant is None or grant[0] != row["principal_id"]:
-            raise StateMachineError("unauthorized", "NPC output controller grant was revoked")
-        if command != _handoff_command(row):
-            raise StateMachineError(
-                "idempotency_conflict", "Command differs from its reliable handoff"
-            )
+        return self._sessions._npc_handoff_command_guard(command)
 
     def dispatch_npc_output(self, evaluation_id, ordinal, package, *, context):
         """Action uses submit_command outside this transaction; lost replies query its receipt."""
@@ -190,42 +172,7 @@ class NPCOutputRuntime:
             return self._output_delivery(updated)
 
     def _npc_combat_target_guard(self, command, package, snapshot):
-        """Handoff visibility is deliberately limited to clear, bright current scenes."""
-        if not self._conn.execute(
-            "SELECT 1 FROM npc_output_handoffs WHERE command_id=?", (command.command_id,)
-        ).fetchone():
-            return
-        if type(command.payload) is not CombatIntentPayload or command.payload.target_id is None:
-            return
-        definition = next(a for a in package.actors if a.actor_id == command.actor_id)
-        locations = dict(
-            self._conn.execute(
-                "SELECT actor_id,current_scene_id FROM actors WHERE session_id=?",
-                (command.session_id,),
-            ).fetchall()
-        )
-        states = {a.entity_id: a for a in snapshot.character_states}
-        grid = snapshot.scene_state.grid
-        observer, target = states.get(command.actor_id), states.get(command.payload.target_id)
-        if (
-            definition.senses is None
-            or not dict(definition.senses)["visual"]
-            or command.payload.target_id not in locations
-            or locations.get(command.actor_id) != locations.get(command.payload.target_id)
-            or observer is None
-            or target is None
-            or observer.conditions
-            or target.conditions
-            or grid.default_lighting != "bright"
-            or grid.lighting
-            or grid.obscurement_cells
-            or grid.wall_segments
-            or grid.blocked_cells
-            or grid.cover_cells
-        ):
-            raise StateMachineError(
-                "unauthorized_target", "Target is outside the supported current perception scope"
-            )
+        return self._sessions._npc_combat_target_guard(command, package, snapshot)
 
     def _publish_npc_dialogue(self, row, session, package):
         data = json.loads(row["payload_json"])
