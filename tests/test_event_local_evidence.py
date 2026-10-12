@@ -18,7 +18,7 @@ from test_conditional_world_effects import conditional
 from test_dnd_runtime import attack, setup
 from test_events import event_data
 from test_game_time import tick_command
-from test_migrations import stored_rows
+from test_migrations import assert_original_rows_equal, stored_rows
 from test_npc_evaluation_tasks import create_task, prepare
 from test_npc_evaluation_tasks import evaluation_package as evaluation_package
 from test_perception_conditions import sensory_event_package
@@ -717,9 +717,7 @@ with StateMachine(sys.argv[1]) as sm:
             assert sm.perception_cursor(complete, package, context=context) == 2
             assert sm.perception_cursor(pending, package, context=context) == 0
     after = stored_rows(db)
-    assert {k: v for k, v in after.items() if k in before and k != "event_outbox"} == {
-        k: v for k, v in before.items() if k != "event_outbox"
-    }
+    assert_original_rows_equal(before, after, excluded=("event_outbox",))
     with StateMachine(db) as sm:
         assert sm.project_event(pending, 1, package, context=context) == "resolved"
         enter(sm, pending, package, context, B, "new-world")
@@ -738,7 +736,7 @@ with StateMachine(sys.argv[1]) as sm:
         for sid in (complete, pending):
             assert evidence(db, sid, 2) == samples[sid]
     with sqlite3.connect(db) as conn:
-        assert conn.execute("PRAGMA user_version").fetchone()[0] == 20
+        assert conn.execute("PRAGMA user_version").fetchone()[0] == 21
         assert conn.execute("PRAGMA foreign_key_check").fetchall() == []
         assert conn.execute("SELECT session_id FROM event_observations").fetchall() == [(complete,)]
 

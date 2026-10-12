@@ -28,7 +28,10 @@ with StateMachine(sys.argv[1], dnd_loader=modern_loader()) as sm:
         package,
         context=context,
     )
-    assert receipt.status == "committed"
+    if saved.character.current_hp == 0:
+        assert receipt.status == "rejected" and receipt.error_code == "unsupported_actor_state"
+    else:
+        assert receipt.status == "committed"
     print(
         json.dumps(
             dict(

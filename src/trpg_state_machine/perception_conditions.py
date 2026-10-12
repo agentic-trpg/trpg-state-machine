@@ -77,7 +77,13 @@ def signal_environment(signal, evidence):
         and obj.get("scene_id") == origin.scene_id
     )
     state = source.get("mechanical") if source else None
-    cell = state.get("cell") if state else None
+    cell = (
+        source.get("cell", state.get("cell") if state else None)
+        if source
+        else obj.get("cell")
+        if obj
+        else None
+    )
     if cell is not None and origin.cell is not None and cell != origin.cell:
         valid = False
     environment.update(
@@ -176,7 +182,7 @@ def judge_visual(signal: Signal, observer: dict, environment: dict | None):
         grid = MechanicalGrid.model_validate_json(canonical_json(environment["grid"]))
         topology = GridTopology(GridScene(**grid.model_dump()))
         a, b = mechanical.get("cell"), environment.get("origin_cell")
-        if type(b) is str and not topology.is_valid_cell(b):
+        if type(b) is str and topology.distance_ft(b, b) is None:
             return _unknown("invalid_spatial_evidence")
         if type(a) is not str or type(b) is not str:
             # A general Scene judgment may fill noticing uncertainty in a plain
@@ -192,7 +198,7 @@ def judge_visual(signal: Signal, observer: dict, environment: dict | None):
                 )
             )
             return _unknown("missing_spatial_evidence", judgment=plain)
-        if not topology.is_valid_cell(a) or not topology.is_valid_cell(b):
+        if topology.distance_ft(a, a) is None or topology.distance_ft(b, b) is None:
             return _unknown("invalid_spatial_evidence")
         # can_see is documented for ordinary targets; a luminous phenomenon
         # cannot be modelled by inventing a light radius or altering the grid.

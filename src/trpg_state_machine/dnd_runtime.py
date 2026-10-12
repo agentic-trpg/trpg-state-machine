@@ -1,6 +1,7 @@
 """Real pinned evaluate(), closed delta validation and one SQLite commit boundary."""
 
 import copy
+import json
 from dataclasses import asdict
 
 from dnd5e_engine import evaluation_delta as delta
@@ -491,6 +492,20 @@ class DndRuntime:
                     ("$." + field, canonical_json(value), sid, identity),
                 )
             elif component == "combat":
+                if field == "ended" and value:
+                    combat = self._conn.execute(
+                        "SELECT scene_id,state_json FROM combats WHERE session_id=?", (sid,)
+                    ).fetchone()
+                    if self._spatial_scene(sid, combat["scene_id"]) is not None:
+                        roster = json.loads(combat["state_json"])["initiative_ids"]
+                        cells = self._current_actor_cells(sid, combat["scene_id"], roster)
+                        # Frozen terminal record; active combat had no second current position map.
+                        self._conn.execute(
+                            "UPDATE combats SET state_json="
+                            "json_set(state_json,'$.actor_zone',json(?)) "
+                            "WHERE session_id=?",
+                            (canonical_json(cells), sid),
+                        )
                 self._conn.execute(
                     "UPDATE combats SET state_json=json_set(state_json,?,json(?)) "
                     "WHERE session_id=?",

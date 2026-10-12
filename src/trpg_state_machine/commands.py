@@ -9,7 +9,16 @@ from dataclasses import asdict, dataclass
 from dnd5e_engine.evaluation_contracts import CheckPayload, CombatClosePayload, CombatIntentPayload
 from pydantic import ValidationError
 
-from ._operations import EnterScene, MoveActor, ObjectState, SetObjectState, SetSceneFlag
+from ._operations import (
+    EnterScene,
+    MoveActor,
+    ObjectState,
+    PlaceObject,
+    SetObjectState,
+    SetSceneFlag,
+    StepActor,
+    TraversePassage,
+)
 from .combat import InitializeCombat
 from .errors import StateMachineError
 from .game_time import AdvanceGameTime, sync_npc_schedules
@@ -17,6 +26,9 @@ from .mechanics import RuleOperation
 from .package import canonical_json
 
 OPERATIONS = {
+    "world.step_actor": StepActor,
+    "world.traverse_passage": TraversePassage,
+    "world.place_object": PlaceObject,
     "world.advance_time": AdvanceGameTime,
     "rules.check": CheckPayload,
     "combat.close": CombatClosePayload,
@@ -51,6 +63,9 @@ class TypedCommand:
         | SetSceneFlag
         | SetObjectState
         | MoveActor
+        | StepActor
+        | TraversePassage
+        | PlaceObject
         | RuleOperation
         | InitializeCombat
         | CombatIntentPayload
@@ -128,6 +143,13 @@ def validate_command(command: TypedCommand) -> None:
     operation_type = OPERATIONS.get(command.command_type)
     if operation_type is None or type(command.payload) is not operation_type:
         raise StateMachineError("unsupported_operation", "Unknown command or payload type")
+    local_version = {
+        StepActor: "actor-step/1",
+        TraversePassage: "passage-traversal/1",
+        PlaceObject: "object-placement/1",
+    }.get(type(command.payload))
+    if local_version and command.payload.schema_version != local_version:
+        raise StateMachineError("invalid_operation", "Unsupported local spatial operation version")
     if type(command.payload) is AdvanceGameTime:
         if any(
             type(v) is not int or not 0 <= v <= 2147483647 for v in asdict(command.payload).values()
@@ -199,7 +221,17 @@ class CommandRuntime:
         if isinstance(payload, CheckPayload) and not context.can_adjudicate_checks:
             raise StateMachineError("unauthorized", "Trusted GM adjudication grant required")
         if isinstance(payload, MoveActor) or (
-            isinstance(payload, (CombatIntentPayload, CombatClosePayload, CheckPayload))
+            isinstance(
+                payload,
+                (
+                    CombatIntentPayload,
+                    CombatClosePayload,
+                    CheckPayload,
+                    StepActor,
+                    TraversePassage,
+                    PlaceObject,
+                ),
+            )
             and actor_id != row["pc_actor_id"]
         ):
             if isinstance(payload, MoveActor) and actor_id != payload.actor_id:
@@ -216,7 +248,18 @@ class CommandRuntime:
             raise StateMachineError("invalid_actor", "Command requires the selected PC")
 
     def _world_operation_capability(self, row, payload):
-        if isinstance(payload, (EnterScene, MoveActor, SetObjectState, AdvanceGameTime)):
+        if isinstance(
+            payload,
+            (
+                EnterScene,
+                MoveActor,
+                SetObjectState,
+                AdvanceGameTime,
+                StepActor,
+                TraversePassage,
+                PlaceObject,
+            ),
+        ):
             combat = self._conn.execute(
                 "SELECT state_json FROM combats WHERE session_id=?", (row["session_id"],)
             ).fetchone()
@@ -280,7 +323,7 @@ class CommandRuntime:
                     events = (
                         self._initialize_combat(row, package, prepared)
                         if isinstance(command.payload, InitializeCombat)
-                        else self._operate(row, package, command.payload)
+                        else self._operate(row, package, command.payload, actor_id=command.actor_id)
                     )
                     events = self._expand_events(row, package, events, command.command_id)
                     if type(command.payload) is not InitializeCombat:
@@ -294,6 +337,7 @@ class CommandRuntime:
                                 "event_cascade_limit", "Bounded schedule cascade exceeded"
                             )
                     if events:
+                        self._assert_spatial_consistency(command.session_id, package)
                         version += 1
                         self._conn.execute(
                             "UPDATE sessions SET world_version = ? WHERE session_id = ?",
@@ -353,3 +397,34 @@ class CommandRuntime:
             ):
                 raise StateMachineError("unauthorized", "Actor control grant has been revoked")
             return receipt
+
+
+def world_command_from_data(data):
+    """Closed local data adapter. Context/capabilities never come from these fields."""
+    if type(data) is not dict or set(data) != {
+        "session_id",
+        "command_id",
+        "actor_id",
+        "command_type",
+        "payload",
+        "expected_world_version",
+        "schema_version",
+    }:
+        raise StateMachineError("invalid_command", "Expected the complete local command envelope")
+    kind = data["command_type"]
+    if type(kind) is not str or kind not in (
+        "world.step_actor",
+        "world.traverse_passage",
+        "world.place_object",
+        "enter_scene",
+        "move_actor",
+    ):
+        raise StateMachineError("unsupported_operation", "Unregistered world operation")
+    if type(data["payload"]) is not dict:
+        raise StateMachineError("invalid_command", "Expected a typed payload mapping")
+    try:
+        command = TypedCommand(**{**data, "payload": OPERATIONS[kind](**data["payload"])})
+    except TypeError as exc:
+        raise StateMachineError("invalid_command", "Unknown or missing payload fields") from exc
+    validate_command(command)
+    return command

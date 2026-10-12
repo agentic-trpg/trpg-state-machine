@@ -19,7 +19,7 @@ from dnd5e_engine.specs import GridScene
 from dnd_support import NPC, create
 from modern_support import modern_data, modern_loader
 from test_events import event_data
-from test_migrations import stored_rows
+from test_migrations import assert_original_rows_equal, stored_rows
 from test_npc_state import SOURCE
 
 from trpg_state_machine import (
@@ -518,7 +518,7 @@ with StateMachine(sys.argv[1]) as sm:
     package = load_adventure_package(SOURCE).package
     before = stored_rows(db)
     with StateMachine(db) as sm:
-        assert sm._conn.execute("PRAGMA user_version").fetchone()[0] == 20
+        assert sm._conn.execute("PRAGMA user_version").fetchone()[0] == 21
         assert sm.project_event(sid, 1, package, context=context) == "resolved"
         assert (
             sm.project_event(
@@ -533,9 +533,9 @@ with StateMachine(sys.argv[1]) as sm:
         assert sm.perception_cursor(sid, package, context=context) == 1
         assert sm._conn.execute("SELECT count(*) FROM event_observations").fetchone()[0] == 0
     after = stored_rows(db)
-    for table in before:
-        if table not in ("event_outbox", "projection_cursors", "npc_completion_cursors"):
-            assert after[table] == before[table]
+    assert_original_rows_equal(
+        before, after, excluded=("event_outbox", "projection_cursors", "npc_completion_cursors")
+    )
 
 
 def test_event_evidence_write_failure_rolls_back_world_receipt_outbox(

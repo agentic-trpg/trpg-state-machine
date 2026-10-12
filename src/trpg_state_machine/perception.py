@@ -138,7 +138,7 @@ def _evidence_v4(evidence, event, binding):
     }:
         return False
     if (
-        evidence["schema"] != "event-evidence/4"
+        evidence["schema"] not in ("event-evidence/4", "event-evidence/5")
         or type(evidence["world_version"]) is not int
         or evidence["world_version"] != event.world_version
         or type(evidence["game_tick"]) is not int
@@ -168,8 +168,12 @@ def _evidence_v4(evidence, event, binding):
     for actor in [*evidence["actors"], *evidence["source_actors"]]:
         if (
             type(actor) is not dict
-            or set(actor) != {"actor_id", "kind", "current_scene_id", "senses", "mechanical"}
+            or set(actor)
+            != {"actor_id", "kind", "current_scene_id", "senses", "mechanical"}
+            | ({"cell"} if evidence["schema"] == "event-evidence/5" else set())
             or any(type(actor[k]) is not str for k in ("actor_id", "kind", "current_scene_id"))
+            or actor.get("cell") is not None
+            and type(actor["cell"]) is not str
         ):
             return False
         if actor["actor_id"] in ids:
@@ -230,9 +234,16 @@ def _evidence_v4(evidence, event, binding):
         return False
     return all(
         type(o) is dict
-        and set(o) == {"scene_id", "state"}
+        and set(o)
+        == {"scene_id", "state"} | ({"cell"} if evidence["schema"] == "event-evidence/5" else set())
         and type(o["scene_id"]) is str
-        and o["state"] in ("closed", "open")
+        and o["state"]
+        in (
+            (None, "closed", "open")
+            if evidence["schema"] == "event-evidence/5"
+            else ("closed", "open")
+        )
+        and (o.get("cell") is None or type(o["cell"]) is str)
         for o in evidence["objects"].values()
     )
 

@@ -99,9 +99,19 @@ def assert_preserved(database, original):
         for table, (columns, rows) in original.items():
             after = set(conn.execute(f"SELECT {','.join(columns)} FROM {table}").fetchall())
             assert rows <= after, table
-        assert conn.execute("PRAGMA user_version").fetchone()[0] == 20
+        assert conn.execute("PRAGMA user_version").fetchone()[0] == 21
         assert conn.execute("PRAGMA integrity_check").fetchone()[0] == "ok"
         assert conn.execute("PRAGMA foreign_key_check").fetchall() == []
+
+
+def assert_original_rows_equal(original, current, *, excluded=()):
+    """Exact equality of every original column/row across additive schema changes."""
+    for table, (columns, rows) in original.items():
+        if table in excluded:
+            continue
+        current_columns, current_rows = current[table]
+        indices = [current_columns.index(column) for column in columns]
+        assert {tuple(row[i] for i in indices) for row in current_rows} == rows, table
 
 
 @pytest.mark.parametrize("version", [1, 2, 3, 4])
@@ -305,7 +315,7 @@ def test_concurrent_initialization_and_upgrade(tmp_path, version, monkeypatch):
             )
 
     with ThreadPoolExecutor(max_workers=4) as workers:
-        assert list(workers.map(open_runtime, range(4))) == [(20, 1, "wal")] * 4
+        assert list(workers.map(open_runtime, range(4))) == [(21, 1, "wal")] * 4
     assert len(version_reads) >= 4 and all(version_reads)
     monkeypatch.undo()
     assert_preserved(database, original)

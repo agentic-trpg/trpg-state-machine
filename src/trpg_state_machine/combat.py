@@ -101,6 +101,23 @@ def _remap(value, old, new):
 
 class CombatRuntime:
     def _initialize_mechanical_scene(self, sid, scene_id, package):
+        definition = package.scene(scene_id)
+        if definition.grid_json is not None:
+            self._conn.execute(
+                "INSERT INTO mechanical_scenes(session_id,scene_id,state_json,spatial_enabled) "
+                "SELECT ?,?,?,1 WHERE NOT EXISTS "
+                "(SELECT 1 FROM mechanical_scenes WHERE session_id=? AND scene_id=?)",
+                (
+                    sid,
+                    scene_id,
+                    canonical_json(
+                        {"scene_id": scene_id, "grid": json.loads(definition.grid_json)}
+                    ),
+                    sid,
+                    scene_id,
+                ),
+            )
+            return
         if package.noncombat_foundation_json is None:
             return
         initial = json.loads(package.noncombat_foundation_json)
@@ -108,7 +125,8 @@ class CombatRuntime:
         scene = next((s for s in scenes if s["scene_id"] == scene_id), None)
         if scene is not None:
             self._conn.execute(
-                "INSERT INTO mechanical_scenes SELECT ?,?,? WHERE NOT EXISTS "
+                "INSERT INTO mechanical_scenes(session_id,scene_id,state_json) "
+                "SELECT ?,?,? WHERE NOT EXISTS "
                 "(SELECT 1 FROM mechanical_scenes WHERE session_id=? AND scene_id=?)",
                 (sid, scene_id, canonical_json(scene), sid, scene_id),
             )
@@ -264,6 +282,25 @@ class CombatRuntime:
         data = _remap(data, row["pc_template_id"], row["pc_actor_id"])
         data["snapshot"]["session_id"] = row["session_id"]
         data["snapshot"]["world_version"] = row["world_version"]
+        spatial = self._spatial_scene(row["session_id"], row["current_scene_id"])
+        if spatial is not None:
+            self._spatial_combat_guard(row["session_id"], row["current_scene_id"], package)
+            roster = data["snapshot"]["combat_state"]["initiative_ids"]
+            present = {
+                r[0]
+                for r in self._conn.execute(
+                    "SELECT actor_id FROM actors WHERE session_id=? AND current_scene_id=?",
+                    (row["session_id"], row["current_scene_id"]),
+                )
+            }
+            if present != set(roster):
+                raise StateMachineError(
+                    "invalid_spatial_state", "Encounter roster must cover present actors"
+                )
+            data["snapshot"]["combat_state"]["actor_zone"] = self._current_actor_cells(
+                row["session_id"], row["current_scene_id"], roster
+            )
+            data["snapshot"]["scene_state"] = spatial
         if package.noncombat_foundation_json is not None:
             # Only authored combat components are new. Actor facts and RNG already
             # belong to SQLite, even before the first encounter.
@@ -295,6 +332,17 @@ class CombatRuntime:
         if self._conn.execute("SELECT 1 FROM combats WHERE session_id=?", (sid,)).fetchone():
             raise StateMachineError("combat_already_initialized", "Encounter cannot be reset")
         snapshot, rng = prepared
+        spatial = self._spatial_scene(sid, row["current_scene_id"])
+        if snapshot.world_version != row["world_version"]:
+            raise StateMachineError("version_conflict", "Combat preparation is stale")
+        if spatial is not None:
+            self._spatial_combat_guard(sid, row["current_scene_id"], package)
+            if snapshot.combat_state.actor_zone != self._current_actor_cells(
+                sid, row["current_scene_id"], snapshot.combat_state.initiative_ids
+            ):
+                raise StateMachineError(
+                    "version_conflict", "Combat positions changed during preparation"
+                )
         for actor in snapshot.character_states:
             existing = self._conn.execute(
                 "SELECT * FROM actors WHERE session_id=? AND actor_id=?", (sid, actor.entity_id)
@@ -348,9 +396,9 @@ class CombatRuntime:
                 "INSERT INTO mechanical_actors VALUES (?,?,?)",
                 (sid, actor.entity_id, canonical_json(state)),
             )
-        if package.noncombat_foundation_json is None:
+        if package.noncombat_foundation_json is None and spatial is None:
             self._conn.execute(
-                "INSERT INTO mechanical_scenes VALUES (?,?,?)",
+                "INSERT INTO mechanical_scenes(session_id,scene_id,state_json) VALUES (?,?,?)",
                 (sid, snapshot.scene_state.scene_id, snapshot.scene_state.model_dump_json()),
             )
         self._conn.execute(
@@ -363,7 +411,9 @@ class CombatRuntime:
                 sid,
                 snapshot.combat_state.combat_id,
                 snapshot.scene_state.scene_id,
-                snapshot.combat_state.model_dump_json(exclude={"event_log"}),
+                snapshot.combat_state.model_dump_json(
+                    exclude={"event_log", "actor_zone"} if spatial else {"event_log"}
+                ),
                 process_id(),
             ),
         )
@@ -388,6 +438,10 @@ class CombatRuntime:
         if combat is None:
             raise StateMachineError("combat_not_initialized", "Session has no mechanical encounter")
         state = json.loads(combat["state_json"])
+        if self._spatial_scene(sid, combat["scene_id"]) is not None and not state["ended"]:
+            state["actor_zone"] = self._current_actor_cells(
+                sid, combat["scene_id"], state["initiative_ids"]
+            )
         # Mechanical history comes from committed events, never a second mutable log.
         state["event_log"] = [
             json.loads(e[0])["engine_event"]

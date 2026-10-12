@@ -128,7 +128,7 @@ class MechanicalRuntime:
             replay = self._command_replay(command, fingerprint)
             if replay is not None:
                 return replay
-            snapshot = self._snapshot(row)
+            snapshot = self._snapshot(row, package)
         detached = snapshot_of(snapshot)
         request = RuleEvaluationRequest(
             f"evaluation.{command.session_id}.{command.command_id}",
@@ -175,7 +175,7 @@ class MechanicalRuntime:
             replay = self._command_replay(command, fingerprint)
             if replay is not None:
                 return replay
-            current = self._snapshot(row)
+            current = self._snapshot(row, package)
             status, error = "committed", None
             version, seq = row["world_version"], row["event_seq"]
             if (

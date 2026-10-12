@@ -13,8 +13,11 @@ from ._operations import (
     FoundationOperation,
     MoveActor,
     ObjectState,
+    PlaceObject,
     SetObjectState,
     SetSceneFlag,
+    StepActor,
+    TraversePassage,
 )
 from .availability import AvailabilityRuntime
 from .combat import DND_RULESET, CombatRuntime
@@ -52,6 +55,7 @@ from .package import (
 )
 from .perception import PerceptionRuntime
 from .perception_queue import PerceptionQueueRuntime
+from .spatial import SpatialRuntime
 
 
 def _binding(row: sqlite3.Row) -> RulesetBinding:
@@ -118,6 +122,7 @@ class StateMachine(
     NPCResultRuntime,
     NPCModeRuntime,
     NPCOutputRuntime,
+    SpatialRuntime,
 ):
     """Trusted in-process runtime. One connection per instance/thread; close explicitly.
 
@@ -173,7 +178,7 @@ class StateMachine(
 
     def _migrate(self):
         scripts = [Path(__file__).with_name("_schema.sql")] + [
-            Path(__file__).with_name(f"_migration_{v}.sql") for v in range(2, 21)
+            Path(__file__).with_name(f"_migration_{v}.sql") for v in range(2, 22)
         ]
         steps = [_migration_statements(path.read_text("utf-8")) for path in scripts]
         # Migration 4 rebuilds a referenced table. Disable FK enforcement only on
@@ -183,7 +188,7 @@ class StateMachine(
             self._conn.execute("BEGIN IMMEDIATE")
             # Read AFTER acquiring the cross-process SQLite migration write lock.
             version = self._conn.execute("PRAGMA user_version").fetchone()[0]
-            if version not in range(21):
+            if version not in range(22):
                 raise StateMachineError(
                     "unsupported_storage_schema", f"Unsupported storage version: {version}"
                 )
@@ -196,7 +201,7 @@ class StateMachine(
                 raise StateMachineError(
                     "unsupported_storage_schema", "Unversioned nonempty database"
                 )
-            for target in range(version + 1, 21):
+            for target in range(version + 1, 22):
                 for statement in steps[target - 1]:
                     self._conn.execute(statement)
                 if self._conn.execute("PRAGMA user_version").fetchone()[0] != target:
@@ -437,9 +442,19 @@ class StateMachine(
                 ],
             )
             self._initialize_scene(session_id, package.entry_scene_id, package)
+            # Fine maps and their configured entities exist independently of PC visits.
+            for scene in package.scenes:
+                if scene.grid_json is not None and scene.scene_id != package.entry_scene_id:
+                    self._initialize_scene(session_id, scene.scene_id, package)
+                    self._conn.execute(
+                        "UPDATE scene_instances SET visited_count=0 "
+                        "WHERE session_id=? AND scene_id=?",
+                        (session_id, scene.scene_id),
+                    )
             self._conn.execute(
-                "INSERT INTO actors VALUES (?, ?, 'pc', ?)",
-                (session_id, pc_actor_id, package.entry_scene_id),
+                "INSERT INTO actors(session_id,actor_id,kind,current_scene_id,cell) "
+                "VALUES (?, ?, 'pc', ?, ?)",
+                (session_id, pc_actor_id, package.entry_scene_id, pc.initial_cell),
             )
             self._conn.execute(
                 "INSERT INTO characters(session_id,actor_id,current_hp,max_hp,"
@@ -470,6 +485,7 @@ class StateMachine(
             ).fetchone()
             if package.noncombat_foundation_json is not None:
                 self._initialize_noncombat(initial_row, package)
+            self._assert_spatial_consistency(session_id, package)
             initial_events = self._expand_events(
                 initial_row,
                 package,
@@ -524,16 +540,27 @@ class StateMachine(
             (session_id, scene_id, canonical_json(dict(scene.flags))),
         )
         self._conn.executemany(
-            "INSERT INTO objects VALUES (?, ?, ?, ?)",
-            [(session_id, ob.object_id, scene_id, ob.state) for ob in scene.objects],
+            "INSERT INTO objects(session_id,object_id,scene_id,state,cell) VALUES (?, ?, ?, ?, ?)",
+            [
+                (session_id, ob.object_id, scene_id, ob.state, ob.initial_cell)
+                for ob in scene.objects
+            ],
         )
         for actor in package.actors:
             if actor.initial_scene_id == scene_id:
                 # A scene reference never duplicates or resets an existing world actor.
                 inserted = self._conn.execute(
-                    "INSERT INTO actors SELECT ?, ?, 'npc', ? WHERE NOT EXISTS "
+                    "INSERT INTO actors(session_id,actor_id,kind,current_scene_id,cell) "
+                    "SELECT ?, ?, 'npc', ?, ? WHERE NOT EXISTS "
                     "(SELECT 1 FROM actors WHERE session_id = ? AND actor_id = ?)",
-                    (session_id, actor.actor_id, scene_id, session_id, actor.actor_id),
+                    (
+                        session_id,
+                        actor.actor_id,
+                        scene_id,
+                        actor.initial_cell,
+                        session_id,
+                        actor.actor_id,
+                    ),
                 )
                 if inserted.rowcount:
                     self._initialize_npc(session_id, actor)
@@ -614,7 +641,9 @@ class StateMachine(
             raise StateMachineError(receipt.error_code, "Command did not commit")
         return self.read_session(session_id, package, context=context)
 
-    def _operate(self, row, package: AdventurePackage, operation: FoundationOperation):
+    def _operate(
+        self, row, package: AdventurePackage, operation: FoundationOperation, *, actor_id=None
+    ):
         self._world_operation_capability(row, operation)
         sid = row["session_id"]
         if type(operation) is AdvanceGameTime:
@@ -622,51 +651,8 @@ class StateMachine(
                 self._capture_event(sid, package, kind, payload, phase="clock.after_advance")
                 for kind, payload in advance_game_time(self, row, operation)
             ]
-        if isinstance(operation, EnterScene):
-            target = package.scene(operation.scene_id)
-            if target.scene_id == row["current_scene_id"]:
-                return []
-            current = package.scene(row["current_scene_id"])
-            if target.scene_id not in current.exits:
-                raise StateMachineError("scene_unreachable", "No unconditional exit to this scene")
-            departure = self._capture_event(
-                sid,
-                package,
-                "scene.exited",
-                {"scene_id": current.scene_id},
-                phase="scene.before_departure",
-                source_actor_id=row["pc_actor_id"],
-            )
-            existed = self._conn.execute(
-                "SELECT 1 FROM scene_instances WHERE session_id = ? AND scene_id = ?",
-                (sid, target.scene_id),
-            ).fetchone()
-            self._initialize_scene(sid, target.scene_id, package)
-            if existed:
-                self._conn.execute(
-                    "UPDATE scene_instances SET visited_count = visited_count + 1 "
-                    "WHERE session_id = ? AND scene_id = ?",
-                    (sid, target.scene_id),
-                )
-            self._conn.execute(
-                "UPDATE sessions SET current_scene_id = ? WHERE session_id = ?",
-                (target.scene_id, sid),
-            )
-            self._conn.execute(
-                "UPDATE actors SET current_scene_id = ? WHERE session_id = ? AND actor_id = ?",
-                (target.scene_id, sid, row["pc_actor_id"]),
-            )
-            return [
-                departure,
-                self._capture_event(
-                    sid,
-                    package,
-                    "scene.entered",
-                    {"scene_id": target.scene_id},
-                    phase="scene.after_arrival",
-                    source_actor_id=row["pc_actor_id"],
-                ),
-            ]
+        if isinstance(operation, (EnterScene, MoveActor, StepActor, TraversePassage, PlaceObject)):
+            return self._operate_spatial(row, package, operation, actor_id or row["pc_actor_id"])
         if isinstance(operation, (SetSceneFlag, SetObjectState)):
             if operation.scene_id != row["current_scene_id"]:
                 raise StateMachineError("invalid_target", "Only the current scene can be modified")
@@ -707,6 +693,12 @@ class StateMachine(
             ).fetchone()
             if obj is None:
                 raise StateMachineError("invalid_target", "Object is not in the current scene")
+            if package.scene(operation.scene_id).grid_json is not None:
+                self._validate_switch_range(sid, actor_id or row["pc_actor_id"], operation, package)
+            if obj[0] is None:
+                raise StateMachineError(
+                    "unsupported_object_capability", "Object has no switch capability"
+                )
             if obj[0] == operation.state.value:
                 return []
             self._conn.execute(
@@ -722,29 +714,9 @@ class StateMachine(
                     phase="world.after_object_update",
                 )
             ]
-        actor = self._conn.execute(
-            "SELECT * FROM actors WHERE session_id = ? AND actor_id = ?", (sid, operation.actor_id)
-        ).fetchone()
-        if actor is None or actor["kind"] != "npc":
-            raise StateMachineError("invalid_target", "Only an existing synthetic NPC may be moved")
-        if not self._conn.execute(
-            "SELECT 1 FROM scene_instances WHERE session_id = ? AND scene_id = ?",
-            (sid, operation.to_scene_id),
-        ).fetchone():
-            raise StateMachineError("invalid_target", "NPC destination must be initialized")
-        if actor["current_scene_id"] == operation.to_scene_id:
-            return []
-        self._conn.execute(
-            "UPDATE actors SET current_scene_id = ? WHERE session_id = ? AND actor_id = ?",
-            (operation.to_scene_id, sid, operation.actor_id),
-        )
-        return [
-            self._capture_event(
-                sid, package, "actor.moved", asdict(operation), phase="world.after_actor_move"
-            )
-        ]
+        raise StateMachineError("unsupported_operation", "Unknown world operation")
 
-    def _snapshot(self, row) -> SessionSnapshot:
+    def _snapshot(self, row, package) -> SessionSnapshot:
         sid = row["session_id"]
         world = self._conn.execute(
             "SELECT flags_json,game_tick FROM world_states WHERE session_id = ?", (sid,)
@@ -762,10 +734,22 @@ class StateMachine(
                 )
             }
             scenes[s["scene_id"]] = SceneInstance(
-                s["scene_id"], s["visited_count"], json.loads(s["flags_json"]), objects
+                s["scene_id"],
+                s["visited_count"],
+                json.loads(s["flags_json"]),
+                objects,
+                {
+                    o[0]: o[1]
+                    for o in self._conn.execute(
+                        "SELECT object_id,cell FROM objects WHERE session_id=? AND scene_id=?",
+                        (sid, s["scene_id"]),
+                    )
+                }
+                if package.scene(s["scene_id"]).grid_json is not None
+                else None,
             )
         actors = {
-            a["actor_id"]: ActorState(a["actor_id"], a["kind"], a["current_scene_id"])
+            a["actor_id"]: ActorState(a["actor_id"], a["kind"], a["current_scene_id"], a["cell"])
             for a in self._conn.execute(
                 "SELECT * FROM actors WHERE session_id = ? ORDER BY actor_id", (sid,)
             )
@@ -820,7 +804,7 @@ class StateMachine(
     ) -> SessionSnapshot:
         """Read a consistent detached runtime snapshot, verifying owner and all pins."""
         with self._transaction():
-            return self._snapshot(self._session(session_id, package, context))
+            return self._snapshot(self._session(session_id, package, context), package)
 
     def save_session(
         self, session_id: str, package: AdventurePackage, *, context: TrustedContext
@@ -832,7 +816,7 @@ class StateMachine(
         with self._transaction():
             row = self._session(session_id, package, context)
             self._require_noncombat_save(row)
-            return self._snapshot(row)
+            return self._snapshot(row, package)
 
     def resume_session(
         self, session_id: str, package: AdventurePackage, *, context: TrustedContext

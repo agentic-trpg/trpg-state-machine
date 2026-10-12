@@ -1,0 +1,226 @@
+{
+  "manifest": {
+    "schema_version": "state-machine-foundation/2",
+    "adventure_id": "example.lantern_station",
+    "package_version": "gc1.1",
+    "title": "Lantern Station",
+    "entry_scene_id": "scene.platform",
+    "ruleset_binding": {
+      "ruleset_id": "synthetic.foundation",
+      "data_revision": "synthetic-data/1",
+      "evaluator_version": "none/1"
+    },
+    "player_setup": {
+      "player_count": 1,
+      "pc_count": 1
+    },
+    "content_provenance": {
+      "source_type": "original_synthetic",
+      "license": "CC0-1.0",
+      "reviewed_by": "foundation_fixture_author",
+      "redistribution_allowed": true
+    },
+    "compatibility": {
+      "unresolved_issues": [],
+      "adaptation_notes": []
+    }
+  },
+  "world": {
+    "locations": [
+      {
+        "location_id": "location.station",
+        "name": "Lantern Station",
+        "scene_ids": [
+          "scene.platform",
+          "scene.workshop"
+        ]
+      }
+    ],
+    "starting_location_id": "location.station",
+    "initial_flags": {
+      "flag.station_ready": false
+    },
+    "world_facts": []
+  },
+  "scenes": [
+    {
+      "scene_id": "scene.platform",
+      "location_id": "location.station",
+      "description": "An empty platform beside a silent signal lamp.",
+      "exits": [
+        {
+          "to_scene_id": "scene.workshop",
+          "passage_id": "passage.station"
+        }
+      ],
+      "initial_state": {
+        "local_flags": {
+          "flag.lamp_checked": false
+        }
+      },
+      "actor_ids": [
+        "npc.caretaker"
+      ],
+      "objects": [
+        {
+          "object_id": "object.platform_gate",
+          "state": "open",
+          "movable": false,
+          "blocks_passage": false,
+          "initial_cell": "1,1"
+        },
+        {
+          "object_id": "object.crate",
+          "state": null,
+          "movable": true,
+          "blocks_passage": true,
+          "initial_cell": "3,2"
+        },
+        {
+          "object_id": "object.stool",
+          "state": null,
+          "movable": true,
+          "blocks_passage": true,
+          "initial_cell": "3,0"
+        }
+      ],
+      "event_definition_ids": [],
+      "access_policy": "public_interactions",
+      "grid": {
+        "width": 5,
+        "height": 5,
+        "cell_size_ft": 5,
+        "blocked_cells": [],
+        "wall_segments": [],
+        "cover_cells": {},
+        "difficult_terrain_cells": [],
+        "lighting": {},
+        "default_lighting": "bright",
+        "obscurement_cells": {},
+        "sunlight": false
+      }
+    },
+    {
+      "scene_id": "scene.workshop",
+      "location_id": "location.station",
+      "description": "A small workshop with a wooden inspection door.",
+      "exits": [
+        {
+          "to_scene_id": "scene.platform",
+          "passage_id": "passage.station"
+        }
+      ],
+      "initial_state": {
+        "local_flags": {
+          "flag.workshop_checked": false
+        }
+      },
+      "actor_ids": [
+        "npc.caretaker",
+        "npc.attendant"
+      ],
+      "objects": [
+        {
+          "object_id": "object.workshop_door",
+          "state": "open",
+          "movable": false,
+          "blocks_passage": false,
+          "initial_cell": "4,4"
+        }
+      ],
+      "event_definition_ids": [],
+      "access_policy": "public_interactions",
+      "grid": {
+        "width": 5,
+        "height": 5,
+        "cell_size_ft": 5,
+        "blocked_cells": [],
+        "wall_segments": [],
+        "cover_cells": {},
+        "difficult_terrain_cells": [],
+        "lighting": {},
+        "default_lighting": "bright",
+        "obscurement_cells": {},
+        "sunlight": false
+      }
+    }
+  ],
+  "actors": [
+    {
+      "actor_id": "npc.caretaker",
+      "name": "Synthetic Caretaker",
+      "kind": "npc",
+      "controller": {
+        "kind": "scripted_event"
+      },
+      "initial_scene_id": "scene.platform",
+      "initial_cell": "1,3",
+      "senses": {
+        "visual": true,
+        "auditory": true
+      }
+    },
+    {
+      "actor_id": "npc.attendant",
+      "name": "Synthetic Attendant",
+      "kind": "npc",
+      "controller": {
+        "kind": "scripted_event"
+      },
+      "initial_scene_id": "scene.workshop",
+      "initial_cell": "1,2",
+      "senses": {
+        "visual": true,
+        "auditory": true
+      }
+    }
+  ],
+  "pc_templates": [
+    {
+      "pc_template_id": "pc_template.observer",
+      "name": "Synthetic Observer",
+      "character": {
+        "hp": {
+          "current": 8,
+          "max": 8
+        },
+        "resources": {},
+        "inventory": []
+      },
+      "initial_cell": "2,1"
+    },
+    {
+      "pc_template_id": "pc_template.visitor",
+      "name": "Synthetic Visitor",
+      "character": {
+        "hp": {
+          "current": 11,
+          "max": 12
+        },
+        "resources": {},
+        "inventory": []
+      },
+      "initial_cell": "2,1"
+    }
+  ],
+  "events": [],
+  "rule_bindings": {},
+  "passages": [
+    {
+      "passage_id": "passage.station",
+      "door_object_id": "object.platform_gate",
+      "endpoints": [
+        {
+          "scene_id": "scene.platform",
+          "standing_cell": "2,1",
+          "threshold_cell": "3,1"
+        },
+        {
+          "scene_id": "scene.workshop",
+          "standing_cell": "1,1",
+          "threshold_cell": "0,1"
+        }
+      ]
+    }
+  ]
+}

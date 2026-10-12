@@ -4,6 +4,22 @@ Batch 1 实现了一个可运行的本地闭环：**验证原创合成 Adventure
 
 State Machine 是全部已实现可变游戏状态的唯一权威拥有者和提交者。Package 是不可变模板；返回的 Snapshot 是独立副本，修改副本不会写入数据库。已接入固定候选 SHA 的真实 D&D 基础攻击及受限胜利/TPK 关闭，同时保留隔离的合成测试路径；没有第二份运行态权威。正常关闭后可以保存并在新进程恢复；活跃战斗跨进程精确续玩仍不支持。
 
+## GC-1：坐标化世界交互
+
+Package /2 与 Schema 21 支持每个 Scene 一张局部 Grid，角色和物体在原有实体行中
+保存当前 Cell。新增 `StepActor`、`TraversePassage`、`PlaceObject` 共用 TypedCommand
+事务；旧移动入口和 NPC handoff 也执行端点、占位、门及障碍验证。单格物体只阻挡
+普通移动，不自动遮挡视觉。探索坐标进入真实 RE 战斗投影，关闭时冻结历史站位。
+
+```powershell
+uv run --offline --locked python examples/spatial_world.py --directory .test-tmp/spatial-new
+```
+
+使用新目录；增加 `--object stool` 可验证第二种物体。示例通过公开 API 完成移动、
+放置、PC/NPC 被阻、解除和恢复，并启动新进程校验。没有 LLM、战斗移动或历史存档
+坐标补全；RE/SRD 依赖未升级，动态物体战斗等缺口明确拒绝。模型与支持矩阵见
+[GC-1 文档](docs/GC1_SPATIAL_WORLD_INTERACTIONS.md)。
+
 ## NPC Observation Lifecycle（OB-1～OB-3）
 
 Schema 16 在既有 Observation Work 上保存本地候选 `ob-retention/1`：首次持久接纳后
