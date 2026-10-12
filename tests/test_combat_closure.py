@@ -129,11 +129,10 @@ def test_real_closure_atomic_balances_xp_replay_restart(tmp_path, package_data, 
     resumed = json.loads(worker.stdout)
     assert resumed["xp"] == saved.character.xp and resumed["hp"] == saved.character.current_hp
     assert resumed["before_version"] == saved.world_version and resumed["phase"] == "exploration"
-    assert resumed["after_version"] == saved.world_version + 1
+    assert resumed["after_version"] == saved.world_version + (0 if tpk else 1)
     with StateMachine(tmp_path / "modern.db", dnd_loader=assets) as restarted:
-        assert (
-            restarted.resume_session(sid, package, context=context).current_scene_id
-            == "scene.workshop"
+        assert restarted.resume_session(sid, package, context=context).current_scene_id == (
+            "scene.platform" if tpk else "scene.workshop"
         )
         assert (
             restarted.get_command_receipt(sid, command.command_id, package, context=context)

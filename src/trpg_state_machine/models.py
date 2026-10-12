@@ -59,7 +59,8 @@ class SceneInstance:
     scene_id: str
     visited_count: int
     local_flags: dict[str, bool]
-    objects: dict[str, str]
+    objects: dict[str, str | None]
+    object_cells: dict[str, str | None] | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -67,6 +68,7 @@ class ActorState:
     actor_id: str
     kind: str
     current_scene_id: str
+    cell: str | None = None
 
 
 @dataclass(frozen=True, slots=True)

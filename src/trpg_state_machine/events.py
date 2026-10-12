@@ -3,6 +3,7 @@
 import json
 from dataclasses import asdict, dataclass, replace
 
+from ._execution import _WorldEffectKind, _WorldEffectOrigin
 from .errors import StateMachineError
 from .package import Signal, SignalOrigin, SignalScope, SignalStimulus, canonical_json
 from .perception_conditions import discover_signals
@@ -36,6 +37,8 @@ class EventRuntime:
             "scene.entered": "Someone enters the scene.",
             "scene.exited": "Someone leaves the scene.",
             "actor.moved": "Someone moves into view.",
+            "actor.stepped": "Someone takes a step.",
+            "object.placed": "Someone adjusts an object.",
             "object.state_changed": "An object changes position.",
         }
         if (
@@ -92,7 +95,9 @@ class EventRuntime:
         """
         signals = self._event_signals(package, event_type, payload, source_actor_id)
         evidence = {
-            "schema": "event-evidence/4",
+            "schema": "event-evidence/5"
+            if any(s.grid_json or any(o.state is None for o in s.objects) for s in package.scenes)
+            else "event-evidence/4",
             "world_version": None,
             "game_tick": self._conn.execute(
                 "SELECT game_tick FROM world_states WHERE session_id=?", (sid,)
@@ -173,6 +178,10 @@ class EventRuntime:
         state = json.loads(combat["state_json"]) if combat else None
         active = state is not None and not state["ended"]
         for actor in [*actors, *evidence["source_actors"]]:
+            position = self._actor_position(sid, actor["actor_id"])
+            fine = self._spatial_scene(sid, actor["current_scene_id"]) is not None
+            if evidence["schema"] == "event-evidence/5":
+                actor["cell"] = position.cell
             definition = next((a for a in package.actors if a.actor_id == actor["actor_id"]), None)
             actor["senses"] = dict(definition.senses) if definition and definition.senses else None
             stored = self._conn.execute(
@@ -191,11 +200,20 @@ class EventRuntime:
                     "dead_recorded": bool(
                         state is not None and actor["actor_id"] in state["dead_ids"]
                     ),
-                    "cell": state["actor_zone"].get(actor["actor_id"])
+                    "cell": position.cell
+                    if fine
+                    else state.get("actor_zone", {}).get(actor["actor_id"])
                     if active and actor["current_scene_id"] == combat["scene_id"]
                     else None,
                 }
             )
+            if data is not None and fine:
+                actor["mechanical"]["cell"] = position.cell
+        if evidence["schema"] == "event-evidence/5":
+            for oid, obj in evidence["objects"].items():
+                obj["cell"] = self._conn.execute(
+                    "SELECT cell FROM objects WHERE session_id=? AND object_id=?", (sid, oid)
+                ).fetchone()[0]
         for scene_id in sorted(scene_ids):
             stored = self._conn.execute(
                 "SELECT state_json FROM mechanical_scenes WHERE session_id=? AND scene_id=?",
@@ -256,7 +274,16 @@ class EventRuntime:
                         row["event_seq"] + index,
                     ),
                 )
-                queue.extend(self._operate(current, package, definition.effect))
+                queue.extend(
+                    self._operate(
+                        current,
+                        package,
+                        definition.effect,
+                        effect_origin=_WorldEffectOrigin(
+                            _WorldEffectKind.PACKAGE, definition.event_definition_id
+                        ),
+                    )
+                )
                 queue.append(
                     self._capture_event(
                         row["session_id"],

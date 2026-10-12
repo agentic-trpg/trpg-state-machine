@@ -1,8 +1,17 @@
 """Versioned local state machine foundation."""
 
-from ._operations import EnterScene, MoveActor, ObjectState, SetObjectState, SetSceneFlag
+from ._operations import (
+    EnterScene,
+    MoveActor,
+    ObjectState,
+    PlaceObject,
+    SetObjectState,
+    SetSceneFlag,
+    StepActor,
+    TraversePassage,
+)
 from .combat import InitializeCombat
-from .commands import CheckWorldEffects, CommandReceipt, TypedCommand
+from .commands import CheckWorldEffects, CommandReceipt, TypedCommand, world_command_from_data
 from .errors import StateMachineError
 from .game_time import AdvanceGameTime
 from .models import CreateSessionRequest, PlayerSelection, TrustedContext
@@ -17,6 +26,10 @@ __all__ = [
     "TypedCommand",
     "EnterScene",
     "MoveActor",
+    "PlaceObject",
+    "StepActor",
+    "TraversePassage",
+    "world_command_from_data",
     "ObjectState",
     "SetObjectState",
     "SetSceneFlag",

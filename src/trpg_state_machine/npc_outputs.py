@@ -5,16 +5,22 @@ from dataclasses import dataclass
 
 from dnd5e_engine.evaluation_contracts import CombatIntentPayload
 
-from ._operations import MoveActor
+from ._operations import MoveActor, ObjectState, SetObjectState
 from .commands import CommandReceipt, TypedCommand, receipt_from_json
 from .errors import StateMachineError
 from .models import TrustedContext
-from .npc_results import NPCActionIntent, NPCCombatIntent, NPCDialogue
+from .npc_results import NPCActionIntent, NPCCombatIntent, NPCDialogue, NPCDoorIntent
 
 
 def _handoff_command(row):
     data = json.loads(row["payload_json"])
-    if "payload" in data:
+    if "object_id" in data:
+        intent = NPCDoorIntent(**{**data, "state": ObjectState(data["state"])})
+        kind, payload = (
+            "set_object_state",
+            SetObjectState(intent.scene_id, intent.object_id, intent.state),
+        )
+    elif "payload" in data:
         intent = NPCCombatIntent(
             CombatIntentPayload.model_validate_json(json.dumps(data["payload"])),
             data["expected_world_version"],

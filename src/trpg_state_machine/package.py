@@ -16,6 +16,7 @@ if TYPE_CHECKING:
     from .npc_state import NPCInitialState, WorldFactDefinition
 
 SCHEMA_VERSION = "state-machine-foundation/1"
+INTERACTION_SCHEMA_VERSION = "state-machine-foundation/2"
 MAX_PACKAGE_BYTES = 1_048_576
 _ID = re.compile(r"[a-z][a-z0-9_]*(?:\.[a-z][a-z0-9_]*)+")
 
@@ -48,7 +49,24 @@ SYNTHETIC_EVALUATION_RULESET = RulesetBinding(
 @dataclass(frozen=True, slots=True)
 class ObjectDefinition:
     object_id: str
-    state: Literal["closed", "open"]
+    state: Literal["closed", "open"] | None
+    movable: bool = False
+    blocks_passage: bool = False
+    initial_cell: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class PassageEndpoint:
+    scene_id: str
+    standing_cell: str
+    threshold_cell: str
+
+
+@dataclass(frozen=True, slots=True)
+class PassageDefinition:
+    passage_id: str
+    endpoints: tuple[PassageEndpoint, PassageEndpoint]
+    door_object_id: str | None
 
 
 @dataclass(frozen=True, slots=True)
@@ -59,6 +77,9 @@ class SceneDefinition:
     flags: tuple[tuple[str, bool], ...]
     actor_ids: tuple[str, ...]
     objects: tuple[ObjectDefinition, ...]
+    exit_passages: tuple[tuple[str, str], ...] = ()
+    public_interactions: bool = False
+    grid_json: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -69,6 +90,7 @@ class ActorDefinition:
     senses: tuple[tuple[str, bool], ...] | None = None
     controller_kind: str = "scripted_event"
     npc_state: "NPCInitialState | None" = None
+    initial_cell: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -79,6 +101,7 @@ class PCTemplate:
     max_hp: int
     resources: tuple[tuple[str, int], ...] = ()
     inventory: tuple[str, ...] = ()
+    initial_cell: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -136,6 +159,7 @@ class AdventurePackage:
     combat_foundation_json: str | None = None
     noncombat_foundation_json: str | None = None
     world_facts: tuple["WorldFactDefinition", ...] = ()
+    passages: tuple[PassageDefinition, ...] = ()
 
     def scene(self, scene_id: str) -> SceneDefinition:
         for scene in self.scenes:
@@ -261,14 +285,24 @@ def _reference(value, targets, path: str) -> None:
 
 
 def _validate(data: dict) -> AdventurePackage:
-    root = _mapping(data, "manifest world scenes actors pc_templates events rule_bindings", "$")
+    interactions = (
+        isinstance(data, dict)
+        and isinstance(data.get("manifest"), dict)
+        and data["manifest"].get("schema_version") == INTERACTION_SCHEMA_VERSION
+    )
+    root = _mapping(
+        data,
+        "manifest world scenes actors pc_templates events rule_bindings"
+        + (" passages" if interactions else ""),
+        "$",
+    )
     m = _mapping(
         root["manifest"],
         "schema_version adventure_id package_version title entry_scene_id "
         "ruleset_binding player_setup content_provenance compatibility",
         "manifest",
     )
-    if m["schema_version"] != SCHEMA_VERSION:
+    if m["schema_version"] not in (SCHEMA_VERSION, INTERACTION_SCHEMA_VERSION):
         _fail("unsupported_schema", "manifest.schema_version", f"Expected {SCHEMA_VERSION}")
     adventure_id = _identifier(m["adventure_id"], "manifest.adventure_id")
     version = _text(m["package_version"], "manifest.package_version")
@@ -304,6 +338,10 @@ def _validate(data: dict) -> AdventurePackage:
     )
     for key in ("source_type", "license", "reviewed_by"):
         _text(provenance[key], f"manifest.content_provenance.{key}")
+    if interactions and provenance["source_type"] != "original_synthetic":
+        _fail(
+            "unsupported_mechanism", "manifest.content_provenance", "GC-1 requires original content"
+        )
     if type(provenance["redistribution_allowed"]) is not bool:
         _fail(
             "schema_error", "manifest.content_provenance.redistribution_allowed", "Expected boolean"
@@ -360,13 +398,15 @@ def _validate(data: dict) -> AdventurePackage:
         s = _mapping(
             value,
             "scene_id location_id description exits initial_state actor_ids objects "
-            "event_definition_ids access_policy",
+            "event_definition_ids access_policy" + (" grid" if interactions else ""),
             path,
         )
         key = _identifier(s["scene_id"], path + ".scene_id", "scene")
         location = _identifier(s["location_id"], path + ".location_id", "location")
         _text(s["description"], path + ".description")
-        if s["access_policy"] != "internal_only":
+        if s["access_policy"] not in (
+            ("internal_only", "public_interactions") if interactions else ("internal_only",)
+        ):
             _fail(
                 "unsupported_mechanism",
                 path + ".access_policy",
@@ -374,10 +414,19 @@ def _validate(data: dict) -> AdventurePackage:
             )
         _list(s["event_definition_ids"], path + ".event_definition_ids")
         initial = _mapping(s["initial_state"], "local_flags", path + ".initial_state")
-        exits = []
+        grid_json = _grid_config(s["grid"], path + ".grid") if interactions else None
+        exits, exit_passages = [], []
         for j, value in enumerate(_list(s["exits"], path + ".exits")):
-            ex = _mapping(value, "to_scene_id", f"{path}.exits[{j}]")
+            ex = _mapping(
+                value,
+                "to_scene_id" + (" passage_id" if interactions else ""),
+                f"{path}.exits[{j}]",
+            )
             exits.append(_identifier(ex["to_scene_id"], path + ".exits", "scene"))
+            if interactions and ex["passage_id"] is not None:
+                exit_passages.append(
+                    (exits[-1], _identifier(ex["passage_id"], path + ".exits", "passage"))
+                )
         _unique(exits, path + ".exits")
         actors = tuple(
             _identifier(v, path + ".actor_ids", "npc")
@@ -386,13 +435,30 @@ def _validate(data: dict) -> AdventurePackage:
         _unique(actors, path + ".actor_ids")
         objects = []
         for j, value in enumerate(_list(s["objects"], path + ".objects")):
-            ob = _mapping(value, "object_id state", f"{path}.objects[{j}]")
+            ob = _mapping(
+                value,
+                "object_id state"
+                + (" movable blocks_passage initial_cell" if interactions else ""),
+                f"{path}.objects[{j}]",
+            )
             oid = _identifier(ob["object_id"], path + ".objects", "object")
-            if ob["state"] not in ("closed", "open"):
+            if ob["state"] not in (
+                (None, "closed", "open") if interactions else ("closed", "open")
+            ):
                 _fail(
                     "unsupported_mechanism", path + ".objects", "Only closed/open synthetic objects"
                 )
-            objects.append(ObjectDefinition(oid, ob["state"]))
+            movable, blocks = ob.get("movable", False), ob.get("blocks_passage", False)
+            if type(movable) is not bool or type(blocks) is not bool or (blocks and not movable):
+                _fail(
+                    "unsupported_mechanism",
+                    path + ".objects",
+                    "Blocking requires explicit movable capability",
+                )
+            cell = _initial_cell(
+                ob.get("initial_cell"), grid_json, path + ".objects", standing=False
+            )
+            objects.append(ObjectDefinition(oid, ob["state"], movable, blocks, cell))
         scenes.append(
             SceneDefinition(
                 key,
@@ -401,11 +467,15 @@ def _validate(data: dict) -> AdventurePackage:
                 _flags(initial["local_flags"], path + ".initial_state.local_flags"),
                 actors,
                 tuple(objects),
+                tuple(exit_passages),
+                s["access_policy"] == "public_interactions",
+                grid_json,
             )
         )
     scene_ids = {s.scene_id for s in scenes}
     _unique([s.scene_id for s in scenes], "scenes")
     _unique([o.object_id for s in scenes for o in s.objects], "scenes.objects")
+    passages = _passage_definitions(root["passages"], scenes) if interactions else ()
     _reference(entry, scene_ids, "manifest.entry_scene_id")
     for scene in scenes:
         _reference(scene.location_id, locations, f"scenes.{scene.scene_id}.location_id")
@@ -449,6 +519,8 @@ def _validate(data: dict) -> AdventurePackage:
             fields += " senses"
         if isinstance(value, dict) and "npc_state" in value:
             fields += " npc_state"
+        if interactions:
+            fields += " initial_cell"
         a = _mapping(value, fields, path)
         key = _identifier(a["actor_id"], path + ".actor_id", "npc")
         initial_scene = _identifier(a["initial_scene_id"], path + ".initial_scene_id", "scene")
@@ -472,7 +544,16 @@ def _validate(data: dict) -> AdventurePackage:
             senses = tuple(sorted(sense_data.items()))
         actors.append(
             ActorDefinition(
-                key, _text(a["name"], path + ".name"), initial_scene, senses, controller["kind"]
+                key,
+                _text(a["name"], path + ".name"),
+                initial_scene,
+                senses,
+                controller["kind"],
+                initial_cell=_initial_cell(
+                    a.get("initial_cell"),
+                    next(s for s in scenes if s.scene_id == initial_scene).grid_json,
+                    path,
+                ),
             )
         )
     _unique([a.actor_id for a in actors], "actors")
@@ -499,7 +580,9 @@ def _validate(data: dict) -> AdventurePackage:
     templates = []
     for i, value in enumerate(_list(root["pc_templates"], "pc_templates", nonempty=True)):
         path = f"pc_templates[{i}]"
-        pc = _mapping(value, "pc_template_id name character", path)
+        pc = _mapping(
+            value, "pc_template_id name character" + (" initial_cell" if interactions else ""), path
+        )
         key = _identifier(pc["pc_template_id"], path + ".pc_template_id", "pc_template")
         char = _mapping(pc["character"], "hp resources inventory", path + ".character")
         hp = _mapping(char["hp"], "current max", path + ".character.hp")
@@ -540,9 +623,16 @@ def _validate(data: dict) -> AdventurePackage:
                 hp["max"],
                 resources,
                 inventory,
+                _initial_cell(
+                    pc.get("initial_cell"),
+                    next(s for s in scenes if s.scene_id == entry).grid_json,
+                    path,
+                ),
             )
         )
     _unique([pc.pc_template_id for pc in templates], "pc_templates")
+    if interactions:
+        _spatial_initial_consistency(scenes, actors, templates, entry)
     definitions = _event_definitions(root["events"], scenes)
     for scene_data in root["scenes"]:
         ids = scene_data["event_definition_ids"]
@@ -572,6 +662,14 @@ def _validate(data: dict) -> AdventurePackage:
             {s.scene_id for s in scenes},
             "rule_bindings.combat_foundation.scene",
         )
+        scene = next(s for s in scenes if s.scene_id == initial["scene_state"]["scene_id"])
+        if (
+            scene.grid_json is not None
+            and json.loads(scene.grid_json) != initial["scene_state"]["grid"]
+        ):
+            _fail(
+                "invalid_reference", "rule_bindings", "Spatial and mechanical base grid must agree"
+            )
     if noncombat is not None:
         initial = json.loads(noncombat)
         snapshot = initial["snapshot"]
@@ -579,6 +677,16 @@ def _validate(data: dict) -> AdventurePackage:
             _fail("invalid_reference", "rule_bindings.noncombat_foundation", "Expected entry scene")
         for scene in initial["additional_scenes"]:
             _reference(scene["scene_id"], scene_ids, "rule_bindings.noncombat_foundation.scenes")
+            configured = next(s for s in scenes if s.scene_id == scene["scene_id"])
+            if (
+                configured.grid_json is not None
+                and json.loads(configured.grid_json) != scene["grid"]
+            ):
+                _fail(
+                    "invalid_reference",
+                    "rule_bindings",
+                    "Spatial and mechanical base grid must agree",
+                )
         for actor in snapshot["character_states"]:
             pc = next((p for p in templates if p.pc_template_id == actor["entity_id"]), None)
             if pc is not None and (
@@ -620,7 +728,136 @@ def _validate(data: dict) -> AdventurePackage:
         foundation,
         noncombat,
         facts,
+        passages,
     )
+
+
+def _grid_config(raw, path):
+    if raw is None:
+        return None
+    from dnd5e_engine.evaluation_state import MechanicalGrid
+    from dnd5e_engine.specs import GridScene
+    from pydantic import ValidationError
+
+    try:
+        # Closed upstream schema plus its canonical geometry validation.
+        grid = MechanicalGrid.model_validate_json(canonical_json(raw))
+        GridScene(**grid.model_dump())
+        if grid.width * grid.height > 4096:
+            _fail("unsupported_mechanism", path, "GC-1 supports at most 4096 cells per Scene")
+        return grid.model_dump_json()
+    except (ValidationError, ValueError, TypeError) as exc:
+        _fail("schema_error", path, f"Invalid mechanical grid: {type(exc).__name__}")
+
+
+def _initial_cell(cell, grid_json, path, *, standing=True):
+    from dnd5e_engine.spatial import GridTopology, canonical_cell_id
+    from dnd5e_engine.specs import GridScene
+
+    if grid_json is None:
+        if cell is not None:
+            _fail("invalid_reference", path, "Abstract Scene has no local coordinates")
+        return None
+    try:
+        topology = GridTopology(GridScene(**json.loads(grid_json)))
+        if type(cell) is not str or canonical_cell_id(cell) != cell:
+            raise ValueError("Noncanonical cell")
+        # distance_ft checks bounds; is_valid_cell additionally checks walkability.
+        if topology.distance_ft(cell, cell) is None or (
+            standing and not topology.is_valid_cell(cell)
+        ):
+            raise ValueError("Invalid position")
+    except (ValueError, TypeError):
+        _fail("invalid_reference", path, "Expected a canonical cell in this Scene's grid")
+    return cell
+
+
+def _spatial_initial_consistency(scenes, actors, templates, entry):
+    for scene in scenes:
+        if scene.grid_json is None:
+            if any(o.movable for o in scene.objects):
+                _fail(
+                    "unsupported_mechanism", "scenes.objects", "Movable objects require coordinates"
+                )
+            continue
+        occupied = [a.initial_cell for a in actors if a.initial_scene_id == scene.scene_id]
+        _unique(occupied, "actors.initial_cell")
+        blocked = {o.initial_cell for o in scene.objects if o.blocks_passage}
+        if blocked & set(occupied):
+            _fail("invalid_reference", "scenes.objects", "Blocking object overlaps an actor")
+        if scene.scene_id == entry:
+            for template in templates:
+                if template.initial_cell in set(occupied) | blocked:
+                    _fail("invalid_reference", "pc_templates.initial_cell", "PC occupancy overlaps")
+
+
+def _passage_definitions(raw, scenes):
+    definitions = []
+    objects = {o.object_id: (s.scene_id, o) for s in scenes for o in s.objects}
+    scene_ids = {s.scene_id for s in scenes}
+    for value in _list(raw, "passages"):
+        p = _mapping(value, "passage_id endpoints door_object_id", "passages")
+        pid = _identifier(p["passage_id"], "passages.passage_id", "passage")
+        endpoints = []
+        for raw_endpoint in _list(p["endpoints"], "passages.endpoints"):
+            e = _mapping(
+                raw_endpoint, "scene_id standing_cell threshold_cell", "passages.endpoints"
+            )
+            _reference(e["scene_id"], scene_ids, "passages.endpoints.scene_id")
+            scene = next(s for s in scenes if s.scene_id == e["scene_id"])
+            if scene.grid_json is None:
+                _fail(
+                    "unsupported_mechanism", "passages.endpoints", "Fine passage requires two grids"
+                )
+            for field in ("standing_cell", "threshold_cell"):
+                _initial_cell(e[field], scene.grid_json, "passages.endpoints")
+            from dnd5e_engine.spatial import GridTopology
+            from dnd5e_engine.specs import GridScene
+
+            if (
+                GridTopology(GridScene(**json.loads(scene.grid_json))).edge_distance(
+                    e["standing_cell"], e["threshold_cell"]
+                )
+                is None
+            ):
+                _fail(
+                    "invalid_reference",
+                    "passages.endpoints",
+                    "Standing and threshold cells must share a legal step",
+                )
+            endpoints.append(PassageEndpoint(**e))
+        if len(endpoints) != 2:
+            _fail("schema_error", "passages.endpoints", "Exactly two distinct endpoints required")
+        _unique([e.scene_id for e in endpoints], "passages.endpoints")
+        door = p["door_object_id"]
+        if door is not None:
+            _reference(door, objects, "passages.door_object_id")
+            scene, obj = objects[door]
+            if scene not in {e.scene_id for e in endpoints} or obj.movable or obj.state is None:
+                _fail(
+                    "unsupported_mechanism",
+                    "passages.door_object_id",
+                    "Door must be a fixed endpoint switch",
+                )
+        definitions.append(PassageDefinition(pid, tuple(endpoints), door))
+    _unique([p.passage_id for p in definitions], "passages")
+    by_id = {p.passage_id: p for p in definitions}
+    used = set()
+    for scene in scenes:
+        for target, pid in scene.exit_passages:
+            _reference(pid, by_id, "scenes.exits.passage_id")
+            if {scene.scene_id, target} != {e.scene_id for e in by_id[pid].endpoints}:
+                _fail("invalid_reference", "scenes.exits", "Exit must match passage endpoints")
+            used.add(pid)
+        if scene.grid_json is not None and set(scene.exits) != dict(scene.exit_passages).keys():
+            _fail(
+                "unsupported_mechanism",
+                "scenes.exits",
+                "Fine Scene exits require explicit endpoints",
+            )
+    if used != set(by_id):
+        _fail("invalid_reference", "passages", "Every passage needs an explicit directed exit")
+    return tuple(definitions)
 
 
 def _event_definitions(raw, scenes):
@@ -657,6 +894,11 @@ def _event_definitions(raw, scenes):
         elif isinstance(effect_data, dict) and effect_data.get("kind") == "set_object_state":
             effect_data = _mapping(effect_data, "kind object_id state", path + ".effect")
             _reference(effect_data["object_id"], {o.object_id for o in scene.objects}, path)
+            if (
+                next(o for o in scene.objects if o.object_id == effect_data["object_id"]).state
+                is None
+            ):
+                _fail("unsupported_mechanism", path, "Object has no switch capability")
             if effect_data["state"] not in ("closed", "open"):
                 _fail("unsupported_mechanism", path, "Unknown object state")
             effect = SetObjectState(

@@ -1,6 +1,7 @@
 """Real pinned evaluate(), closed delta validation and one SQLite commit boundary."""
 
 import copy
+import json
 from dataclasses import asdict
 
 from dnd5e_engine import evaluation_delta as delta
@@ -17,6 +18,7 @@ from dnd5e_engine.evaluation_ruleset import EVALUATOR_VERSION, RulesetBinding, R
 from dnd5e_engine.evaluation_state import CombatSnapshot
 from pydantic import ValidationError
 
+from ._execution import _WorldEffectKind, _WorldEffectOrigin
 from .combat import process_id
 from .commands import CommandReceipt, command_fingerprint, validate_command
 from .dnd_checks import check_changes, world_effects_ready
@@ -411,7 +413,16 @@ class DndRuntime:
                             else command.check_world_effects.on_failure
                         )
                         for operation in branch:
-                            events.extend(self._operate(row, package, operation))
+                            events.extend(
+                                self._operate(
+                                    row,
+                                    package,
+                                    operation,
+                                    effect_origin=_WorldEffectOrigin(
+                                        _WorldEffectKind.CHECK, command.command_id
+                                    ),
+                                )
+                            )
                     events = self._expand_events(row, package, events, command.command_id)
                     version += 1
                     transition = result.rng_transition
@@ -491,6 +502,20 @@ class DndRuntime:
                     ("$." + field, canonical_json(value), sid, identity),
                 )
             elif component == "combat":
+                if field == "ended" and value:
+                    combat = self._conn.execute(
+                        "SELECT scene_id,state_json FROM combats WHERE session_id=?", (sid,)
+                    ).fetchone()
+                    if self._spatial_scene(sid, combat["scene_id"]) is not None:
+                        roster = json.loads(combat["state_json"])["initiative_ids"]
+                        cells = self._current_actor_cells(sid, combat["scene_id"], roster)
+                        # Frozen terminal record; active combat had no second current position map.
+                        self._conn.execute(
+                            "UPDATE combats SET state_json="
+                            "json_set(state_json,'$.actor_zone',json(?)) "
+                            "WHERE session_id=?",
+                            (canonical_json(cells), sid),
+                        )
                 self._conn.execute(
                     "UPDATE combats SET state_json=json_set(state_json,?,json(?)) "
                     "WHERE session_id=?",

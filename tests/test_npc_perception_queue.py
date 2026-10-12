@@ -593,7 +593,7 @@ def test_real_schema18_upgrade_uses_own_proofs_preserves_all_old_rows_concurrent
             return sm._conn.execute("PRAGMA user_version").fetchone()[0]
 
     with ThreadPoolExecutor(3) as pool:
-        assert list(pool.map(upgrade, range(3))) == [20] * 3
+        assert list(pool.map(upgrade, range(3))) == [21] * 3
     for _ in range(2):
         with StateMachine(db) as sm:
             for sid in (complete, partial):
@@ -645,9 +645,9 @@ def test_real_schema18_upgrade_uses_own_proofs_preserves_all_old_rows_concurrent
                 assert not sm.get_npc_perception_queue(partial, package, context=other)[-1].complete
             assert sm._conn.execute("PRAGMA foreign_key_check").fetchall() == []
     after = stored_rows(db)
-    for table in original:
-        if table != "event_outbox":
-            assert after[table] == original[table], table
+    from test_migrations import assert_original_rows_equal
+
+    assert_original_rows_equal(original, after, excluded=("event_outbox",))
     if reference == "e88efa2":
         with StateMachine(db) as sm:
             assert (
@@ -683,7 +683,7 @@ def test_interrupted_schema19_migration_rolls_back_and_recovers(
     with sqlite3.connect(db) as conn:
         assert conn.execute("PRAGMA user_version").fetchone()[0] == 18
     with StateMachine(db) as sm:
-        assert sm._conn.execute("PRAGMA user_version").fetchone()[0] == 20
+        assert sm._conn.execute("PRAGMA user_version").fetchone()[0] == 21
         assert sm._conn.execute("PRAGMA foreign_key_check").fetchall() == []
 
 

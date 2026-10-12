@@ -34,4 +34,39 @@ class MoveActor:
     to_scene_id: str
 
 
-type FoundationOperation = EnterScene | SetSceneFlag | SetObjectState | MoveActor
+@dataclass(frozen=True, slots=True)
+class PlaceObject:
+    """One adjacent object adjustment, including its derived passage blocking."""
+
+    object_id: str
+    scene_id: str
+    expected_cell: str
+    to_cell: str
+    schema_version: str = "object-placement/1"
+
+
+@dataclass(frozen=True, slots=True)
+class StepActor:
+    scene_id: str
+    expected_cell: str
+    to_cell: str
+    schema_version: str = "actor-step/1"
+
+
+@dataclass(frozen=True, slots=True)
+class TraversePassage:
+    passage_id: str
+    from_scene_id: str
+    expected_cell: str
+    schema_version: str = "passage-traversal/1"
+
+
+type FoundationOperation = (
+    EnterScene
+    | SetSceneFlag
+    | SetObjectState
+    | MoveActor
+    | PlaceObject
+    | StepActor
+    | TraversePassage
+)

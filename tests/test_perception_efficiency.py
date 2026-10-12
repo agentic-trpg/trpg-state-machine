@@ -16,7 +16,7 @@ import pytest
 from dnd_support import create
 from perception_support import synthetic_notice
 from test_event_local_evidence import N1, N2, A, command
-from test_migrations import stored_rows
+from test_migrations import assert_original_rows_equal, stored_rows
 from test_npc_perception_queue import change, negative, prepared
 from test_npc_perception_queue import queue_data as queue_data
 
@@ -232,9 +232,16 @@ print(sid)
 
 
 @pytest.mark.parametrize(
-    "crash_at", ["CREATE INDEX npc_perception_pending", "DROP TABLE npc_perception_cursors"]
+    "crash_at",
+    [
+        "CREATE INDEX npc_perception_pending",
+        "DROP TABLE npc_perception_cursors",
+        "DROP TABLE scene_instances",
+        "DROP TABLE objects",
+        "ALTER TABLE actors ADD COLUMN cell",
+    ],
 )
-def test_schema20_process_crash_rollback_and_multiprocess_recovery(
+def test_schema20_21_process_crash_rollback_and_multiprocess_recovery(
     tmp_path, queue_data, context, crash_at
 ):
     db, sid = schema19_save(tmp_path, queue_data)
@@ -283,7 +290,7 @@ with StateMachine(sys.argv[1]) as sm:
     ]
     for worker in workers:
         stdout, stderr = worker.communicate(timeout=30)
-        assert worker.returncode == 0 and stdout.strip() == b"20", stderr
+        assert worker.returncode == 0 and stdout.strip() == b"21", stderr
     package = _validate(queue_data)
     for _ in range(2):
         with StateMachine(db) as sm:
@@ -298,7 +305,8 @@ with StateMachine(sys.argv[1]) as sm:
             assert sm._conn.execute("PRAGMA foreign_key_check").fetchall() == []
     after = stored_rows(db)
     assert "npc_perception_cursors" not in after
-    assert {k: v for k, v in before.items() if k != "npc_perception_cursors"} == after
+    assert set(before) - {"npc_perception_cursors"} == set(after)
+    assert_original_rows_equal(before, after, excluded=("npc_perception_cursors",))
 
 
 def test_event_submit_and_pending_read_concurrent(tmp_path, queue_data, context):
@@ -355,4 +363,4 @@ def test_schema20_sql_failure_rolls_back_then_reopens(tmp_path, queue_data, monk
     with sqlite3.connect(db) as conn:
         assert conn.execute("PRAGMA user_version").fetchone()[0] == 19
     with StateMachine(db) as sm:
-        assert sm._conn.execute("PRAGMA user_version").fetchone()[0] == 20
+        assert sm._conn.execute("PRAGMA user_version").fetchone()[0] == 21
