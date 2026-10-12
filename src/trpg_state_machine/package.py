@@ -13,10 +13,12 @@ from ._operations import ObjectState, SetObjectState, SetSceneFlag
 from .errors import Issue, StateMachineError
 
 if TYPE_CHECKING:
+    from .navigation_models import NavigationKnowledge
     from .npc_state import NPCInitialState, WorldFactDefinition
 
 SCHEMA_VERSION = "state-machine-foundation/1"
 INTERACTION_SCHEMA_VERSION = "state-machine-foundation/2"
+NAVIGATION_SCHEMA_VERSION = "state-machine-foundation/3"
 MAX_PACKAGE_BYTES = 1_048_576
 _ID = re.compile(r"[a-z][a-z0-9_]*(?:\.[a-z][a-z0-9_]*)+")
 
@@ -160,6 +162,7 @@ class AdventurePackage:
     noncombat_foundation_json: str | None = None
     world_facts: tuple["WorldFactDefinition", ...] = ()
     passages: tuple[PassageDefinition, ...] = ()
+    navigation: "NavigationKnowledge | None" = None
 
     def scene(self, scene_id: str) -> SceneDefinition:
         for scene in self.scenes:
@@ -288,12 +291,15 @@ def _validate(data: dict) -> AdventurePackage:
     interactions = (
         isinstance(data, dict)
         and isinstance(data.get("manifest"), dict)
-        and data["manifest"].get("schema_version") == INTERACTION_SCHEMA_VERSION
+        and data["manifest"].get("schema_version")
+        in (INTERACTION_SCHEMA_VERSION, NAVIGATION_SCHEMA_VERSION)
     )
+    navigation = interactions and data["manifest"]["schema_version"] == NAVIGATION_SCHEMA_VERSION
     root = _mapping(
         data,
         "manifest world scenes actors pc_templates events rule_bindings"
-        + (" passages" if interactions else ""),
+        + (" passages" if interactions else "")
+        + (" navigation" if navigation else ""),
         "$",
     )
     m = _mapping(
@@ -302,7 +308,11 @@ def _validate(data: dict) -> AdventurePackage:
         "ruleset_binding player_setup content_provenance compatibility",
         "manifest",
     )
-    if m["schema_version"] not in (SCHEMA_VERSION, INTERACTION_SCHEMA_VERSION):
+    if m["schema_version"] not in (
+        SCHEMA_VERSION,
+        INTERACTION_SCHEMA_VERSION,
+        NAVIGATION_SCHEMA_VERSION,
+    ):
         _fail("unsupported_schema", "manifest.schema_version", f"Expected {SCHEMA_VERSION}")
     adventure_id = _identifier(m["adventure_id"], "manifest.adventure_id")
     version = _text(m["package_version"], "manifest.package_version")
@@ -714,6 +724,13 @@ def _validate(data: dict) -> AdventurePackage:
                 or combat_initial["scene_state"] != snapshot["scene_state"]
             ):
                 _fail("invalid_reference", "rule_bindings", "Initial mechanical facts disagree")
+    from .navigation_package import validate_navigation
+
+    knowledge = (
+        validate_navigation(root["navigation"], scenes, passages, actors, templates)
+        if navigation
+        else None
+    )
     return AdventurePackage(
         adventure_id,
         version,
@@ -729,6 +746,7 @@ def _validate(data: dict) -> AdventurePackage:
         noncombat,
         facts,
         passages,
+        knowledge,
     )
 
 

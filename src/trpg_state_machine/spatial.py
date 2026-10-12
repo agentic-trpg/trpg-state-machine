@@ -72,7 +72,11 @@ def cell_in_bounds(topology, cell):
 
 
 class WorldHandler:
-    def __init__(self, store, sessions, characters, facts, combats, capture, npc_bootstrap):
+    def __init__(
+        self, store, sessions, characters, facts, combats, capture, npc_bootstrap, activities=None
+    ):
+        from .activity_records import ActivityRecords
+
         self.store = store
         self.sessions = sessions
         self.characters = characters
@@ -80,6 +84,7 @@ class WorldHandler:
         self.combats = combats
         self.capture = capture
         self.npc_bootstrap = npc_bootstrap
+        self.activities = activities if activities is not None else ActivityRecords(store)
 
     @property
     def _conn(self):
@@ -113,7 +118,10 @@ class WorldHandler:
                 self.npc_bootstrap.initialize(sid, actor)
         self.facts.initialize_mechanical_scene(sid, scene_id, package)
 
-    def _world_actor_ready(self, sid, actor_id):
+    def _world_actor_ready(self, sid, actor_id, *, navigation_scope=None):
+        qualified = self.activities.qualifies(navigation_scope, sid, actor_id)
+        if self.activities.active(sid, actor_id) and not qualified:
+            raise StateMachineError("unsupported_actor_activity", "Navigation owns actor execution")
         core = self._conn.execute(
             "SELECT current_hp,effects_json FROM characters WHERE session_id=? AND actor_id=?",
             (sid, actor_id),
@@ -139,6 +147,7 @@ class WorldHandler:
             and npc
             and npc[0]
             and json.loads(npc[0])["current_activity"] is not None
+            and not qualified
         ):
             raise StateMachineError(
                 "unsupported_actor_activity", "Active NPC activity needs adjudication"
@@ -338,14 +347,14 @@ class WorldHandler:
             if e.scene_id == scene_id
         )
 
-    def _manual_object_target(self, sid, actor_id, operation, package):
+    def _manual_object_target(self, sid, actor_id, operation, package, *, navigation_scope=None):
         """A shared door is addressed at this actor's port, never at a foreign Cell."""
         position = self._actor_position(sid, actor_id)
         if operation.scene_id != position.scene_id:
             raise StateMachineError("invalid_target", "Interaction must be in the actor's scene")
         fine = package.scene(position.scene_id).grid_json is not None
         if fine:
-            self._world_actor_ready(sid, actor_id)
+            self._world_actor_ready(sid, actor_id, navigation_scope=navigation_scope)
             self._public_scope(sid, actor_id, package)
         obj = self._conn.execute(
             "SELECT scene_id,state,cell FROM objects WHERE session_id=? AND object_id=?",
@@ -465,10 +474,10 @@ class WorldHandler:
                 raise StateMachineError("passage_unavailable", "Passage is currently unavailable")
         return SpatialPosition(target.scene_id, b.standing_cell)
 
-    def _world_destination(self, row, actor_id, operation, package):
+    def _world_destination(self, row, actor_id, operation, package, *, navigation_scope=None):
         sid = row["session_id"]
         self._world_operation_capability(row, operation)
-        self._world_actor_ready(sid, actor_id)
+        self._world_actor_ready(sid, actor_id, navigation_scope=navigation_scope)
         position = self._actor_position(sid, actor_id)
         # Establish caller capability before looking up any target reference.
         if package.scene(position.scene_id).grid_json is not None:
@@ -482,7 +491,9 @@ class WorldHandler:
 
             if type(operation.state) is not ObjectState:
                 raise StateMachineError("invalid_operation", "Expected a typed ObjectState")
-            obj, _ = self._manual_object_target(sid, actor_id, operation, package)
+            obj, _ = self._manual_object_target(
+                sid, actor_id, operation, package, navigation_scope=navigation_scope
+            )
             if obj[1] is None:
                 raise StateMachineError("unsupported_object_capability", "Object has no switch")
             self._validate_door_occupancy(sid, operation, package)
@@ -613,10 +624,12 @@ class WorldHandler:
             ).fetchone()[0]
             return SpatialView(position, version, tuple(objects), exits, doors)
 
-    def _operate_spatial(self, row, package, operation, actor_id):
+    def _operate_spatial(self, row, package, operation, actor_id, *, navigation_scope=None):
         sid = row["session_id"]
         before = self._actor_position(sid, actor_id)
-        destination = self._world_destination(row, actor_id, operation, package)
+        destination = self._world_destination(
+            row, actor_id, operation, package, navigation_scope=navigation_scope
+        )
         if type(operation) is PlaceObject:
             if operation.expected_cell == operation.to_cell:
                 return []
@@ -815,8 +828,17 @@ class WorldHandler:
         *,
         actor_id=None,
         effect_origin=None,
+        navigation_scope=None,
     ):
         self.store.require_write()
+        if navigation_scope is not None and (
+            effect_origin is not None
+            or type(operation) not in (StepActor, TraversePassage, SetObjectState)
+            or not self.activities.qualifies(
+                navigation_scope, row["session_id"], actor_id, operation
+            )
+        ):
+            raise StateMachineError("unauthorized", "No persisted navigation step qualification")
         execution = _execution_data(actor_id, effect_origin)
         automatic = effect_origin is not None
         if automatic and type(operation) not in (SetSceneFlag, SetObjectState):
@@ -829,7 +851,9 @@ class WorldHandler:
                 for kind, payload in advance_game_time(self, row, operation)
             ]
         if isinstance(operation, (EnterScene, MoveActor, StepActor, TraversePassage, PlaceObject)):
-            return self._operate_spatial(row, package, operation, actor_id)
+            return self._operate_spatial(
+                row, package, operation, actor_id, navigation_scope=navigation_scope
+            )
         if isinstance(operation, (SetSceneFlag, SetObjectState)):
             if (automatic or isinstance(operation, SetSceneFlag)) and operation.scene_id != row[
                 "current_scene_id"
@@ -876,7 +900,9 @@ class WorldHandler:
                 if obj is None:
                     raise StateMachineError("invalid_target", "No object in the effect scene")
             else:
-                obj, passage = self._manual_object_target(sid, actor_id, operation, package)
+                obj, passage = self._manual_object_target(
+                    sid, actor_id, operation, package, navigation_scope=navigation_scope
+                )
             if obj[1] is None:
                 raise StateMachineError(
                     "unsupported_object_capability", "Object has no switch capability"

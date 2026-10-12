@@ -77,7 +77,7 @@ class SqliteStore:
 
     def _migrate(self):
         scripts = [Path(__file__).with_name("_schema.sql")] + [
-            Path(__file__).with_name(f"_migration_{v}.sql") for v in range(2, 22)
+            Path(__file__).with_name(f"_migration_{v}.sql") for v in range(2, 23)
         ]
         steps = [_migration_statements(path.read_text("utf-8")) for path in scripts]
         # Migration 4 rebuilds a referenced table. Disable FK enforcement only on
@@ -87,7 +87,7 @@ class SqliteStore:
             self._conn.execute("BEGIN IMMEDIATE")
             # Read AFTER acquiring the cross-process SQLite migration write lock.
             version = self._conn.execute("PRAGMA user_version").fetchone()[0]
-            if version not in range(22):
+            if version not in range(23):
                 raise StateMachineError(
                     "unsupported_storage_schema", f"Unsupported storage version: {version}"
                 )
@@ -100,7 +100,7 @@ class SqliteStore:
                 raise StateMachineError(
                     "unsupported_storage_schema", "Unversioned nonempty database"
                 )
-            for target in range(version + 1, 22):
+            for target in range(version + 1, 23):
                 for statement in steps[target - 1]:
                     self._conn.execute(statement)
                 if self._conn.execute("PRAGMA user_version").fetchone()[0] != target:
@@ -154,6 +154,10 @@ class SqliteStore:
             raise StateMachineError("invalid_transaction", "Cannot close an active transaction")
         self._conn.close()
         self._closed = True
+
+    def savepoint(self):
+        self.require_write()
+        return self._scope.savepoint()
 
     @contextmanager
     def transaction(self, *, write=False):

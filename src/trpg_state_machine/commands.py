@@ -23,9 +23,20 @@ from .combat import InitializeCombat
 from .errors import StateMachineError
 from .game_time import AdvanceGameTime, sync_npc_schedules
 from .mechanics import RuleOperation
+from .navigation_models import (
+    NAVIGATION_OPERATIONS,
+    AdvanceNavigation,
+    CancelNavigation,
+    ResumeNavigation,
+    StartNavigation,
+)
 from .package import canonical_json
 
 OPERATIONS = {
+    "activity.start_navigation": StartNavigation,
+    "activity.advance_navigation": AdvanceNavigation,
+    "activity.resume_navigation": ResumeNavigation,
+    "activity.cancel_navigation": CancelNavigation,
     "world.step_actor": StepActor,
     "world.traverse_passage": TraversePassage,
     "world.place_object": PlaceObject,
@@ -72,6 +83,10 @@ class TypedCommand:
         | CombatClosePayload
         | CheckPayload
         | AdvanceGameTime
+        | StartNavigation
+        | AdvanceNavigation
+        | ResumeNavigation
+        | CancelNavigation
     )
     expected_world_version: int
     schema_version: str = "sm-command/1"
@@ -143,6 +158,28 @@ def validate_command(command: TypedCommand) -> None:
     operation_type = OPERATIONS.get(command.command_type)
     if operation_type is None or type(command.payload) is not operation_type:
         raise StateMachineError("unsupported_operation", "Unknown command or payload type")
+    if type(command.payload) in NAVIGATION_OPERATIONS:
+        payload = command.payload
+        if (
+            payload.schema_version != "navigation-activity/1"
+            or type(payload.activity_id) is not str
+            or not re.fullmatch(r"activity\.[a-zA-Z0-9_.-]{1,119}", payload.activity_id)
+        ):
+            raise StateMachineError(
+                "invalid_operation", "Expected a bounded navigation activity identity"
+            )
+        if type(payload) is StartNavigation:
+            if any(
+                type(v) is not str or not v or len(v) > 128
+                for v in (payload.target_scene_id, payload.target_cell)
+            ):
+                raise StateMachineError("invalid_operation", "Expected explicit Scene and Cell")
+        elif (
+            type(payload.expected_activity_version) is not int
+            or payload.expected_activity_version < 1
+        ):
+            raise StateMachineError("invalid_operation", "Expected a positive activity version")
+        return
     local_version = {
         StepActor: "actor-step/1",
         TraversePassage: "passage-traversal/1",
@@ -263,11 +300,22 @@ class CommandRuntime:
             else:
                 self._conn.execute("SAVEPOINT command_effects")
                 try:
-                    events = (
-                        self._initialize_combat(row, package, prepared)
-                        if isinstance(command.payload, InitializeCombat)
-                        else self._operate(row, package, command.payload, actor_id=command.actor_id)
-                    )
+                    if type(command.payload) in NAVIGATION_OPERATIONS:
+                        events = self._activities.operate(
+                            row,
+                            package,
+                            command.payload,
+                            actor_id=command.actor_id,
+                            command_id=command.command_id,
+                        )
+                    else:
+                        events = (
+                            self._initialize_combat(row, package, prepared)
+                            if isinstance(command.payload, InitializeCombat)
+                            else self._operate(
+                                row, package, command.payload, actor_id=command.actor_id
+                            )
+                        )
                     events = self._expand_events(row, package, events, command.command_id)
                     if type(command.payload) is not InitializeCombat:
                         events.extend(
@@ -350,6 +398,10 @@ def world_command_from_data(data):
         "enter_scene",
         "move_actor",
         "set_object_state",
+        "activity.start_navigation",
+        "activity.advance_navigation",
+        "activity.resume_navigation",
+        "activity.cancel_navigation",
     ):
         raise StateMachineError("unsupported_operation", "Unregistered world operation")
     if type(data["payload"]) is not dict:

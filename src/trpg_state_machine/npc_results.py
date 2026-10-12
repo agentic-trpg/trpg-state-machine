@@ -39,6 +39,16 @@ class NPCDoorIntent:
     expected_world_version: int
 
 
+@dataclass(frozen=True, slots=True)
+class NPCNavigationIntent:
+    """Only start an explicitly addressed navigation activity; never execute Plan text."""
+
+    activity_id: str
+    target_scene_id: str
+    target_cell: str
+    expected_world_version: int
+
+
 def _output_data(output):
     data = asdict(output)
     if type(output) is NPCCombatIntent:
@@ -281,7 +291,26 @@ class NPCResultRuntime:
             outputs.append(("dialogue", dialogue, error))
         for intent in result.action_intents:
             error = None
-            if type(intent) is NPCDoorIntent:
+            if type(intent) is NPCNavigationIntent:
+                from .commands import TypedCommand, validate_command
+                from .navigation_models import StartNavigation
+
+                try:
+                    validate_command(
+                        TypedCommand(
+                            row["session_id"],
+                            "navigation.proposal",
+                            row["npc_id"],
+                            "activity.start_navigation",
+                            StartNavigation(
+                                intent.activity_id, intent.target_scene_id, intent.target_cell
+                            ),
+                            intent.expected_world_version,
+                        )
+                    )
+                except StateMachineError:
+                    error = "invalid_npc_action"
+            elif type(intent) is NPCDoorIntent:
                 if (
                     type(intent.expected_world_version) is not int
                     or intent.expected_world_version < 0

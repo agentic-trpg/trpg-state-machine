@@ -9,6 +9,8 @@ from ._operations import (
     FoundationOperation,
     MoveActor,
 )
+from .activity_handler import ActivityHandler
+from .activity_records import ActivityRecords
 from .availability import AvailabilityRuntime
 from .combat import DND_RULESET
 from .combat_handler import CombatHandler
@@ -92,6 +94,7 @@ class StateMachine(
         self._world_facts = WorldFacts(self._store)
         self._combat_records = CombatRecords(self._store)
         self._npc_bootstrap = NPCBootstrap(self._store)
+        self._activity_records = ActivityRecords(self._store)
         self._event_capture = EventCapture(self._store, self._characters, self._world_facts)
         self._event_persistence = EventPersistence(self._store)
         self._world = WorldHandler(
@@ -102,6 +105,14 @@ class StateMachine(
             self._combat_records,
             self._event_capture,
             self._npc_bootstrap,
+            self._activity_records,
+        )
+        self._activities = ActivityHandler(
+            self._store,
+            self._activity_records,
+            self._characters,
+            self._world,
+            self._event_capture,
         )
         self._package_effects = PackageEffects(self._store, self._world, self._event_capture)
         self._rules = LegacyRulesAdapter(
@@ -129,6 +140,9 @@ class StateMachine(
     def _conn(self):
         """Transitional connection for NPC/perception runtimes, owned by the store."""
         return self._store.connection
+
+    def read_navigation_activity(self, session_id, actor_id, activity_id, package, *, context):
+        return self._activities.read(session_id, actor_id, activity_id, package, context=context)
 
     def __enter__(self):
         self._ensure_open()

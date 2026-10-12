@@ -15,10 +15,22 @@ from .commands import CheckWorldEffects, CommandReceipt, TypedCommand, world_com
 from .errors import StateMachineError
 from .game_time import AdvanceGameTime
 from .models import CreateSessionRequest, PlayerSelection, TrustedContext
+from .navigation_driver import pump_navigation
+from .navigation_models import (
+    AdvanceNavigation,
+    CancelNavigation,
+    ResumeNavigation,
+    StartNavigation,
+)
 from .package import load_adventure_package
 from .service import StateMachine
 
 __all__ = [
+    "StartNavigation",
+    "AdvanceNavigation",
+    "ResumeNavigation",
+    "CancelNavigation",
+    "pump_navigation",
     "AdvanceGameTime",
     "CheckWorldEffects",
     "InitializeCombat",
