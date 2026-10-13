@@ -205,3 +205,23 @@ rebase or force push. The RE unrelated untracked worktree and pre-existing SM
 GC2 baseline commit remain preserved.
 No GitHub Actions workflow is configured in this SM repository; local evidence
 must not be reported as a remote CI result.
+
+
+## RF4-REV-01 follow-up
+
+Review found one omitted downstream position reader: EventCapture still read
+removed active `actor_zone` for mechanically complete Scenes with spatial
+admission disabled. The [position evidence repair record](reviews/RF4_REV01_PERCEPTION_POSITION_SOURCE.md)
+records the real public-API red regression, both actor roles and Evidence shapes,
+consumer audit and validation. New captures now use actual CharacterFacts
+positions against complete current mechanical geometry regardless of movement
+admission; closed-combat positions remain historical only. Existing missing-coordinate
+Evidence is never repaired from the present. Engine intermediate-stage Evidence
+remains explicitly unavailable and is outside this repair.
+
+Repair validation completed: 244 focused tests passed in 77.63 s; the final full
+SM gate passed 1,023 tests in 457.41 s (23 new SQLite regressions), with only the
+two existing Lark warnings. Ruff, format (165 files), whitespace and unchanged
+RE/SRD pin checks passed. The repair was self-reviewed; no new independent agent
+review or remote CI success is claimed. See the linked record for exact commands,
+red/green evidence, historical limitations and delivery boundaries.
