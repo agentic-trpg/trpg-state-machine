@@ -3,6 +3,7 @@
 from ._operations import (
     DropItem,
     EnterScene,
+    LockDoor,
     MoveActor,
     ObjectState,
     PickupItem,
@@ -11,6 +12,7 @@ from ._operations import (
     SetSceneFlag,
     StepActor,
     TraversePassage,
+    UnlockDoor,
 )
 from .combat import InitializeCombat
 from .commands import CheckWorldEffects, CommandReceipt, TypedCommand, world_command_from_data
@@ -28,6 +30,8 @@ from .package import load_adventure_package
 from .service import StateMachine
 
 __all__ = [
+    "UnlockDoor",
+    "LockDoor",
     "DropItem",
     "PickupItem",
     "StartNavigation",

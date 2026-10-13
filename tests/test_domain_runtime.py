@@ -252,6 +252,8 @@ def test_production_writers_and_dependency_direction():
         "mechanical_actors": "CharacterFacts",
         "mechanical_components": "CharacterFacts",
         "objects": "WorldFacts",
+        "door_locks": "WorldFacts",
+        "door_credentials": "WorldFacts",
         "scene_instances": "WorldFacts",
         "world_states": "WorldFacts",
         "mechanical_scenes": "WorldFacts",

@@ -335,7 +335,7 @@ def test_actual_schema15_upgrade_unknown_times_concurrent_and_repeat(tmp_path, o
             return sm._conn.execute("PRAGMA user_version").fetchone()[0]
 
     with ThreadPoolExecutor(3) as pool:
-        assert list(pool.map(upgrade, range(3))) == [24] * 3
+        assert list(pool.map(upgrade, range(3))) == [25] * 3
     assert_preserved(db, before)
     npc = NPCContext("agent:npc.caretaker", sid, "npc.caretaker")
     with StateMachine(db) as sm:

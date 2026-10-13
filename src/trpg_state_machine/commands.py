@@ -12,6 +12,7 @@ from pydantic import ValidationError
 from ._operations import (
     DropItem,
     EnterScene,
+    LockDoor,
     MoveActor,
     ObjectState,
     PickupItem,
@@ -20,6 +21,7 @@ from ._operations import (
     SetSceneFlag,
     StepActor,
     TraversePassage,
+    UnlockDoor,
 )
 from .combat import InitializeCombat
 from .errors import StateMachineError
@@ -35,6 +37,8 @@ from .navigation_models import (
 from .package import canonical_json
 
 OPERATIONS = {
+    "world.unlock_door": UnlockDoor,
+    "world.lock_door": LockDoor,
     "world.pickup_item": PickupItem,
     "world.drop_item": DropItem,
     "activity.start_navigation": StartNavigation,
@@ -93,6 +97,8 @@ class TypedCommand:
         | CancelNavigation
         | PickupItem
         | DropItem
+        | UnlockDoor
+        | LockDoor
     )
     expected_world_version: int
     schema_version: str = "sm-command/1"
@@ -192,6 +198,8 @@ def validate_command(command: TypedCommand) -> None:
         PlaceObject: "object-placement/1",
         PickupItem: "item-transfer/1",
         DropItem: "item-transfer/1",
+        UnlockDoor: "door-lock/1",
+        LockDoor: "door-lock/1",
     }.get(type(command.payload))
     if local_version and command.payload.schema_version != local_version:
         raise StateMachineError("invalid_operation", "Unsupported local spatial operation version")
@@ -406,6 +414,8 @@ def world_command_from_data(data):
         "world.step_actor",
         "world.traverse_passage",
         "world.place_object",
+        "world.unlock_door",
+        "world.lock_door",
         "world.pickup_item",
         "world.drop_item",
         "enter_scene",

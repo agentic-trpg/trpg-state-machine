@@ -14,6 +14,7 @@ from .errors import Issue, StateMachineError
 
 if TYPE_CHECKING:
     from .item_package import PortableItem
+    from .lock_package import LockableDoor
     from .navigation_models import NavigationKnowledge
     from .npc_state import NPCInitialState, WorldFactDefinition
 
@@ -21,6 +22,7 @@ SCHEMA_VERSION = "state-machine-foundation/1"
 INTERACTION_SCHEMA_VERSION = "state-machine-foundation/2"
 NAVIGATION_SCHEMA_VERSION = "state-machine-foundation/3"
 ITEM_SCHEMA_VERSION = "state-machine-foundation/4"
+LOCK_SCHEMA_VERSION = "state-machine-foundation/5"
 MAX_PACKAGE_BYTES = 1_048_576
 _ID = re.compile(r"[a-z][a-z0-9_]*(?:\.[a-z][a-z0-9_]*)+")
 
@@ -167,6 +169,7 @@ class AdventurePackage:
     navigation: "NavigationKnowledge | None" = None
     legacy_audit_only: bool = False
     portable_items: tuple["PortableItem", ...] = ()
+    lockable_doors: tuple["LockableDoor", ...] = ()
 
     def scene(self, scene_id: str) -> SceneDefinition:
         for scene in self.scenes:
@@ -296,19 +299,30 @@ def _validate(data: dict, *, allow_legacy_audit=False) -> AdventurePackage:
         isinstance(data, dict)
         and isinstance(data.get("manifest"), dict)
         and data["manifest"].get("schema_version")
-        in (INTERACTION_SCHEMA_VERSION, NAVIGATION_SCHEMA_VERSION, ITEM_SCHEMA_VERSION)
+        in (
+            INTERACTION_SCHEMA_VERSION,
+            NAVIGATION_SCHEMA_VERSION,
+            ITEM_SCHEMA_VERSION,
+            LOCK_SCHEMA_VERSION,
+        )
     )
-    items = interactions and data["manifest"]["schema_version"] == ITEM_SCHEMA_VERSION
+    locks = interactions and data["manifest"]["schema_version"] == LOCK_SCHEMA_VERSION
+    items = interactions and data["manifest"]["schema_version"] in (
+        ITEM_SCHEMA_VERSION,
+        LOCK_SCHEMA_VERSION,
+    )
     navigation = interactions and data["manifest"]["schema_version"] in (
         NAVIGATION_SCHEMA_VERSION,
         ITEM_SCHEMA_VERSION,
+        LOCK_SCHEMA_VERSION,
     )
     root = _mapping(
         data,
         "manifest world scenes actors pc_templates events rule_bindings"
         + (" passages" if interactions else "")
         + (" navigation" if navigation else "")
-        + (" item_transfers" if items else ""),
+        + (" item_transfers" if items else "")
+        + (" lockable_doors" if locks else ""),
         # Package versioning keeps legacy raw-data digests unchanged.
         "$",
     )
@@ -323,6 +337,7 @@ def _validate(data: dict, *, allow_legacy_audit=False) -> AdventurePackage:
         INTERACTION_SCHEMA_VERSION,
         NAVIGATION_SCHEMA_VERSION,
         ITEM_SCHEMA_VERSION,
+        LOCK_SCHEMA_VERSION,
     ):
         _fail("unsupported_schema", "manifest.schema_version", f"Expected {SCHEMA_VERSION}")
     adventure_id = _identifier(m["adventure_id"], "manifest.adventure_id")
@@ -768,6 +783,9 @@ def _validate(data: dict, *, allow_legacy_audit=False) -> AdventurePackage:
     portable = (
         validate_items(root["item_transfers"], scenes, noncombat, definitions) if items else ()
     )
+    from .lock_package import validate_locks
+
+    lockable = validate_locks(root["lockable_doors"], scenes, passages, portable) if locks else ()
     return AdventurePackage(
         adventure_id,
         version,
@@ -786,6 +804,7 @@ def _validate(data: dict, *, allow_legacy_audit=False) -> AdventurePackage:
         knowledge,
         legacy_audit,
         portable,
+        lockable,
     )
 
 

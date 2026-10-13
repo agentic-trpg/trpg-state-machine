@@ -10,16 +10,30 @@ RF-1 将现有世界交互和战斗编排改为显式组件组合，角色、世
 实现。字段责任与提交链见 [RF-1 设计](docs/RF1_DOMAIN_RUNTIME.md)，实际验证见
 [RF-1 Review](docs/reviews/RF1_DOMAIN_RUNTIME_REVIEW.md)。
 
+## GC-4：共享通路锁与实际持有凭据
+
+Schema 25 / Package `/5` 为显式批准的共享门增加独立锁状态；
+`world.unlock_door` / `world.lock_door` 要求实际 Actor 当前携带配置接受的
+GC-3 物品实例。两侧使用同一份门与锁事实，类型 slug 相同不代表凭据相同。
+解锁不开门、关门不上锁；普通开门、通行、导航与自动后果都尊重锁状态。
+导航遇锁进入 blocked，取得凭据后需明确解锁与恢复，或取消后重新导航。
+
+本批仅支持公开、非战斗、确定性原创机关。示例使用实际 `amulet` 实例，
+不调用其魔法或施法效果。未实现撬锁、破坏、修锁、容器或完整 D&D 锁具规则。
+见 [设计与支持矩阵](docs/GC4_LOCKABLE_PASSAGES.md)、
+[Review](docs/reviews/GC4_LOCKABLE_PASSAGES_REVIEW.md) 和
+[含新进程恢复的公开示例](examples/lockable_passages.py)。
+
 ## GC-3：普通物品实例取放
 
-当前 SQLite Schema 24 与 Package `/4` 增加显式批准的便携实例。
+GC-3 的 SQLite Schema 24 与 Package `/4` 增加显式批准的便携实例。
 `world.pickup_item` / `world.drop_item` 复用 TypedCommand、共享事务、OCC、
 幂等回执与可靠 NPC handoff；`read_carried_items` 只允许读取自己或获准 Actor。
 世界对象 ID 在地面、携带、移动和重启后保持不变。RF-4 真实库存实例和携带
 slug 投影同事务更新；拾取不改变持握、装备或机械加成。
 
 首版仅支持非战斗、公开、无争抢、可信配置的单件取放；导航不会自动拾取。
-旧 Package 不获得新能力，旧库存数量/充能不被重建或清空。容器、锁具、
+旧 Package 不获得新能力，旧库存数量/充能不被重建或清空。容器、完整锁具规则、
 装备切换、堆叠、负重裁决、消耗效果和战斗取放仍不支持。
 见 [GC-3 设计与支持矩阵](docs/GC3_ITEM_TRANSFERS.md)、
 [Review](docs/reviews/GC3_ITEM_TRANSFERS_REVIEW.md) 和
@@ -207,7 +221,7 @@ SQLite 测试。Schema 20 不提供降级迁移，旧运行时不能直接打开
 
 RF-RE4 当前固定 Engine/SRD 完整 Git SHA
 `675552406e67470bf3456fe90e88c4f1595bf324`，Evaluator `/36`、Evaluation `/23`、
-Snapshot `/17`、Availability `/13`，RF-4 引入 SQLite Schema 23（GC-3 升至 24）。当前 Snapshot/OCC 从受控事实
+Snapshot `/17`、Availability `/13`，RF-4 引入 SQLite Schema 23（GC-3 升至 24，GC-4 升至 25）。当前 Snapshot/OCC 从受控事实
 组件读取，不加载完整战斗事件历史；历史事件继续通过授权审计入口读取。
 [RF-RE4 契约、归属、兼容与验证记录](docs/RF_RE4_HISTORY_FREE_RULES.md) 说明了当前边界。
 

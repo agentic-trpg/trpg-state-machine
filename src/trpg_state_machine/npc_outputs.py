@@ -5,7 +5,15 @@ from dataclasses import dataclass
 
 from dnd5e_engine.evaluation_contracts import CombatIntentPayload
 
-from ._operations import DropItem, MoveActor, ObjectState, PickupItem, SetObjectState
+from ._operations import (
+    DropItem,
+    LockDoor,
+    MoveActor,
+    ObjectState,
+    PickupItem,
+    SetObjectState,
+    UnlockDoor,
+)
 from .commands import CommandReceipt, TypedCommand, receipt_from_json
 from .errors import StateMachineError
 from .models import TrustedContext
@@ -16,14 +24,31 @@ from .npc_results import (
     NPCDialogue,
     NPCDoorIntent,
     NPCDropIntent,
+    NPCLockIntent,
     NPCNavigationIntent,
     NPCPickupIntent,
+    NPCUnlockIntent,
 )
 
 
 def _handoff_command(row):
     data = json.loads(row["payload_json"])
-    if "instance_id" in data:
+    if "intent_type" in data:
+        discriminator = data.pop("intent_type")
+        if discriminator not in ("door_unlock", "door_lock"):
+            raise StateMachineError("unsupported_npc_action", "Unknown typed NPC handoff")
+        unlock = discriminator == "door_unlock"
+        intent = (NPCUnlockIntent if unlock else NPCLockIntent)(**data)
+        kind, payload = (
+            "world.unlock_door" if unlock else "world.lock_door",
+            (UnlockDoor if unlock else LockDoor)(
+                intent.scene_id,
+                intent.object_id,
+                intent.credential_instance_id,
+                intent.expected_cell,
+            ),
+        )
+    elif "instance_id" in data:
         if "expected_cell" in data:
             intent = NPCPickupIntent(**data)
             kind, payload = (

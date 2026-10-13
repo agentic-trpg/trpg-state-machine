@@ -106,12 +106,24 @@ local objects and endpoints using public scope, declared NPC visual capability
 and base geometry; it is unavailable during active combat. It does not export a
 GM map, private NPC state or hidden obstacle identities. `query_world_action`
 shares execution admission and returns a generic reason plus world version.
+The current role-spatial query set is StepActor, EnterScene, MoveActor,
+TraversePassage, PlaceObject, SetObjectState, and the GC3/GC4 item/lock payloads.
+SetSceneFlag is not a spatial query: it explicitly raises `unsupported_operation`;
+formal Flag submission and approved automatic effects retain their support.
+See [GC14 review fixes](reviews/GC14_REVIEW_FIXES.md) for the public red/green proof.
 `SpatialView.doors` exposes each visible local port's shared object identity,
 current state and local standing/threshold Cells; it never substitutes a remote
 storage Cell for a local Cell. It is independent of the directed `exits` list.
 Hidden/nonexistent local object and fine exit references use `invalid_target`.
 Mechanical visibility authorizes this explicitly public interaction subset; it
 does not assert that an NPC has actually noticed the stimulus.
+
+The GC14 repair captures NPC cross-Scene movement as `actor.departed` before
+position update in the source Scene, then existing `actor.moved` after arrival.
+PC `scene.exited` / `scene.entered` semantics remain unchanged. Both NPC stages
+share one command/transaction, with actual frozen candidates and coordinates.
+Departure Signals do not expose destination or navigation data. Candidate status
+alone never creates a Positive Observation; old moves/receipts are not backfilled.
 
 Formal execution rechecks current position, actual conditions and OCC under the
 existing short transaction. Actor Scene/Cell, PC Scene, object Cell/state, world

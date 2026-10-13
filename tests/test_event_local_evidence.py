@@ -638,7 +638,18 @@ def test_real_move_captures_destination_without_copying_identity(tmp_path, scope
         cmd = replace(cmd, actor_id=N1)
         result = sm.submit_command(cmd, package, context=context)
         assert result.status == "committed"
-        sample = evidence(db, sid, result.event_seqs[0])
+        moved = [
+            e
+            for e in sm.read_events(sid, package, context=context)
+            if e.event_seq in result.event_seqs
+        ]
+        assert [e.event_type for e in moved] == ["actor.departed", "actor.moved"]
+        assert [e.signals[0].origin.entity_id for e in moved] == [N1, N1]
+        departure = evidence(db, sid, moved[0].event_seq)
+        assert departure["phase"]["code"] == "world.before_actor_departure"
+        assert departure["discovery"]["by_signal"] == {"signal.visible": [N1]}
+        assert all(a["current_scene_id"] == A for a in departure["actors"])
+        sample = evidence(db, sid, moved[1].event_seq)
         assert sample["phase"]["code"] == "world.after_actor_move"
         assert sample["discovery"]["by_signal"] == {"signal.visible": [N2, N1]}
         assert {a["actor_id"] for a in sample["actors"]} == {N1, N2}
@@ -736,7 +747,7 @@ with StateMachine(sys.argv[1]) as sm:
         for sid in (complete, pending):
             assert evidence(db, sid, 2) == samples[sid]
     with sqlite3.connect(db) as conn:
-        assert conn.execute("PRAGMA user_version").fetchone()[0] == 24
+        assert conn.execute("PRAGMA user_version").fetchone()[0] == 25
         assert conn.execute("PRAGMA foreign_key_check").fetchall() == []
         assert conn.execute("SELECT session_id FROM event_observations").fetchall() == [(complete,)]
 

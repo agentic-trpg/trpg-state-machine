@@ -16,6 +16,7 @@ from ._operations import (
     DropItem,
     EnterScene,
     FoundationOperation,
+    LockDoor,
     MoveActor,
     ObjectState,
     PickupItem,
@@ -24,6 +25,7 @@ from ._operations import (
     SetSceneFlag,
     StepActor,
     TraversePassage,
+    UnlockDoor,
 )
 from .errors import StateMachineError
 from .game_time import AdvanceGameTime, advance_game_time
@@ -51,6 +53,7 @@ class SpatialDoor:
     state: str
     standing_cell: str
     threshold_cell: str
+    locked: bool | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -516,6 +519,98 @@ class WorldHandler:
             if e.scene_id == scene_id
         )
 
+    def _door_lock_status(self, sid, object_id, package):
+        locked = self.facts.door_lock(sid, object_id)
+        if (locked is not None) != any(d.object_id == object_id for d in package.lockable_doors):
+            raise StateMachineError("invalid_lock_state", "Lock capability contradicts package")
+        return locked
+
+    def _validate_lock(self, row, actor_id, operation, package):
+        sid = row["session_id"]
+        self._world_operation_capability(row, operation)
+        self._world_actor_ready(sid, actor_id)
+        position = self._public_scope(sid, actor_id, package)
+        obj, passage = self._manual_object_target(sid, actor_id, operation, package)
+        if passage is None:
+            raise StateMachineError("unsupported_object_capability", "No approved shared lock")
+        if position.cell != operation.expected_cell:
+            raise StateMachineError("position_conflict", "Door interaction position differs")
+        locked = self._door_lock_status(sid, operation.object_id, package)
+        if locked is None:
+            raise StateMachineError("unsupported_object_capability", "No approved shared lock")
+        # No distinction between absent, foreign, ground and mismatched credentials.
+        item = self._conn.execute(
+            "SELECT * FROM objects WHERE session_id=? AND object_id=?",
+            (sid, operation.credential_instance_id),
+        ).fetchone()
+        if (
+            item is None
+            or item["carrier_id"] != actor_id
+            or item["item_json"] is None
+            or operation.credential_instance_id
+            not in {i.instance_id for i in package.portable_items}
+            or not self.facts.accepts_credential(
+                sid, operation.object_id, operation.credential_instance_id
+            )
+        ):
+            raise StateMachineError("credential_unavailable", "No usable owned credential")
+        known = set(self.characters.rule_actors(sid))
+        if actor_id not in known:
+            raise StateMachineError("unsupported_actor_state", "Explicit actor facts required")
+        components = self.characters.rule_components(sid, known)
+        if any(e["target_id"] == actor_id for e in components["effect_states"]):
+            raise StateMachineError("unsupported_actor_state", "Active effects need adjudication")
+        entry = next(
+            (
+                e
+                for e in components["inventory_state"]["entries"]
+                if e["instance_id"] == operation.credential_instance_id
+            ),
+            None,
+        )
+        if (
+            entry is None
+            or entry["owner_id"] != actor_id
+            or entry["quantity"] != 1
+            or not entry["accessible"]
+        ):
+            raise StateMachineError("credential_unavailable", "No usable owned credential")
+        if type(operation) is LockDoor and obj[1] != "closed":
+            raise StateMachineError("door_must_be_closed", "Close the door before locking")
+        self._validate_door_occupancy(
+            sid,
+            SetObjectState(operation.scene_id, operation.object_id, ObjectState.CLOSED),
+            package,
+        )
+        return position, passage, locked
+
+    def _operate_lock(self, row, actor_id, operation, package):
+        position, passage, before = self._validate_lock(row, actor_id, operation, package)
+        locked = type(operation) is LockDoor
+        if before == locked:
+            return []
+        sid = row["session_id"]
+        self.facts.set_door_lock(sid, operation.object_id, locked)
+        return [
+            self._capture_event(
+                sid,
+                package,
+                "door.lock_changed",
+                {
+                    "scene_id": position.scene_id,
+                    "actor_id": actor_id,
+                    "actor_cell": position.cell,
+                    "object_id": operation.object_id,
+                    "passage_id": passage.passage_id,
+                    "credential_instance_id": operation.credential_instance_id,
+                    "locked": locked,
+                    "execution": _execution_data(actor_id, None),
+                },
+                phase="world.after_door_lock_update",
+                source_actor_id=actor_id,
+            )
+        ]
+
     def _manual_object_target(self, sid, actor_id, operation, package, *, navigation_scope=None):
         """A shared door is addressed at this actor's port, never at a foreign Cell."""
         position = self._actor_position(sid, actor_id)
@@ -657,6 +752,8 @@ class WorldHandler:
             return self._validate_placement(sid, actor_id, operation, package)
         if type(operation) in (PickupItem, DropItem):
             return self._validate_item_transfer(row, actor_id, operation, package)[0]
+        if type(operation) in (UnlockDoor, LockDoor):
+            return self._validate_lock(row, actor_id, operation, package)[0]
         if type(operation) is SetObjectState:
             from ._operations import ObjectState
 
@@ -668,6 +765,8 @@ class WorldHandler:
             if obj[1] is None:
                 raise StateMachineError("unsupported_object_capability", "Object has no switch")
             self._validate_door_occupancy(sid, operation, package)
+            self._door_lock_status(sid, operation.object_id, package)
+            self.facts.validate_door_switch(sid, operation.object_id, operation.state.value)
             return position
         if type(operation) is TraversePassage:
             passage = next(
@@ -710,13 +809,12 @@ class WorldHandler:
             PlaceObject,
             PickupItem,
             DropItem,
+            UnlockDoor,
+            LockDoor,
             TraversePassage,
             EnterScene,
             MoveActor,
             SetObjectState,
-            SetSceneFlag,
-            ObjectState,
-            FoundationOperation,
         ):
             raise StateMachineError("unsupported_operation", "Unsupported spatial query")
         validate_command(TypedCommand(session_id, "query", actor_id, kind, operation, 0))
@@ -785,6 +883,7 @@ class WorldHandler:
                     ).fetchone()[0],
                     e.standing_cell,
                     e.threshold_cell,
+                    self._door_lock_status(session_id, p.door_object_id, package),
                 )
                 for p in package.passages
                 if p.door_object_id
@@ -829,14 +928,17 @@ class WorldHandler:
             return []
         is_pc = actor_id == row["pc_actor_id"]
         events = []
-        if is_pc and before.scene_id != destination.scene_id:
+        if before.scene_id != destination.scene_id:
             events.append(
                 self._capture_event(
                     sid,
                     package,
-                    "scene.exited",
-                    {"scene_id": before.scene_id},
-                    phase="scene.before_departure",
+                    "scene.exited" if is_pc else "actor.departed",
+                    {
+                        "scene_id": before.scene_id,
+                        **({} if is_pc else {"actor_id": actor_id, "from_cell": before.cell}),
+                    },
+                    phase="scene.before_departure" if is_pc else "world.before_actor_departure",
                     source_actor_id=actor_id,
                 )
             )
@@ -930,6 +1032,7 @@ class WorldHandler:
                 )
 
     def _door_closed(self, sid, passage, package):
+        self._door_lock_status(sid, passage.door_object_id, package)
         door = self._conn.execute(
             "SELECT state FROM objects WHERE session_id=? AND object_id=?",
             (sid, passage.door_object_id),
@@ -1020,6 +1123,8 @@ class WorldHandler:
             raise StateMachineError("unsupported_operation", "Unsupported automatic world effect")
         self._world_operation_capability(row, operation)
         sid = row["session_id"]
+        if type(operation) in (UnlockDoor, LockDoor):
+            return self._operate_lock(row, actor_id, operation, package)
         if type(operation) is AdvanceGameTime:
             return [
                 self._capture_event(sid, package, kind, payload, phase="clock.after_advance")
@@ -1086,6 +1191,8 @@ class WorldHandler:
                     "unsupported_object_capability", "Object has no switch capability"
                 )
             self._validate_door_occupancy(sid, operation, package)
+            self._door_lock_status(sid, operation.object_id, package)
+            self.facts.validate_door_switch(sid, operation.object_id, operation.state.value)
             if obj[1] == operation.state.value:
                 return []
             self.facts.switch(sid, operation.object_id, operation.state.value)

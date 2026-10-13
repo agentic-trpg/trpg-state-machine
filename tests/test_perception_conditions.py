@@ -518,7 +518,7 @@ with StateMachine(sys.argv[1]) as sm:
     package = load_adventure_package(SOURCE).package
     before = stored_rows(db)
     with StateMachine(db) as sm:
-        assert sm._conn.execute("PRAGMA user_version").fetchone()[0] == 24
+        assert sm._conn.execute("PRAGMA user_version").fetchone()[0] == 25
         assert sm.project_event(sid, 1, package, context=context) == "resolved"
         assert (
             sm.project_event(

@@ -77,6 +77,24 @@ class DropItem:
     schema_version: str = "item-transfer/1"
 
 
+@dataclass(frozen=True, slots=True)
+class UnlockDoor:
+    scene_id: str
+    object_id: str
+    credential_instance_id: str
+    expected_cell: str
+    schema_version: str = "door-lock/1"
+
+
+@dataclass(frozen=True, slots=True)
+class LockDoor:
+    scene_id: str
+    object_id: str
+    credential_instance_id: str
+    expected_cell: str
+    schema_version: str = "door-lock/1"
+
+
 type FoundationOperation = (
     EnterScene
     | SetSceneFlag
@@ -87,4 +105,6 @@ type FoundationOperation = (
     | TraversePassage
     | PickupItem
     | DropItem
+    | UnlockDoor
+    | LockDoor
 )

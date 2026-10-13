@@ -331,7 +331,51 @@ def test_scene_revisit_preserves_flags_objects_and_unique_actor_location(
         assert state.scenes["scene.workshop"].objects == {"object.workshop_door": "open"}
         assert len(state.actors) == 3
         assert state.world_version == 6
-        assert state.event_seq == 11
+        assert state.event_seq == 12
+        events = sm.read_events(sid, package, context=context)
+        assert [event.event_type for event in events] == [
+            "session.created",
+            "scene.entered",
+            "scene.exited",
+            "scene.entered",
+            "object.state_changed",
+            "scene.flag_changed",
+            "actor.departed",
+            "actor.moved",
+            "scene.exited",
+            "scene.entered",
+            "scene.exited",
+            "scene.entered",
+        ]
+        npc_events = [
+            event for event in events if event.event_type in ("actor.departed", "actor.moved")
+        ]
+        assert npc_events[0].source_command_id == npc_events[1].source_command_id
+        assert npc_events[0].source_command_id is not None
+        assert npc_events[1].event_seq == npc_events[0].event_seq + 1
+        for event, scene_id, phase in zip(
+            npc_events,
+            ("scene.platform", "scene.workshop"),
+            ("world.before_actor_departure", "world.after_actor_move"),
+            strict=True,
+        ):
+            assert event.payload["actor_id"] == "npc.caretaker"
+            assert event.signals[0].origin.entity_id == "npc.caretaker"
+            assert event.signals[0].scope.scene_id == scene_id
+            frozen = json.loads(
+                sm._conn.execute(
+                    "SELECT evidence_json FROM event_evidence WHERE session_id=? AND event_seq=?",
+                    (sid, event.event_seq),
+                ).fetchone()[0]
+            )
+            assert frozen["phase"]["code"] == phase
+            assert set(frozen["scenes"]) == {scene_id}
+            source = next(
+                actor
+                for actor in [*frozen["actors"], *frozen["source_actors"]]
+                if actor["actor_id"] == "npc.caretaker"
+            )
+            assert source["current_scene_id"] == scene_id
 
 
 def test_noop_does_not_advance_versions_or_reenter_scene(tmp_path, package, context, request_for):

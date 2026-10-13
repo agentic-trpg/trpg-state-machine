@@ -26,11 +26,13 @@ class EventCapture:
         descriptions = {
             "scene.entered": "Someone enters the scene.",
             "scene.exited": "Someone leaves the scene.",
+            "actor.departed": "Someone leaves the scene.",
             "actor.moved": "Someone moves into view.",
             "actor.stepped": "Someone takes a step.",
             "object.placed": "Someone adjusts an object.",
             "item.picked_up": "Someone picks up an item.",
             "item.dropped": "Someone puts down an item.",
+            "door.lock_changed": "Someone operates a door lock.",
             "object.state_changed": "An object changes position.",
         }
         if (
