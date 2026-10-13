@@ -51,7 +51,7 @@ from .package import (
 from .package_effects import PackageEffects
 from .perception import PerceptionRuntime
 from .perception_queue import PerceptionQueueRuntime
-from .rules_adapter import LegacyRulesAdapter
+from .rules_adapter import RulesAdapter
 from .session_access import SessionAccess, _binding, _trusted
 from .spatial import WorldHandler
 from .storage import SqliteStore
@@ -115,7 +115,7 @@ class StateMachine(
             self._event_capture,
         )
         self._package_effects = PackageEffects(self._store, self._world, self._event_capture)
-        self._rules = LegacyRulesAdapter(
+        self._rules = RulesAdapter(
             self._store,
             loader,
             self._characters,
@@ -285,6 +285,19 @@ class StateMachine(
                     self._initialize_scene(session_id, scene.scene_id, package)
                     self._world_facts.mark_unvisited(session_id, scene.scene_id)
             self._characters.initialize_pc(session_id, pc_actor_id, package.entry_scene_id, pc)
+            if package.combat_foundation_json is not None:
+                initial = json.loads(package.combat_foundation_json)["snapshot"]
+                from .combat import _remap
+
+                cells = _remap(
+                    initial["combat_state"]["actor_zone"], pc.pc_template_id, pc_actor_id
+                )
+                fresh = self._conn.execute(
+                    "SELECT * FROM sessions WHERE session_id=?", (session_id,)
+                ).fetchone()
+                self._characters.initialize_rule_positions(
+                    fresh, cells, initial["scene_state"]["scene_id"]
+                )
             self._sessions.initialize_rng(
                 session_id,
                 rng_ref,

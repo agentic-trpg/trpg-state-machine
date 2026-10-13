@@ -6,6 +6,12 @@ Rules metadata edits have a closed field set matching the pinned adapter.
 
 import json
 
+from dnd5e_engine.evaluation_casting import CastingState
+from dnd5e_engine.evaluation_effects import EffectState
+from dnd5e_engine.evaluation_resources import ResourceState
+from dnd5e_engine.evaluation_state import InventoryState
+from pydantic import TypeAdapter
+
 from .errors import StateMachineError
 from .package import canonical_json
 
@@ -198,14 +204,133 @@ class CharacterFacts:
             (sid, actor.entity_id, canonical_json(state)),
         )
 
+    def initial_rule_actor(self, sid, approved):
+        """Overlay existing core balances at the first mechanical initialization."""
+        core = self._conn.execute(
+            "SELECT current_hp,max_hp,inventory_json FROM characters "
+            "WHERE session_id=? AND actor_id=?",
+            (sid, approved.entity_id),
+        ).fetchone()
+        if core is None:
+            return approved
+        if json.loads(core["inventory_json"]) != list(approved.carried_item_slugs):
+            raise StateMachineError(
+                "invalid_combat_foundation",
+                "Changed equipment requires explicit current inventory instance facts",
+            )
+        return approved.model_copy(
+            update={"hp_current": core["current_hp"], "hp_max": core["max_hp"]}
+        )
+
+    def initialize_rule_components(self, sid, snapshot):
+        """Initial explicit facts only; an existing owner record may never be reset."""
+        self.store.require_write()
+        fields = ("inventory_state", "resource_state", "casting_state", "effect_states")
+        data = snapshot.model_dump(mode="json", include=set(fields))
+        encoded = tuple(canonical_json(data[field]) for field in fields)
+        old = self._conn.execute(
+            "SELECT schema_version,inventory_json,resources_json,casting_json,effects_json "
+            "FROM mechanical_components WHERE session_id=?",
+            (sid,),
+        ).fetchone()
+        expected = (snapshot.snapshot_schema_version, *encoded)
+        if old is not None:
+            if tuple(old) != expected:
+                raise StateMachineError(
+                    "invalid_combat_foundation", "Initialization cannot reset component facts"
+                )
+            return
+        self._conn.execute(
+            "INSERT INTO mechanical_components VALUES (?,?,?,?,?,?)", (sid, *expected)
+        )
+
+    def rule_components(self, sid, owner_ids):
+        """Read persisted facts, then project owners; absence is never an empty component."""
+        row = self._conn.execute(
+            "SELECT * FROM mechanical_components WHERE session_id=?", (sid,)
+        ).fetchone()
+        if row is None or row["schema_version"] != "engine-snapshot/17":
+            raise StateMachineError(
+                "unsupported_mechanical_version", "Explicit component facts are missing"
+            )
+        try:
+            inventory, resources, casting, effects = (
+                json.loads(row[field])
+                for field in ("inventory_json", "resources_json", "casting_json", "effects_json")
+            )
+            inventory = InventoryState.model_validate_json(row["inventory_json"]).model_dump(
+                mode="json"
+            )
+            resources = (
+                ResourceState.model_validate_json(row["resources_json"]).model_dump(mode="json")
+                if resources is not None
+                else None
+            )
+            casting = (
+                CastingState.model_validate_json(row["casting_json"]).model_dump(mode="json")
+                if casting is not None
+                else None
+            )
+            effects = TypeAdapter(tuple[EffectState, ...]).validate_json(row["effects_json"])
+            effects = [v.model_dump(mode="json") for v in effects]
+            known = set(self.rule_actors(sid))
+            references = {v["owner_id"] for v in inventory["entries"]}
+            references |= {v["target_id"] for v in effects}
+            if resources is not None:
+                references |= {v["owner_id"] for v in resources["pools"]}
+            if casting is not None:
+                references |= {v["actor_id"] for v in casting["actors"]}
+            if not references <= known:
+                raise ValueError("component owner is missing")
+            inventory["entries"] = [v for v in inventory["entries"] if v["owner_id"] in owner_ids]
+            if resources is not None:
+                resources["pools"] = [v for v in resources["pools"] if v["owner_id"] in owner_ids]
+            if casting is not None:
+                casting["actors"] = [v for v in casting["actors"] if v["actor_id"] in owner_ids]
+            return {
+                "inventory_state": inventory,
+                "resource_state": resources,
+                "casting_state": casting,
+                "effect_states": [v for v in effects if v["target_id"] in owner_ids],
+            }
+        except (ValueError, KeyError, TypeError) as exc:
+            raise StateMachineError(
+                "invalid_mechanical_state", "Stored component closure is incomplete"
+            ) from exc
+
+    def initialize_rule_positions(self, row, cells, scene_id):
+        """Called only at fresh session creation before events or world movement."""
+        self.store.require_write()
+        if row["world_version"] != 0 or row["event_seq"] != 0:
+            raise StateMachineError(
+                "invalid_combat_foundation", "Initial positions require a fresh session"
+            )
+        for actor_id, cell in cells.items():
+            current = self.position(row["session_id"], actor_id)
+            if current.scene_id != scene_id:
+                raise StateMachineError(
+                    "invalid_combat_foundation", "Initial position scenes disagree"
+                )
+            if current.cell is not None:
+                continue
+            self._conn.execute(
+                "UPDATE actors SET cell=? WHERE session_id=? AND actor_id=?",
+                (cell, row["session_id"], actor_id),
+            )
+
     def rule_actors(self, sid):
         result = {}
         for actor in self._conn.execute(
-            "SELECT m.actor_id,m.state_json,c.current_hp,c.max_hp,c.inventory_json "
+            "SELECT m.actor_id,m.state_json,c.current_hp,c.max_hp,c.inventory_json,"
+            "c.resources_json,c.effects_json "
             "FROM mechanical_actors m JOIN characters c USING(session_id,actor_id) "
             "WHERE session_id=?",
             (sid,),
         ):
+            if json.loads(actor["resources_json"]) or json.loads(actor["effects_json"]):
+                raise StateMachineError(
+                    "invalid_mechanical_state", "Legacy core resources/effects have no typed source"
+                )
             data = json.loads(actor["state_json"])
             data.update(
                 hp_current=actor["current_hp"],
@@ -384,9 +509,7 @@ class CombatRecords:
                 sid,
                 snapshot.combat_state.combat_id,
                 snapshot.scene_state.scene_id,
-                snapshot.combat_state.model_dump_json(
-                    exclude={"event_log", "actor_zone"} if spatial else {"event_log"}
-                ),
+                snapshot.combat_state.model_dump_json(exclude={"actor_zone"}),
                 process_id,
             ),
         )

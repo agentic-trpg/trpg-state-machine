@@ -27,7 +27,24 @@ def npc_command(sm, sid, package, context, *, action="scimitar", key="attack.npc
 
 @pytest.mark.parametrize("action", [None, "scimitar", "light-crossbow"])
 def test_pc_and_npc_share_real_attack_commit_and_replay(tmp_path, package_data, context, action):
-    sm, sid, package, assets = setup(tmp_path, package_data, context)
+    def equip_weapon(foundation):
+        if action is None:
+            npc = foundation["snapshot"]["character_states"][1]
+            npc.update(
+                carried_item_slugs=[WEAPON], weapon_in_hands=WEAPON, weapon_grip="one_handed"
+            )
+            foundation["snapshot"]["inventory_state"]["entries"].append(
+                {
+                    "instance_id": "inventory.npc.lantern",
+                    "owner_id": NPC,
+                    "item_slug": WEAPON,
+                    "quantity": 1,
+                    "charges_remaining_per_unit": 0,
+                    "accessible": True,
+                }
+            )
+
+    sm, sid, package, assets = setup(tmp_path, package_data, context, equip_weapon)
     with sm:
         assert (
             sm.submit_command(attack(sm, sid, package, context), package, context=context).status

@@ -1,6 +1,6 @@
 {
   "snapshot": {
-    "snapshot_schema_version": "engine-snapshot/1",
+    "snapshot_schema_version": "engine-snapshot/17",
     "session_id": "package.lantern",
     "world_version": 0,
     "character_states": [
@@ -104,7 +104,11 @@
         "spell_slots": {},
         "pact_slots": {},
         "spells_known": [],
-        "custom_counters": {}
+        "custom_counters": {},
+        "weapon_in_hands": "item.lantern_blade",
+        "weapon_grip": "one_handed",
+        "other_hand_occupied": false,
+        "weapon_mastery_slugs": []
       },
       {
         "entity_id": "npc.caretaker",
@@ -206,7 +210,11 @@
         "spell_slots": {},
         "pact_slots": {},
         "spells_known": [],
-        "custom_counters": {}
+        "custom_counters": {},
+        "weapon_in_hands": null,
+        "weapon_grip": "none",
+        "other_hand_occupied": false,
+        "weapon_mastery_slugs": []
       }
     ],
     "effect_states": [],
@@ -283,7 +291,6 @@
       "xp_value_by_entity": {
         "npc.caretaker": 25
       },
-      "event_log": [],
       "deaths_recorded": [],
       "dead_ids": [],
       "expended_resources": {},
@@ -310,11 +317,24 @@
       "departed_actor_id": null,
       "legendary_windows_used": [],
       "legendary_resistance_armed": {},
-      "legendary_resistance_applied_event_indices": [],
       "constructs": {},
       "transforms": {},
       "summons": {},
       "summon_counts": {}
+    },
+    "resource_state": null,
+    "casting_state": null,
+    "inventory_state": {
+      "entries": [
+        {
+          "instance_id": "inventory.lantern_blade",
+          "owner_id": "pc_template.observer",
+          "item_slug": "item.lantern_blade",
+          "quantity": 1,
+          "charges_remaining_per_unit": 0,
+          "accessible": true
+        }
+      ]
     }
   },
   "rng_state": {

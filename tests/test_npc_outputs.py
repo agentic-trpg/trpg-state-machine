@@ -122,7 +122,7 @@ def test_complete_manual_result_vertical_slice_and_fresh_process_resume(
     assert resumed.returncode == 0, resumed.stderr
     assert json.loads(resumed.stdout) == executed
     with sqlite3.connect(db) as conn:
-        assert conn.execute("PRAGMA user_version").fetchone()[0] == 22
+        assert conn.execute("PRAGMA user_version").fetchone()[0] == 23
         assert conn.execute("PRAGMA foreign_key_check").fetchall() == []
         assert conn.execute("SELECT COUNT(*) FROM npc_evaluation_receipts").fetchone()[0] == 1
         assert (
@@ -791,3 +791,27 @@ with StateMachine(sys.argv[1]) as sm:
             ).status
             == "completed"
         )
+
+
+def test_audit_only_package_cannot_publish_pending_dialogue_but_can_read_published(
+    tmp_path, evaluation_package, context
+):
+    db = tmp_path / "audit-dialogue.db"
+    with StateMachine(db) as sm:
+        sid, npc, ids = prepare(sm, evaluation_package, context)
+        task = create_task(sm, sid, evaluation_package, npc, ids)
+        pc = sm.read_session(sid, evaluation_package, context=context).pc_actor_id
+        result = NPCEvaluationResult(dialogue=NPCDialogue("A chime!", (pc,), "local", ids))
+        sm.submit_npc_evaluation_result(task.evaluation_id, result, evaluation_package, context=npc)
+        audit = replace(evaluation_package, legacy_audit_only=True)
+        before = stored_rows(db)
+        with pytest.raises(StateMachineError) as error:
+            sm.dispatch_npc_output(task.evaluation_id, 0, audit, context=context)
+        assert error.value.code == "legacy_rules_audit_only"
+        assert stored_rows(db) == before
+        published = sm.dispatch_npc_output(
+            task.evaluation_id, 0, evaluation_package, context=context
+        )
+        before = stored_rows(db)
+        assert sm.dispatch_npc_output(task.evaluation_id, 0, audit, context=context) == published
+        assert stored_rows(db) == before

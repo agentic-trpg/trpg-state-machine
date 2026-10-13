@@ -97,7 +97,7 @@ def test_real_closure_atomic_balances_xp_replay_restart(tmp_path, package_data, 
         assert sm.read_rng_context(sid, package, context=context) == rng
         saved = sm.save_session(sid, package, context=context)
         assert saved.phase == "exploration"
-        assert saved.character.xp == 10 + closure.xp_awarded.get(saved.pc_actor_id, 0)
+        assert saved.character.xp == 10 + closure.xp_increments.get(saved.pc_actor_id, 0)
         assert (saved.character.xp > 10) != tpk
         committed = stored_state(tmp_path / "modern.db")
         assert sm.submit_command(command, package, context=context) == receipt
@@ -150,7 +150,7 @@ def test_real_closure_atomic_balances_xp_replay_restart(tmp_path, package_data, 
         "resources",
         "xp_owner",
         "event",
-        "missing_normalization",
+        "missing_close",
         "duplicate",
         "unrelated_operation",
     ],
@@ -173,19 +173,19 @@ def test_malformed_real_closure_leaves_all_sqlite_rows_and_allows_retry(
             if fault == "combat":
                 close["combat_id"] = "other"
             elif fault == "hp":
-                close["residual_hp"][pc] += 1
+                close["historical"]["residual_hp"][pc] += 1
             elif fault == "temp_hp":
-                close["residual_temp_hp"][pc] = 2
+                close["historical"]["residual_temp_hp"][pc] = 2
             elif fault == "deaths":
-                close["deaths"][0]["killer_id"] = NPC
+                close["historical"]["deaths"][0]["killer_id"] = NPC
             elif fault == "resources":
-                close["expended_resources"] = {pc: {"spell_slot_1": 1}}
+                close["historical"]["expended_resources"] = {pc: {"spell_slot_1": 1}}
             elif fault == "xp_owner":
-                close["xp_awarded"] = {NPC: 25}
+                close["xp_increments"] = {NPC: 25}
             elif fault == "event":
                 raw["proposed_events"][0]["reason"] = "defeat_tpk"
-            elif fault == "missing_normalization":
-                raw["state_delta"]["operations"] = [close]
+            elif fault == "missing_close":
+                raw["state_delta"]["operations"] = []
             elif fault == "duplicate":
                 ops.append(close.copy())
             elif fault == "unrelated_operation":

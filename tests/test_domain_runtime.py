@@ -24,7 +24,7 @@ def components(path, loader=None):
     from trpg_state_machine.event_persistence import EventPersistence
     from trpg_state_machine.npc_bootstrap import NPCBootstrap
     from trpg_state_machine.package_effects import PackageEffects
-    from trpg_state_machine.rules_adapter import LegacyRulesAdapter
+    from trpg_state_machine.rules_adapter import RulesAdapter
     from trpg_state_machine.session_access import SessionAccess
     from trpg_state_machine.spatial import WorldHandler
 
@@ -34,9 +34,7 @@ def components(path, loader=None):
     capture, persistence = EventCapture(store, characters, facts), EventPersistence(store)
     world = WorldHandler(store, sessions, characters, facts, records, capture, NPCBootstrap(store))
     effects = PackageEffects(store, world, capture)
-    rules = LegacyRulesAdapter(
-        store, loader or BundledAssetLoader(), characters, facts, records, world
-    )
+    rules = RulesAdapter(store, loader or BundledAssetLoader(), characters, facts, records, world)
     combat = CombatHandler(
         store, sessions, characters, facts, records, world, rules, capture, effects, persistence
     )
@@ -121,6 +119,17 @@ def test_real_combat_composes_without_facade_and_atomic_world_failure(
     sid, pc = seed(c, package, context)
     with c.store.transaction():
         row = dict(c.sessions._session(sid, package, context))
+    import json
+
+    from trpg_state_machine.combat import _remap
+
+    initial = json.loads(package.combat_foundation_json)["snapshot"]
+    with c.store.transaction(write=True):
+        c.characters.initialize_rule_positions(
+            row,
+            _remap(initial["combat_state"]["actor_zone"], row["pc_template_id"], pc),
+            initial["scene_state"]["scene_id"],
+        )
     prepared = c.rules._prepare_combat(row, package)
     with c.store.transaction(write=True):
         c.combat._initialize_combat(row, package, prepared)
@@ -136,7 +145,13 @@ def test_real_combat_composes_without_facade_and_atomic_world_failure(
     assert receipt.status == "committed"
     assert asyncio.run(c.combat.submit_command_async(command, package, context=context)) == receipt
     before = c.combat.read_combat_snapshot(sid, package, context=context)
-    assert before.combat_state.event_log
+    assert (
+        c.store.connection.execute(
+            "SELECT count(*) FROM events WHERE session_id=? AND event_type='combat.engine_event'",
+            (sid,),
+        ).fetchone()[0]
+        > 0
+    )
     # These are real SQLite failures after character/combat/world writes and capture.
     c.store.connection.execute(
         "CREATE TRIGGER fail_world_outbox BEFORE INSERT ON event_outbox "
@@ -234,6 +249,7 @@ def test_production_writers_and_dependency_direction():
         "actors": "CharacterFacts",
         "characters": "CharacterFacts",
         "mechanical_actors": "CharacterFacts",
+        "mechanical_components": "CharacterFacts",
         "objects": "WorldFacts",
         "scene_instances": "WorldFacts",
         "world_states": "WorldFacts",

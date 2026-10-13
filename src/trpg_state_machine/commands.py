@@ -264,6 +264,10 @@ class CommandRuntime:
     def submit_command(self, command: TypedCommand, package, *, context) -> CommandReceipt:
         validate_command(command)
         self.read_session(command.session_id, package, context=context)
+        if package.legacy_audit_only:
+            raise StateMachineError(
+                "legacy_rules_audit_only", "Old package permits audit reads only"
+            )
         fingerprint = command_fingerprint(command, package, context)
         if type(command.payload) in (CombatIntentPayload, CombatClosePayload, CheckPayload):
             import asyncio
@@ -282,8 +286,7 @@ class CommandRuntime:
                 self._authorize_command(row, command.actor_id, command.payload, context)
                 if replay := self._command_replay(command, fingerprint):
                     return replay
-                prepared_row = dict(row)
-            prepared = self._prepare_combat(prepared_row, package)
+                prepared = self._prepare_combat(dict(row), package)
         with self._transaction(write=True):
             row = self._session(command.session_id, package, context)
             self._authorize_command(row, command.actor_id, command.payload, context)

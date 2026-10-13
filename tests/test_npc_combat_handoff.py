@@ -218,6 +218,40 @@ with StateMachine(sys.argv[1],dnd_loader=loader()) as sm:
         conn.close()
 
 
+def test_lost_response_replays_receipt_after_actor_scene_changes(tmp_path, context):
+    sm, sid, package, _, _, task, _, _ = prepare(tmp_path, context)
+    with sm:
+        real = sm.submit_command
+
+        def lose(*args, **kwargs):
+            real(*args, **kwargs)
+            raise RuntimeError("response lost after COMMIT")
+
+        sm.submit_command = lose
+        with pytest.raises(RuntimeError):
+            sm.dispatch_npc_output(task.evaluation_id, 0, package, context=context)
+        # Trusted race setup after a genuine committed attack; subsequent target
+        # admission must not prevent reconciling the original durable receipt.
+        with sm._transaction(write=True):
+            sm._initialize_scene(sid, "scene.workshop", package)
+            sm._conn.execute(
+                "UPDATE actors SET current_scene_id=? WHERE session_id=? AND actor_id=?",
+                ("scene.workshop", sid, NPC),
+            )
+        sm.submit_command = real
+        before = authority(sm, sid)
+        delivered = sm.dispatch_npc_output(task.evaluation_id, 0, package, context=context)
+        assert delivered.status == "dispatched"
+        assert delivered.command_receipt.status == "committed"
+        assert authority(sm, sid) == before
+        assert (
+            sm.get_command_receipt(
+                sid, delivered.command_receipt.command_id, package, context=context
+            )
+            == delivered.command_receipt
+        )
+
+
 @pytest.mark.parametrize("kind", ["unsupported", "conflict"])
 def test_command_failure_keeps_selected_result(tmp_path, context, kind):
     sm, sid, package, _, npc, task, result, selected = prepare(tmp_path, context)

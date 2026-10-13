@@ -190,12 +190,17 @@ SQLite 测试。Schema 20 不提供降级迁移，旧运行时不能直接打开
 
 ## 安装与验证
 
-SM-10 已固定 Engine/SRD 候选 `602dcb8d448e670049427bbb751d6ed226005298`
-（Evaluator `/8`），加入首次 Combat 前的 `read_noncombat_snapshot(...)`、
-完整 Snapshot V2 机械事实及唯一存储的 XP。Schema 9 不静默升级旧 Session 的
-RulesetBinding；旧 `/4` 环境用于真实历史存档迁移测试。
-详见 [版本与字段归属](docs/SM10_VERSIONED_STATE.md)。SM-11/12 已加入真实关闭和
-非战斗检定；[当前支持矩阵与迁移说明](docs/SM13_SUPPORT_MATRIX.md) 区分了受限能力与未实现范围。
+RF-RE4 当前固定 Engine/SRD 完整 Git SHA
+`675552406e67470bf3456fe90e88c4f1595bf324`，Evaluator `/36`、Evaluation `/23`、
+Snapshot `/17`、Availability `/13`，SQLite Schema 23。当前 Snapshot/OCC 从受控事实
+组件读取，不加载完整战斗事件历史；历史事件继续通过授权审计入口读取。
+[RF-RE4 契约、归属、兼容与验证记录](docs/RF_RE4_HISTORY_FREE_RULES.md) 说明了当前边界。
+
+SM-10–SM-13 的旧版本文档保留当时实现与证据；其 `/8` 依赖及 Snapshot V2 说明已由
+RF-RE4 更新。实际旧 `/4`、`/8` Package/存档不能证明新版所需的完整组件事实，默认拒绝；
+显式 `load_adventure_package(..., allow_legacy_audit=True)` 可保留原 Digest 和绑定供授权审计，
+不授权新游戏命令或待发布对话。完整 `/16` 源 Package 可用显式转换辅助函数生成新的受审
+Package；不会重绑旧 Session。
 
 需要 Python 3.12+ 和 [uv](https://docs.astral.sh/uv/)。运行时依赖 PyYAML、固定 Git SHA 的 dnd5e-engine / dnd5e-srd-data 及其必要依赖；SQLite 使用 Python 标准库，pytest/Ruff 是开发依赖。`uv.lock` 固定完整解析结果。真实异步 Engine 测试在 Windows 需要事件循环使用的本地 socketpair；受限环境须允许该 OS 功能，测试不调用外部服务。
 

@@ -1,5 +1,8 @@
 # SM-10–SM-13 support and migration matrix
 
+Historical implementation record. Current dependency/schema/compatibility and
+component ownership are specified in [RF-RE4](RF_RE4_HISTORY_FREE_RULES.md).
+
 | Capability | Actual status and evidence |
 |---|---|
 | Single authority before/inside/after combat | Supported: `characters`, `mechanical_actors`, `mechanical_scenes` share facts; no snapshot overwrite. `test_versioned_state`, `test_cross_phase` inspect SQLite. |

@@ -3,6 +3,11 @@
 import json
 from dataclasses import asdict, replace
 
+from dnd5e_engine.evaluation_state import MechanicalGrid
+from dnd5e_engine.spatial import GridTopology
+from dnd5e_engine.specs import GridScene
+
+from .errors import StateMachineError
 from .events import _StagedEvent
 from .package import Signal, SignalOrigin, SignalScope, SignalStimulus, canonical_json
 from .perception_conditions import discover_signals
@@ -163,11 +168,28 @@ class EventCapture:
         ).fetchone()
         state = json.loads(combat["state_json"]) if combat else None
         active = state is not None and not state["ended"]
+        topologies = {}
+        for scene_id in sorted(scene_ids):
+            grid, topology = self._perception_geometry(sid, scene_id)
+            topologies[scene_id] = topology
+            evidence["scenes"][scene_id] = {
+                "grid": grid,
+                "unsupported_effects": bool(
+                    active
+                    and combat["scene_id"] == scene_id
+                    and (
+                        state["persistent_areas"]["areas"]
+                        or state["conditions_by_effect"]
+                        or state["effect_lifecycles"]
+                    )
+                ),
+            }
         for actor in [*actors, *evidence["source_actors"]]:
-            position = self.characters.position(sid, actor["actor_id"])
-            fine = self.world.spatial_scene(sid, actor["current_scene_id"]) is not None
+            cell = self._current_evidence_cell(
+                sid, actor, topologies.get(actor["current_scene_id"])
+            )
             if evidence["schema"] == "event-evidence/5":
-                actor["cell"] = position.cell
+                actor["cell"] = cell
             definition = next((a for a in package.actors if a.actor_id == actor["actor_id"]), None)
             actor["senses"] = dict(definition.senses) if definition and definition.senses else None
             stored = self._conn.execute(
@@ -186,34 +208,44 @@ class EventCapture:
                     "dead_recorded": bool(
                         state is not None and actor["actor_id"] in state["dead_ids"]
                     ),
-                    "cell": position.cell
-                    if fine
-                    else state.get("actor_zone", {}).get(actor["actor_id"])
-                    if active and actor["current_scene_id"] == combat["scene_id"]
-                    else None,
+                    "cell": cell,
                 }
             )
-            if data is not None and fine:
-                actor["mechanical"]["cell"] = position.cell
         if evidence["schema"] == "event-evidence/5":
             for oid, obj in evidence["objects"].items():
                 obj["cell"] = self._conn.execute(
                     "SELECT cell FROM objects WHERE session_id=? AND object_id=?", (sid, oid)
                 ).fetchone()[0]
-        for scene_id in sorted(scene_ids):
-            stored = self._conn.execute(
-                "SELECT state_json FROM mechanical_scenes WHERE session_id=? AND scene_id=?",
-                (sid, scene_id),
-            ).fetchone()
-            evidence["scenes"][scene_id] = {
-                "grid": json.loads(stored[0])["grid"] if stored else None,
-                "unsupported_effects": bool(
-                    active
-                    and combat["scene_id"] == scene_id
-                    and (
-                        state["persistent_areas"]["areas"]
-                        or state["conditions_by_effect"]
-                        or state["effect_lifecycles"]
-                    )
-                ),
-            }
+
+    def _perception_geometry(self, sid, scene_id):
+        """Full current mechanical geometry, independent of movement admission."""
+        stored = self._conn.execute(
+            "SELECT state_json FROM mechanical_scenes WHERE session_id=? AND scene_id=?",
+            (sid, scene_id),
+        ).fetchone()
+        if stored is None:
+            return None, None
+        try:
+            scene = json.loads(stored[0])
+            if scene["scene_id"] != scene_id:
+                return None, None
+            # MechanicalGrid requires every sensory field. GridScene defaults
+            # must not promote a movement-only projection into sensory evidence.
+            grid = MechanicalGrid.model_validate_json(canonical_json(scene["grid"]))
+            topology = GridTopology(GridScene(**grid.model_dump()))
+            return grid.model_dump(mode="json"), topology
+        except (KeyError, TypeError, ValueError):
+            return None, None
+
+    def _current_evidence_cell(self, sid, actor, topology):
+        """Sample the actual position owner at this producer stage, never combat history."""
+        from .spatial import cell_in_bounds
+
+        position = self.characters.position(sid, actor["actor_id"])
+        if position.scene_id != actor["current_scene_id"]:
+            raise StateMachineError("invalid_spatial_state", "Evidence position scene differs")
+        if position.cell is None or topology is None:
+            return None
+        if not cell_in_bounds(topology, position.cell) or not topology.is_valid_cell(position.cell):
+            raise StateMachineError("invalid_spatial_state", "Evidence position is invalid")
+        return position.cell

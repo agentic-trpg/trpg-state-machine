@@ -167,6 +167,10 @@ class NPCOutputRuntime:
             if row["status"] != "pending":
                 return self._output_delivery(row)
             if row["kind"] == "dialogue":
+                if package.legacy_audit_only:
+                    raise StateMachineError(
+                        "legacy_rules_audit_only", "Old package cannot publish pending dialogue"
+                    )
                 self._publish_npc_dialogue(row, session, package)
                 updated, _ = self._dispatch_authorized(evaluation_id, ordinal, package, context)
                 return self._output_delivery(updated)

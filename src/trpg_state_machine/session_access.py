@@ -299,6 +299,29 @@ class SessionAccess:
                 "idempotency_conflict", "Command differs from its reliable handoff"
             )
 
+    def _npc_combat_location_guard(self, command):
+        """Current target admission after receipt replay, before mechanical assembly."""
+        if not self._conn.execute(
+            "SELECT 1 FROM npc_output_handoffs WHERE command_id=?", (command.command_id,)
+        ).fetchone():
+            return
+        if type(command.payload) is CombatIntentPayload and command.payload.target_id is not None:
+            locations = dict(
+                self._conn.execute(
+                    "SELECT actor_id,current_scene_id FROM actors "
+                    "WHERE session_id=? AND actor_id IN (?,?)",
+                    (command.session_id, command.actor_id, command.payload.target_id),
+                ).fetchall()
+            )
+            if (
+                command.actor_id not in locations
+                or command.payload.target_id not in locations
+                or locations[command.actor_id] != locations[command.payload.target_id]
+            ):
+                raise StateMachineError(
+                    "unauthorized_target", "NPC target is outside its current scene"
+                )
+
     def _npc_combat_target_guard(self, command, package, snapshot):
         """Handoff visibility is deliberately limited to clear, bright current scenes."""
         if not self._conn.execute(

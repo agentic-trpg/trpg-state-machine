@@ -71,7 +71,8 @@ class CombatHandler:
             raise StateMachineError("invalid_noncombat_foundation", "Expected the selected PC only")
         for actor in snapshot.character_states:
             self.characters.initialize_rule_actor(row, actor, xp=initial["xp"][actor.entity_id])
-        self.sessions.set_mechanical_schema(row["session_id"], "engine-snapshot/2")
+        self.characters.initialize_rule_components(row["session_id"], snapshot)
+        self.sessions.set_mechanical_schema(row["session_id"], "engine-snapshot/17")
         self.sessions.select_rule_rng(row["session_id"], canonical_json(initial["rng_state"]))
 
     def _initialize_combat(self, row, package, prepared):
@@ -85,13 +86,27 @@ class CombatHandler:
             raise StateMachineError("version_conflict", "Combat preparation is stale")
         if spatial is not None:
             self.world._spatial_combat_guard(sid, row["current_scene_id"], package)
-            if snapshot.combat_state.actor_zone != self.world._current_actor_cells(
-                sid, row["current_scene_id"], snapshot.combat_state.initiative_ids
+        if snapshot.combat_state.actor_zone != self.rules._current_cells(
+            sid,
+            row["current_scene_id"],
+            snapshot.combat_state.initiative_ids,
+            snapshot.scene_state.grid.model_dump(),
+        ):
+            raise StateMachineError(
+                "version_conflict", "Combat positions changed during preparation"
+            )
+        current_actors = (
+            self.characters.rule_actors(sid)
+            if package.noncombat_foundation_json is not None
+            else {}
+        )
+        for actor in snapshot.character_states:
+            if current_actors and current_actors.get(actor.entity_id) != actor.model_dump(
+                mode="json"
             ):
                 raise StateMachineError(
-                    "version_conflict", "Combat positions changed during preparation"
+                    "version_conflict", "Actor facts changed during combat preparation"
                 )
-        for actor in snapshot.character_states:
             existing = self._conn.execute(
                 "SELECT * FROM actors WHERE session_id=? AND actor_id=?", (sid, actor.entity_id)
             ).fetchone()
@@ -109,6 +124,17 @@ class CombatHandler:
             self.characters.initialize_rule_actor(row, actor, encounter=True)
         if package.noncombat_foundation_json is None and spatial is None:
             self.facts.initialize_rule_scene(sid, snapshot.scene_state)
+        if package.noncombat_foundation_json is None:
+            self.characters.initialize_rule_components(sid, snapshot)
+        elif self.characters.rule_components(
+            sid, {a.entity_id for a in snapshot.character_states}
+        ) != snapshot.model_dump(
+            mode="json",
+            include={"inventory_state", "resource_state", "casting_state", "effect_states"},
+        ):
+            raise StateMachineError(
+                "version_conflict", "Component facts changed during preparation"
+            )
         self.sessions.set_mechanical_schema(row["session_id"], snapshot.snapshot_schema_version)
         self.records.initialize(sid, snapshot, spatial=spatial is not None, process_id=process_id())
         self.sessions.select_rule_rng(sid, rng.model_dump_json(), reset_position=True)
@@ -131,14 +157,14 @@ class CombatHandler:
 
     def read_combat_snapshot(self, session_id, package, *, context):
         """Trusted audit/read boundary; this does not authorize cross-process continuation."""
-        if package.ruleset_binding.evaluator_version != "dnd5e-evaluation/4":
+        if not package.legacy_audit_only:
             self.rules._verify_dnd_binding(package)
         with self.store.transaction():
             row = self.sessions._session(session_id, package, context)
             return self.rules._combat_snapshot(row)
 
     def read_rng_context(self, session_id, package, *, context):
-        if package.ruleset_binding.evaluator_version != "dnd5e-evaluation/4":
+        if not package.legacy_audit_only:
             self.rules._verify_dnd_binding(package)
         with self.store.transaction():
             return self.rules._rng_context(self.sessions._session(session_id, package, context))
@@ -146,6 +172,10 @@ class CombatHandler:
     async def submit_command_async(self, command, package, *, context):
         """Async entry for the same TypedCommand and persistent receipt protocol."""
         validate_command(command)
+        if package.legacy_audit_only:
+            raise StateMachineError(
+                "legacy_rules_audit_only", "Old package permits audit reads only"
+            )
         if type(command.payload) not in (CombatIntentPayload, CombatClosePayload, CheckPayload):
             raise StateMachineError(
                 "unsupported_operation", "Expected an admitted real Engine command"
@@ -168,6 +198,7 @@ class CombatHandler:
             self.sessions._npc_handoff_command_guard(command)
             if replay := self.sessions._command_replay(command, fingerprint):
                 return replay
+            self.sessions._npc_combat_location_guard(command)
             if row["evaluator_version"] != EVALUATOR_VERSION:
                 raise StateMachineError(
                     "ruleset_binding_mismatch", "Pinned evaluator version is not installed"
@@ -220,6 +251,7 @@ class CombatHandler:
             self.sessions._npc_handoff_command_guard(command)
             if replay := self.sessions._command_replay(command, fingerprint):
                 return replay
+            self.sessions._npc_combat_location_guard(command)
             version, seq = row["world_version"], row["event_seq"]
             status, error = "committed", None
             if (

@@ -163,6 +163,7 @@ class AdventurePackage:
     world_facts: tuple["WorldFactDefinition", ...] = ()
     passages: tuple[PassageDefinition, ...] = ()
     navigation: "NavigationKnowledge | None" = None
+    legacy_audit_only: bool = False
 
     def scene(self, scene_id: str) -> SceneDefinition:
         for scene in self.scenes:
@@ -287,7 +288,7 @@ def _reference(value, targets, path: str) -> None:
         _fail("invalid_reference", path, f"Unknown reference: {value}")
 
 
-def _validate(data: dict) -> AdventurePackage:
+def _validate(data: dict, *, allow_legacy_audit=False) -> AdventurePackage:
     interactions = (
         isinstance(data, dict)
         and isinstance(data.get("manifest"), dict)
@@ -326,10 +327,15 @@ def _validate(data: dict) -> AdventurePackage:
         )
     )
     dnd = binding.ruleset_id == "dnd-2024-srd-5.2.1"
+    legacy_audit = (
+        dnd
+        and allow_legacy_audit
+        and binding.evaluator_version in ("dnd5e-evaluation/4", "dnd5e-evaluation/8")
+    )
     if dnd and (
         not isinstance(binding.data_revision, str)
         or not re.fullmatch(r"sha256:[0-9a-f]{64}", binding.data_revision)
-        or binding.evaluator_version not in ("dnd5e-evaluation/4", "dnd5e-evaluation/8")
+        or (binding.evaluator_version != "dnd5e-evaluation/36" and not legacy_audit)
     ):
         _fail("unsupported_ruleset", "manifest.ruleset_binding", "Invalid pinned D&D binding")
     if not dnd and binding not in (SYNTHETIC_RULESET, SYNTHETIC_EVALUATION_RULESET):
@@ -373,12 +379,16 @@ def _validate(data: dict) -> AdventurePackage:
         ):
             _fail("schema_error", "rule_bindings", "Expected reviewed mechanical foundations")
         if "combat_foundation" in rules:
-            validate_foundation(rules["combat_foundation"])
+            if not legacy_audit:
+                validate_foundation(rules["combat_foundation"])
+            else:
+                _legacy_audit_foundation(rules["combat_foundation"], combat=True)
             foundation = canonical_json(rules["combat_foundation"])
         if "noncombat_foundation" in rules:
-            if binding.evaluator_version != "dnd5e-evaluation/8":
-                _fail("unsupported_ruleset", "rule_bindings", "Noncombat requires evaluator /8")
-            validate_noncombat_foundation(rules["noncombat_foundation"])
+            if not legacy_audit:
+                validate_noncombat_foundation(rules["noncombat_foundation"])
+            else:
+                _legacy_audit_foundation(rules["noncombat_foundation"], combat=False)
             noncombat = canonical_json(rules["noncombat_foundation"])
     else:
         _empty(root["rule_bindings"], {}, "rule_bindings")
@@ -722,6 +732,18 @@ def _validate(data: dict) -> AdventurePackage:
                 combat_initial["snapshot_schema_version"] != snapshot["snapshot_schema_version"]
                 or combat_initial["character_states"] != snapshot["character_states"]
                 or combat_initial["scene_state"] != snapshot["scene_state"]
+                or (
+                    not legacy_audit
+                    and any(
+                        combat_initial[f] != snapshot[f]
+                        for f in (
+                            "inventory_state",
+                            "resource_state",
+                            "casting_state",
+                            "effect_states",
+                        )
+                    )
+                )
             ):
                 _fail("invalid_reference", "rule_bindings", "Initial mechanical facts disagree")
     from .navigation_package import validate_navigation
@@ -747,6 +769,7 @@ def _validate(data: dict) -> AdventurePackage:
         facts,
         passages,
         knowledge,
+        legacy_audit,
     )
 
 
@@ -1004,9 +1027,44 @@ def _event_definitions(raw, scenes):
     return tuple(definitions)
 
 
-def load_adventure_package(source: str | Path) -> PackageLoadResult:
+def _legacy_audit_foundation(value, *, combat):
+    """Opaque old mechanics for authorized audit only; not a new-schema conversion."""
+    expected = (
+        {"snapshot", "rng_state"}
+        if combat
+        else {"snapshot", "rng_state", "xp", "additional_scenes"}
+    )
+    if type(value) is not dict or set(value) != expected:
+        _fail("invalid_combat_foundation", "rule_bindings", "Incomplete Legacy audit envelope")
+    snapshot = value["snapshot"]
+    required = {"snapshot_schema_version", "character_states", "scene_state"} | (
+        {"combat_state"} if combat else set()
+    )
+    if (
+        type(snapshot) is not dict
+        or not required <= snapshot.keys()
+        or snapshot["snapshot_schema_version"] not in ("engine-snapshot/1", "engine-snapshot/2")
+    ):
+        _fail("unsupported_mechanical_version", "rule_bindings", "Unknown Legacy audit schema")
+    if type(snapshot["character_states"]) is not list or any(
+        type(a) is not dict
+        or not {"entity_id", "entity_type", "hp_current", "hp_max", "carried_item_slugs"}
+        <= a.keys()
+        for a in snapshot["character_states"]
+    ):
+        _fail("invalid_combat_foundation", "rule_bindings", "Incomplete Legacy audit identities")
+    if (
+        type(snapshot["scene_state"]) is not dict
+        or not {"scene_id", "grid"} <= snapshot["scene_state"].keys()
+    ):
+        _fail("invalid_combat_foundation", "rule_bindings", "Incomplete Legacy audit scene")
+
+
+def load_adventure_package(source: str | Path, *, allow_legacy_audit=False) -> PackageLoadResult:
     """Read one local UTF-8 YAML file; invalid results expose no partial package.
 
+    allow_legacy_audit retains original /1-/2 content and digest for authorized
+    audit reads. It never upgrades a Session or admits new gameplay/creation.
     Fail fast with one structured issue. Provenance is metadata, not a license check.
     """
     try:
@@ -1016,7 +1074,7 @@ def load_adventure_package(source: str | Path) -> PackageLoadResult:
             _fail("package_too_large", str(source), "Maximum package size is 1 MiB")
         data = yaml.load(raw.decode("utf-8"), Loader=_DataLoader)
         _plain(data)
-        return PackageLoadResult("valid", _validate(data))
+        return PackageLoadResult("valid", _validate(data, allow_legacy_audit=allow_legacy_audit))
     except StateMachineError as exc:
         return PackageLoadResult("invalid", errors=(exc.issue,))
     except (OSError, UnicodeError) as exc:

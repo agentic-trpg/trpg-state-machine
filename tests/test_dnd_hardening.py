@@ -297,6 +297,7 @@ def test_noncombat_discriminator_is_not_forged_into_combat(tmp_path, package_dat
         with pytest.raises(ValidationError):
             NonCombatSnapshot.model_validate_json(json.dumps(data))
         del data["combat_state"]
+        data["combat_setup"] = None
         actual = NonCombatSnapshot.model_validate_json(json.dumps(data))
         assert actual.snapshot_kind == "non_combat" and actual.character_states
         with pytest.raises(ValidationError):
@@ -346,11 +347,23 @@ def test_actual_legacy_combat_upgrade_preserves_mechanics_rng_receipt(
     assets = loader()
     from trpg_state_machine.package import _validate
 
-    package = _validate(old["package_data"])
+    package = _validate(old["package_data"], allow_legacy_audit=True)
     sid = old["session_id"]
     with StateMachine(database, dnd_loader=assets) as sm:
-        snapshot = sm.read_combat_snapshot(sid, package, context=context)
-        assert snapshot == CombatSnapshot.model_validate_json(json.dumps(old["snapshot"]))
+        with pytest.raises(StateMachineError) as missing:
+            sm.read_combat_snapshot(sid, package, context=context)
+        assert missing.value.code == "unsupported_mechanical_version"
+        assert (
+            sm._conn.execute(
+                "SELECT count(*) FROM mechanical_components WHERE session_id=?", (sid,)
+            ).fetchone()[0]
+            == 0
+        )
+        assert [
+            event.payload["engine_event"]
+            for event in sm.read_events(sid, package, context=context)
+            if event.event_type == "combat.engine_event"
+        ] == old["snapshot"]["combat_state"]["event_log"]
         assert (
             json.loads(sm.read_rng_context(sid, package, context=context).model_dump_json())
             == old["rng"]
@@ -359,14 +372,14 @@ def test_actual_legacy_combat_upgrade_preserves_mechanics_rng_receipt(
             sm.get_command_receipt(sid, "old.real.attack", package, context=context).status
             == "committed"
         )
-        assert sm._conn.execute("PRAGMA user_version").fetchone()[0] == 22
+        assert sm._conn.execute("PRAGMA user_version").fetchone()[0] == 23
         assert sm._conn.execute("PRAGMA foreign_key_check").fetchall() == []
         before = sm.read_session(sid, package, context=context)
         assert before.ruleset_binding.evaluator_version == "dnd5e-evaluation/4"
         command = attack(sm, sid, package, context, key="old.unsupported")
         with pytest.raises(StateMachineError) as caught:
             sm.submit_command(command, package, context=context)
-        assert caught.value.code == "ruleset_binding_mismatch"
+        assert caught.value.code == "legacy_rules_audit_only"
         assert sm.get_command_receipt(sid, command.command_id, package, context=context) is None
         assert sm.read_session(sid, package, context=context) == before
     with sqlite3.connect(database) as db:
