@@ -7,15 +7,18 @@ must never be passed to the Engine or perception as a mechanical Grid.
 import json
 from dataclasses import asdict, dataclass
 
+from dnd5e_engine.evaluation_state import InventoryEntry, InventoryState
 from dnd5e_engine.spatial import GridTopology, canonical_cell_id
 from dnd5e_engine.specs import GridScene
 
 from ._execution import _execution_data
 from ._operations import (
+    DropItem,
     EnterScene,
     FoundationOperation,
     MoveActor,
     ObjectState,
+    PickupItem,
     PlaceObject,
     SetObjectState,
     SetSceneFlag,
@@ -25,7 +28,7 @@ from ._operations import (
 from .errors import StateMachineError
 from .game_time import AdvanceGameTime, advance_game_time
 from .models import TrustedContext
-from .package import AdventurePackage
+from .package import AdventurePackage, canonical_json
 
 
 @dataclass(frozen=True, slots=True)
@@ -59,6 +62,13 @@ class SpatialView:
     doors: tuple[SpatialDoor, ...] = ()
 
 
+@dataclass(frozen=True, slots=True)
+class CarriedItemsView:
+    actor_id: str
+    world_version: int
+    entries: tuple[InventoryEntry, ...]
+
+
 def cell_in_bounds(topology, cell):
     """Upstream bounds/distance, deliberately distinct from walkability."""
     try:
@@ -73,7 +83,16 @@ def cell_in_bounds(topology, cell):
 
 class WorldHandler:
     def __init__(
-        self, store, sessions, characters, facts, combats, capture, npc_bootstrap, activities=None
+        self,
+        store,
+        sessions,
+        characters,
+        facts,
+        combats,
+        capture,
+        npc_bootstrap,
+        activities=None,
+        loader=None,
     ):
         from .activity_records import ActivityRecords
 
@@ -85,6 +104,7 @@ class WorldHandler:
         self.capture = capture
         self.npc_bootstrap = npc_bootstrap
         self.activities = activities if activities is not None else ActivityRecords(store)
+        self.loader = loader
 
     @property
     def _conn(self):
@@ -295,6 +315,7 @@ class WorldHandler:
             self._visible_target(sid, actor_id, obj[1], package)
         except StateMachineError as exc:
             raise StateMachineError("invalid_target", "No authorized local object") from exc
+        self.facts.require_ordinary_object(sid, operation.object_id)
         definition = next(
             o for s in package.scenes for o in s.objects if o.object_id == operation.object_id
         )
@@ -337,6 +358,154 @@ class WorldHandler:
         if any(cell == operation.to_cell for _, cell in actors):
             raise StateMachineError("movement_unavailable", "Object destination is occupied")
         return position
+
+    def _validate_item_transfer(self, row, actor_id, operation, package):
+        sid = row["session_id"]
+        self._world_operation_capability(row, operation)
+        self._world_actor_ready(sid, actor_id)
+        position = self._public_scope(sid, actor_id, package)
+        # Establish local visibility before reporting any target-specific reason.
+        item = self._conn.execute(
+            "SELECT * FROM objects WHERE session_id=? AND object_id=?", (sid, operation.instance_id)
+        ).fetchone()
+        if operation.scene_id != position.scene_id or item is None:
+            raise StateMachineError("invalid_target", "No authorized local item")
+        if type(operation) is PickupItem:
+            if item["carrier_id"] is not None or item["scene_id"] != position.scene_id:
+                raise StateMachineError("invalid_target", "No authorized local item")
+            target = item["cell"]
+            try:
+                self._visible_target(sid, actor_id, target, package)
+            except StateMachineError as exc:
+                raise StateMachineError("invalid_target", "No authorized local item") from exc
+        else:
+            if item["carrier_id"] != actor_id:
+                raise StateMachineError("invalid_target", "No authorized carried item")
+            target = operation.to_cell
+            self._visible_target(sid, actor_id, target, package)
+        if item["item_json"] is None or operation.instance_id not in {
+            i.instance_id for i in package.portable_items
+        }:
+            raise StateMachineError(
+                "unsupported_object_capability", "No approved portable capability"
+            )
+        if type(operation) is PickupItem and target != operation.expected_cell:
+            raise StateMachineError("position_conflict", "Item position precondition differs")
+        base = self._base_topology(sid, position.scene_id)
+        topology = self._movement_topology(sid, position.scene_id, package, exclude_actor=actor_id)
+        if not base.is_valid_cell(target) or (
+            target != position.cell and topology.edge_distance(position.cell, target) is None
+        ):
+            raise StateMachineError(
+                "item_out_of_reach", "Item transfer requires clear adjacent reach"
+            )
+        if type(operation) is DropItem and any(
+            aid != actor_id and cell == target
+            for aid, cell in self._scene_occupants(sid, position.scene_id, package)[0]
+        ):
+            raise StateMachineError("item_out_of_reach", "Item destination is occupied")
+        known = set(self.characters.rule_actors(sid))
+        if actor_id not in known:
+            raise StateMachineError(
+                "unsupported_actor_state", "Carrier needs explicit mechanical facts"
+            )
+        components = self.characters.rule_components(sid, known)
+        if any(e["target_id"] == actor_id for e in components["effect_states"]):
+            raise StateMachineError(
+                "unsupported_actor_state", "Active effects need unsupported adjudication"
+            )
+        if type(operation) is DropItem:
+            state = self.characters.rule_actors(sid)[actor_id]
+            casting = components["casting_state"]
+            if casting is not None and any(
+                material["inventory_instance_id"] == operation.instance_id
+                for actor in casting["actors"]
+                for material in actor["materials"]
+            ):
+                raise StateMachineError(
+                    "unsupported_actor_activity", "Item has a casting material binding"
+                )
+            slug = json.loads(item["item_json"])["item_slug"]
+            armor = state["worn_armor"]
+            asset = self.loader.get_item(slug) if self.loader else None
+            if (
+                state["weapon_in_hands"] == slug
+                or state["other_hand_occupied"]
+                or (state["shield_equipped"] and slug == "shield")
+                or (
+                    armor is not None
+                    and asset is not None
+                    and asset.item_kind == "armor"
+                    and slug != "shield"
+                )
+            ):
+                raise StateMachineError(
+                    "equipped_item_unsupported",
+                    "Slug equipment cannot identify a safe instance to drop",
+                )
+        return position, item
+
+    def _operate_item_transfer(self, row, actor_id, operation, package):
+        sid = row["session_id"]
+        position, before = self._validate_item_transfer(row, actor_id, operation, package)
+        pickup = type(operation) is PickupItem
+        payload = {
+            "actor_id": actor_id,
+            "actor_cell": position.cell,
+            "instance_id": before["object_id"],
+            "scene_id": position.scene_id,
+            "cell": before["cell"] if pickup else operation.to_cell,
+            "execution": _execution_data(actor_id, None),
+        }
+        events = []
+        if pickup:
+            events.append(
+                self._capture_event(
+                    sid,
+                    package,
+                    "item.picked_up",
+                    payload,
+                    phase="world.before_item_pickup",
+                    source_actor_id=before["object_id"],
+                )
+            )
+        after = self.facts.transfer_item(
+            sid,
+            before,
+            carrier_id=actor_id if pickup else None,
+            scene_id=None if pickup else position.scene_id,
+            cell=None if pickup else operation.to_cell,
+        )
+        self.characters.project_item_transfer(sid, before, after)
+        if not pickup:
+            events.append(
+                self._capture_event(
+                    sid,
+                    package,
+                    "item.dropped",
+                    payload,
+                    phase="world.after_item_drop",
+                    source_actor_id=before["object_id"],
+                )
+            )
+        return events
+
+    def read_carried_items(self, session_id, actor_id, package, *, context):
+        with self._transaction():
+            self._spatial_reader(session_id, actor_id, package, context)
+            known = set(self.characters.rule_actors(session_id))
+            if actor_id not in known:
+                raise StateMachineError(
+                    "unsupported_mechanical_version", "Explicit inventory is unavailable"
+                )
+            components = self.characters.rule_components(session_id, {actor_id})
+            inventory = InventoryState.model_validate_json(
+                canonical_json(components["inventory_state"])
+            )
+            version = self._conn.execute(
+                "SELECT world_version FROM sessions WHERE session_id=?", (session_id,)
+            ).fetchone()[0]
+            return CarriedItemsView(actor_id, version, inventory.entries)
 
     def _door_ports(self, scene_id, object_id, package):
         return tuple(
@@ -486,6 +655,8 @@ class WorldHandler:
             return self._validate_step(sid, actor_id, operation, package)
         if type(operation) is PlaceObject:
             return self._validate_placement(sid, actor_id, operation, package)
+        if type(operation) in (PickupItem, DropItem):
+            return self._validate_item_transfer(row, actor_id, operation, package)[0]
         if type(operation) is SetObjectState:
             from ._operations import ObjectState
 
@@ -537,6 +708,8 @@ class WorldHandler:
         if type(operation) not in (
             StepActor,
             PlaceObject,
+            PickupItem,
+            DropItem,
             TraversePassage,
             EnterScene,
             MoveActor,
@@ -626,6 +799,8 @@ class WorldHandler:
 
     def _operate_spatial(self, row, package, operation, actor_id, *, navigation_scope=None):
         sid = row["session_id"]
+        if type(operation) in (PickupItem, DropItem):
+            return self._operate_item_transfer(row, actor_id, operation, package)
         before = self._actor_position(sid, actor_id)
         destination = self._world_destination(
             row, actor_id, operation, package, navigation_scope=navigation_scope
@@ -850,7 +1025,10 @@ class WorldHandler:
                 self._capture_event(sid, package, kind, payload, phase="clock.after_advance")
                 for kind, payload in advance_game_time(self, row, operation)
             ]
-        if isinstance(operation, (EnterScene, MoveActor, StepActor, TraversePassage, PlaceObject)):
+        if isinstance(
+            operation,
+            (EnterScene, MoveActor, StepActor, TraversePassage, PlaceObject, PickupItem, DropItem),
+        ):
             return self._operate_spatial(
                 row, package, operation, actor_id, navigation_scope=navigation_scope
             )

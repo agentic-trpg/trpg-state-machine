@@ -5,7 +5,7 @@ from dataclasses import dataclass
 
 from dnd5e_engine.evaluation_contracts import CombatIntentPayload
 
-from ._operations import MoveActor, ObjectState, SetObjectState
+from ._operations import DropItem, MoveActor, ObjectState, PickupItem, SetObjectState
 from .commands import CommandReceipt, TypedCommand, receipt_from_json
 from .errors import StateMachineError
 from .models import TrustedContext
@@ -15,13 +15,28 @@ from .npc_results import (
     NPCCombatIntent,
     NPCDialogue,
     NPCDoorIntent,
+    NPCDropIntent,
     NPCNavigationIntent,
+    NPCPickupIntent,
 )
 
 
 def _handoff_command(row):
     data = json.loads(row["payload_json"])
-    if "activity_id" in data:
+    if "instance_id" in data:
+        if "expected_cell" in data:
+            intent = NPCPickupIntent(**data)
+            kind, payload = (
+                "world.pickup_item",
+                PickupItem(intent.instance_id, intent.scene_id, intent.expected_cell),
+            )
+        else:
+            intent = NPCDropIntent(**data)
+            kind, payload = (
+                "world.drop_item",
+                DropItem(intent.instance_id, intent.scene_id, intent.to_cell),
+            )
+    elif "activity_id" in data:
         intent = NPCNavigationIntent(**data)
         kind, payload = (
             "activity.start_navigation",

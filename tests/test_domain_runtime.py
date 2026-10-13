@@ -30,7 +30,8 @@ def components(path, loader=None):
 
     store = SqliteStore(path)
     sessions = SessionAccess(store)
-    characters, facts, records = CharacterFacts(store), WorldFacts(store), CombatRecords(store)
+    facts, records = WorldFacts(store), CombatRecords(store)
+    characters = CharacterFacts(store, facts)
     capture, persistence = EventCapture(store, characters, facts), EventPersistence(store)
     world = WorldHandler(store, sessions, characters, facts, records, capture, NPCBootstrap(store))
     effects = PackageEffects(store, world, capture)
@@ -277,6 +278,7 @@ def test_production_writers_and_dependency_direction():
         "navigation_driver.py",
         "navigation_package.py",
         "navigation_models.py",
+        "item_package.py",
     }
     writers = set()
     for path in root.glob("*.py"):

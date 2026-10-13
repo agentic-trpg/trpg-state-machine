@@ -29,6 +29,8 @@ class EventCapture:
             "actor.moved": "Someone moves into view.",
             "actor.stepped": "Someone takes a step.",
             "object.placed": "Someone adjusts an object.",
+            "item.picked_up": "Someone picks up an item.",
+            "item.dropped": "Someone puts down an item.",
             "object.state_changed": "An object changes position.",
         }
         if (
@@ -157,12 +159,12 @@ class EventCapture:
             if source:
                 evidence["source_actors"].append(dict(source))
             else:
-                obj = self._conn.execute(
-                    "SELECT scene_id,state FROM objects WHERE session_id=? AND object_id=?",
-                    (sid, entity_id),
-                ).fetchone()
+                obj = self.world.object_position(sid, entity_id)
                 if obj:
-                    evidence["objects"][entity_id] = dict(obj)
+                    evidence["objects"][entity_id] = {
+                        "scene_id": obj["scene_id"],
+                        "state": obj["state"],
+                    }
         combat = self._conn.execute(
             "SELECT scene_id,state_json FROM combats WHERE session_id=?", (sid,)
         ).fetchone()
@@ -213,9 +215,7 @@ class EventCapture:
             )
         if evidence["schema"] == "event-evidence/5":
             for oid, obj in evidence["objects"].items():
-                obj["cell"] = self._conn.execute(
-                    "SELECT cell FROM objects WHERE session_id=? AND object_id=?", (sid, oid)
-                ).fetchone()[0]
+                obj["cell"] = self.world.object_position(sid, oid)["cell"]
 
     def _perception_geometry(self, sid, scene_id):
         """Full current mechanical geometry, independent of movement admission."""

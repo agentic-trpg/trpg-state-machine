@@ -13,12 +13,14 @@ from ._operations import ObjectState, SetObjectState, SetSceneFlag
 from .errors import Issue, StateMachineError
 
 if TYPE_CHECKING:
+    from .item_package import PortableItem
     from .navigation_models import NavigationKnowledge
     from .npc_state import NPCInitialState, WorldFactDefinition
 
 SCHEMA_VERSION = "state-machine-foundation/1"
 INTERACTION_SCHEMA_VERSION = "state-machine-foundation/2"
 NAVIGATION_SCHEMA_VERSION = "state-machine-foundation/3"
+ITEM_SCHEMA_VERSION = "state-machine-foundation/4"
 MAX_PACKAGE_BYTES = 1_048_576
 _ID = re.compile(r"[a-z][a-z0-9_]*(?:\.[a-z][a-z0-9_]*)+")
 
@@ -164,6 +166,7 @@ class AdventurePackage:
     passages: tuple[PassageDefinition, ...] = ()
     navigation: "NavigationKnowledge | None" = None
     legacy_audit_only: bool = False
+    portable_items: tuple["PortableItem", ...] = ()
 
     def scene(self, scene_id: str) -> SceneDefinition:
         for scene in self.scenes:
@@ -293,14 +296,20 @@ def _validate(data: dict, *, allow_legacy_audit=False) -> AdventurePackage:
         isinstance(data, dict)
         and isinstance(data.get("manifest"), dict)
         and data["manifest"].get("schema_version")
-        in (INTERACTION_SCHEMA_VERSION, NAVIGATION_SCHEMA_VERSION)
+        in (INTERACTION_SCHEMA_VERSION, NAVIGATION_SCHEMA_VERSION, ITEM_SCHEMA_VERSION)
     )
-    navigation = interactions and data["manifest"]["schema_version"] == NAVIGATION_SCHEMA_VERSION
+    items = interactions and data["manifest"]["schema_version"] == ITEM_SCHEMA_VERSION
+    navigation = interactions and data["manifest"]["schema_version"] in (
+        NAVIGATION_SCHEMA_VERSION,
+        ITEM_SCHEMA_VERSION,
+    )
     root = _mapping(
         data,
         "manifest world scenes actors pc_templates events rule_bindings"
         + (" passages" if interactions else "")
-        + (" navigation" if navigation else ""),
+        + (" navigation" if navigation else "")
+        + (" item_transfers" if items else ""),
+        # Package versioning keeps legacy raw-data digests unchanged.
         "$",
     )
     m = _mapping(
@@ -313,6 +322,7 @@ def _validate(data: dict, *, allow_legacy_audit=False) -> AdventurePackage:
         SCHEMA_VERSION,
         INTERACTION_SCHEMA_VERSION,
         NAVIGATION_SCHEMA_VERSION,
+        ITEM_SCHEMA_VERSION,
     ):
         _fail("unsupported_schema", "manifest.schema_version", f"Expected {SCHEMA_VERSION}")
     adventure_id = _identifier(m["adventure_id"], "manifest.adventure_id")
@@ -753,6 +763,11 @@ def _validate(data: dict, *, allow_legacy_audit=False) -> AdventurePackage:
         if navigation
         else None
     )
+    from .item_package import validate_items
+
+    portable = (
+        validate_items(root["item_transfers"], scenes, noncombat, definitions) if items else ()
+    )
     return AdventurePackage(
         adventure_id,
         version,
@@ -770,6 +785,7 @@ def _validate(data: dict, *, allow_legacy_audit=False) -> AdventurePackage:
         passages,
         knowledge,
         legacy_audit,
+        portable,
     )
 
 

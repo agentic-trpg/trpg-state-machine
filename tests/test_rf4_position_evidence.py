@@ -15,7 +15,7 @@ from modern_support import modern_data, modern_loader
 from perception_support import synthetic_notice
 from test_combat_closure import close_command, pc_attack
 from test_events import event_data
-from test_migrations import stored_rows
+from test_migrations import assert_original_rows_equal, stored_rows
 
 from trpg_state_machine import (
     EnterScene,
@@ -488,7 +488,13 @@ with StateMachine(sys.argv[3], dnd_loader=assets) as sm:
     before = stored_rows(db)
     package, assets = authored_package(package_data)
     with StateMachine(db, dnd_loader=assets) as sm:
-        assert stored_rows(db) == before
+        assert_original_rows_equal(before, stored_rows(db))
+        assert (
+            sm._conn.execute(
+                "SELECT count(*) FROM objects WHERE carrier_id IS NOT NULL OR item_json IS NOT NULL"
+            ).fetchone()[0]
+            == 0
+        )
         assert sm.read_actor_position(sid, NPC, package, context=context).cell == "1,0"
         assert (
             sm.get_command_receipt(sid, "fire.position", package, context=context).status

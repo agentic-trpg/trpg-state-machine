@@ -10,9 +10,24 @@ RF-1 将现有世界交互和战斗编排改为显式组件组合，角色、世
 实现。字段责任与提交链见 [RF-1 设计](docs/RF1_DOMAIN_RUNTIME.md)，实际验证见
 [RF-1 Review](docs/reviews/RF1_DOMAIN_RUNTIME_REVIEW.md)。
 
+## GC-3：普通物品实例取放
+
+当前 SQLite Schema 24 与 Package `/4` 增加显式批准的便携实例。
+`world.pickup_item` / `world.drop_item` 复用 TypedCommand、共享事务、OCC、
+幂等回执与可靠 NPC handoff；`read_carried_items` 只允许读取自己或获准 Actor。
+世界对象 ID 在地面、携带、移动和重启后保持不变。RF-4 真实库存实例和携带
+slug 投影同事务更新；拾取不改变持握、装备或机械加成。
+
+首版仅支持非战斗、公开、无争抢、可信配置的单件取放；导航不会自动拾取。
+旧 Package 不获得新能力，旧库存数量/充能不被重建或清空。容器、锁具、
+装备切换、堆叠、负重裁决、消耗效果和战斗取放仍不支持。
+见 [GC-3 设计与支持矩阵](docs/GC3_ITEM_TRANSFERS.md)、
+[Review](docs/reviews/GC3_ITEM_TRANSFERS_REVIEW.md) 和
+[可运行示例](examples/item_transfers.py)。
+
 ## GC-2：持久非战斗导航活动
 
-当前 Schema 22 仅追加导航活动记录。Package /3 显式授予公共区域的静态布局和通路；
+GC-2 的 Schema 22 仅追加导航活动记录。Package /3 显式授予公共区域的静态布局和通路；
 PC 或获准 NPC 提交一次 `StartNavigation` 后，通用有界驱动器自动选择单格移动、
 普通共享门和通路操作。活动与真实世界、事件证据、Outbox、版本和回执共同提交，
 正常关闭后可在新进程连续推进。动态障碍只在实际执行时检查；受阻需明确恢复决定。
@@ -192,7 +207,7 @@ SQLite 测试。Schema 20 不提供降级迁移，旧运行时不能直接打开
 
 RF-RE4 当前固定 Engine/SRD 完整 Git SHA
 `675552406e67470bf3456fe90e88c4f1595bf324`，Evaluator `/36`、Evaluation `/23`、
-Snapshot `/17`、Availability `/13`，SQLite Schema 23。当前 Snapshot/OCC 从受控事实
+Snapshot `/17`、Availability `/13`，RF-4 引入 SQLite Schema 23（GC-3 升至 24）。当前 Snapshot/OCC 从受控事实
 组件读取，不加载完整战斗事件历史；历史事件继续通过授权审计入口读取。
 [RF-RE4 契约、归属、兼容与验证记录](docs/RF_RE4_HISTORY_FREE_RULES.md) 说明了当前边界。
 
