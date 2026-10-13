@@ -9,12 +9,14 @@ from dnd5e_engine.evaluation_contracts import CheckPayload, CombatClosePayload, 
 from ._operations import (
     DropItem,
     EnterScene,
+    LockDoor,
     MoveActor,
     PickupItem,
     PlaceObject,
     SetObjectState,
     StepActor,
     TraversePassage,
+    UnlockDoor,
 )
 from .commands import receipt_from_json
 from .errors import StateMachineError
@@ -108,6 +110,8 @@ class SessionAccess:
                         PlaceObject,
                         PickupItem,
                         DropItem,
+                        UnlockDoor,
+                        LockDoor,
                         SetObjectState,
                     ),
                 )
@@ -140,6 +144,8 @@ class SessionAccess:
                 PlaceObject,
                 PickupItem,
                 DropItem,
+                UnlockDoor,
+                LockDoor,
             ),
         ):
             combat = self._conn.execute(

@@ -339,7 +339,7 @@ class CombatHandler:
                         package=package,
                     )
                 except StateMachineError as exc:
-                    if exc.code != "event_cascade_limit":
+                    if exc.code not in {"event_cascade_limit", "door_locked", "invalid_lock_state"}:
                         raise
                     self._conn.execute("ROLLBACK TO dnd_effects")
                     status, error, version = "rejected", exc.code, row["world_version"]

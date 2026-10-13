@@ -310,6 +310,7 @@ class StateMachine(
             if package.noncombat_foundation_json is not None:
                 self._initialize_noncombat(initial_row, package)
             self._world_facts.initialize_items(initial_row, package, self._rules.loader)
+            self._world_facts.initialize_locks(initial_row, package)
             if package.portable_items:
                 self._characters.rule_components(
                     session_id, set(self._characters.rule_actors(session_id))

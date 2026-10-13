@@ -500,8 +500,68 @@ class WorldFacts:
     def switch(self, sid, object_id, state):
         self.store.require_write()
         self.require_ordinary_object(sid, object_id)
+        self.validate_door_switch(sid, object_id, state)
         self._conn.execute(
             "UPDATE objects SET state=? WHERE session_id=? AND object_id=?", (state, sid, object_id)
+        )
+
+    def door_lock(self, sid, object_id):
+        row = self._conn.execute(
+            "SELECT l.locked,o.state FROM door_locks l JOIN objects o "
+            "USING(session_id,object_id) WHERE l.session_id=? AND l.object_id=?",
+            (sid, object_id),
+        ).fetchone()
+        if row is None:
+            return None
+        if (
+            row[0] not in (0, 1)
+            or row[1] not in ("open", "closed")
+            or (row[0] and row[1] != "closed")
+        ):
+            raise StateMachineError("invalid_lock_state", "Contradictory shared door state")
+        return bool(row[0])
+
+    def validate_door_switch(self, sid, object_id, state):
+        locked = self.door_lock(sid, object_id)
+        if locked and state == "open":
+            raise StateMachineError("door_locked", "Door is locked")
+
+    def set_door_lock(self, sid, object_id, locked):
+        self.store.require_write()
+        if self.door_lock(sid, object_id) is None:
+            raise StateMachineError("unsupported_object_capability", "Door has no lock")
+        state = self._conn.execute(
+            "SELECT state FROM objects WHERE session_id=? AND object_id=?", (sid, object_id)
+        ).fetchone()[0]
+        if locked and state != "closed":
+            raise StateMachineError("door_must_be_closed", "Close the door before locking")
+        self._conn.execute(
+            "UPDATE door_locks SET locked=? WHERE session_id=? AND object_id=?",
+            (int(locked), sid, object_id),
+        )
+
+    def initialize_locks(self, row, package):
+        self.store.require_write()
+        if row["world_version"] or row["event_seq"]:
+            raise StateMachineError("invalid_lock_foundation", "Locks require a fresh session")
+        for door in package.lockable_doors:
+            self._conn.execute(
+                "INSERT INTO door_locks VALUES (?,?,?)",
+                (row["session_id"], door.object_id, int(door.initial_locked)),
+            )
+            self._conn.executemany(
+                "INSERT INTO door_credentials VALUES (?,?,?)",
+                [(row["session_id"], door.object_id, iid) for iid in door.credential_instance_ids],
+            )
+
+    def accepts_credential(self, sid, object_id, instance_id):
+        return (
+            self._conn.execute(
+                "SELECT 1 FROM door_credentials WHERE session_id=? AND object_id=? "
+                "AND instance_id=?",
+                (sid, object_id, instance_id),
+            ).fetchone()
+            is not None
         )
 
     def require_ordinary_object(self, sid, object_id):

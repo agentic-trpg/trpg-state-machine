@@ -8,7 +8,7 @@ from uuid import uuid4
 
 from dnd5e_engine.evaluation_contracts import CombatIntentPayload
 
-from ._operations import DropItem, ObjectState, PickupItem
+from ._operations import DropItem, LockDoor, ObjectState, PickupItem, UnlockDoor
 from .errors import StateMachineError
 from .npc_state import RECORD_TYPES, SourceReference
 from .package import canonical_json
@@ -65,8 +65,28 @@ class NPCDropIntent:
     expected_world_version: int
 
 
+@dataclass(frozen=True, slots=True)
+class NPCUnlockIntent:
+    scene_id: str
+    object_id: str
+    credential_instance_id: str
+    expected_cell: str
+    expected_world_version: int
+
+
+@dataclass(frozen=True, slots=True)
+class NPCLockIntent:
+    scene_id: str
+    object_id: str
+    credential_instance_id: str
+    expected_cell: str
+    expected_world_version: int
+
+
 def _output_data(output):
     data = asdict(output)
+    if type(output) in (NPCUnlockIntent, NPCLockIntent):
+        data["intent_type"] = "door_unlock" if type(output) is NPCUnlockIntent else "door_lock"
     if type(output) is NPCCombatIntent:
         if type(output.payload) is not CombatIntentPayload:
             _invalid("Combat handoff requires the pinned Engine payload type")
@@ -149,7 +169,9 @@ def _result_json(result):
     try:
         data = asdict(result)
         data["action_intents"] = tuple(
-            _output_data(item) if type(item) is NPCCombatIntent else encoded
+            _output_data(item)
+            if type(item) in (NPCCombatIntent, NPCUnlockIntent, NPCLockIntent)
+            else encoded
             for item, encoded in zip(result.action_intents, data["action_intents"], strict=True)
         )
         raw = canonical_json(data)
@@ -307,7 +329,29 @@ class NPCResultRuntime:
             outputs.append(("dialogue", dialogue, error))
         for intent in result.action_intents:
             error = None
-            if type(intent) in (NPCPickupIntent, NPCDropIntent):
+            if type(intent) in (NPCUnlockIntent, NPCLockIntent):
+                from .commands import TypedCommand, validate_command
+
+                unlock = type(intent) is NPCUnlockIntent
+                try:
+                    validate_command(
+                        TypedCommand(
+                            row["session_id"],
+                            "lock.proposal",
+                            row["npc_id"],
+                            "world.unlock_door" if unlock else "world.lock_door",
+                            (UnlockDoor if unlock else LockDoor)(
+                                intent.scene_id,
+                                intent.object_id,
+                                intent.credential_instance_id,
+                                intent.expected_cell,
+                            ),
+                            intent.expected_world_version,
+                        )
+                    )
+                except StateMachineError:
+                    error = "invalid_npc_action"
+            elif type(intent) in (NPCPickupIntent, NPCDropIntent):
                 from .commands import TypedCommand, validate_command
 
                 pickup = type(intent) is NPCPickupIntent
