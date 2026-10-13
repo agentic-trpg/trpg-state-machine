@@ -7,8 +7,10 @@ from dataclasses import asdict
 from dnd5e_engine.evaluation_contracts import CheckPayload, CombatClosePayload, CombatIntentPayload
 
 from ._operations import (
+    DropItem,
     EnterScene,
     MoveActor,
+    PickupItem,
     PlaceObject,
     SetObjectState,
     StepActor,
@@ -104,6 +106,8 @@ class SessionAccess:
                         StepActor,
                         TraversePassage,
                         PlaceObject,
+                        PickupItem,
+                        DropItem,
                         SetObjectState,
                     ),
                 )
@@ -134,6 +138,8 @@ class SessionAccess:
                 StepActor,
                 TraversePassage,
                 PlaceObject,
+                PickupItem,
+                DropItem,
             ),
         ):
             combat = self._conn.execute(

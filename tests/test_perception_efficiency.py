@@ -290,7 +290,7 @@ with StateMachine(sys.argv[1]) as sm:
     ]
     for worker in workers:
         stdout, stderr = worker.communicate(timeout=30)
-        assert worker.returncode == 0 and stdout.strip() == b"23", stderr
+        assert worker.returncode == 0 and stdout.strip() == b"24", stderr
     package = _validate(queue_data)
     for _ in range(2):
         with StateMachine(db) as sm:
@@ -368,4 +368,4 @@ def test_schema20_sql_failure_rolls_back_then_reopens(tmp_path, queue_data, monk
     with sqlite3.connect(db) as conn:
         assert conn.execute("PRAGMA user_version").fetchone()[0] == 19
     with StateMachine(db) as sm:
-        assert sm._conn.execute("PRAGMA user_version").fetchone()[0] == 23
+        assert sm._conn.execute("PRAGMA user_version").fetchone()[0] == 24

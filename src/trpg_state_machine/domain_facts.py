@@ -13,6 +13,7 @@ from dnd5e_engine.evaluation_state import InventoryState
 from pydantic import TypeAdapter
 
 from .errors import StateMachineError
+from .item_units import valid_item_unit
 from .package import canonical_json
 
 
@@ -50,8 +51,9 @@ class CharacterFacts:
         )
     )
 
-    def __init__(self, store):
+    def __init__(self, store, world):
         self.store = store
+        self.world = world
 
     @property
     def _conn(self):
@@ -282,6 +284,7 @@ class CharacterFacts:
                 references |= {v["actor_id"] for v in casting["actors"]}
             if not references <= known:
                 raise ValueError("component owner is missing")
+            self.validate_portable_inventory(sid, inventory)
             inventory["entries"] = [v for v in inventory["entries"] if v["owner_id"] in owner_ids]
             if resources is not None:
                 resources["pools"] = [v for v in resources["pools"] if v["owner_id"] in owner_ids]
@@ -297,6 +300,87 @@ class CharacterFacts:
             raise StateMachineError(
                 "invalid_mechanical_state", "Stored component closure is incomplete"
             ) from exc
+
+    def validate_portable_inventory(self, sid, inventory):
+        """Validate the complete portable subset before any owner projection."""
+        identities, expected = self.world.portable_inventory(sid)
+        actual = {
+            e["instance_id"]: e for e in inventory["entries"] if e["instance_id"] in identities
+        }
+        if actual != expected:
+            raise StateMachineError(
+                "invalid_mechanical_state", "Portable inventory differs from location facts"
+            )
+        if identities:
+            for aid, actor in self.rule_actors(sid).items():
+                slugs = {
+                    e["item_slug"]
+                    for e in inventory["entries"]
+                    if e["owner_id"] == aid and e["quantity"] > 0
+                }
+                if (
+                    len(actor["carried_item_slugs"]) != len(slugs)
+                    or set(actor["carried_item_slugs"]) != slugs
+                ):
+                    raise StateMachineError(
+                        "invalid_mechanical_state",
+                        "Carried projection differs from owned instances",
+                    )
+
+    def project_item_transfer(self, sid, before, after):
+        """Only one admitted instance transition, never arbitrary inventory replacement."""
+        self.store.require_write()
+        stored = self._conn.execute(
+            "SELECT inventory_json FROM mechanical_components WHERE session_id=?", (sid,)
+        ).fetchone()
+        if stored is None:
+            raise StateMachineError(
+                "unsupported_mechanical_version", "Explicit inventory is missing"
+            )
+        inventory = InventoryState.model_validate_json(stored[0]).model_dump(mode="json")
+        iid = before["object_id"]
+        old_entry = self.world.item_entry(before)
+        actual = next((e for e in inventory["entries"] if e["instance_id"] == iid), None)
+        if (
+            actual != old_entry
+            or after["object_id"] != iid
+            or before["item_json"] != after["item_json"]
+        ):
+            raise StateMachineError(
+                "invalid_mechanical_state", "Item transition precondition differs"
+            )
+        inventory["entries"] = [e for e in inventory["entries"] if e["instance_id"] != iid]
+        if entry := self.world.item_entry(after):
+            inventory["entries"].append(entry)
+        self._conn.execute(
+            "UPDATE mechanical_components SET inventory_json=? WHERE session_id=?",
+            (canonical_json(inventory), sid),
+        )
+        for aid in {before["carrier_id"], after["carrier_id"]} - {None}:
+            core = self._conn.execute(
+                "SELECT inventory_json FROM characters WHERE session_id=? AND actor_id=?",
+                (sid, aid),
+            ).fetchone()
+            if core is None:
+                raise StateMachineError(
+                    "invalid_mechanical_state", "Item carrier lacks character facts"
+                )
+            current = json.loads(core[0])
+            slug = json.loads(after["item_json"])["item_slug"]
+            owned = any(
+                e["owner_id"] == aid and e["item_slug"] == slug and e["quantity"] > 0
+                for e in inventory["entries"]
+            )
+            projected = (
+                current
+                if owned and slug in current
+                else ([*current, slug] if owned else [s for s in current if s != slug])
+            )
+            self._conn.execute(
+                "UPDATE characters SET inventory_json=? WHERE session_id=? AND actor_id=?",
+                (canonical_json(projected), sid, aid),
+            )
+        self.validate_portable_inventory(sid, inventory)
 
     def initialize_rule_positions(self, row, cells, scene_id):
         """Called only at fresh session creation before events or world movement."""
@@ -408,15 +492,120 @@ class WorldFacts:
 
     def place(self, sid, object_id, cell):
         self.store.require_write()
+        self.require_ordinary_object(sid, object_id)
         self._conn.execute(
             "UPDATE objects SET cell=? WHERE session_id=? AND object_id=?", (cell, sid, object_id)
         )
 
     def switch(self, sid, object_id, state):
         self.store.require_write()
+        self.require_ordinary_object(sid, object_id)
         self._conn.execute(
             "UPDATE objects SET state=? WHERE session_id=? AND object_id=?", (state, sid, object_id)
         )
+
+    def require_ordinary_object(self, sid, object_id):
+        row = self._conn.execute(
+            "SELECT item_json FROM objects WHERE session_id=? AND object_id=?", (sid, object_id)
+        ).fetchone()
+        if row and row[0] is not None:
+            raise StateMachineError(
+                "unsupported_object_capability", "Portable instances require item transfer"
+            )
+
+    def initialize_items(self, row, package, loader):
+        self.store.require_write()
+        sid = row["session_id"]
+        if row["world_version"] or row["event_seq"]:
+            raise StateMachineError(
+                "invalid_item_foundation", "Item initialization requires a fresh session"
+            )
+        for item in package.portable_items:
+            if loader.get_item(item.item_slug) is None:
+                raise StateMachineError("invalid_item_foundation", "Unknown pinned mechanical item")
+            owner = (
+                row["pc_actor_id"]
+                if item.initial_owner_id == row["pc_template_id"]
+                else item.initial_owner_id
+            )
+            data = {
+                "item_slug": item.item_slug,
+                "quantity": item.quantity,
+                "charges_remaining_per_unit": item.charges_remaining_per_unit,
+                "accessible": True,
+            }
+            old = self._conn.execute(
+                "SELECT * FROM objects WHERE session_id=? AND object_id=?", (sid, item.instance_id)
+            ).fetchone()
+            if old is None or old["item_json"] is not None:
+                raise StateMachineError(
+                    "invalid_item_foundation", "Portable instance must exist exactly once"
+                )
+            self._conn.execute(
+                "UPDATE objects SET item_json=?,carrier_id=?,scene_id=?,cell=? "
+                "WHERE session_id=? AND object_id=?",
+                (
+                    canonical_json(data),
+                    owner,
+                    None if owner else old["scene_id"],
+                    None if owner else old["cell"],
+                    sid,
+                    item.instance_id,
+                ),
+            )
+
+    @staticmethod
+    def item_entry(row):
+        if row["carrier_id"] is None:
+            return None
+        return {
+            "instance_id": row["object_id"],
+            "owner_id": row["carrier_id"],
+            **json.loads(row["item_json"]),
+        }
+
+    def portable_inventory(self, sid):
+        identities, entries = set(), {}
+        for row in self._conn.execute(
+            "SELECT * FROM objects WHERE session_id=? AND item_json IS NOT NULL", (sid,)
+        ):
+            identities.add(row["object_id"])
+            data = json.loads(row["item_json"])
+            # Ground metadata is validated without constructing a fictional owner.
+            if not valid_item_unit(data):
+                raise StateMachineError(
+                    "invalid_mechanical_state", "Portable unit metadata is invalid"
+                )
+            if entry := self.item_entry(row):
+                entries[row["object_id"]] = entry
+        return identities, entries
+
+    def transfer_item(self, sid, before, *, carrier_id=None, scene_id=None, cell=None):
+        self.store.require_write()
+        current = self._conn.execute(
+            "SELECT * FROM objects WHERE session_id=? AND object_id=?", (sid, before["object_id"])
+        ).fetchone()
+        if current is None or dict(current) != dict(before) or current["item_json"] is None:
+            raise StateMachineError("position_conflict", "Item location changed")
+        self._conn.execute(
+            "UPDATE objects SET carrier_id=?,scene_id=?,cell=? WHERE session_id=? AND object_id=?",
+            (carrier_id, scene_id, cell, sid, before["object_id"]),
+        )
+        return self._conn.execute(
+            "SELECT * FROM objects WHERE session_id=? AND object_id=?", (sid, before["object_id"])
+        ).fetchone()
+
+    def object_position(self, sid, object_id):
+        """Current physical source position, including a carried object's actual actor."""
+        obj = self._conn.execute(
+            "SELECT o.state,COALESCE(a.current_scene_id,o.scene_id) AS scene_id,"
+            "CASE WHEN o.carrier_id IS NULL THEN o.cell ELSE a.cell END AS cell "
+            "FROM objects o LEFT JOIN actors a "
+            "ON a.session_id=o.session_id AND a.actor_id=o.carrier_id "
+            "WHERE o.session_id=? AND o.object_id=?",
+            (sid, object_id),
+        ).fetchone()
+        return dict(obj) if obj else None
 
     def set_scene_flags(self, sid, scene_id, flags):
         self.store.require_write()

@@ -90,8 +90,8 @@ class StateMachine(
         self._evaluator = evaluator if evaluator is not None else SyntheticEvaluator()
         self._store = SqliteStore(database)
         self._sessions = SessionAccess(self._store)
-        self._characters = CharacterFacts(self._store)
         self._world_facts = WorldFacts(self._store)
+        self._characters = CharacterFacts(self._store, self._world_facts)
         self._combat_records = CombatRecords(self._store)
         self._npc_bootstrap = NPCBootstrap(self._store)
         self._activity_records = ActivityRecords(self._store)
@@ -106,6 +106,7 @@ class StateMachine(
             self._event_capture,
             self._npc_bootstrap,
             self._activity_records,
+            loader=loader,
         )
         self._activities = ActivityHandler(
             self._store,
@@ -308,6 +309,11 @@ class StateMachine(
             ).fetchone()
             if package.noncombat_foundation_json is not None:
                 self._initialize_noncombat(initial_row, package)
+            self._world_facts.initialize_items(initial_row, package, self._rules.loader)
+            if package.portable_items:
+                self._characters.rule_components(
+                    session_id, set(self._characters.rule_actors(session_id))
+                )
             self._assert_spatial_consistency(session_id, package)
             initial_events = self._expand_events(
                 initial_row,
@@ -517,6 +523,9 @@ class StateMachine(
 
     def read_actor_position(self, session_id, actor_id, package, *, context):
         return self._world.read_actor_position(session_id, actor_id, package, context=context)
+
+    def read_carried_items(self, session_id, actor_id, package, *, context):
+        return self._world.read_carried_items(session_id, actor_id, package, context=context)
 
     def _assert_spatial_consistency(self, sid, package):
         return self._world._assert_spatial_consistency(sid, package)

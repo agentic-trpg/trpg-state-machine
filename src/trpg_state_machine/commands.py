@@ -10,9 +10,11 @@ from dnd5e_engine.evaluation_contracts import CheckPayload, CombatClosePayload, 
 from pydantic import ValidationError
 
 from ._operations import (
+    DropItem,
     EnterScene,
     MoveActor,
     ObjectState,
+    PickupItem,
     PlaceObject,
     SetObjectState,
     SetSceneFlag,
@@ -33,6 +35,8 @@ from .navigation_models import (
 from .package import canonical_json
 
 OPERATIONS = {
+    "world.pickup_item": PickupItem,
+    "world.drop_item": DropItem,
     "activity.start_navigation": StartNavigation,
     "activity.advance_navigation": AdvanceNavigation,
     "activity.resume_navigation": ResumeNavigation,
@@ -87,6 +91,8 @@ class TypedCommand:
         | AdvanceNavigation
         | ResumeNavigation
         | CancelNavigation
+        | PickupItem
+        | DropItem
     )
     expected_world_version: int
     schema_version: str = "sm-command/1"
@@ -184,6 +190,8 @@ def validate_command(command: TypedCommand) -> None:
         StepActor: "actor-step/1",
         TraversePassage: "passage-traversal/1",
         PlaceObject: "object-placement/1",
+        PickupItem: "item-transfer/1",
+        DropItem: "item-transfer/1",
     }.get(type(command.payload))
     if local_version and command.payload.schema_version != local_version:
         raise StateMachineError("invalid_operation", "Unsupported local spatial operation version")
@@ -398,6 +406,8 @@ def world_command_from_data(data):
         "world.step_actor",
         "world.traverse_passage",
         "world.place_object",
+        "world.pickup_item",
+        "world.drop_item",
         "enter_scene",
         "move_actor",
         "set_object_state",

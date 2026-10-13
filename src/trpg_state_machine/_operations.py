@@ -61,6 +61,22 @@ class TraversePassage:
     schema_version: str = "passage-traversal/1"
 
 
+@dataclass(frozen=True, slots=True)
+class PickupItem:
+    instance_id: str
+    scene_id: str
+    expected_cell: str
+    schema_version: str = "item-transfer/1"
+
+
+@dataclass(frozen=True, slots=True)
+class DropItem:
+    instance_id: str
+    scene_id: str
+    to_cell: str
+    schema_version: str = "item-transfer/1"
+
+
 type FoundationOperation = (
     EnterScene
     | SetSceneFlag
@@ -69,4 +85,6 @@ type FoundationOperation = (
     | PlaceObject
     | StepActor
     | TraversePassage
+    | PickupItem
+    | DropItem
 )

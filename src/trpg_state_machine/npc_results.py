@@ -8,7 +8,7 @@ from uuid import uuid4
 
 from dnd5e_engine.evaluation_contracts import CombatIntentPayload
 
-from ._operations import ObjectState
+from ._operations import DropItem, ObjectState, PickupItem
 from .errors import StateMachineError
 from .npc_state import RECORD_TYPES, SourceReference
 from .package import canonical_json
@@ -46,6 +46,22 @@ class NPCNavigationIntent:
     activity_id: str
     target_scene_id: str
     target_cell: str
+    expected_world_version: int
+
+
+@dataclass(frozen=True, slots=True)
+class NPCPickupIntent:
+    instance_id: str
+    scene_id: str
+    expected_cell: str
+    expected_world_version: int
+
+
+@dataclass(frozen=True, slots=True)
+class NPCDropIntent:
+    instance_id: str
+    scene_id: str
+    to_cell: str
     expected_world_version: int
 
 
@@ -291,7 +307,29 @@ class NPCResultRuntime:
             outputs.append(("dialogue", dialogue, error))
         for intent in result.action_intents:
             error = None
-            if type(intent) is NPCNavigationIntent:
+            if type(intent) in (NPCPickupIntent, NPCDropIntent):
+                from .commands import TypedCommand, validate_command
+
+                pickup = type(intent) is NPCPickupIntent
+                payload = (
+                    PickupItem(intent.instance_id, intent.scene_id, intent.expected_cell)
+                    if pickup
+                    else DropItem(intent.instance_id, intent.scene_id, intent.to_cell)
+                )
+                try:
+                    validate_command(
+                        TypedCommand(
+                            row["session_id"],
+                            "item.proposal",
+                            row["npc_id"],
+                            "world.pickup_item" if pickup else "world.drop_item",
+                            payload,
+                            intent.expected_world_version,
+                        )
+                    )
+                except StateMachineError:
+                    error = "invalid_npc_action"
+            elif type(intent) is NPCNavigationIntent:
                 from .commands import TypedCommand, validate_command
                 from .navigation_models import StartNavigation
 

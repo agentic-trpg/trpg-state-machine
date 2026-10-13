@@ -1,9 +1,11 @@
 """Versioned local state machine foundation."""
 
 from ._operations import (
+    DropItem,
     EnterScene,
     MoveActor,
     ObjectState,
+    PickupItem,
     PlaceObject,
     SetObjectState,
     SetSceneFlag,
@@ -26,6 +28,8 @@ from .package import load_adventure_package
 from .service import StateMachine
 
 __all__ = [
+    "DropItem",
+    "PickupItem",
     "StartNavigation",
     "AdvanceNavigation",
     "ResumeNavigation",
