@@ -815,9 +815,6 @@ class WorldHandler:
             EnterScene,
             MoveActor,
             SetObjectState,
-            SetSceneFlag,
-            ObjectState,
-            FoundationOperation,
         ):
             raise StateMachineError("unsupported_operation", "Unsupported spatial query")
         validate_command(TypedCommand(session_id, "query", actor_id, kind, operation, 0))
@@ -931,14 +928,17 @@ class WorldHandler:
             return []
         is_pc = actor_id == row["pc_actor_id"]
         events = []
-        if is_pc and before.scene_id != destination.scene_id:
+        if before.scene_id != destination.scene_id:
             events.append(
                 self._capture_event(
                     sid,
                     package,
-                    "scene.exited",
-                    {"scene_id": before.scene_id},
-                    phase="scene.before_departure",
+                    "scene.exited" if is_pc else "actor.departed",
+                    {
+                        "scene_id": before.scene_id,
+                        **({} if is_pc else {"actor_id": actor_id, "from_cell": before.cell}),
+                    },
+                    phase="scene.before_departure" if is_pc else "world.before_actor_departure",
                     source_actor_id=actor_id,
                 )
             )

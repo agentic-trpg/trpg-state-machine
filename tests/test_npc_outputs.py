@@ -207,7 +207,14 @@ def test_concurrent_dispatch_uses_one_command_or_publication(
         delivered = list(pool.map(dispatch, range(4)))
     assert delivered == [delivered[0]] * 4
     with StateMachine(db) as sm:
-        assert len(sm.read_events(sid, evaluation_package, context=context)) == len(events) + 1
+        fresh = sm.read_events(sid, evaluation_package, context=context)[len(events) :]
+        assert [e.event_type for e in fresh] == (
+            ["actor.departed", "actor.moved"] if kind == "action" else ["npc.dialogue_published"]
+        )
+        if kind == "action":
+            assert tuple(e.event_seq for e in fresh) == delivered[0].command_receipt.event_seqs
+            assert [e.source_command_id for e in fresh] == [delivered[0].command_id] * 2
+            assert [e.signals[0].origin.entity_id for e in fresh] == [npc.observer_id] * 2
 
 
 @pytest.mark.parametrize(
@@ -362,19 +369,23 @@ def test_real_projection_then_cognition_gaps_cannot_advance_continuous_cursor(
             expected_world_version=second.world_version,
             context=context,
         )
-        end = sm.read_events(sid, evaluation_package, context=context)[-1].event_seq
+        moved = sm.read_events(sid, evaluation_package, context=context, after_seq=first.event_seq)
+        assert [e.event_type for e in moved] == ["actor.departed", "actor.moved"] * 2
+        assert all(e.signals[0].origin.entity_id == npc.observer_id for e in moved)
+        end = moved[-1].event_seq
         sm.project_event(sid, end, evaluation_package, context=context, judgment=synthetic_notice)
         assert sm.perception_cursor(sid, evaluation_package, context=context) == prefix
         assert sm.npc_completed_cursor(sid, evaluation_package, context=npc) == prefix
-        sm.project_event(
-            sid, end - 1, evaluation_package, context=context, judgment=synthetic_notice
-        )
+        for event in reversed(moved[:-1]):
+            sm.project_event(
+                sid, event.event_seq, evaluation_package, context=context, judgment=synthetic_notice
+            )
         fresh = [
             o.observation_id
             for o in sm.read_observations(sid, evaluation_package, context=npc)
             if o.observation_id not in ids
         ]
-        assert len(fresh) == 2
+        assert len(fresh) == len(moved) == 4
         later = create_task(sm, sid, evaluation_package, npc, (fresh[-1],), key="later")
         sm.submit_npc_evaluation_result(
             later.evaluation_id, NPCEvaluationResult(), evaluation_package, context=npc
@@ -383,7 +394,7 @@ def test_real_projection_then_cognition_gaps_cannot_advance_continuous_cursor(
         earlier = sm.route_npc_observations(
             sid, evaluation_package, context=npc, request_id="earlier"
         ).task
-        assert earlier.source_observation_ids == (fresh[0],)
+        assert earlier.source_observation_ids == tuple(fresh[:-1])
         sm.submit_npc_evaluation_result(
             earlier.evaluation_id, NPCEvaluationResult(), evaluation_package, context=npc
         )

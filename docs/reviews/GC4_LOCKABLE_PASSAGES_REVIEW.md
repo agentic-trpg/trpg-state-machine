@@ -157,3 +157,12 @@ Reference: [Evennia SimpleDoor](https://www.evennia.com/docs/latest/Contribs/Con
 Only its two-sided door extension boundary is borrowed; no dependency or
 superuser lock bypass is adopted. Local executed results do not establish remote
 CI success. Only the requested branch is delivered; no merge or next-batch work.
+
+## Subsequent GC1–GC4 review repair
+
+[GC14 review fixes](GC14_REVIEW_FIXES.md) records the later repair based on this
+review's `359e096` delivery: the spatial query support set is aligned with actual
+dispatch, and NPC crossings capture source departure before destination arrival.
+It includes fresh public red/green, query parity, queue/transaction/history and
+independent review evidence. Original counts above remain the historical GC4
+record and are not presented as validation of that later repair.

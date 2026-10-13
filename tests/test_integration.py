@@ -39,7 +39,7 @@ def test_create_enter_mutate_leave_revisit_save_restart_resume(tmp_path, shutdow
         assert db.execute(
             "SELECT current_scene_id, world_version, event_seq FROM sessions WHERE session_id = ?",
             (sid,),
-        ).fetchone() == ("scene.workshop", 6, 11)
+        ).fetchone() == ("scene.workshop", 6, 12)
         assert (
             db.execute(
                 "SELECT state FROM objects "
@@ -68,7 +68,42 @@ def test_create_enter_mutate_leave_revisit_save_restart_resume(tmp_path, shutdow
         ).fetchone() == (11, 12)
         assert db.execute(
             "SELECT event_seq FROM events WHERE session_id = ? ORDER BY event_seq", (sid,)
-        ).fetchall() == [(i,) for i in range(1, 12)]
+        ).fetchall() == [(i,) for i in range(1, 13)]
+        events = db.execute(
+            "SELECT e.event_type,e.payload_json,r.source_command_id,r.signals_json,v.evidence_json "
+            "FROM events e JOIN event_records r USING(session_id,event_seq) "
+            "JOIN event_evidence v USING(session_id,event_seq) "
+            "WHERE session_id=? ORDER BY event_seq",
+            (sid,),
+        ).fetchall()
+        assert [e[0] for e in events] == [
+            "session.created",
+            "scene.entered",
+            "scene.exited",
+            "scene.entered",
+            "object.state_changed",
+            "scene.flag_changed",
+            "actor.departed",
+            "actor.moved",
+            "scene.exited",
+            "scene.entered",
+            "scene.exited",
+            "scene.entered",
+        ]
+        npc_events = [e for e in events if e[0] in ("actor.departed", "actor.moved")]
+        assert npc_events[0][2] == npc_events[1][2]
+        assert [json.loads(e[1])["actor_id"] for e in npc_events] == ["npc.caretaker"] * 2
+        assert [json.loads(e[3])[0]["origin"]["entity_id"] for e in npc_events] == [
+            "npc.caretaker"
+        ] * 2
+        assert [json.loads(e[3])[0]["scope"]["scene_id"] for e in npc_events] == [
+            "scene.platform",
+            "scene.workshop",
+        ]
+        assert [json.loads(e[4])["phase"]["code"] for e in npc_events] == [
+            "world.before_actor_departure",
+            "world.after_actor_move",
+        ]
     # Fresh interpreter + fresh connection + freshly loaded immutable package.
     resumed = run_process("resume", database)
     assert resumed == saved
@@ -79,4 +114,4 @@ def test_create_enter_mutate_leave_revisit_save_restart_resume(tmp_path, shutdow
     with sqlite3.connect(database) as db:
         assert db.execute("SELECT COUNT(*) FROM sessions").fetchone()[0] == 1
         assert db.execute("SELECT COUNT(*) FROM creation_commands").fetchone()[0] == 1
-        assert db.execute("SELECT COUNT(*) FROM events").fetchone()[0] == 11
+        assert db.execute("SELECT COUNT(*) FROM events").fetchone()[0] == 12
