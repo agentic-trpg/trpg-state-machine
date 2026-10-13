@@ -9,12 +9,25 @@ from ._operations import MoveActor, ObjectState, SetObjectState
 from .commands import CommandReceipt, TypedCommand, receipt_from_json
 from .errors import StateMachineError
 from .models import TrustedContext
-from .npc_results import NPCActionIntent, NPCCombatIntent, NPCDialogue, NPCDoorIntent
+from .navigation_models import StartNavigation
+from .npc_results import (
+    NPCActionIntent,
+    NPCCombatIntent,
+    NPCDialogue,
+    NPCDoorIntent,
+    NPCNavigationIntent,
+)
 
 
 def _handoff_command(row):
     data = json.loads(row["payload_json"])
-    if "object_id" in data:
+    if "activity_id" in data:
+        intent = NPCNavigationIntent(**data)
+        kind, payload = (
+            "activity.start_navigation",
+            StartNavigation(intent.activity_id, intent.target_scene_id, intent.target_cell),
+        )
+    elif "object_id" in data:
         intent = NPCDoorIntent(**{**data, "state": ObjectState(data["state"])})
         kind, payload = (
             "set_object_state",

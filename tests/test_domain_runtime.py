@@ -242,6 +242,7 @@ def test_production_writers_and_dependency_direction():
         "sessions": "SessionAccess",
         "rng_states": "SessionAccess",
         "command_receipts": "SessionAccess",
+        "navigation_activities": "ActivityRecords",
     }
     components = {
         "storage.py",
@@ -254,6 +255,12 @@ def test_production_writers_and_dependency_direction():
         "event_persistence.py",
         "package_effects.py",
         "npc_bootstrap.py",
+        "activity_handler.py",
+        "activity_records.py",
+        "navigation_plan.py",
+        "navigation_driver.py",
+        "navigation_package.py",
+        "navigation_models.py",
     }
     writers = set()
     for path in root.glob("*.py"):

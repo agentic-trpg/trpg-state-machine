@@ -18,6 +18,7 @@ from .commands import receipt_from_json
 from .errors import StateMachineError
 from .game_time import AdvanceGameTime
 from .models import TrustedContext
+from .navigation_models import NAVIGATION_OPERATIONS
 from .npc_outputs import _handoff_command
 from .package import AdventurePackage, RulesetBinding, canonical_json
 from .perception import NPCContext
@@ -90,20 +91,24 @@ class SessionAccess:
             raise StateMachineError("unauthorized", "Trusted game-time grant required")
         if isinstance(payload, CheckPayload) and not context.can_adjudicate_checks:
             raise StateMachineError("unauthorized", "Trusted GM adjudication grant required")
-        if isinstance(payload, MoveActor) or (
-            isinstance(
-                payload,
-                (
-                    CombatIntentPayload,
-                    CombatClosePayload,
-                    CheckPayload,
-                    StepActor,
-                    TraversePassage,
-                    PlaceObject,
-                    SetObjectState,
-                ),
+        if (
+            isinstance(payload, MoveActor)
+            or (type(payload) in NAVIGATION_OPERATIONS and actor_id != row["pc_actor_id"])
+            or (
+                isinstance(
+                    payload,
+                    (
+                        CombatIntentPayload,
+                        CombatClosePayload,
+                        CheckPayload,
+                        StepActor,
+                        TraversePassage,
+                        PlaceObject,
+                        SetObjectState,
+                    ),
+                )
+                and actor_id != row["pc_actor_id"]
             )
-            and actor_id != row["pc_actor_id"]
         ):
             if isinstance(payload, MoveActor) and actor_id != payload.actor_id:
                 raise StateMachineError("invalid_actor", "Envelope and payload actors differ")

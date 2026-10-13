@@ -5,10 +5,28 @@ Batch 1 实现了一个可运行的本地闭环：**验证原创合成 Adventure
 State Machine 是全部已实现可变游戏状态的唯一权威拥有者和提交者。Package 是不可变模板；返回的 Snapshot 是独立副本，修改副本不会写入数据库。已接入固定候选 SHA 的真实 D&D 基础攻击及受限胜利/TPK 关闭，同时保留隔离的合成测试路径；没有第二份运行态权威。正常关闭后可以保存并在新进程恢复；活跃战斗跨进程精确续玩仍不支持。
 
 RF-1 将现有世界交互和战斗编排改为显式组件组合，角色、世界、战斗和 Session
-事实经受控写入口共享同一 SQLite 事务。公开 API、Schema 21、GC-1 门与效果来源
+事实经受控写入口共享同一 SQLite 事务。RF-1 保留了公开 API、Schema 21、GC-1 门与效果来源
 语义及固定 RE/SRD 依赖保持兼容；NPC/感知仍采用受控过渡，完整战斗日志解耦尚未
 实现。字段责任与提交链见 [RF-1 设计](docs/RF1_DOMAIN_RUNTIME.md)，实际验证见
 [RF-1 Review](docs/reviews/RF1_DOMAIN_RUNTIME_REVIEW.md)。
+
+## GC-2：持久非战斗导航活动
+
+当前 Schema 22 仅追加导航活动记录。Package /3 显式授予公共区域的静态布局和通路；
+PC 或获准 NPC 提交一次 `StartNavigation` 后，通用有界驱动器自动选择单格移动、
+普通共享门和通路操作。活动与真实世界、事件证据、Outbox、版本和回执共同提交，
+正常关闭后可在新进程连续推进。动态障碍只在实际执行时检查；受阻需明确恢复决定。
+
+```powershell
+uv run --offline --locked python examples/navigation_activity.py --directory .test-tmp/navigation-new
+```
+
+使用尚不存在的目录；默认演示真实 NPC Task / 合成 Result / 可靠 handoff。
+`--actor pc --destination platform` 使用同一执行器验证另一角色和目的地。
+示例自动关闭并启动新进程恢复，输出保存进度与回执的 `trace.json`。不调用 LLM、
+不自动推进游戏时间，不实现锁具、取装备、自动绕路或活跃战斗恢复。
+API、责任边界与限制见 [GC-2 设计](docs/GC2_NAVIGATION_ACTIVITIES.md)，
+本轮验证见 [GC-2 Review](docs/reviews/GC2_NAVIGATION_ACTIVITIES_REVIEW.md)。
 
 ## GC-1：坐标化世界交互
 

@@ -116,6 +116,11 @@ def sync_npc_schedules(runtime, sid, command_id, package):
             and e["start_tick"] <= tick < e["end_tick"]
             and e["scene_id"] == npc["current_scene_id"]
             and available
+            and not db.execute(
+                "SELECT 1 FROM navigation_activities WHERE session_id=? "
+                "AND actor_id=? AND status='active'",
+                (sid, npc["npc_id"]),
+            ).fetchone()
         ]
         if len(candidates) + bool(active) > 1:
             raise StateMachineError(
