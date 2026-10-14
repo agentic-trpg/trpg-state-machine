@@ -490,10 +490,46 @@ class WorldFacts:
             obj = self.object(sid, d.object_id)
             if obj is None or obj["scene_id"] != scene_id:
                 continue
+            if c := d.capability("openable"):
+                self._conn.execute(
+                    "INSERT INTO object_openables VALUES (?,?,?,?)",
+                    (
+                        sid,
+                        d.object_id,
+                        int(c.initial_jammed),
+                        None if c.initial_barred is None else int(c.initial_barred),
+                    ),
+                )
             if c := d.capability("durability"):
                 self._conn.execute(
                     "INSERT INTO object_durability VALUES (?,?,?)", (sid, d.object_id, c.initial_hp)
                 )
+
+    def openable_state(self, sid, oid):
+        row = self._conn.execute(
+            "SELECT jammed,barred FROM object_openables WHERE session_id=? AND object_id=?",
+            (sid, oid),
+        ).fetchone()
+        return (
+            {"jammed": bool(row[0]), "barred": None if row[1] is None else bool(row[1])}
+            if row
+            else None
+        )
+
+    def set_object_bar(self, sid, oid, barred):
+        self.store.require_write()
+        obj = self.object(sid, oid)
+        state = self.openable_state(sid, oid)
+        if state is None or state["barred"] is None:
+            raise StateMachineError("unsupported_object_capability", "Object has no bar")
+        if self.object_hp(sid, oid) == 0:
+            raise StateMachineError("object_destroyed", "Destroyed object is unusable")
+        if barred and obj["state"] != "closed":
+            raise StateMachineError("object_must_be_closed", "Close object before barring")
+        self._conn.execute(
+            "UPDATE object_openables SET barred=? WHERE session_id=? AND object_id=?",
+            (int(barred), sid, oid),
+        )
 
     def object_hp(self, sid, oid):
         row = self._conn.execute(
@@ -564,6 +600,13 @@ class WorldFacts:
     def validate_door_switch(self, sid, object_id, state):
         if self.object_hp(sid, object_id) == 0:
             raise StateMachineError("object_destroyed", "Destroyed object is unusable")
+        current = self.object(sid, object_id)
+        openable = self.openable_state(sid, object_id)
+        if openable and current["state"] != state:
+            if openable["jammed"]:
+                raise StateMachineError("object_jammed", "Object is jammed")
+            if openable["barred"]:
+                raise StateMachineError("object_barred", "Object is barred")
         locked = self.door_lock(sid, object_id)
         if locked and state == "open":
             raise StateMachineError("door_locked", "Door is locked")

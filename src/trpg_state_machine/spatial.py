@@ -31,6 +31,7 @@ from .errors import StateMachineError
 from .game_time import AdvanceGameTime, advance_game_time
 from .models import TrustedContext
 from .package import AdventurePackage, canonical_json
+from .world_commands import WORLD_CAPABILITY_OPERATIONS
 
 
 @dataclass(frozen=True, slots=True)
@@ -617,6 +618,16 @@ class WorldHandler:
         position = self._actor_position(sid, actor_id)
         if operation.scene_id != position.scene_id:
             raise StateMachineError("invalid_target", "Interaction must be in the actor's scene")
+        definition = self.facts.object_definition(package, operation.object_id)
+        capability = definition.capability("openable") if definition else None
+        if (
+            capability
+            and capability.operation_sides
+            and position.scene_id not in capability.operation_sides
+        ):
+            raise StateMachineError(
+                "operation_side_forbidden", "Operation unavailable from this side"
+            )
         fine = package.scene(position.scene_id).grid_json is not None
         if fine:
             self._world_actor_ready(sid, actor_id, navigation_scope=navigation_scope)
@@ -805,6 +816,8 @@ class WorldHandler:
         from .commands import OPERATIONS, TypedCommand, validate_command
 
         kind = next((k for k, v in OPERATIONS.items() if type(operation) is v), None)
+        if type(operation) in WORLD_CAPABILITY_OPERATIONS:
+            return self.objects.query(session_id, actor_id, operation, package, context=context)
         if type(operation) not in (
             StepActor,
             PlaceObject,
@@ -1124,6 +1137,8 @@ class WorldHandler:
             raise StateMachineError("unsupported_operation", "Unsupported automatic world effect")
         self._world_operation_capability(row, operation)
         sid = row["session_id"]
+        if type(operation) in WORLD_CAPABILITY_OPERATIONS:
+            return self.objects.operate(row, actor_id, operation, package)
         if type(operation) in (UnlockDoor, LockDoor):
             return self._operate_lock(row, actor_id, operation, package)
         if type(operation) is AdvanceGameTime:

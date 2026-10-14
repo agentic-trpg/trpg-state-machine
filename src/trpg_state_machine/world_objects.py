@@ -3,12 +3,68 @@
 from dataclasses import asdict
 
 from .errors import StateMachineError
+from .world_commands import BarObject, UnbarObject
 
 
 class WorldObjectService:
     def __init__(self, handler):
         self.handler = handler
         self.facts = handler.facts
+
+    def validate(self, row, actor_id, operation, package):
+        h, sid = self.handler, row["session_id"]
+        h._world_operation_capability(row, operation)
+        h._world_actor_ready(sid, actor_id)
+        h._manual_object_target(sid, actor_id, operation, package)
+        if h._actor_position(sid, actor_id).cell != operation.expected_cell:
+            raise StateMachineError("position_conflict", "Actor position changed")
+        definition = self.facts.object_definition(package, operation.object_id)
+        c = definition.capability("openable") if definition else None
+        if c is None or c.initial_barred is None:
+            raise StateMachineError("unsupported_object_capability", "Object has no bar")
+        if c.bar_operable_sides and operation.scene_id not in c.bar_operable_sides:
+            raise StateMachineError("operation_side_forbidden", "Bar inaccessible from this side")
+        if self.facts.object_hp(sid, operation.object_id) == 0:
+            raise StateMachineError("object_destroyed", "Destroyed object is unusable")
+        if (
+            type(operation) is BarObject
+            and self.facts.object(sid, operation.object_id)["state"] != "closed"
+        ):
+            raise StateMachineError("object_must_be_closed", "Close object before barring")
+
+    def query(self, sid, actor_id, operation, package, *, context):
+        from .commands import OPERATIONS, TypedCommand, validate_command
+        from .spatial import WorldActionAvailability
+
+        kind = next(k for k, v in OPERATIONS.items() if type(operation) is v)
+        validate_command(TypedCommand(sid, "query", actor_id, kind, operation, 0))
+        h = self.handler
+        with h._transaction():
+            h._spatial_reader(sid, actor_id, package, context)
+            row = h._conn.execute("SELECT * FROM sessions WHERE session_id=?", (sid,)).fetchone()
+            try:
+                self.validate(row, actor_id, operation, package)
+            except StateMachineError as exc:
+                return WorldActionAvailability("unavailable", exc.code, row["world_version"])
+            return WorldActionAvailability("available", "available", row["world_version"])
+
+    def operate(self, row, actor_id, operation, package):
+        self.validate(row, actor_id, operation, package)
+        h, sid = self.handler, row["session_id"]
+        barred = type(operation) is BarObject
+        if self.facts.openable_state(sid, operation.object_id)["barred"] == barred:
+            return []
+        self.facts.set_object_bar(sid, operation.object_id, barred)
+        return [
+            h._capture_event(
+                sid,
+                package,
+                "object.bar_changed",
+                {**asdict(operation), "barred": barred, "actor_id": actor_id},
+                phase="world.after_bar_update",
+                source_actor_id=actor_id,
+            )
+        ]
 
     def _visible(self, sid, actor_id, oid, package):
         h = self.handler
@@ -52,9 +108,33 @@ class WorldObjectService:
             if definition
             else (("openable",) if obj["state"] is not None else ())
         )
+        openable = self.facts.openable_state(sid, oid)
         hp = self.facts.object_hp(sid, oid)
         destroyed = hp == 0 if hp is not None else None
+        from ._operations import ObjectState, SetObjectState
+
+        position = self.handler._actor_position(sid, actor_id)
+        row = self.handler._conn.execute(
+            "SELECT * FROM sessions WHERE session_id=?", (sid,)
+        ).fetchone()
+        available = {}
+        for name, op in (
+            ("can_open", SetObjectState(position.scene_id, oid, ObjectState.OPEN)),
+            ("can_close", SetObjectState(position.scene_id, oid, ObjectState.CLOSED)),
+            ("can_bar", BarObject(position.scene_id, oid, position.cell)),
+            ("can_unbar", UnbarObject(position.scene_id, oid, position.cell)),
+        ):
+            try:
+                if isinstance(op, SetObjectState):
+                    self.handler._world_destination(row, actor_id, op, package)
+                else:
+                    self.validate(row, actor_id, op, package)
+                available[name] = True
+            except StateMachineError:
+                available[name] = False
         return {
+            **available,
+            "openable": openable,
             "current_hp": hp,
             "destroyed": destroyed,
             "durability": asdict(definition.capability("durability"))

@@ -98,3 +98,34 @@ Checks: W1+W2+legacy lock/navigation suite: 26 passed. Includes synthetic intern
 rollback, replay, stale/session/bounds rejection, destruction and reopen. These do
 not prove a genuine RE object attack path. Later batches must explicitly integrate
 destruction consequences for container/light/spatial combinations before accepting them.
+
+
+## W3 — independent open, jam and bar facts
+
+W2 commit d6cdfe2 pushed. W3 keeps objects.state as the only open/closed authority.
+Package Openable config specifies initial jam/bar, prevent_transitions jam policy,
+operation scene sides and bar sides. Absent bar is null, distinct from unbarred.
+Legacy definitions preserve previous behavior. DB 26→27 adds object_openables;
+old saves receive no invented jam/bar capability. Facts never commit.
+
+| Fields | Actual location | Class | Writer / consumer |
+|---|---|---|---|
+| initial open state/open_state | ObjectDefinition.state / objects.state | T/S | init, WorldFacts.switch / all door and navigation consumers |
+| initial_jammed/jammed, initial_barred/barred | Openable / object_openables | T/S | init, set_object_bar / switch inhibitors |
+| jam/bar/access policies and sides | Openable typed config | T/R | Package / WorldHandler target admission |
+| passage/door/endpoints/standing/threshold | existing PassageDefinition | T/R | Package / shared two-sided door, navigation |
+| can_open/close/bar/unbar | authorized object view + same pure validators | D | derived / callers |
+| passage availability | existing _door_closed + latest topology | D | derived per step / Activity execution |
+
+Open/Close use existing SetObjectState; BarObject/UnbarObject are registered in the
+closed command union/parser, authorization, query and noncombat dispatch. Sync and
+async submission supported. Player and explicitly controlled NPC may submit typed
+commands; NPC Evaluation intent conversion for bar is not implemented. ForceOpen,
+Unjam and combat interactions remain unsupported. Existing NPC open/close intents
+and navigation still use their established conversion.
+
+Legacy SetObjectState, automatic PackageEffects and internal WorldFacts.switch all
+check durability, jam, bar and locks. No implicit unlock/unbar or force check.
+Evidence is captured after the bar update in the shared command transaction.
+Checks cover query/parser, retry, bar/open separation, jam, legacy locks/navigation;
+all focused tests must pass before W3 commit. No independent caches exist.

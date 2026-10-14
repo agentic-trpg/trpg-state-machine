@@ -7,6 +7,11 @@ from .package import _fail, _identifier, _list, _mapping, _reference, _text, _un
 
 @dataclass(frozen=True, slots=True)
 class Openable:
+    initial_jammed: bool = False
+    initial_barred: bool | None = None
+    jam_policy: str = "prevent_transitions"
+    operation_sides: tuple[str, ...] = ()
+    bar_operable_sides: tuple[str, ...] = ()
     kind: str = "openable"
 
 
@@ -69,6 +74,8 @@ def validate_world_objects(raw, scenes):
             _fail("schema_error", p, "Weight is a nonnegative integer in pounds or unknown")
         capabilities = []
         for config in _list(d["capabilities"], p + ".capabilities"):
+            if not isinstance(config, dict):
+                _fail("schema_error", p, "Capability must be a mapping")
             if isinstance(config, dict) and config.get("kind") == "durability":
                 c = _mapping(
                     config,
@@ -96,12 +103,40 @@ def validate_world_objects(raw, scenes):
                     _fail("unsupported_mechanism", p, "Unknown damage/destruction policy")
                 capabilities.append(Durability(**c))
                 continue
-            c = _mapping(config, "kind", p + ".capabilities")
+            c = _mapping(
+                {
+                    "initial_jammed": False,
+                    "initial_barred": None,
+                    "jam_policy": "prevent_transitions",
+                    "operation_sides": [],
+                    "bar_operable_sides": [],
+                    **config,
+                },
+                "kind initial_jammed initial_barred jam_policy operation_sides bar_operable_sides",
+                p + ".capabilities",
+            )
             if c["kind"] != "openable":
                 _fail("unsupported_object_capability", p, "Unknown capability")
             if objects[d["object_id"]].state is None:
                 _fail("invalid_reference", p, "Openable requires an initial open state")
-            capabilities.append(Openable())
+            jammed, barred = c.get("initial_jammed", False), c.get("initial_barred")
+            if type(jammed) is not bool or (barred is not None and type(barred) is not bool):
+                _fail("schema_error", p, "Invalid openable state")
+            if c.get("jam_policy", "prevent_transitions") != "prevent_transitions":
+                _fail("unsupported_mechanism", p, "Unsupported jam policy")
+            sides, bar_sides = [], []
+            for field, target in (("operation_sides", sides), ("bar_operable_sides", bar_sides)):
+                for scene_id in _list(c.get(field, []), p):
+                    _reference(scene_id, {s.scene_id for s in scenes}, p)
+                    target.append(scene_id)
+                _unique(target, p)
+            if barred is True and objects[d["object_id"]].state != "closed":
+                _fail("invalid_reference", p, "Barred object must be closed")
+            if barred is None and bar_sides:
+                _fail("invalid_reference", p, "Bar sides need a bar capability")
+            capabilities.append(
+                Openable(jammed, barred, "prevent_transitions", tuple(sides), tuple(bar_sides))
+            )
         _unique([c.kind for c in capabilities], p)
         if (objects[d["object_id"]].state is not None) != any(
             c.kind == "openable" for c in capabilities

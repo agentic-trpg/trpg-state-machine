@@ -35,6 +35,7 @@ from .navigation_models import (
     StartNavigation,
 )
 from .package import canonical_json
+from .world_commands import WORLD_CAPABILITY_COMMANDS, BarObject, UnbarObject
 
 OPERATIONS = {
     "world.unlock_door": UnlockDoor,
@@ -60,6 +61,8 @@ OPERATIONS = {
     "move_actor": MoveActor,
 }
 
+OPERATIONS.update(WORLD_CAPABILITY_COMMANDS)
+
 
 @dataclass(frozen=True, slots=True)
 class CheckWorldEffects:
@@ -78,7 +81,9 @@ class TypedCommand:
     actor_id: str
     command_type: str
     payload: (
-        EnterScene
+        BarObject
+        | UnbarObject
+        | EnterScene
         | SetSceneFlag
         | SetObjectState
         | MoveActor
@@ -411,6 +416,7 @@ def world_command_from_data(data):
         raise StateMachineError("invalid_command", "Expected the complete local command envelope")
     kind = data["command_type"]
     if type(kind) is not str or kind not in (
+        *WORLD_CAPABILITY_COMMANDS,
         "world.step_actor",
         "world.traverse_passage",
         "world.place_object",
