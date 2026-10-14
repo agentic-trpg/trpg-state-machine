@@ -500,6 +500,11 @@ class WorldFacts:
             obj = self.object(sid, d.object_id)
             if obj is None or obj["scene_id"] != scene_id:
                 continue
+            if c := d.capability("mechanism"):
+                self._conn.execute(
+                    "INSERT INTO object_mechanisms VALUES (?,?,?)",
+                    (sid, d.object_id, c.initial_status),
+                )
             if c := d.capability("light"):
                 self._conn.execute(
                     "INSERT INTO object_lights VALUES (?,?,?,?)",
@@ -519,6 +524,21 @@ class WorldFacts:
                 self._conn.execute(
                     "INSERT INTO object_durability VALUES (?,?,?)", (sid, d.object_id, c.initial_hp)
                 )
+
+    def mechanism_status(self, sid, oid):
+        row = self._conn.execute(
+            "SELECT status FROM object_mechanisms WHERE session_id=? AND object_id=?", (sid, oid)
+        ).fetchone()
+        return row[0] if row else None
+
+    def consume_mechanism(self, sid, oid):
+        self.store.require_write()
+        if not self._conn.execute(
+            "UPDATE object_mechanisms SET status='spent' "
+            "WHERE session_id=? AND object_id=? AND status='armed'",
+            (sid, oid),
+        ).rowcount:
+            raise StateMachineError("mechanism_spent", "Mechanism is not armed")
 
     def light_state(self, sid, oid):
         row = self._conn.execute(

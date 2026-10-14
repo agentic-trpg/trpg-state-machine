@@ -29,6 +29,7 @@ from .navigation_models import (
 from .package import load_adventure_package
 from .service import StateMachine
 from .world_commands import (
+    ActivateMechanism,
     BarObject,
     LockObject,
     PutItem,
@@ -41,6 +42,7 @@ from .world_commands import (
 )
 
 __all__ = [
+    "ActivateMechanism",
     "SetLightEnabled",
     "SwitchLightMode",
     "RepositionObject",

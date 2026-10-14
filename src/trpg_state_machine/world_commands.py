@@ -75,7 +75,15 @@ class SwitchLightMode:
     mode: str
 
 
+@dataclass(frozen=True, slots=True)
+class ActivateMechanism:
+    scene_id: str
+    object_id: str
+    expected_cell: str
+
+
 WORLD_CAPABILITY_COMMANDS = {
+    "world.activate_mechanism": ActivateMechanism,
     "world.set_light_enabled": SetLightEnabled,
     "world.switch_light_mode": SwitchLightMode,
     "world.reposition_object": RepositionObject,
@@ -96,4 +104,5 @@ WORLD_CAPABILITY_OPERATIONS = (
     RepositionObject,
     SetLightEnabled,
     SwitchLightMode,
+    ActivateMechanism,
 )

@@ -1,6 +1,7 @@
 """Explicit immutable object definitions, pinned by the Session package digest."""
 
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
+from typing import Literal
 
 from .package import _fail, _identifier, _list, _mapping, _reference, _text, _unique
 
@@ -21,7 +22,7 @@ class Durability:
     max_hp: int
     initial_hp: int
     damage_profile_ref: str
-    damage_threshold: int | None
+    damage_threshold: int | None | Literal["unknown"]
     destruction_policy_ref: str
     kind: str = "durability"
 
@@ -43,8 +44,8 @@ class LockSet:
 
 @dataclass(frozen=True, slots=True)
 class Container:
-    capacity_weight_lb: int | None
-    capacity_volume_cu_ft: int | None
+    capacity_weight_lb: int | None | Literal["unknown"]
+    capacity_volume_cu_ft: int | None | Literal["unknown"]
     opening_profiles: tuple[str, ...]
     allowed_content_kinds: tuple[str, ...]
     nesting_limit: int
@@ -83,6 +84,23 @@ class LightEmitter:
 
 
 @dataclass(frozen=True, slots=True)
+class MechanismAction:
+    kind: str
+    target_object_id: str
+    value: str | bool
+
+
+@dataclass(frozen=True, slots=True)
+class Mechanism:
+    trigger_kind: str
+    trigger_conditions: str
+    initial_status: str
+    reset_policy: str
+    actions: tuple[MechanismAction, ...]
+    kind: str = "mechanism"
+
+
+@dataclass(frozen=True, slots=True)
 class WorldObjectDefinition:
     object_id: str
     definition_ref: str
@@ -102,11 +120,13 @@ class WorldObjectDefinition:
         return next((c for c in self.capabilities if c.kind == kind), None)
 
 
-def validate_world_objects(raw, scenes, portable=(), legacy_locks=()):
+def validate_world_objects(raw, scenes, portable=(), legacy_locks=(), passages=()):
     result = []
     objects = {o.object_id: o for s in scenes for o in s.objects}
     for value in _list(raw, "world_objects"):
         p = "world_objects"
+        if type(value) is not dict:
+            _fail("schema_error", p, "Definition must be a mapping")
         d = _mapping(
             {"volume_cu_ft": None, "fit_profile": None, "content_kind": None, **value},
             "volume_cu_ft fit_profile content_kind object_id definition_ref "
@@ -145,6 +165,34 @@ def validate_world_objects(raw, scenes, portable=(), legacy_locks=()):
         for config in _list(d["capabilities"], p + ".capabilities"):
             if not isinstance(config, dict):
                 _fail("schema_error", p, "Capability must be a mapping")
+            if config.get("kind") == "mechanism":
+                c = _mapping(
+                    config,
+                    "kind trigger_kind trigger_conditions initial_status reset_policy actions",
+                    p,
+                )
+                if (
+                    c["trigger_kind"],
+                    c["trigger_conditions"],
+                    c["initial_status"],
+                    c["reset_policy"],
+                ) != ("manual", "actor_adjacent", "armed", "none"):
+                    _fail("unsupported_mechanism", p, "Only one-shot adjacent manual mechanisms")
+                actions = []
+                for value in _list(c["actions"], p, nonempty=True):
+                    a = _mapping(value, "kind target_object_id value", p)
+                    _reference(a["target_object_id"], objects, p)
+                    if (
+                        (a["kind"] == "set_open_state" and a["value"] not in ("open", "closed"))
+                        or (a["kind"] == "set_light_enabled" and type(a["value"]) is not bool)
+                        or a["kind"] not in ("set_open_state", "set_light_enabled")
+                    ):
+                        _fail("unsupported_mechanism", p, "Unknown linked capability result")
+                    actions.append(MechanismAction(**a))
+                if len(actions) > 8:
+                    _fail("unsupported_mechanism", p, "At most eight synchronous results")
+                capabilities.append(Mechanism(**{**c, "actions": tuple(actions)}))
+                continue
             if config.get("kind") == "light":
                 c = _mapping(
                     config,
@@ -230,7 +278,7 @@ def validate_world_objects(raw, scenes, portable=(), legacy_locks=()):
                     p,
                 )
                 for field in ("capacity_weight_lb", "capacity_volume_cu_ft"):
-                    if c[field] is not None and (
+                    if c[field] not in (None, "unknown") and (
                         type(c[field]) is not int or not 0 <= c[field] <= 2147483647
                     ):
                         _fail("schema_error", p, "Capacity is a known limit or explicitly unset")
@@ -296,7 +344,7 @@ def validate_world_objects(raw, scenes, portable=(), legacy_locks=()):
                     and c["max_hp"] > 0
                 ):
                     _fail("schema_error", p, "Invalid durability bounds")
-                if c["damage_threshold"] is not None and (
+                if c["damage_threshold"] not in (None, "unknown") and (
                     type(c["damage_threshold"]) is not int
                     or not 0 <= c["damage_threshold"] <= 2147483647
                 ):
@@ -358,9 +406,58 @@ def validate_world_objects(raw, scenes, portable=(), legacy_locks=()):
             c.kind == "openable" for c in capabilities
         ):
             _fail("invalid_reference", p, "Locks require an openable capability")
+        spatial = next((c for c in capabilities if c.kind == "spatial"), None)
+        if (
+            spatial
+            and d["object_id"] in {p.door_object_id for p in passages}
+            and (spatial.footprint != ((0, 0),) or spatial.mobility_policy != "fixed")
+        ):
+            _fail(
+                "unsupported_mechanism", p, "Shared doors require fixed single-threshold geometry"
+            )
+        durability = next((c for c in capabilities if c.kind == "durability"), None)
+        if (
+            durability
+            and durability.destruction_policy_ref == "disable_spatial_policy"
+            and not spatial
+        ):
+            _fail("invalid_reference", p, "Spatial destruction policy needs spatial capability")
         result.append(WorldObjectDefinition(**{**d, "capabilities": tuple(capabilities)}))
     _unique([d.object_id for d in result], "world_objects")
     _unique(
-        [lock.lock_id for d in result if (c := d.capability("locks")) for lock in c.locks], "locks"
+        ["lock." + legacy.object_id for legacy in legacy_locks]
+        + [lock.lock_id for d in result if (c := d.capability("locks")) for lock in c.locks],
+        "locks",
     )
+    references = {}
+    for definition in result:
+        template = asdict(definition)
+        template.pop("object_id")
+        if (
+            definition.definition_ref in references
+            and references[definition.definition_ref] != template
+        ):
+            _fail(
+                "invalid_reference",
+                "world_objects",
+                "One definition reference cannot name different templates",
+            )
+        references[definition.definition_ref] = template
+    definitions = {d.object_id: d for d in result}
+    for d in result:
+        mechanism = d.capability("mechanism")
+        if mechanism:
+            for action in mechanism.actions:
+                target = definitions.get(action.target_object_id)
+                required = "openable" if action.kind == "set_open_state" else "light"
+                if (
+                    target is None
+                    or target.capability(required) is None
+                    or target.capability("mechanism")
+                ):
+                    _fail(
+                        "invalid_reference",
+                        "world_objects",
+                        "Linked target lacks capability or is recursive",
+                    )
     return tuple(result)

@@ -30,6 +30,15 @@ class ObjectDurabilityService:
         h.store.require_write()
         if type(result) is not _ObjectHPSettlement or type(origin) is not _WorldEffectOrigin:
             raise StateMachineError("invalid_rule_result", "Expected an internally admitted result")
+        if (
+            any(
+                type(value) is not str or not 0 < len(value) <= 256
+                for value in (result.session_id, result.object_id, result.resolution_id)
+            )
+            or type(result.expected_world_version) is not int
+            or result.expected_world_version < 0
+        ):
+            raise StateMachineError("invalid_rule_result", "Invalid settlement identities/version")
         execution = _execution_data(None, origin)
         if result.session_id != row["session_id"] or not result.resolution_id:
             raise StateMachineError("invalid_rule_result", "Result session/source mismatch")

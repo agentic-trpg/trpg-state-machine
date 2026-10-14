@@ -104,3 +104,15 @@ def test_no_public_damage_backdoor():
                 "schema_version": "sm-command/1",
             }
         )
+
+
+def test_unknown_threshold_is_preserved_and_not_reinterpreted_as_no_threshold(tmp_path, context):
+    d = durability_data()
+    d["world_objects"][0]["capabilities"][-1]["damage_threshold"] = "unknown"
+    sm, sid, p, _ = setup(tmp_path, context, d)
+    with sm:
+        actor = sm.read_session(sid, p, context=context).pc_actor_id
+        assert (
+            sm.get_object(sid, actor, DOOR, p, context=context)["durability"]["damage_threshold"]
+            == "unknown"
+        )

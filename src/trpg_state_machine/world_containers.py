@@ -119,6 +119,10 @@ class ContainerService:
                 (c.capacity_weight_lb, weights),
                 (c.capacity_volume_cu_ft, volumes),
             ):
+                if limit == "unknown":
+                    raise StateMachineError(
+                        "unknown_container_capacity", "Container capacity is unknown"
+                    )
                 if limit is not None:
                     if any(v is None for v in values):
                         raise StateMachineError(

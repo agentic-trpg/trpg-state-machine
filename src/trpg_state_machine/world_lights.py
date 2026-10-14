@@ -138,10 +138,14 @@ class LightService:
         if type(op) is not SetLightEnabled and op.mode not in {m.mode_id for m in c.modes}:
             raise StateMachineError("unsupported_light_mode", "Undeclared light mode")
 
-    def operate(self, row, actor, op, package, *, linked=False):
+    def operate(self, row, actor, op, package, *, origin=None):
         h, sid = self.h, row["session_id"]
-        if not linked:
+        if origin is None:
             self.validate(row, actor, op, package)
+        else:
+            h.objects.mechanisms.qualify_link(
+                sid, origin, op.object_id, "set_light_enabled", op.enabled, package
+            )
         c = self.config(package, op.object_id)
         if c is None or h.facts.object_hp(sid, op.object_id) == 0:
             raise StateMachineError("unsupported_object_capability", "Emitter unavailable")
@@ -177,13 +181,19 @@ class LightService:
         return events
 
     def query_illumination(self, sid, actor, cell, package, *, context):
+        if type(cell) is not str or not 0 < len(cell) <= 128:
+            raise StateMachineError("invalid_query", "Cell must be a bounded coordinate string")
         h = self.h
         with h._transaction():
             position = h._spatial_reader(sid, actor, package, context)
             h._public_scope(sid, actor, package)
             raw = h._spatial_scene(sid, position.scene_id)["grid"]
             topology = GridTopology(GridScene(**raw))
-            if not topology.has_line_of_sight(position.cell, cell):
+            try:
+                visible_cell = topology.has_line_of_sight(position.cell, cell)
+            except (ValueError, TypeError) as exc:
+                raise StateMachineError("invalid_query", "Invalid grid coordinate") from exc
+            if not visible_cell:
                 raise StateMachineError("invalid_target", "No authorized local position")
             grid, uncertain, sources = self.project(sid, position.scene_id, package, raw)
             visible = []

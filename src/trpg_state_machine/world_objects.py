@@ -4,6 +4,7 @@ from dataclasses import asdict
 
 from .errors import StateMachineError
 from .world_commands import (
+    ActivateMechanism,
     BarObject,
     LockObject,
     PutItem,
@@ -16,6 +17,7 @@ from .world_commands import (
 )
 from .world_containers import ContainerService
 from .world_lights import LightService
+from .world_mechanisms import MechanismService
 from .world_spatial import ObjectSpatialService
 
 
@@ -26,9 +28,13 @@ class WorldObjectService:
         self.containers = ContainerService(handler)
         self.spatial = ObjectSpatialService(handler)
         self.lights = LightService(handler)
+        self.mechanisms = MechanismService(handler)
 
     def validate(self, row, actor_id, operation, package):
         h, sid = self.handler, row["session_id"]
+        if type(operation) is ActivateMechanism:
+            self.mechanisms.validate(row, actor_id, operation, package)
+            return
         if type(operation) in (SetLightEnabled, SwitchLightMode):
             self.lights.validate(row, actor_id, operation, package)
             return
@@ -80,7 +86,9 @@ class WorldObjectService:
                 return WorldActionAvailability("unavailable", exc.code, row["world_version"])
             return WorldActionAvailability("available", "available", row["world_version"])
 
-    def operate(self, row, actor_id, operation, package):
+    def operate(self, row, actor_id, operation, package, *, source_command_id=None):
+        if type(operation) is ActivateMechanism:
+            return self.mechanisms.operate(row, actor_id, operation, package, source_command_id)
         if type(operation) in (SetLightEnabled, SwitchLightMode):
             return self.lights.operate(row, actor_id, operation, package)
         if type(operation) is RepositionObject:
@@ -165,6 +173,7 @@ class WorldObjectService:
         ).fetchone()
         available = {}
         for name, op in (
+            ("can_activate", ActivateMechanism(position.scene_id, oid, position.cell)),
             ("can_open", SetObjectState(position.scene_id, oid, ObjectState.OPEN)),
             ("can_close", SetObjectState(position.scene_id, oid, ObjectState.CLOSED)),
             ("can_bar", BarObject(position.scene_id, oid, position.cell)),
@@ -192,6 +201,8 @@ class WorldObjectService:
             and definition.weight_lb is not None
             and total_weight is not None
             else None,
+            "mechanism_status": self.facts.mechanism_status(sid, oid),
+            "linked_result_preview": "hidden" if self.mechanisms.config(package, oid) else None,
             "light": self.facts.light_state(sid, oid),
             "spatial": asdict(self.spatial.config(package, oid))
             if self.spatial.config(package, oid)
@@ -220,6 +231,8 @@ class WorldObjectService:
         }
 
     def get_object(self, sid, actor_id, oid, package, *, context):
+        if type(oid) is not str or not 0 < len(oid) <= 256:
+            raise StateMachineError("invalid_query", "Object identity must be a bounded string")
         h = self.handler
         with h._transaction():
             h._spatial_reader(sid, actor_id, package, context)

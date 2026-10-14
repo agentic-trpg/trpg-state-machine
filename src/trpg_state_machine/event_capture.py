@@ -33,6 +33,8 @@ class EventCapture:
             "item.picked_up": "Someone picks up an item.",
             "item.container_transferred": "Someone transfers an item.",
             "item.dropped": "Someone puts down an item.",
+            "mechanism.activated": "Someone activates a mechanism.",
+            "mechanism.spent": "A mechanism completes its operation.",
             "object.light_changed": "Someone operates a light source.",
             "object.bar_changed": "Someone operates an object bar.",
             "object.durability_changed": "An object is damaged.",
@@ -94,7 +96,9 @@ class EventCapture:
         self.store.require_write()
         signals = self._event_signals(package, event_type, payload, source_actor_id)
         evidence = {
-            "schema": "event-evidence/5"
+            "schema": "event-evidence/6"
+            if any(d.capability("light") for d in package.world_objects)
+            else "event-evidence/5"
             if any(s.grid_json or any(o.state is None for o in s.objects) for s in package.scenes)
             else "event-evidence/4",
             "world_version": None,
@@ -203,7 +207,7 @@ class EventCapture:
             cell = self._current_evidence_cell(
                 sid, actor, topologies.get(actor["current_scene_id"])
             )
-            if evidence["schema"] == "event-evidence/5":
+            if evidence["schema"] in ("event-evidence/5", "event-evidence/6"):
                 actor["cell"] = cell
             definition = next((a for a in package.actors if a.actor_id == actor["actor_id"]), None)
             actor["senses"] = dict(definition.senses) if definition and definition.senses else None
@@ -226,7 +230,7 @@ class EventCapture:
                     "cell": cell,
                 }
             )
-        if evidence["schema"] == "event-evidence/5":
+        if evidence["schema"] in ("event-evidence/5", "event-evidence/6"):
             for oid, obj in evidence["objects"].items():
                 obj["cell"] = self.world.object_position(sid, oid)["cell"]
 

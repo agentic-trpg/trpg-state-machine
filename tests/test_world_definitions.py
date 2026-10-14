@@ -62,3 +62,10 @@ def test_invalid_definitions_rejected(mutation):
         obj["capabilities"] = []
     with pytest.raises(StateMachineError):
         _validate(data)
+
+
+def test_one_definition_reference_cannot_name_conflicting_templates():
+    data = world_data()
+    data["world_objects"][1]["definition_ref"] = data["world_objects"][0]["definition_ref"]
+    with pytest.raises(StateMachineError):
+        _validate(data)

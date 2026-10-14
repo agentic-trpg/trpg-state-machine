@@ -37,6 +37,7 @@ from .navigation_models import (
 from .package import canonical_json
 from .world_commands import (
     WORLD_CAPABILITY_COMMANDS,
+    ActivateMechanism,
     BarObject,
     LockObject,
     PutItem,
@@ -92,7 +93,8 @@ class TypedCommand:
     actor_id: str
     command_type: str
     payload: (
-        SetLightEnabled
+        ActivateMechanism
+        | SetLightEnabled
         | SwitchLightMode
         | RepositionObject
         | PutItem
@@ -360,7 +362,11 @@ class CommandRuntime:
                             self._initialize_combat(row, package, prepared)
                             if isinstance(command.payload, InitializeCombat)
                             else self._operate(
-                                row, package, command.payload, actor_id=command.actor_id
+                                row,
+                                package,
+                                command.payload,
+                                actor_id=command.actor_id,
+                                source_command_id=command.command_id,
                             )
                         )
                     events = self._expand_events(row, package, events, command.command_id)

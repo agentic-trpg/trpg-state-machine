@@ -319,3 +319,140 @@ W7 review/validation: 85 Perception/evidence/spatial cases passed in the combine
 endpoint check. Fixed it and reran all six light cases successfully, including
 that regression and internal destroyed-emitter adoption. Ruff and format pass.
 The synthetic destruction test proves contribution removal, not an object attack.
+
+
+## W8 — one-shot mechanism and complete public scenario
+
+W7 3bf1989 pushed after checking the same authorized origin and explicit attachment
+push instruction. DB 30→31 adds object_mechanisms, empty for old saves. No new event
+queue, command transaction layer or timer exists. Manual actor-adjacent triggers,
+armed→spent and reset=none are supported; automatic pressure/weight triggers are not.
+
+| Fields | Actual model/storage | Class | Writer / consumer |
+|---|---|---|---|
+| mechanism definition, trigger and conditions/reset | strict Mechanism config | T/R | Package / MechanismService |
+| status initial/armed/spent | Mechanism.initial_status / object_mechanisms | T/S | init, WorldFacts.consume_mechanism / query, admission |
+| ordered actions/target capability | MechanismAction tuple of set_open_state/set_light_enabled | T/R | Package validation / preflight, internal capability calls |
+| source command/activation/adoption | existing trigger_history + source first event | R | shared mechanism commit / replay, unique one-shot adoption |
+| invocation_origin | existing private _WorldEffectOrigin kind=MECHANISM | internal | admitted graph constructs / target+value qualification |
+| can_activate/linked_result_preview | object view and same validators; targets hidden | D | derived / authorized query |
+| region/multiple uses/disabled/reset clock | deferred | conditional | no automatic, multi-use or disabling consumer |
+
+ActivateMechanism is registered in both closed operation unions, wire parser,
+authorization, sync/async submission and availability query. The trusted command ID
+travels internally; callers cannot submit an invocation origin. Result target/value
+must belong to the admitted immutable graph. No boolean bypass or nested public
+submission. Locks, jam, bar, HP and door occupancy are prechecked, then rechecked
+against sequential candidate state. Target already at value is a result no-op;
+a successful chain still consumes the one-shot mechanism. Any forbidden result,
+missing target, evidence/adoption/storage failure rolls back the entire command.
+Recursive/self/other-mechanism targeting, arbitrary scripts and damage results are
+rejected during Package validation. NPC Evaluation conversion is not implemented;
+explicit trusted control remains available. Scope/evidence follow each target scene,
+not a broadcast to all NPCs. Trigger adoption reuses source event and command IDs.
+
+### Original scenario
+
+`examples/fixtures/world_station.yaml` and `examples/world_station.py` are standalone
+runtime artifacts; the example does not import tests. The Prism Relay has shared
+locked door, real distinct credential tokens, separately locked case, nested pouch,
+portable bead/fixed ordinary scenario emitters, multi-cell workshop obstacle and
+one-shot lever. Mechanical token slugs do not imply official container/light rules.
+
+The example performs real pickup, put and take, confirms closed nested key denial,
+confirms locked-target lever failure, saves/closes the first process, restores in a
+new Python process, replays the original receipt, unlocks case/door, activates lever,
+crosses the shared passage, records actual blocked movement, performs explicitly
+trusted GM placement and navigates through the cleared route. The portable source
+moves with the nested carrier chain. Result: workshop (1,0), world_version 32,
+event_seq 49 in the demonstrated run, bright local illumination; no invented attack.
+Its report separates real_player_paths, gm_management_paths and internal_synthetic_tests.
+
+### W8 review fixes and proof boundaries
+
+- Fixed the Perception evidence parser gap found in W7: new writes use /6 with strict
+  light metadata validation; /4, /5 and the explicit W7 extended-/5 shape remain
+  readable. Real public project_event and authorized Observation tests pass; source
+  debug lists are removed before Host/JEV judgment. No retroactive evidence rebuild.
+- Public carried-item view now hides inaccessible contained entries, in addition to
+  hiding closed object contents/weights/source IDs. Trusted mechanical snapshots
+  retain complete authoritative entries with accessible=false. No cognition fields
+  were added to World. The example and nested-key tests verify the boundary.
+- Strengthened spatial audit against legacy blockers and passage reserved cells;
+  shared doors are limited to fixed single-threshold geometry until orientation
+  semantics exist. Spatial destruction policy requires its actual capability.
+- Strengthened internal settlement identity/version types and invalid read inputs;
+  no player HP patch or user-provided trusted-origin flag was added.
+
+The exact W4/W8 reviews, validation output and remaining integration paths are in
+`docs/reviews/WORLD_W1_W8_REVIEW.md`. Final all-test partitions and static checks
+are required before W8 commit/push. This is noncombat local capability delivery,
+not full PHB/DMG/MM coverage or an authenticated HTTP/Host integration.
+
+## Remaining original field catalog coverage
+
+| Original direction | Handling in this implementation |
+|---|---|
+| WorldState/session/rules/time | existing Session binding and world_states.game_tick; abstract game ticks, no seconds/fuel conversion invented |
+| Calendar/date/day/night/due time | deferred: no calendar consumer; existing Activity/Effects own their established due work |
+| Scene definition/flags/visited/spatial | existing Package SceneDefinition and scene_instances; no actors re-created on revisit |
+| actors/objects/exits projections | actual CharacterFacts positions, unique object parent chain and current shared passages |
+| Terrain/barriers/grids | existing static grid untouched; W6 current movement footprints only; complex terrain/flight/fall left to actual RE paths |
+| identity/material/size/weight/placement/durability | W1/W2/W5/W6 tables and mappings above; unknown measurements remain unknown |
+| openable/locks/container/light/mechanism | W3/W4/W5/W7/W8 capabilities and actual consumers above |
+| uninstantiated quantities/resource pools | deferred; existing object item units retain quantity/charges, no duplicate fuel balance |
+| environment/weather/water/temperature/severity | deferred; only existing base illumination and required spatial inputs used |
+| concealment/sensory/discovery | existing Signals/Scope/Evidence/Perception; no World discovered_by/password/memory fields |
+| generic interactions | closed typed operations and shared validators; no script interpreter, arbitrary patch or cooldown table |
+| interaction progress/cooldowns | deferred to actual Activity/Effects support; no empty object progress system |
+| persistent magic/area/lifecycle | existing mechanical Effects remain authoritative; no new magic or World lifecycle |
+| arbitrary attachment/vehicles/lair/planes/Bastion | deferred; no consumer required for these eight bounded batches |
+
+## Integration boundaries and merge readiness
+
+RE dependency/version unchanged. Needed future work: real object-target settlement
+ABI and Adapter/RNG/resource chain for attacks/repair; Combat eligibility/cost/
+reaction sequencing and dynamic environment snapshot; Activity/tool semantics for
+picking/forcing; Effects for magical light/darkness/sunlight and lifecycles; explicit
+vision-occlusion/Cover adapter for dynamic geometry; finite fuel with authoritative
+tick/accounting; NPC Evaluation intent DTO/conversion for newly introduced commands.
+Existing NPC open/close, unique-door lock and pickup/drop/navigation intents still
+use the actual reliable handoff path and are covered by the existing suite.
+
+No main merge is performed. Local delivery is reviewable subject to final tests and
+these explicit supported-range limits. The original checkout's GC5 remains excluded;
+its independent uncommitted migration 26 cannot be combined by copying this branch's
+schema number. Integration must renumber and test both migration histories first.
+
+
+Final field review clarification: `damage_threshold=None` means no applicable
+threshold, while literal `"unknown"` preserves an unknown threshold. Container
+capacity `None` explicitly omits that limit; `"unknown"` refuses adding contents
+with unknown_container_capacity. Item measurements remain nullable unknown and
+never become zero. Definition references cannot name conflicting templates, and
+legacy/new lock declarations share one unique lock-ID namespace.
+
+
+## Final delivery verification
+
+Frozen-code full regression: **1,259 passed**, all four complete file partitions
+exit 0: 314 / 396 / 242 / 307. Runtime: isolated locked Python 3.12.14 environment.
+Final logs: `.test-tmp/world-final0.log` (113.07s), `world-final1.log` (96.57s),
+`world-final2.log` (116.88s), `world-final3.log` (74.68s). Two existing upstream
+Lark deprecation warnings per test process; no test skips or failures in the final
+runs. Ruff check, Ruff format check (148 files), and git diff --check pass.
+
+The first final pass found two facade-composition failures; both were fixed by
+WorldHandler-owned service assembly and complete affected partitions passed.
+After the final unknown-field regressions were added, **every partition was rerun
+on the frozen implementation**, yielding the 1,259-case clean result above.
+
+Remote main was read-only verified at 1fa7cea5dab7bb95f3f6fa975f8e681c691937a6
+before W8 delivery. Only origin/feat/world-w1-w8 is pushed. The original checkout
+remains at the original HEAD with its same GC5 dirty-file list; the delivered code
+is in this isolated checkout and the task remote branch. No reset/stash/main merge.
+
+Within the documented noncombat scope this branch is ready for merge review.
+The open RE/Combat/Activity/Effects/Perception/NPC boundaries above remain explicit
+limits, not completed integration. Combining GC5 first requires migration conflict
+resolution and combined testing. No automatic merge is performed.

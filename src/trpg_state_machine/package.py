@@ -803,7 +803,7 @@ def _validate(data: dict, *, allow_legacy_audit=False) -> AdventurePackage:
     from .world_package import validate_world_objects
 
     world_objects = (
-        validate_world_objects(root["world_objects"], scenes, portable, lockable)
+        validate_world_objects(root["world_objects"], scenes, portable, lockable, passages)
         if world_enabled
         else ()
     )

@@ -273,3 +273,34 @@ def test_destroyed_emitter_ceases_contributing_without_identity_loss(tmp_path, c
         adopt(sm, sid, p, context, _ObjectHPSettlement(sid, CRED, "destroy.emitter", version, 5, 0))
         assert sm.get_illumination(sid, actor, "1,0", p, context=context)["illumination"] == "dark"
         assert sm.get_object(sid, actor, CRED, p, context=context)["destroyed"]
+
+
+def test_real_perception_projection_accepts_light_evidence_and_filters_source_debug(
+    tmp_path, context
+):
+    from lock_support import NPC
+
+    from trpg_state_machine.perception import JudgmentResult, NPCContext, SignalJudgment
+
+    sm, sid, p, _ = setup(tmp_path, context, lighting_data())
+    with sm:
+        sm.grant_npc_access(sid, NPC, "agent:light", p, context=context)
+        receipt = submit(sm, sid, p, context, SetLightEnabled(A, CRED, "0,0", True), "on")
+        requests = []
+
+        def notice(request):
+            assert not sm._conn.in_transaction
+            for environment in request.evidence["environments"].values():
+                assert "lighting_sources" not in environment
+            requests.append(request)
+            return JudgmentResult(tuple(SignalJudgment(s.signal_id, True) for s in request.signals))
+
+        for event in sm.read_events(sid, p, context=context):
+            assert (
+                sm.project_event(sid, event.event_seq, p, context=context, judgment=notice)
+                == "resolved"
+            )
+        assert requests
+        assert evidence(sm, sid, receipt.event_seqs[-1])["schema"] == "event-evidence/6"
+        observations = sm.read_observations(sid, p, context=NPCContext("agent:light", sid, NPC))
+        assert observations

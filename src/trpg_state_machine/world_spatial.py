@@ -109,12 +109,24 @@ class ObjectSpatialService:
             base = h._base_topology(sid, scene.scene_id)
             actors, objects = h._scene_occupants(sid, scene.scene_id, package)
             occupied = {cell for _, cell in actors}
-            blocking = set()
+            legacy = {o.object_id: o for s in package.scenes for o in s.objects}
+            blocking = {
+                cell
+                for oid, cell in objects
+                if self.config(package, oid) is None and legacy[oid].blocks_passage
+            }
+            reserved = {
+                cell
+                for passage in package.passages
+                for e in passage.endpoints
+                if e.scene_id == scene.scene_id
+                for cell in (e.threshold_cell, e.standing_cell)
+            }
             for oid, anchor in objects:
                 if self.config(package, oid) is None or oid in doors:
                     continue
                 cells = self.cells(package, oid, anchor)
-                if any(not base.is_valid_cell(cell) for cell in cells):
+                if set(cells) & reserved or any(not base.is_valid_cell(cell) for cell in cells):
                     raise StateMachineError(
                         "invalid_spatial_state", "Object footprint conflicts with grid"
                     )

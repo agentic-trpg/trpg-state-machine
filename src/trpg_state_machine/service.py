@@ -56,7 +56,6 @@ from .rules_adapter import RulesAdapter
 from .session_access import SessionAccess, _binding, _trusted
 from .spatial import WorldHandler
 from .storage import SqliteStore
-from .world_objects import WorldObjectService
 
 
 def _result(raw: str) -> CreationResult:
@@ -111,9 +110,7 @@ class StateMachine(
             loader=loader,
         )
         self._durability = ObjectDurabilityService(self._world)
-        self._objects = WorldObjectService(self._world)
-        self._world.objects = self._objects
-        self._event_capture.lights = self._objects.lights
+        self._objects = self._world.objects
         self._activities = ActivityHandler(
             self._store,
             self._activity_records,
@@ -410,9 +407,15 @@ class StateMachine(
         *,
         actor_id=None,
         effect_origin=None,
+        source_command_id=None,
     ):
         return self._world._operate(
-            row, package, operation, actor_id=actor_id, effect_origin=effect_origin
+            row,
+            package,
+            operation,
+            actor_id=actor_id,
+            effect_origin=effect_origin,
+            source_command_id=source_command_id,
         )
 
     def _snapshot(self, row, package) -> SessionSnapshot:

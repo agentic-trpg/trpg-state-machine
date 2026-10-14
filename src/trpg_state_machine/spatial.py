@@ -109,6 +109,10 @@ class WorldHandler:
         self.npc_bootstrap = npc_bootstrap
         self.activities = activities if activities is not None else ActivityRecords(store)
         self.loader = loader
+        from .world_objects import WorldObjectService
+
+        self.objects = WorldObjectService(self)
+        self.capture.lights = self.objects.lights
 
     @property
     def _conn(self):
@@ -524,7 +528,16 @@ class WorldHandler:
             version = self._conn.execute(
                 "SELECT world_version FROM sessions WHERE session_id=?", (session_id,)
             ).fetchone()[0]
-            return CarriedItemsView(actor_id, version, inventory.entries)
+            visible = tuple(
+                entry
+                for entry in inventory.entries
+                if entry.accessible
+                or not (
+                    (obj := self.facts.object(session_id, entry.instance_id)) is not None
+                    and obj["container_id"] is not None
+                )
+            )
+            return CarriedItemsView(actor_id, version, visible)
 
     def _door_ports(self, scene_id, object_id, package):
         return tuple(
@@ -1194,6 +1207,7 @@ class WorldHandler:
         actor_id=None,
         effect_origin=None,
         navigation_scope=None,
+        source_command_id=None,
     ):
         self.store.require_write()
         if navigation_scope is not None and (
@@ -1211,7 +1225,9 @@ class WorldHandler:
         self._world_operation_capability(row, operation)
         sid = row["session_id"]
         if type(operation) in WORLD_CAPABILITY_OPERATIONS:
-            return self.objects.operate(row, actor_id, operation, package)
+            return self.objects.operate(
+                row, actor_id, operation, package, source_command_id=source_command_id
+            )
         if type(operation) in (UnlockDoor, LockDoor):
             return self._operate_lock(row, actor_id, operation, package)
         if type(operation) is AdvanceGameTime:

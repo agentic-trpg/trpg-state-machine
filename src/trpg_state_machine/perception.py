@@ -123,6 +123,29 @@ def _judge(request, judgment):
     return answers if set(answers) == set(ids) else None
 
 
+def _valid_scene_evidence(scene, schema):
+    basic = {"grid", "unsupported_effects"}
+    extended = basic | {"light_uncertain_cells", "lighting_sources"}
+    if set(scene) == basic:
+        return schema != "event-evidence/6"
+    # Explicit compatibility for the W7 producer's extended /5 records.
+    if schema not in ("event-evidence/5", "event-evidence/6") or set(scene) != extended:
+        return False
+    uncertain, sources = scene["light_uncertain_cells"], scene["lighting_sources"]
+    if type(uncertain) is not list or any(type(c) is not str or not c for c in uncertain):
+        return False
+    if len(uncertain) != len(set(uncertain)) or type(sources) is not dict:
+        return False
+    return all(
+        type(cell) is str
+        and bool(cell)
+        and type(ids) is list
+        and all(type(oid) is str and oid.startswith("object.") for oid in ids)
+        and len(ids) == len(set(ids))
+        for cell, ids in sources.items()
+    )
+
+
 def _evidence_v4(evidence, event, binding):
     if not isinstance(evidence, dict) or set(evidence) != {
         "schema",
@@ -138,7 +161,7 @@ def _evidence_v4(evidence, event, binding):
     }:
         return False
     if (
-        evidence["schema"] not in ("event-evidence/4", "event-evidence/5")
+        evidence["schema"] not in ("event-evidence/4", "event-evidence/5", "event-evidence/6")
         or type(evidence["world_version"]) is not int
         or evidence["world_version"] != event.world_version
         or type(evidence["game_tick"]) is not int
@@ -170,7 +193,11 @@ def _evidence_v4(evidence, event, binding):
             type(actor) is not dict
             or set(actor)
             != {"actor_id", "kind", "current_scene_id", "senses", "mechanical"}
-            | ({"cell"} if evidence["schema"] == "event-evidence/5" else set())
+            | (
+                {"cell"}
+                if evidence["schema"] in ("event-evidence/5", "event-evidence/6")
+                else set()
+            )
             or any(type(actor[k]) is not str for k in ("actor_id", "kind", "current_scene_id"))
             or actor.get("cell") is not None
             and type(actor["cell"]) is not str
@@ -201,7 +228,7 @@ def _evidence_v4(evidence, event, binding):
             return False
     if not all(
         type(s) is dict
-        and set(s) == {"grid", "unsupported_effects"}
+        and _valid_scene_evidence(s, evidence["schema"])
         and type(s["unsupported_effects"]) is bool
         for s in evidence["scenes"].values()
     ):
@@ -235,12 +262,13 @@ def _evidence_v4(evidence, event, binding):
     return all(
         type(o) is dict
         and set(o)
-        == {"scene_id", "state"} | ({"cell"} if evidence["schema"] == "event-evidence/5" else set())
+        == {"scene_id", "state"}
+        | ({"cell"} if evidence["schema"] in ("event-evidence/5", "event-evidence/6") else set())
         and type(o["scene_id"]) is str
         and o["state"]
         in (
             (None, "closed", "open")
-            if evidence["schema"] == "event-evidence/5"
+            if evidence["schema"] in ("event-evidence/5", "event-evidence/6")
             else ("closed", "open")
         )
         and (o.get("cell") is None or type(o["cell"]) is str)

@@ -82,7 +82,12 @@ def test_nested_carried_location_closed_key_access_and_restore(tmp_path, context
             == "committed"
         )
         entries = sm.read_carried_items(sid, actor, p, context=context).entries
-        assert next(e for e in entries if e.instance_id == CRED).accessible is False
+        assert CRED not in {e.instance_id for e in entries}
+        internal = sm.read_noncombat_snapshot(sid, p, context=context)
+        assert (
+            next(e for e in internal.inventory_state.entries if e.instance_id == CRED).accessible
+            is False
+        )
         assert sm.get_object(sid, actor, BOX, p, context=context)["contents"] is None
         assert sm.get_object(sid, actor, BOX, p, context=context)["contents_weight_lb"] is None
         assert (
@@ -230,3 +235,15 @@ def test_destroyed_container_retains_contents_and_allows_access(tmp_path, contex
         adopt(sm, sid, p, context, _ObjectHPSettlement(sid, BOX, "destroy.case", version, 5, 0))
         result = submit(sm, sid, p, context, TakeItem(A, CRED, BOX, "0,0"), "recover")
         assert result.status == "committed", result
+
+
+def test_unknown_container_limit_is_distinct_from_unlimited(tmp_path, context):
+    d = container_data()
+    next(x for x in d["world_objects"] if x["object_id"] == BOX)["capabilities"][1][
+        "capacity_weight_lb"
+    ] = "unknown"
+    sm, sid, p, _ = setup(tmp_path, context, d)
+    with sm:
+        acquire(sm, sid, p, context)
+        result = submit(sm, sid, p, context, PutItem(A, CRED, BOX, "0,0"), "unknown.limit")
+        assert result.error_code == "unknown_container_capacity"

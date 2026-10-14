@@ -3,6 +3,19 @@
 from dataclasses import dataclass
 from enum import StrEnum
 
+from .world_commands import (
+    ActivateMechanism,
+    BarObject,
+    LockObject,
+    PutItem,
+    RepositionObject,
+    SetLightEnabled,
+    SwitchLightMode,
+    TakeItem,
+    UnbarObject,
+    UnlockObject,
+)
+
 
 class ObjectState(StrEnum):
     CLOSED = "closed"
@@ -96,7 +109,17 @@ class LockDoor:
 
 
 type FoundationOperation = (
-    EnterScene
+    ActivateMechanism
+    | BarObject
+    | UnbarObject
+    | LockObject
+    | UnlockObject
+    | PutItem
+    | TakeItem
+    | RepositionObject
+    | SetLightEnabled
+    | SwitchLightMode
+    | EnterScene
     | SetSceneFlag
     | SetObjectState
     | MoveActor
