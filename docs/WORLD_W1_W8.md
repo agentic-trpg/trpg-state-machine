@@ -220,3 +220,44 @@ case fixtures use explicit World fit/capacity definitions attached to approved
 mundane mechanical token instances; they do not claim official item capacities.
 Partial stack transfer, arbitrary attachments and equipment instance rebinding
 remain unsupported. New processes resolve the same IDs and fixed package binding.
+
+
+## W6 — dynamic object footprints and navigation
+
+W5 b48995e pushed (72 legacy/item/capability cases + 21 World/recovery cases).
+SpatialObject supplies an explicit bounded relative footprint, fixed axes, mobility
+policy and open/closed/destroyed blocking mapping. No size-derived geometry.
+ObjectSpatialService projects the current objects.cell, state and durability into
+the existing GridTopology. Legacy static blocked_cells are preserved verbatim.
+Shared doors are projected only through both existing passage endpoints, with set
+union avoiding duplicated obstacles. Carried spatial-footprint objects are rejected.
+
+| Fields | Actual location | Class | Writer / consumer |
+|---|---|---|---|
+| grid/scale/static terrain | existing MechanicalGrid, cell_size_ft | T | existing Package / upstream GridTopology |
+| footprint/state blocking/mobility | SpatialObject | T | Package / current projection and placement admission |
+| anchor_cell | objects.cell | S | WorldFacts.place / footprint projection |
+| occupied_cells/passability | relative offsets + current state and existing topology | D | ObjectSpatialService / navigation, step, passage, placement, views |
+| spatial revision/cache | existing world_version; no retained cache | D | shared commit / rebuild every query |
+| orientation/dimensions | deferred | conditional | fixed axes; no rotation or dimension consumer claimed |
+| vision occlusion/cover candidates | explicit unsupported query fields | conditional | no dynamic sensory/RE obstacle adapter yet |
+
+RepositionObject is an ordinary registered command requiring authenticated
+TrustedContext.can_place_world_objects. The capability must explicitly permit
+GM placement; fixed objects/shared passage doors cannot be repositioned. It checks
+all footprint cells against bounds, actors, static/dynamic obstacles and passage
+standing/threshold cells. Normal PlaceObject cannot bypass this capability policy.
+No player lifting/pushing/strength-cost path is claimed. Sync/async and controlled
+NPC command envelopes work with the trusted GM grant; no NPC intent conversion.
+
+Destruction retains obstruction under disable_preserve_obstruction; the explicit
+new disable_spatial_policy permits configured destroyed blocking. The internal HP
+application audits the resulting spatial candidate before adoption. Open/close
+submission runs the common final spatial invariant before commit. Combat dynamic
+obstacle guards remain. Current movement projection is not fed into LoS/Cover.
+
+Validation: 13 initial World spatial/container/open tests and 16 spatial/durability/
+navigation tests passed. Includes old-plan execution blocked by new multi-cell
+obstacle, cancellation/replan after clearing, denied GM permission, collision,
+bounds, replay and evidence-write rollback. No DB migration is needed: anchors
+and version already have authoritative storage. Recovery reconstructs projections.

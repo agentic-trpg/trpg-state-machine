@@ -26,7 +26,7 @@ from .navigation_models import NAVIGATION_OPERATIONS
 from .npc_outputs import _handoff_command
 from .package import AdventurePackage, RulesetBinding, canonical_json
 from .perception import NPCContext
-from .world_commands import WORLD_CAPABILITY_OPERATIONS
+from .world_commands import WORLD_CAPABILITY_OPERATIONS, RepositionObject
 
 
 def _trusted(context: TrustedContext) -> None:
@@ -40,7 +40,8 @@ def _trusted(context: TrustedContext) -> None:
     ):
         raise StateMachineError("invalid_context", "NPC grants must be trusted identity tuples")
     if (
-        type(context.can_adjudicate_checks) is not bool
+        type(context.can_place_world_objects) is not bool
+        or type(context.can_adjudicate_checks) is not bool
         or type(context.can_advance_time) is not bool
     ):
         raise StateMachineError(
@@ -92,6 +93,8 @@ class SessionAccess:
             )
 
     def _authorize_command(self, row, actor_id, payload, context):
+        if type(payload) is RepositionObject and not context.can_place_world_objects:
+            raise StateMachineError("unauthorized", "Trusted GM placement grant required")
         if type(payload) is AdvanceGameTime and not context.can_advance_time:
             raise StateMachineError("unauthorized", "Trusted game-time grant required")
         if isinstance(payload, CheckPayload) and not context.can_adjudicate_checks:

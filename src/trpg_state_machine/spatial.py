@@ -267,7 +267,15 @@ class WorldHandler:
         cells.update(
             cell
             for oid, cell in objects
-            if oid != exclude_object and definitions[oid].blocks_passage and cell is not None
+            if oid != exclude_object
+            and definitions[oid].blocks_passage
+            and cell is not None
+            and self.objects.spatial.config(package, oid) is None
+        )
+        cells.update(
+            self.objects.spatial.movement_cells(
+                sid, scene_id, package, exclude_object=exclude_object
+            )
         )
         for passage in package.passages:
             if passage.door_object_id and self._door_closed(sid, passage, package):
@@ -321,6 +329,10 @@ class WorldHandler:
         except StateMachineError as exc:
             raise StateMachineError("invalid_target", "No authorized local object") from exc
         self.facts.require_ordinary_object(sid, operation.object_id)
+        if self.objects.spatial.config(package, operation.object_id):
+            raise StateMachineError(
+                "unsupported_object_capability", "Use authorized placement policy"
+            )
         definition = next(
             o for s in package.scenes for o in s.objects if o.object_id == operation.object_id
         )
@@ -913,7 +925,15 @@ class WorldHandler:
                     definition = next(
                         o for s in package.scenes for o in s.objects if o.object_id == obj[0]
                     )
-                    objects.append((obj[0], obj[1], definition.movable, definition.blocks_passage))
+                    blocking = self.objects.spatial.blocks(session_id, obj[0], package)
+                    objects.append(
+                        (
+                            obj[0],
+                            obj[1],
+                            definition.movable,
+                            definition.blocks_passage if blocking is None else blocking,
+                        )
+                    )
             exits = tuple(
                 (target, pid, e.standing_cell, e.threshold_cell)
                 for target, pid in package.scene(position.scene_id).exit_passages
@@ -1063,6 +1083,11 @@ class WorldHandler:
     def _spatial_combat_guard(self, sid, scene_id, package):
         if self._spatial_scene(sid, scene_id) is None:
             return
+        if self.objects.spatial.movement_cells(sid, scene_id, package):
+            raise StateMachineError(
+                "unsupported_combat_dynamic_obstacles",
+                "Dynamic object geometry needs RE integration",
+            )
         definitions = {o.object_id: o for s in package.scenes for o in s.objects}
         objects = self._conn.execute(
             "SELECT object_id FROM objects WHERE session_id=? AND scene_id=?", (sid, scene_id)
@@ -1082,6 +1107,9 @@ class WorldHandler:
                 )
 
     def _door_closed(self, sid, passage, package):
+        blocking = self.objects.spatial.blocks(sid, passage.door_object_id, package)
+        if blocking is not None:
+            return blocking
         self._door_lock_status(sid, passage.door_object_id, package)
         door = self._conn.execute(
             "SELECT state FROM objects WHERE session_id=? AND object_id=?",
@@ -1122,6 +1150,7 @@ class WorldHandler:
             return self._spatial_reader(session_id, actor_id, package, context)
 
     def _assert_spatial_consistency(self, sid, package):
+        self.objects.spatial.audit(sid, package)
         definitions = {o.object_id: o for s in package.scenes for o in s.objects}
         for scene in package.scenes:
             if scene.grid_json is None:

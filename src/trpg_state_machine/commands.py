@@ -40,6 +40,7 @@ from .world_commands import (
     BarObject,
     LockObject,
     PutItem,
+    RepositionObject,
     TakeItem,
     UnbarObject,
     UnlockObject,
@@ -89,7 +90,8 @@ class TypedCommand:
     actor_id: str
     command_type: str
     payload: (
-        PutItem
+        RepositionObject
+        | PutItem
         | TakeItem
         | LockObject
         | UnlockObject

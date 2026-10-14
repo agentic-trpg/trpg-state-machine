@@ -28,9 +28,18 @@ from .navigation_models import (
 )
 from .package import load_adventure_package
 from .service import StateMachine
-from .world_commands import BarObject, LockObject, PutItem, TakeItem, UnbarObject, UnlockObject
+from .world_commands import (
+    BarObject,
+    LockObject,
+    PutItem,
+    RepositionObject,
+    TakeItem,
+    UnbarObject,
+    UnlockObject,
+)
 
 __all__ = [
+    "RepositionObject",
     "PutItem",
     "TakeItem",
     "LockObject",

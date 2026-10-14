@@ -54,6 +54,16 @@ class Container:
 
 
 @dataclass(frozen=True, slots=True)
+class SpatialObject:
+    footprint: tuple[tuple[int, int], ...]
+    mobility_policy: str
+    open_blocks_movement: bool
+    closed_blocks_movement: bool
+    destroyed_blocks_movement: bool
+    kind: str = "spatial"
+
+
+@dataclass(frozen=True, slots=True)
 class WorldObjectDefinition:
     object_id: str
     definition_ref: str
@@ -62,7 +72,7 @@ class WorldObjectDefinition:
     material: str | None
     size_category: str | None
     weight_lb: int | None
-    capabilities: tuple[Openable | Durability | LockSet | Container, ...]
+    capabilities: tuple[Openable | Durability | LockSet | Container | SpatialObject, ...]
     volume_cu_ft: int | None = None
     fit_profile: str | None = None
     content_kind: str | None = None
@@ -114,6 +124,44 @@ def validate_world_objects(raw, scenes, portable=(), legacy_locks=()):
         for config in _list(d["capabilities"], p + ".capabilities"):
             if not isinstance(config, dict):
                 _fail("schema_error", p, "Capability must be a mapping")
+            if config.get("kind") == "spatial":
+                c = _mapping(
+                    config,
+                    "kind footprint mobility_policy open_blocks_movement "
+                    "closed_blocks_movement destroyed_blocks_movement",
+                    p,
+                )
+                offsets = _list(c["footprint"], p, nonempty=True)
+                if (
+                    len(offsets) > 64
+                    or any(
+                        type(v) is not list
+                        or len(v) != 2
+                        or any(type(n) is not int or abs(n) > 32 for n in v)
+                        for v in offsets
+                    )
+                    or [0, 0] not in offsets
+                ):
+                    _fail("schema_error", p, "Bounded explicit relative grid footprint required")
+                c["footprint"] = tuple(tuple(v) for v in offsets)
+                _unique(c["footprint"], p)
+                if c["mobility_policy"] not in ("fixed", "gm_placement") or any(
+                    type(c[f]) is not bool
+                    for f in (
+                        "open_blocks_movement",
+                        "closed_blocks_movement",
+                        "destroyed_blocks_movement",
+                    )
+                ):
+                    _fail("unsupported_mechanism", p, "Unsupported spatial policy")
+                if d["object_id"] in {i.instance_id for i in portable}:
+                    _fail(
+                        "unsupported_mechanism",
+                        p,
+                        "Independent spatial footprints cannot be carried",
+                    )
+                capabilities.append(SpatialObject(**c))
+                continue
             if config.get("kind") == "container":
                 c = _mapping(
                     config,
@@ -194,10 +242,9 @@ def validate_world_objects(raw, scenes, portable=(), legacy_locks=()):
                     or not 0 <= c["damage_threshold"] <= 2147483647
                 ):
                     _fail("schema_error", p, "Invalid threshold")
-                if (
-                    c["damage_profile_ref"] != "scenario.explicit_settled_damage"
-                    or c["destruction_policy_ref"] != "disable_preserve_obstruction"
-                ):
+                if c["damage_profile_ref"] != "scenario.explicit_settled_damage" or c[
+                    "destruction_policy_ref"
+                ] not in ("disable_preserve_obstruction", "disable_spatial_policy"):
                     _fail("unsupported_mechanism", p, "Unknown damage/destruction policy")
                 capabilities.append(Durability(**c))
                 continue

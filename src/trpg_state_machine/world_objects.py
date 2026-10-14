@@ -3,8 +3,17 @@
 from dataclasses import asdict
 
 from .errors import StateMachineError
-from .world_commands import BarObject, LockObject, PutItem, TakeItem, UnbarObject, UnlockObject
+from .world_commands import (
+    BarObject,
+    LockObject,
+    PutItem,
+    RepositionObject,
+    TakeItem,
+    UnbarObject,
+    UnlockObject,
+)
 from .world_containers import ContainerService
+from .world_spatial import ObjectSpatialService
 
 
 class WorldObjectService:
@@ -12,9 +21,13 @@ class WorldObjectService:
         self.handler = handler
         self.facts = handler.facts
         self.containers = ContainerService(handler)
+        self.spatial = ObjectSpatialService(handler)
 
     def validate(self, row, actor_id, operation, package):
         h, sid = self.handler, row["session_id"]
+        if type(operation) is RepositionObject:
+            self.spatial.validate_placement(row, actor_id, operation, package)
+            return
         if type(operation) in (PutItem, TakeItem):
             self.containers.validate(row, actor_id, operation, package)
             return
@@ -51,12 +64,18 @@ class WorldObjectService:
             h._spatial_reader(sid, actor_id, package, context)
             row = h._conn.execute("SELECT * FROM sessions WHERE session_id=?", (sid,)).fetchone()
             try:
+                if type(operation) is RepositionObject and not getattr(
+                    context, "can_place_world_objects", False
+                ):
+                    raise StateMachineError("unauthorized", "Trusted GM placement grant required")
                 self.validate(row, actor_id, operation, package)
             except StateMachineError as exc:
                 return WorldActionAvailability("unavailable", exc.code, row["world_version"])
             return WorldActionAvailability("available", "available", row["world_version"])
 
     def operate(self, row, actor_id, operation, package):
+        if type(operation) is RepositionObject:
+            return self.spatial.operate(row, actor_id, operation, package)
         if type(operation) in (PutItem, TakeItem):
             return self.containers.operate(row, actor_id, operation, package)
         if type(operation) in (LockObject, UnlockObject):
@@ -164,6 +183,12 @@ class WorldObjectService:
             and definition.weight_lb is not None
             and total_weight is not None
             else None,
+            "spatial": asdict(self.spatial.config(package, oid))
+            if self.spatial.config(package, oid)
+            else None,
+            "occupied_cells": self.spatial.cells(package, oid, obj["cell"]),
+            "vision_occlusion": "unsupported",
+            "cover_candidates": "unsupported",
             **available,
             "locks_for_object": tuple(
                 {"lock_id": lock[0], "locked": bool(lock[1])}

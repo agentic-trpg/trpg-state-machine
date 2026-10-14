@@ -51,7 +51,16 @@ class TakeItem:
     expected_cell: str
 
 
+@dataclass(frozen=True, slots=True)
+class RepositionObject:
+    scene_id: str
+    object_id: str
+    expected_cell: str
+    to_cell: str
+
+
 WORLD_CAPABILITY_COMMANDS = {
+    "world.reposition_object": RepositionObject,
     "world.put_item": PutItem,
     "world.take_item": TakeItem,
     "world.lock_object": LockObject,
@@ -59,4 +68,12 @@ WORLD_CAPABILITY_COMMANDS = {
     "world.bar_object": BarObject,
     "world.unbar_object": UnbarObject,
 }
-WORLD_CAPABILITY_OPERATIONS = (BarObject, UnbarObject, LockObject, UnlockObject, PutItem, TakeItem)
+WORLD_CAPABILITY_OPERATIONS = (
+    BarObject,
+    UnbarObject,
+    LockObject,
+    UnlockObject,
+    PutItem,
+    TakeItem,
+    RepositionObject,
+)
