@@ -63,3 +63,38 @@ Validation: `pytest tests/test_world_definitions.py tests/test_lockable_passages
 (with checkout-local basetemp). Includes a separate Python process restore,
 unauthorized query, strict validation and legacy lock/navigation compatibility.
 Initial environment-only failures were fixed by selecting a writable basetemp.
+
+
+## W2 — object durability and internal application
+
+W1: 24 tests passed; commit 5d7a5d3 pushed. Pinned RE 675552406e67470bf3456fe90e88c4f1595bf324
+(Engine 0.6.0, snapshot/17): CombatObject contains holder/placement attestations, no
+HP/AC. RulesAdapter.delta_changes limits HP targets to character_states. Player
+object attacks, repair and combat world operations are unsupported.
+
+ObjectDurabilityService._apply_admitted is a private participant inside an admitted
+caller's shared transaction. Existing private execution origins carry provenance;
+no player command/parser/StateMachine write API accepts this result or a validated
+flag. No fake adapter exists. Internal synthetic fixtures prove application only.
+
+| Fields | Actual model/storage | T/S/R/D | Writer / consumer |
+|---|---|---|---|
+| durability, AC, max/initial HP | strict Durability config | T | Package / init, query, bounds |
+| damage profile, optional threshold | explicit scenario policy + nullable threshold | T/R | Package / future RE input; no World formula |
+| current_hp | object_durability | S | WorldFacts.apply_object_hp / settlement and query |
+| destruction_policy_ref | disable_preserve_obstruction | T | Package / identity and obstruction retained, operation disabled |
+| destroyed, usable | HP==0, effective_capabilities | D | derived / authorized view and legacy switch guard |
+| resolution/source/snapshot | private typed settlement, existing world_version | R | internal admitted caller / stale and target checks |
+| repeated application | world_result_adoptions | R | same shared transaction / fingerprint and dedup |
+
+DB 25→26 adds empty tables. Old package/state/IDs/quantity/charges remain untouched.
+Combining excluded GC5 later requires explicit renumbering of its independent
+migration 26. Full PHB/DMG/MM texts were not verified. Rules checked in
+[SRD 5.2.1](https://media.dndbeyond.com/compendium-images/srd/5.2/SRD_CC_v5.2.1.pdf):
+p.178 Breaking Objects and p.180 Damage Threshold. Fixture AC/HP are explicit
+scenario values; material does not generate them. Threshold is not subtraction.
+
+Checks: W1+W2+legacy lock/navigation suite: 26 passed. Includes synthetic internal
+rollback, replay, stale/session/bounds rejection, destruction and reopen. These do
+not prove a genuine RE object attack path. Later batches must explicitly integrate
+destruction consequences for container/light/spatial combinations before accepting them.

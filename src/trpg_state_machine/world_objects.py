@@ -52,11 +52,18 @@ class WorldObjectService:
             if definition
             else (("openable",) if obj["state"] is not None else ())
         )
+        hp = self.facts.object_hp(sid, oid)
+        destroyed = hp == 0 if hp is not None else None
         return {
+            "current_hp": hp,
+            "destroyed": destroyed,
+            "durability": asdict(definition.capability("durability"))
+            if definition and definition.capability("durability")
+            else None,
             **config,
             "package_revision": package.package_digest,
             "capabilities": declared,
-            "effective_capabilities": declared,
+            "effective_capabilities": () if destroyed else declared,
             "open_state": obj["state"],
             "location": self.facts.object_position(sid, oid),
         }

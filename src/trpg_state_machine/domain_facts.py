@@ -484,6 +484,37 @@ class WorldFacts:
         )
         return True
 
+    def initialize_object_capabilities(self, sid, scene_id, package):
+        self.store.require_write()
+        for d in package.world_objects:
+            obj = self.object(sid, d.object_id)
+            if obj is None or obj["scene_id"] != scene_id:
+                continue
+            if c := d.capability("durability"):
+                self._conn.execute(
+                    "INSERT INTO object_durability VALUES (?,?,?)", (sid, d.object_id, c.initial_hp)
+                )
+
+    def object_hp(self, sid, oid):
+        row = self._conn.execute(
+            "SELECT current_hp FROM object_durability WHERE session_id=? AND object_id=?",
+            (sid, oid),
+        ).fetchone()
+        return row[0] if row else None
+
+    def apply_object_hp(self, sid, oid, expected, value):
+        self.store.require_write()
+        if (
+            type(value) is not int
+            or not 0 <= value <= expected
+            or not self._conn.execute(
+                "UPDATE object_durability SET current_hp=? "
+                "WHERE session_id=? AND object_id=? AND current_hp=?",
+                (value, sid, oid, expected),
+            ).rowcount
+        ):
+            raise StateMachineError("invalid_rule_result", "Invalid durability transition")
+
     def mark_unvisited(self, sid, scene_id):
         self.store.require_write()
         self._conn.execute(
@@ -531,6 +562,8 @@ class WorldFacts:
         return bool(row[0])
 
     def validate_door_switch(self, sid, object_id, state):
+        if self.object_hp(sid, object_id) == 0:
+            raise StateMachineError("object_destroyed", "Destroyed object is unusable")
         locked = self.door_lock(sid, object_id)
         if locked and state == "open":
             raise StateMachineError("door_locked", "Door is locked")

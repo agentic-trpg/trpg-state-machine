@@ -134,6 +134,7 @@ class WorldHandler:
     def _initialize_scene(self, sid, scene_id, package):
         if not self.facts.initialize_scene(sid, scene_id, package):
             return
+        self.facts.initialize_object_capabilities(sid, scene_id, package)
         for actor in package.actors:
             if actor.initial_scene_id == scene_id and self.characters.initialize_npc_actor(
                 sid, actor

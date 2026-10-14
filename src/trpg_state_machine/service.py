@@ -40,6 +40,7 @@ from .npc_modes import NPCModeRuntime
 from .npc_outputs import NPCOutputRuntime
 from .npc_results import NPCResultRuntime
 from .npc_state import NPCRuntime
+from .object_durability import ObjectDurabilityService
 from .observation_lifecycle import ObservationLifecycleRuntime
 from .package import (
     SYNTHETIC_EVALUATION_RULESET,
@@ -109,6 +110,7 @@ class StateMachine(
             self._activity_records,
             loader=loader,
         )
+        self._durability = ObjectDurabilityService(self._world)
         self._objects = WorldObjectService(self._world)
         self._world.objects = self._objects
         self._activities = ActivityHandler(
