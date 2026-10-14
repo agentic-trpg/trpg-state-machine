@@ -63,6 +63,8 @@ class ObjectDurabilityService:
             "INSERT INTO world_result_adoptions VALUES (?,?,?)",
             (result.session_id, result.resolution_id, encoded),
         )
+        if package.portable_items:
+            h.characters.sync_world_inventory(result.session_id)
         position = h.facts.object_position(result.session_id, result.object_id)
         return [
             h._capture_event(

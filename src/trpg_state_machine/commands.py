@@ -39,6 +39,8 @@ from .world_commands import (
     WORLD_CAPABILITY_COMMANDS,
     BarObject,
     LockObject,
+    PutItem,
+    TakeItem,
     UnbarObject,
     UnlockObject,
 )
@@ -87,7 +89,9 @@ class TypedCommand:
     actor_id: str
     command_type: str
     payload: (
-        LockObject
+        PutItem
+        | TakeItem
+        | LockObject
         | UnlockObject
         | BarObject
         | UnbarObject
@@ -332,6 +336,11 @@ class CommandRuntime:
             else:
                 self._conn.execute("SAVEPOINT command_effects")
                 try:
+                    if package.portable_items:
+                        self._characters.rule_components(
+                            command.session_id,
+                            set(self._characters.rule_actors(command.session_id)),
+                        )
                     if type(command.payload) in NAVIGATION_OPERATIONS:
                         events = self._activities.operate(
                             row,
@@ -360,6 +369,8 @@ class CommandRuntime:
                                 "event_cascade_limit", "Bounded schedule cascade exceeded"
                             )
                     if events:
+                        if package.portable_items:
+                            self._characters.sync_world_inventory(command.session_id)
                         self._assert_spatial_consistency(command.session_id, package)
                         version += 1
                         self._sessions.set_world_version(command.session_id, version)

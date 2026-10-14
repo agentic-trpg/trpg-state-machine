@@ -54,8 +54,11 @@ def test_old_nonempty_save_preserves_facts_keys_receipts_and_adds_no_capabilitie
         p = _validate(lock_data())
         sm.resume_session(sid, p, context=ctx)
         after = stored_rows(db)
-        for table in before.keys() - {"door_locks", "door_credentials"}:
+        for table in before.keys() - {"door_locks", "door_credentials", "objects"}:
             assert after[table] == before[table], table
+        from test_migrations import assert_original_rows_equal
+
+        assert_original_rows_equal(before, after)
         assert sm._world_facts.door_lock(sid, DOOR) is True
         assert sm._world_facts.accepts_credential(sid, DOOR, CRED, "lock." + DOOR)
         assert sm._conn.execute("SELECT count(*) FROM object_durability").fetchone()[0] == 0

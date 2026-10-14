@@ -172,3 +172,51 @@ Historical /25 nonempty save migration is tested with genuine old committed code
 in another process. Full logs are checkout-local `.test-tmp/w4-final*.log`.
 The isolated checkout now has its own locked Python 3.12 venv; no global PYTHONPATH
 is used because it would incorrectly override historical runtime subprocesses.
+
+
+## W5 — containers and single placement authority
+
+W4 878d93b pushed. DB 28→29 preserves all old columns/rows and adds nullable
+container_id while widening the existing objects location constraint to exactly one
+of ground, direct carrier or parent container. Self/cycle constraints and controlled
+ancestry checks guard the relation. No child absolute coordinates or second owner.
+
+| Fields | Actual model/storage | Class | Writer / consumer |
+|---|---|---|---|
+| container, capacity weight/volume, nesting, accepts, opening | Container typed config | T | Package / ContainerService.audit |
+| item external volume, explicit fit and content group | WorldObjectDefinition | T conditional | Package / only enabled capacity/fit checks |
+| placement kind/scene/cell/carrier/container | objects exclusive relation | S/R | WorldFacts.transfer_item / recursive placement |
+| quantity/charges | existing objects.item_json | S | existing mechanical unit / preserved on whole-instance transfer |
+| contents/ancestry/root carrier/effective location | reverse links and bounded WorldFacts.placement | D | derived / query, key, evidence and inventory |
+| accessible/blockers | item_accessible plus parent open/lock/destroyed | D | derived / key validation and InventoryState.accessible |
+| contents weight/capacity | recursive own-weight*quantity; external child volume once | D | audit / limit admission; unknown rejects required measurement |
+| inventory_projection | existing mechanical entries + characters carried-slug | D materialized | CharacterFacts scoped rebuild in same transaction |
+
+PutItem/TakeItem use the registered closed command/parser/query with sync/async
+submission. Whole instances only; source may be owned, reachable ground or an
+accessible container. Nested container→container paths supported. Cross-role handoff
+uses existing drop/pickup and reprojects every descendant to the actual root carrier.
+NPC typed commands require existing control/access grants; new container intents
+are not wired into NPC Evaluation. Existing pickup/drop intents continue to work.
+
+Capacity null means explicitly no such limit; unknown item measurements stay null
+and fail any enabled corresponding limit. Fit groups are explicit scenario data,
+not inferred from size. Nesting 1..8 is an engineering bound, not a D&D rule.
+Closed/locked ancestors prevent key use and set mechanical inventory accessible=false.
+Pinned Engine item and equipment consumers check accessible; tool checks remain
+unsupported in the pinned check evaluator. Equipment/casting/effect bindings reject
+unsafe transfers, including descendants of a moved container. No encumbrance claim.
+
+Destruction policy retains parent/contents identity and permits contents access
+through the destroyed shell; the shell's operations remain disabled. No guessed
+spillage locations. Queries hide closed contents and contents weight. Transfer
+before/after evidence freezes each actual stage. Candidate audit is pure and
+shared savepoint rollback includes facts, projection, evidence and receipts.
+
+Checks: 72 container/openable/multi-lock/legacy-item cases passed, including all
+legacy transfer fault injections. Added cross-role nested ownership, synthetic
+container destruction and independent-process nested restore. Original scenario
+case fixtures use explicit World fit/capacity definitions attached to approved
+mundane mechanical token instances; they do not claim official item capacities.
+Partial stack transfer, arbitrary attachments and equipment instance rebinding
+remain unsupported. New processes resolve the same IDs and fixed package binding.

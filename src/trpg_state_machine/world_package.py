@@ -42,6 +42,18 @@ class LockSet:
 
 
 @dataclass(frozen=True, slots=True)
+class Container:
+    capacity_weight_lb: int | None
+    capacity_volume_cu_ft: int | None
+    opening_profiles: tuple[str, ...]
+    allowed_content_kinds: tuple[str, ...]
+    nesting_limit: int
+    light_transmission_open: str
+    light_transmission_closed: str
+    kind: str = "container"
+
+
+@dataclass(frozen=True, slots=True)
 class WorldObjectDefinition:
     object_id: str
     definition_ref: str
@@ -50,7 +62,10 @@ class WorldObjectDefinition:
     material: str | None
     size_category: str | None
     weight_lb: int | None
-    capabilities: tuple[Openable | Durability | LockSet, ...]
+    capabilities: tuple[Openable | Durability | LockSet | Container, ...]
+    volume_cu_ft: int | None = None
+    fit_profile: str | None = None
+    content_kind: str | None = None
 
     def capability(self, kind):
         return next((c for c in self.capabilities if c.kind == kind), None)
@@ -62,8 +77,9 @@ def validate_world_objects(raw, scenes, portable=(), legacy_locks=()):
     for value in _list(raw, "world_objects"):
         p = "world_objects"
         d = _mapping(
-            value,
-            "object_id definition_ref display_name description_ref material "
+            {"volume_cu_ft": None, "fit_profile": None, "content_kind": None, **value},
+            "volume_cu_ft fit_profile content_kind object_id definition_ref "
+            "display_name description_ref material "
             "size_category weight_lb capabilities",
             p,
         )
@@ -87,10 +103,43 @@ def validate_world_objects(raw, scenes, portable=(), legacy_locks=()):
             type(d["weight_lb"]) is not int or not 0 <= d["weight_lb"] <= 2147483647
         ):
             _fail("schema_error", p, "Weight is a nonnegative integer in pounds or unknown")
+        if d["volume_cu_ft"] is not None and (
+            type(d["volume_cu_ft"]) is not int or not 0 <= d["volume_cu_ft"] <= 2147483647
+        ):
+            _fail("schema_error", p, "Invalid external volume")
+        for field in ("fit_profile", "content_kind"):
+            if d[field] is not None:
+                _text(d[field], p)
         capabilities = []
         for config in _list(d["capabilities"], p + ".capabilities"):
             if not isinstance(config, dict):
                 _fail("schema_error", p, "Capability must be a mapping")
+            if config.get("kind") == "container":
+                c = _mapping(
+                    config,
+                    "kind capacity_weight_lb capacity_volume_cu_ft "
+                    "opening_profiles allowed_content_kinds nesting_limit "
+                    "light_transmission_open light_transmission_closed",
+                    p,
+                )
+                for field in ("capacity_weight_lb", "capacity_volume_cu_ft"):
+                    if c[field] is not None and (
+                        type(c[field]) is not int or not 0 <= c[field] <= 2147483647
+                    ):
+                        _fail("schema_error", p, "Capacity is a known limit or explicitly unset")
+                if type(c["nesting_limit"]) is not int or not 1 <= c["nesting_limit"] <= 8:
+                    _fail("schema_error", p, "Engineering nesting bound is 1..8")
+                for field in ("opening_profiles", "allowed_content_kinds"):
+                    values = _list(c[field], p, nonempty=True)
+                    for entry in values:
+                        _text(entry, p)
+                    _unique(values, p)
+                    c[field] = tuple(values)
+                for field in ("light_transmission_open", "light_transmission_closed"):
+                    if c[field] not in ("transmit", "block", "unknown"):
+                        _fail("schema_error", p, "Explicit container transmission required")
+                capabilities.append(Container(**c))
+                continue
             if config.get("kind") == "locks":
                 c = _mapping(config, "kind locks", p)
                 locks = []

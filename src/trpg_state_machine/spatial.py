@@ -420,6 +420,8 @@ class WorldHandler:
                 "unsupported_actor_state", "Active effects need unsupported adjudication"
             )
         if type(operation) is DropItem:
+            if self.facts.contents(sid, operation.instance_id):
+                self.objects.containers.require_unbound(sid, actor_id, operation.instance_id)
             state = self.characters.rule_actors(sid)[actor_id]
             casting = components["casting_state"]
             if casting is not None and any(
@@ -573,10 +575,11 @@ class WorldHandler:
         ).fetchone()
         if (
             item is None
-            or item["carrier_id"] != actor_id
+            or self.facts.placement(sid, operation.credential_instance_id)["carrier_id"] != actor_id
             or item["item_json"] is None
             or operation.credential_instance_id
             not in {i.instance_id for i in package.portable_items}
+            or not self.facts.item_accessible(sid, operation.credential_instance_id)
             or not self.facts.accepts_credential(
                 sid, operation.object_id, operation.credential_instance_id, lock_id
             )
@@ -667,6 +670,10 @@ class WorldHandler:
         ).fetchone()
         if obj is None:
             raise StateMachineError("invalid_target", "No authorized local object")
+        full = self.facts.object(sid, operation.object_id)
+        if full["container_id"] is not None or full["carrier_id"] is not None:
+            self.objects.containers.reachable(sid, actor_id, operation.object_id, package)
+            return obj, None
         ports = self._door_ports(position.scene_id, operation.object_id, package)
         if ports:
             base = self._base_topology(sid, position.scene_id)
@@ -695,7 +702,7 @@ class WorldHandler:
         actor = self._conn.execute(
             "SELECT kind FROM actors WHERE session_id=? AND actor_id=?", (sid, actor_id)
         ).fetchone()
-        if actor[0] != "pc" or obj[0] != position.scene_id:
+        if (actor[0] != "pc" and definition is None) or obj[0] != position.scene_id:
             raise StateMachineError("invalid_target", "No authorized local switch")
         if fine:
             self._validate_switch_range(sid, actor_id, operation, package)

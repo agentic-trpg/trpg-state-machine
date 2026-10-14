@@ -3,16 +3,21 @@
 from dataclasses import asdict
 
 from .errors import StateMachineError
-from .world_commands import BarObject, LockObject, UnbarObject, UnlockObject
+from .world_commands import BarObject, LockObject, PutItem, TakeItem, UnbarObject, UnlockObject
+from .world_containers import ContainerService
 
 
 class WorldObjectService:
     def __init__(self, handler):
         self.handler = handler
         self.facts = handler.facts
+        self.containers = ContainerService(handler)
 
     def validate(self, row, actor_id, operation, package):
         h, sid = self.handler, row["session_id"]
+        if type(operation) in (PutItem, TakeItem):
+            self.containers.validate(row, actor_id, operation, package)
+            return
         if type(operation) in (LockObject, UnlockObject):
             h._validate_lock(row, actor_id, operation, package)
             return
@@ -52,6 +57,8 @@ class WorldObjectService:
             return WorldActionAvailability("available", "available", row["world_version"])
 
     def operate(self, row, actor_id, operation, package):
+        if type(operation) in (PutItem, TakeItem):
+            return self.containers.operate(row, actor_id, operation, package)
         if type(operation) in (LockObject, UnlockObject):
             return self.handler._operate_lock(row, actor_id, operation, package)
         self.validate(row, actor_id, operation, package)
@@ -78,6 +85,12 @@ class WorldObjectService:
         obj = self.facts.object(sid, oid)
         if obj is None:
             raise StateMachineError("invalid_target", "No authorized local object")
+        if obj["container_id"] is not None:
+            try:
+                self.containers.reachable(sid, actor_id, oid, package)
+            except StateMachineError as exc:
+                raise StateMachineError("invalid_target", "No authorized local object") from exc
+            return obj
         if obj["carrier_id"] == actor_id:
             return obj
         targets = [e.threshold_cell for _, e in h._door_ports(position.scene_id, oid, package)]
@@ -137,7 +150,20 @@ class WorldObjectService:
                 available[name] = True
             except StateMachineError:
                 available[name] = False
+        contents_visible = self.containers.config(package, oid) and (
+            destroyed or (obj["state"] != "closed" and not self.facts.door_lock(sid, oid))
+        )
+        total_weight = self.containers.total_weight(oid, self.containers._rows(sid), package)
         return {
+            "contents": tuple(c["object_id"] for c in self.facts.contents(sid, oid))
+            if contents_visible
+            else None,
+            "contents_weight_lb": total_weight - definition.weight_lb
+            if contents_visible
+            and definition
+            and definition.weight_lb is not None
+            and total_weight is not None
+            else None,
             **available,
             "locks_for_object": tuple(
                 {"lock_id": lock[0], "locked": bool(lock[1])}

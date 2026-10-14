@@ -31,6 +31,7 @@ class EventCapture:
             "actor.stepped": "Someone takes a step.",
             "object.placed": "Someone adjusts an object.",
             "item.picked_up": "Someone picks up an item.",
+            "item.container_transferred": "Someone transfers an item.",
             "item.dropped": "Someone puts down an item.",
             "object.bar_changed": "Someone operates an object bar.",
             "object.durability_changed": "An object is damaged.",

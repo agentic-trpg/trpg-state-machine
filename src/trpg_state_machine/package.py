@@ -793,7 +793,9 @@ def _validate(data: dict, *, allow_legacy_audit=False) -> AdventurePackage:
     from .item_package import validate_items
 
     portable = (
-        validate_items(root["item_transfers"], scenes, noncombat, definitions) if items else ()
+        validate_items(root["item_transfers"], scenes, noncombat, definitions, world=world_enabled)
+        if items
+        else ()
     )
     from .lock_package import validate_locks
 
