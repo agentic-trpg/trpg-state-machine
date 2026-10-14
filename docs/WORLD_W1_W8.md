@@ -456,3 +456,20 @@ Within the documented noncombat scope this branch is ready for merge review.
 The open RE/Combat/Activity/Effects/Perception/NPC boundaries above remain explicit
 limits, not completed integration. Combining GC5 first requires migration conflict
 resolution and combined testing. No automatic merge is performed.
+
+
+### Batch commits and push results
+
+| Batch | Commit | Delivered capability | Push |
+|---|---|---|---|
+| W1 | 5d7a5d3 | fixed object definitions and authorized views | confirmed origin/feat/world-w1-w8 |
+| W2 | d6cdfe2 | object HP and private admitted settlement application | confirmed |
+| W3 | 00a6db7 | shared open state, independent jam/bar and sides | confirmed |
+| W4 | 878d93b | stable multi-lock instances and genuine-save migration | confirmed |
+| W5 | b48995e | unique nested placement and scoped inventory projection | confirmed |
+| W6 | c63c296 | dynamic multi-cell movement geometry and GM placement | confirmed |
+| W7 | 3bf1989 | ordinary local emitters, snapshot and frozen stage evidence | confirmed |
+| W8 | c2e8b7b | atomic one-shot mechanisms, complete public scenario and final review fixes | confirmed |
+
+A following documentation-only delivery commit records this table. The W8 push
+returned c2e8b7b on the authorized task branch; no main change or PR merge occurred.
