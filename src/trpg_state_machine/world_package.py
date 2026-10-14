@@ -64,6 +64,25 @@ class SpatialObject:
 
 
 @dataclass(frozen=True, slots=True)
+class LightMode:
+    mode_id: str
+    bright_radius_ft: int | None
+    dim_outer_radius_ft: int
+
+
+@dataclass(frozen=True, slots=True)
+class LightEmitter:
+    modes: tuple[LightMode, ...]
+    initial_enabled: bool
+    initial_mode: str
+    emission_shape: str
+    source_kind: str
+    sunlight: bool
+    fuel_policy: str
+    kind: str = "light"
+
+
+@dataclass(frozen=True, slots=True)
 class WorldObjectDefinition:
     object_id: str
     definition_ref: str
@@ -72,7 +91,9 @@ class WorldObjectDefinition:
     material: str | None
     size_category: str | None
     weight_lb: int | None
-    capabilities: tuple[Openable | Durability | LockSet | Container | SpatialObject, ...]
+    capabilities: tuple[
+        Openable | Durability | LockSet | Container | SpatialObject | LightEmitter, ...
+    ]
     volume_cu_ft: int | None = None
     fit_profile: str | None = None
     content_kind: str | None = None
@@ -124,6 +145,44 @@ def validate_world_objects(raw, scenes, portable=(), legacy_locks=()):
         for config in _list(d["capabilities"], p + ".capabilities"):
             if not isinstance(config, dict):
                 _fail("schema_error", p, "Capability must be a mapping")
+            if config.get("kind") == "light":
+                c = _mapping(
+                    config,
+                    "kind modes initial_enabled initial_mode emission_shape "
+                    "source_kind sunlight fuel_policy",
+                    p,
+                )
+                if (
+                    c["emission_shape"] != "grid_radius_static_los"
+                    or c["source_kind"] != "scenario"
+                    or c["fuel_policy"] != "scenario_unmetered"
+                    or c["sunlight"] is not False
+                    or type(c["initial_enabled"]) is not bool
+                ):
+                    _fail(
+                        "unsupported_mechanism",
+                        p,
+                        "Only explicit ordinary unmetered scenario lights",
+                    )
+                modes = []
+                for value in _list(c["modes"], p, nonempty=True):
+                    mode = _mapping(value, "mode_id bright_radius_ft dim_outer_radius_ft", p)
+                    _text(mode["mode_id"], p)
+                    bright, dim = mode["bright_radius_ft"], mode["dim_outer_radius_ft"]
+                    if (
+                        type(dim) is not int
+                        or not 0 <= dim <= 1000
+                        or (
+                            bright is not None
+                            and (type(bright) is not int or not 0 <= bright <= dim)
+                        )
+                    ):
+                        _fail("schema_error", p, "Ranges are feet; dim is the outer radius")
+                    modes.append(LightMode(**mode))
+                _unique([m.mode_id for m in modes], p)
+                _reference(c["initial_mode"], {m.mode_id for m in modes}, p)
+                capabilities.append(LightEmitter(**{**c, "modes": tuple(modes)}))
+                continue
             if config.get("kind") == "spatial":
                 c = _mapping(
                     config,
@@ -281,6 +340,14 @@ def validate_world_objects(raw, scenes, portable=(), legacy_locks=()):
                 _fail("invalid_reference", p, "Bar sides need a bar capability")
             capabilities.append(
                 Openable(jammed, barred, "prevent_transitions", tuple(sides), tuple(bar_sides))
+            )
+        if any(c.kind == "light" for c in capabilities) and any(
+            c.kind == "spatial" for c in capabilities
+        ):
+            _fail(
+                "unsupported_mechanism",
+                p,
+                "Light anchors on independent spatial geometry are not supported",
             )
         _unique([c.kind for c in capabilities], p)
         if (objects[d["object_id"]].state is not None) != any(

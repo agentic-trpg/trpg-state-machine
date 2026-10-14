@@ -113,6 +113,7 @@ class StateMachine(
         self._durability = ObjectDurabilityService(self._world)
         self._objects = WorldObjectService(self._world)
         self._world.objects = self._objects
+        self._event_capture.lights = self._objects.lights
         self._activities = ActivityHandler(
             self._store,
             self._activity_records,
@@ -529,6 +530,11 @@ class StateMachine(
 
     def read_actor_position(self, session_id, actor_id, package, *, context):
         return self._world.read_actor_position(session_id, actor_id, package, context=context)
+
+    def get_illumination(self, session_id, actor_id, cell, package, *, context):
+        return self._objects.lights.query_illumination(
+            session_id, actor_id, cell, package, context=context
+        )
 
     def get_object(self, session_id, actor_id, object_id, package, *, context):
         return self._objects.get_object(session_id, actor_id, object_id, package, context=context)

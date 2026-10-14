@@ -8,11 +8,14 @@ from .world_commands import (
     LockObject,
     PutItem,
     RepositionObject,
+    SetLightEnabled,
+    SwitchLightMode,
     TakeItem,
     UnbarObject,
     UnlockObject,
 )
 from .world_containers import ContainerService
+from .world_lights import LightService
 from .world_spatial import ObjectSpatialService
 
 
@@ -22,9 +25,13 @@ class WorldObjectService:
         self.facts = handler.facts
         self.containers = ContainerService(handler)
         self.spatial = ObjectSpatialService(handler)
+        self.lights = LightService(handler)
 
     def validate(self, row, actor_id, operation, package):
         h, sid = self.handler, row["session_id"]
+        if type(operation) in (SetLightEnabled, SwitchLightMode):
+            self.lights.validate(row, actor_id, operation, package)
+            return
         if type(operation) is RepositionObject:
             self.spatial.validate_placement(row, actor_id, operation, package)
             return
@@ -74,6 +81,8 @@ class WorldObjectService:
             return WorldActionAvailability("available", "available", row["world_version"])
 
     def operate(self, row, actor_id, operation, package):
+        if type(operation) in (SetLightEnabled, SwitchLightMode):
+            return self.lights.operate(row, actor_id, operation, package)
         if type(operation) is RepositionObject:
             return self.spatial.operate(row, actor_id, operation, package)
         if type(operation) in (PutItem, TakeItem):
@@ -117,7 +126,7 @@ class WorldObjectService:
             targets.append(obj["cell"])
         if not any(
             cell is not None
-            and h._base_topology(sid, position.scene_id).can_see(position.cell, cell)
+            and h._base_topology(sid, position.scene_id, package).can_see(position.cell, cell)
             for cell in targets
         ):
             raise StateMachineError("invalid_target", "No authorized local object")
@@ -183,6 +192,7 @@ class WorldObjectService:
             and definition.weight_lb is not None
             and total_weight is not None
             else None,
+            "light": self.facts.light_state(sid, oid),
             "spatial": asdict(self.spatial.config(package, oid))
             if self.spatial.config(package, oid)
             else None,

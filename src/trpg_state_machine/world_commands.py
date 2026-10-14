@@ -59,7 +59,25 @@ class RepositionObject:
     to_cell: str
 
 
+@dataclass(frozen=True, slots=True)
+class SetLightEnabled:
+    scene_id: str
+    object_id: str
+    expected_cell: str
+    enabled: bool
+
+
+@dataclass(frozen=True, slots=True)
+class SwitchLightMode:
+    scene_id: str
+    object_id: str
+    expected_cell: str
+    mode: str
+
+
 WORLD_CAPABILITY_COMMANDS = {
+    "world.set_light_enabled": SetLightEnabled,
+    "world.switch_light_mode": SwitchLightMode,
     "world.reposition_object": RepositionObject,
     "world.put_item": PutItem,
     "world.take_item": TakeItem,
@@ -76,4 +94,6 @@ WORLD_CAPABILITY_OPERATIONS = (
     PutItem,
     TakeItem,
     RepositionObject,
+    SetLightEnabled,
+    SwitchLightMode,
 )

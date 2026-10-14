@@ -33,6 +33,7 @@ class EventCapture:
             "item.picked_up": "Someone picks up an item.",
             "item.container_transferred": "Someone transfers an item.",
             "item.dropped": "Someone puts down an item.",
+            "object.light_changed": "Someone operates a light source.",
             "object.bar_changed": "Someone operates an object bar.",
             "object.durability_changed": "An object is damaged.",
             "door.lock_changed": "Someone operates a door lock.",
@@ -178,6 +179,10 @@ class EventCapture:
         topologies = {}
         for scene_id in sorted(scene_ids):
             grid, topology = self._perception_geometry(sid, scene_id)
+            uncertainty, light_sources = (), {}
+            if grid is not None and any(d.capability("light") for d in package.world_objects):
+                grid, uncertainty, light_sources = self.lights.project(sid, scene_id, package, grid)
+                topology = GridTopology(GridScene(**grid))
             topologies[scene_id] = topology
             evidence["scenes"][scene_id] = {
                 "grid": grid,
@@ -191,6 +196,9 @@ class EventCapture:
                     )
                 ),
             }
+            if any(d.capability("light") for d in package.world_objects):
+                evidence["scenes"][scene_id]["light_uncertain_cells"] = list(uncertainty)
+                evidence["scenes"][scene_id]["lighting_sources"] = light_sources
         for actor in [*actors, *evidence["source_actors"]]:
             cell = self._current_evidence_cell(
                 sid, actor, topologies.get(actor["current_scene_id"])

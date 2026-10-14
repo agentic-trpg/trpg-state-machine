@@ -33,12 +33,16 @@ from .world_commands import (
     LockObject,
     PutItem,
     RepositionObject,
+    SetLightEnabled,
+    SwitchLightMode,
     TakeItem,
     UnbarObject,
     UnlockObject,
 )
 
 __all__ = [
+    "SetLightEnabled",
+    "SwitchLightMode",
     "RepositionObject",
     "PutItem",
     "TakeItem",

@@ -500,6 +500,11 @@ class WorldFacts:
             obj = self.object(sid, d.object_id)
             if obj is None or obj["scene_id"] != scene_id:
                 continue
+            if c := d.capability("light"):
+                self._conn.execute(
+                    "INSERT INTO object_lights VALUES (?,?,?,?)",
+                    (sid, d.object_id, int(c.initial_enabled), c.initial_mode),
+                )
             if c := d.capability("openable"):
                 self._conn.execute(
                     "INSERT INTO object_openables VALUES (?,?,?,?)",
@@ -514,6 +519,21 @@ class WorldFacts:
                 self._conn.execute(
                     "INSERT INTO object_durability VALUES (?,?,?)", (sid, d.object_id, c.initial_hp)
                 )
+
+    def light_state(self, sid, oid):
+        row = self._conn.execute(
+            "SELECT enabled,mode FROM object_lights WHERE session_id=? AND object_id=?", (sid, oid)
+        ).fetchone()
+        return {"enabled": bool(row[0]), "mode": row[1]} if row else None
+
+    def set_light_state(self, sid, oid, enabled, mode):
+        self.store.require_write()
+        if self.light_state(sid, oid) is None or type(enabled) is not bool or type(mode) is not str:
+            raise StateMachineError("unsupported_object_capability", "No valid emitter state")
+        self._conn.execute(
+            "UPDATE object_lights SET enabled=?,mode=? WHERE session_id=? AND object_id=?",
+            (int(enabled), mode, sid, oid),
+        )
 
     def openable_state(self, sid, oid):
         row = self._conn.execute(

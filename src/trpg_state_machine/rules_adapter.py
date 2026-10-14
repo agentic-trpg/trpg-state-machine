@@ -269,7 +269,7 @@ class RulesAdapter:
                 "ruleset_binding_mismatch", "Evaluator data/configuration differ"
             ) from exc
 
-    def _noncombat_snapshot(self, row):
+    def _noncombat_snapshot(self, row, package=None):
         self.records.require_noncombat_save(row)
         sid = row["session_id"]
         if row["mechanical_schema_version"] != "engine-snapshot/17":
@@ -291,6 +291,16 @@ class RulesAdapter:
             "SELECT state_json FROM mechanical_scenes WHERE session_id=? AND scene_id=?",
             (sid, row["current_scene_id"]),
         ).fetchone()
+        scene_data = json.loads(scene[0]) if scene else None
+        if scene_data is not None and package is not None:
+            projected, unknown, _ = self.world.objects.lights.project(
+                sid, scene_data["scene_id"], package, scene_data["grid"]
+            )
+            if unknown:
+                raise StateMachineError(
+                    "unsupported_light_geometry", "Mechanical lighting contains uncertainty"
+                )
+            scene_data = {**scene_data, "grid": projected}
         try:
             return NonCombatSnapshot.model_validate_json(
                 canonical_json(
@@ -302,7 +312,7 @@ class RulesAdapter:
                         "character_states": [actors[a] for a in present],
                         **self.characters.rule_components(sid, set(present)),
                         "combat_setup": None,
-                        "scene_state": json.loads(scene[0]),
+                        "scene_state": scene_data,
                     }
                 )
             )

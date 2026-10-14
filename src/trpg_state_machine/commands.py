@@ -41,6 +41,8 @@ from .world_commands import (
     LockObject,
     PutItem,
     RepositionObject,
+    SetLightEnabled,
+    SwitchLightMode,
     TakeItem,
     UnbarObject,
     UnlockObject,
@@ -90,7 +92,9 @@ class TypedCommand:
     actor_id: str
     command_type: str
     payload: (
-        RepositionObject
+        SetLightEnabled
+        | SwitchLightMode
+        | RepositionObject
         | PutItem
         | TakeItem
         | LockObject
@@ -259,7 +263,7 @@ def validate_command(command: TypedCommand) -> None:
     else:
         fields = asdict(command.payload)
     for key, value in fields.items():
-        if key == "value":
+        if key in ("value", "enabled"):
             if type(value) is not bool:
                 raise StateMachineError("invalid_operation", "Flag must be boolean")
         elif not isinstance(value, str) or not value or len(value) > 256:

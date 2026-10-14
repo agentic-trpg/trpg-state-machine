@@ -261,3 +261,61 @@ navigation tests passed. Includes old-plan execution blocked by new multi-cell
 obstacle, cancellation/replan after clearing, denied GM permission, collision,
 bounds, replay and evidence-write rollback. No DB migration is needed: anchors
 and version already have authoritative storage. Recovery reconstructs projections.
+
+
+## W7 — local ordinary lighting and immutable perception inputs
+
+W6 c63c296 pushed. DB 29→30 adds object_lights(enabled,mode), initially empty for
+old saves. LightEmitter has strict modes, normal/hooded ranges in feet and explicitly
+uses dim_outer_radius_ft (distance from source, not an additional distance).
+Only grid_radius_static_los, ordinary scenario source_kind, sunlight=false and
+explicit scenario_unmetered fuel policy are admitted. These are original scenario
+emitters, not infinitely fueled SRD torches/lamps or persistent spells. Finite fuel,
+real-time timers, Effects sources, cones and sunlight emitters are unsupported.
+
+| Fields | Actual model/storage | Class | Writer / consumer |
+|---|---|---|---|
+| ambient illumination | existing MechanicalGrid.default_lighting/lighting | T | Package / base environment, unchanged |
+| profile/shape/ranges/modes/source/sunlight/fuel policy | LightEmitter + LightMode | T/R | Package / LightService |
+| initial/enabled/mode | LightEmitter / object_lights | T/S | init, WorldFacts.set_light_state / projection |
+| source_object_id/effective_origin | same object_id + WorldFacts.placement | R/D | actual relations / carry and container projection |
+| container transmission | Container open/closed explicit transmit/block/unknown | T | Package / recursive shading |
+| effective illumination/contributors/uncertainty | LightService.project | D | existing GridTopology distance/LoS/cover / query, snapshot, evidence |
+| fuel balance/time/orientation | deferred | conditional | no new stock, clock or rotation without a consumer |
+
+SetLightEnabled/SwitchLightMode are closed typed commands with query, parser,
+authorization, sync/async and combat/activity guards. New NPC Evaluation conversion
+is not implemented; explicitly controlled NPC commands remain authorized through
+existing grants. Public get_illumination reads only this actor's public scene and
+filters hidden source identities. Closed contents do not leak through contributors.
+
+Light positions follow carrier/parent facts automatically. Contributions combine
+by the greatest bright/dim/dark category, never arbitrary addition. Existing static
+Grid LoS/Total Cover gate propagation. Dynamic movement-only objects/closed passage
+rays have explicit uncertainty rather than assumed visual opacity/transparency;
+unknown container transmission likewise produces illumination=None/status=unknown.
+A light on independent spatial geometry is rejected until anchor/occlusion semantics
+exist. Unknown rays are frozen as light_uncertain_cells; perception refuses to
+adjudicate those cells as definite visibility. Mechanical snapshots reject uncertain
+lighting instead of serializing guessed brightness. Active light sources retain a
+combat initialization guard pending the real combat environment adapter.
+
+EventCapture stores projected local grid plus stage sources at before/after light
+updates and all later movement/container events. Historical reads use frozen JSON.
+Perception consumes that grid; diagnostic source lists are stripped from its signal
+environment. Noncombat rule request/recheck snapshots use the same projection.
+No noticing/Knowledge/Memory facts are written by lighting. Destroyed sources cease
+contributing while identity/history are retained (synthetic W2 application scope).
+
+Verified rules: SRD 5.2.1 p.11 Vision and Light; engine GridTopology implements the
+existing distance/LoS/light categories. Standard lantern fuel/Bonus Action semantics
+are not imported into these scenario emitters. Tests verify carried/fixed emitters,
+mode/shading/movement, before/after frozen evidence, real Perception admission,
+mechanical snapshot input, uncertainty, fault rollback, replay and fresh-process state.
+
+
+W7 review/validation: 85 Perception/evidence/spatial cases passed in the combined
+86-case run; one dynamic-obstacle endpoint uncertainty case exposed a missing
+endpoint check. Fixed it and reran all six light cases successfully, including
+that regression and internal destroyed-emitter adoption. Ruff and format pass.
+The synthetic destruction test proves contribution removal, not an object attack.

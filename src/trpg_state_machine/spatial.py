@@ -290,7 +290,7 @@ class WorldHandler:
 
     def _visible_target(self, sid, actor_id, cell, package):
         position = self._public_scope(sid, actor_id, package)
-        topology = self._base_topology(sid, position.scene_id)
+        topology = self._base_topology(sid, position.scene_id, package)
         if not cell_in_bounds(topology, cell) or not cell_in_bounds(topology, position.cell):
             raise StateMachineError(
                 "invalid_spatial_state", "Position is missing or outside its map"
@@ -305,7 +305,7 @@ class WorldHandler:
         position = self._public_scope(sid, actor_id, package)
         if position.scene_id != operation.scene_id or position.cell != operation.expected_cell:
             raise StateMachineError("position_conflict", "Position precondition differs")
-        base = self._base_topology(sid, position.scene_id)
+        base = self._base_topology(sid, position.scene_id, package)
         if not cell_in_bounds(base, operation.to_cell):
             raise StateMachineError("invalid_cell", "Target is outside this local map")
         if position.cell == operation.to_cell:
@@ -408,7 +408,7 @@ class WorldHandler:
             )
         if type(operation) is PickupItem and target != operation.expected_cell:
             raise StateMachineError("position_conflict", "Item position precondition differs")
-        base = self._base_topology(sid, position.scene_id)
+        base = self._base_topology(sid, position.scene_id, package)
         topology = self._movement_topology(sid, position.scene_id, package, exclude_actor=actor_id)
         if not base.is_valid_cell(target) or (
             target != position.cell and topology.edge_distance(position.cell, target) is None
@@ -688,7 +688,7 @@ class WorldHandler:
             return obj, None
         ports = self._door_ports(position.scene_id, operation.object_id, package)
         if ports:
-            base = self._base_topology(sid, position.scene_id)
+            base = self._base_topology(sid, position.scene_id, package)
             visible = [(p, e) for p, e in ports if base.can_see(position.cell, e.threshold_cell)]
             if not visible:
                 raise StateMachineError("invalid_target", "No authorized local door")
@@ -914,7 +914,7 @@ class WorldHandler:
                     "unsupported_spatial_view", "Active combat needs its perception adapter"
                 )
             position = self._public_scope(session_id, actor_id, package)
-            topology = self._base_topology(session_id, position.scene_id)
+            topology = self._base_topology(session_id, position.scene_id, package)
             objects = []
             for obj in self._conn.execute(
                 "SELECT object_id,cell FROM objects WHERE session_id=? AND scene_id=? "
@@ -1060,11 +1060,14 @@ class WorldHandler:
     def _spatial_scene(self, sid, scene_id):
         return self.facts.spatial_scene(sid, scene_id)
 
-    def _base_topology(self, sid, scene_id):
+    def _base_topology(self, sid, scene_id, package=None):
         scene = self._spatial_scene(sid, scene_id)
         if scene is None:
             raise StateMachineError("spatial_unconfigured", "Scene has no fine spatial capability")
-        return GridTopology(GridScene(**scene["grid"]))
+        grid = scene["grid"]
+        if package is not None:
+            grid, _, _ = self.objects.lights.project(sid, scene_id, package, grid)
+        return GridTopology(GridScene(**grid))
 
     def _current_actor_cells(self, sid, scene_id, roster):
         topology = self._base_topology(sid, scene_id)
@@ -1083,6 +1086,11 @@ class WorldHandler:
     def _spatial_combat_guard(self, sid, scene_id, package):
         if self._spatial_scene(sid, scene_id) is None:
             return
+        if self.objects.lights.sources(sid, scene_id, package):
+            raise StateMachineError(
+                "unsupported_combat_dynamic_lighting",
+                "Local emitter lighting needs combat integration",
+            )
         if self.objects.spatial.movement_cells(sid, scene_id, package):
             raise StateMachineError(
                 "unsupported_combat_dynamic_obstacles",

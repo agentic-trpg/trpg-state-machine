@@ -61,6 +61,7 @@ def signal_environment(signal, evidence):
     if origin is None or origin.scene_id not in evidence.get("scenes", {}):
         return None
     environment = dict(evidence["scenes"][origin.scene_id])
+    environment.pop("lighting_sources", None)
     source = next(
         (
             a
@@ -164,6 +165,10 @@ def judge_visual(signal: Signal, observer: dict, environment: dict | None):
     if failure := _admission(signal, observer, environment):
         return failure
     mechanical = observer["mechanical"]
+    if environment.get("origin_cell") in environment.get(
+        "light_uncertain_cells", ()
+    ) or mechanical.get("cell") in environment.get("light_uncertain_cells", ()):
+        return _unknown("unsupported_light_geometry")
     conditions = mechanical["conditions"]
     try:
         senses = SensesState.model_validate_json(canonical_json(mechanical["senses"]))

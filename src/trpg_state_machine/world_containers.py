@@ -29,9 +29,9 @@ class ContainerService:
             )
         if location["carrier_id"] is None:
             cell = location["cell"]
-            base = h._base_topology(sid, position.scene_id)
+            base = h._base_topology(sid, position.scene_id, package)
             topology = h._movement_topology(sid, position.scene_id, package, exclude_actor=actor)
-            if cell is None or not base.can_see(position.cell, cell):
+            if cell is None or (cell != position.cell and not base.can_see(position.cell, cell)):
                 raise StateMachineError("invalid_target", "No authorized local object")
             if cell != position.cell and topology.edge_distance(position.cell, cell) is None:
                 raise StateMachineError("object_out_of_reach", "Object requires adjacent access")
