@@ -55,6 +55,7 @@ from .rules_adapter import RulesAdapter
 from .session_access import SessionAccess, _binding, _trusted
 from .spatial import WorldHandler
 from .storage import SqliteStore
+from .world_objects import WorldObjectService
 
 
 def _result(raw: str) -> CreationResult:
@@ -108,6 +109,8 @@ class StateMachine(
             self._activity_records,
             loader=loader,
         )
+        self._objects = WorldObjectService(self._world)
+        self._world.objects = self._objects
         self._activities = ActivityHandler(
             self._store,
             self._activity_records,
@@ -524,6 +527,12 @@ class StateMachine(
 
     def read_actor_position(self, session_id, actor_id, package, *, context):
         return self._world.read_actor_position(session_id, actor_id, package, context=context)
+
+    def get_object(self, session_id, actor_id, object_id, package, *, context):
+        return self._objects.get_object(session_id, actor_id, object_id, package, context=context)
+
+    def list_scene_objects(self, session_id, actor_id, package, *, context):
+        return self._objects.list_objects(session_id, actor_id, package, context=context)
 
     def read_carried_items(self, session_id, actor_id, package, *, context):
         return self._world.read_carried_items(session_id, actor_id, package, context=context)

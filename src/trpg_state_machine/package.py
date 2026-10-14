@@ -17,12 +17,14 @@ if TYPE_CHECKING:
     from .lock_package import LockableDoor
     from .navigation_models import NavigationKnowledge
     from .npc_state import NPCInitialState, WorldFactDefinition
+    from .world_package import WorldObjectDefinition
 
 SCHEMA_VERSION = "state-machine-foundation/1"
 INTERACTION_SCHEMA_VERSION = "state-machine-foundation/2"
 NAVIGATION_SCHEMA_VERSION = "state-machine-foundation/3"
 ITEM_SCHEMA_VERSION = "state-machine-foundation/4"
 LOCK_SCHEMA_VERSION = "state-machine-foundation/5"
+WORLD_SCHEMA_VERSION = "state-machine-foundation/6"
 MAX_PACKAGE_BYTES = 1_048_576
 _ID = re.compile(r"[a-z][a-z0-9_]*(?:\.[a-z][a-z0-9_]*)+")
 
@@ -170,6 +172,7 @@ class AdventurePackage:
     legacy_audit_only: bool = False
     portable_items: tuple["PortableItem", ...] = ()
     lockable_doors: tuple["LockableDoor", ...] = ()
+    world_objects: tuple["WorldObjectDefinition", ...] = ()
 
     def scene(self, scene_id: str) -> SceneDefinition:
         for scene in self.scenes:
@@ -304,17 +307,24 @@ def _validate(data: dict, *, allow_legacy_audit=False) -> AdventurePackage:
             NAVIGATION_SCHEMA_VERSION,
             ITEM_SCHEMA_VERSION,
             LOCK_SCHEMA_VERSION,
+            WORLD_SCHEMA_VERSION,
         )
     )
-    locks = interactions and data["manifest"]["schema_version"] == LOCK_SCHEMA_VERSION
+    world_enabled = interactions and data["manifest"]["schema_version"] == WORLD_SCHEMA_VERSION
+    locks = interactions and data["manifest"]["schema_version"] in (
+        LOCK_SCHEMA_VERSION,
+        WORLD_SCHEMA_VERSION,
+    )
     items = interactions and data["manifest"]["schema_version"] in (
         ITEM_SCHEMA_VERSION,
         LOCK_SCHEMA_VERSION,
+        WORLD_SCHEMA_VERSION,
     )
     navigation = interactions and data["manifest"]["schema_version"] in (
         NAVIGATION_SCHEMA_VERSION,
         ITEM_SCHEMA_VERSION,
         LOCK_SCHEMA_VERSION,
+        WORLD_SCHEMA_VERSION,
     )
     root = _mapping(
         data,
@@ -322,7 +332,8 @@ def _validate(data: dict, *, allow_legacy_audit=False) -> AdventurePackage:
         + (" passages" if interactions else "")
         + (" navigation" if navigation else "")
         + (" item_transfers" if items else "")
-        + (" lockable_doors" if locks else ""),
+        + (" lockable_doors" if locks else "")
+        + (" world_objects" if world_enabled else ""),
         # Package versioning keeps legacy raw-data digests unchanged.
         "$",
     )
@@ -338,6 +349,7 @@ def _validate(data: dict, *, allow_legacy_audit=False) -> AdventurePackage:
         NAVIGATION_SCHEMA_VERSION,
         ITEM_SCHEMA_VERSION,
         LOCK_SCHEMA_VERSION,
+        WORLD_SCHEMA_VERSION,
     ):
         _fail("unsupported_schema", "manifest.schema_version", f"Expected {SCHEMA_VERSION}")
     adventure_id = _identifier(m["adventure_id"], "manifest.adventure_id")
@@ -786,6 +798,9 @@ def _validate(data: dict, *, allow_legacy_audit=False) -> AdventurePackage:
     from .lock_package import validate_locks
 
     lockable = validate_locks(root["lockable_doors"], scenes, passages, portable) if locks else ()
+    from .world_package import validate_world_objects
+
+    world_objects = validate_world_objects(root["world_objects"], scenes) if world_enabled else ()
     return AdventurePackage(
         adventure_id,
         version,
@@ -805,6 +820,7 @@ def _validate(data: dict, *, allow_legacy_audit=False) -> AdventurePackage:
         legacy_audit,
         portable,
         lockable,
+        world_objects,
     )
 
 

@@ -437,6 +437,15 @@ class CharacterFacts:
 
 
 class WorldFacts:
+    def object(self, sid, oid):
+        return self._conn.execute(
+            "SELECT * FROM objects WHERE session_id=? AND object_id=?", (sid, oid)
+        ).fetchone()
+
+    @staticmethod
+    def object_definition(package, oid):
+        return next((d for d in package.world_objects if d.object_id == oid), None)
+
     def __init__(self, store):
         self.store = store
 
