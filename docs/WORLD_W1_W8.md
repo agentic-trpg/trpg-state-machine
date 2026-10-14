@@ -129,3 +129,46 @@ check durability, jam, bar and locks. No implicit unlock/unbar or force check.
 Evidence is captured after the bar update in the shared command transaction.
 Checks cover query/parser, retry, bar/open separation, jam, legacy locks/navigation;
 all focused tests must pass before W3 commit. No independent caches exist.
+
+
+## W4 — independently identified ordinary locks
+
+W3 commit 00a6db7 pushed (29 focused tests). LockSet declarations attach one or more
+strict LockDefinition records to any openable. LockObject/UnlockObject explicitly
+name the target lock; credential IDs are actual portable instances, never slugs.
+Lock requires closed, unlock changes only the selected lock. PickLock unsupported:
+no approved object/tool/activity rule chain in the pinned Adapter.
+
+| Fields | Actual location | Class | Writer / consumer |
+|---|---|---|---|
+| lock_id, target_object_id | door_locks composite session identity | R | initialization / target validation |
+| definition/policy, operable_sides, requires_closed | LockDefinition and fixed closed invariant | T | Package / handler |
+| initial_locked/locked | LockDefinition / door_locks.locked | T/S | init, WorldFacts.set_door_lock / open, navigation |
+| credential_binding | door_credentials(session,lock_id,instance_id) | R | init / credential admission |
+| locks_for_object/effective_locked | authorized object view, any blocking lock | D | derived / query, open and passage |
+| usable_credentials/can_unlock | query_world_action with actual credential | D | validators / permission-safe result, no credential list |
+| broken/pick/replacement | deferred | conditional | no supported rules/lifecycle consumer |
+
+DB 27→28 evolves existing lock/credential tables with stable lock IDs. Old IDs and
+bindings are preserved as lock.<old object_id>; no new key instances are created.
+Legacy LockDoor/UnlockDoor remain compatible for a unique lock and reject multi-lock
+ambiguity. New commands use existing sync/async submission, controlled-NPC grants
+and availability query. Existing NPC single-door intents remain; new lock-ID NPC
+Evaluation conversion is not implemented. W5 must extend recursive key accessibility.
+
+W1–W4 review: fixed missing operation registration/imports; guarded legacy switching
+against destroyed/jammed/barred/locked states; rejected lock-without-openable and
+legacy+new duplicate lock declarations. Shared SQLite remains sole authority.
+Credential lists are absent from public views. No new transaction/cache/RNG layer.
+Full pytest suite and migration compatibility are run before proceeding to W5.
+
+
+W4 validation result: all 1,227 collected cases covered by four complete file
+partitions (300, 395, 231, and 301). The last partition initially had one stale
+schema-shape equality assertion; changed it to preserve every original column/row
+and compare replay against the upgraded snapshot. That test then passed separately.
+No runtime failure remains from this run. Ruff check/format and diff check pass.
+Historical /25 nonempty save migration is tested with genuine old committed code
+in another process. Full logs are checkout-local `.test-tmp/w4-final*.log`.
+The isolated checkout now has its own locked Python 3.12 venv; no global PYTHONPATH
+is used because it would incorrectly override historical runtime subprocesses.

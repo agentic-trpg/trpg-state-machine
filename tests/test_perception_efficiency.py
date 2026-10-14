@@ -290,7 +290,7 @@ with StateMachine(sys.argv[1]) as sm:
     ]
     for worker in workers:
         stdout, stderr = worker.communicate(timeout=30)
-        assert worker.returncode == 0 and stdout.strip() == b"25", stderr
+        assert worker.returncode == 0 and stdout.strip() == b"28", stderr
     package = _validate(queue_data)
     for _ in range(2):
         with StateMachine(db) as sm:
@@ -310,11 +310,16 @@ with StateMachine(sys.argv[1]) as sm:
         "mechanical_components",
         "door_locks",
         "door_credentials",
+        "object_durability",
+        "world_result_adoptions",
+        "object_openables",
     }
     assert after["navigation_activities"][1] == set()
     assert after["mechanical_components"][1] == set()
     assert after["door_locks"][1] == set()
     assert after["door_credentials"][1] == set()
+    for table in ("object_durability", "world_result_adoptions", "object_openables"):
+        assert after[table][1] == set()
     assert_original_rows_equal(before, after, excluded=("npc_perception_cursors",))
 
 
@@ -372,4 +377,4 @@ def test_schema20_sql_failure_rolls_back_then_reopens(tmp_path, queue_data, monk
     with sqlite3.connect(db) as conn:
         assert conn.execute("PRAGMA user_version").fetchone()[0] == 19
     with StateMachine(db) as sm:
-        assert sm._conn.execute("PRAGMA user_version").fetchone()[0] == 25
+        assert sm._conn.execute("PRAGMA user_version").fetchone()[0] == 28

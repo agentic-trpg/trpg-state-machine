@@ -31,7 +31,7 @@ from .errors import StateMachineError
 from .game_time import AdvanceGameTime, advance_game_time
 from .models import TrustedContext
 from .package import AdventurePackage, canonical_json
-from .world_commands import WORLD_CAPABILITY_OPERATIONS
+from .world_commands import WORLD_CAPABILITY_OPERATIONS, LockObject, UnlockObject
 
 
 @dataclass(frozen=True, slots=True)
@@ -523,7 +523,11 @@ class WorldHandler:
 
     def _door_lock_status(self, sid, object_id, package):
         locked = self.facts.door_lock(sid, object_id)
-        if (locked is not None) != any(d.object_id == object_id for d in package.lockable_doors):
+        definition = self.facts.object_definition(package, object_id)
+        configured = any(d.object_id == object_id for d in package.lockable_doors) or bool(
+            definition and definition.capability("locks")
+        )
+        if (locked is not None) != configured:
             raise StateMachineError("invalid_lock_state", "Lock capability contradicts package")
         return locked
 
@@ -533,13 +537,35 @@ class WorldHandler:
         self._world_actor_ready(sid, actor_id)
         position = self._public_scope(sid, actor_id, package)
         obj, passage = self._manual_object_target(sid, actor_id, operation, package)
-        if passage is None:
+        if passage is None and type(operation) in (LockDoor, UnlockDoor):
             raise StateMachineError("unsupported_object_capability", "No approved shared lock")
         if position.cell != operation.expected_cell:
             raise StateMachineError("position_conflict", "Door interaction position differs")
         locked = self._door_lock_status(sid, operation.object_id, package)
         if locked is None:
             raise StateMachineError("unsupported_object_capability", "No approved shared lock")
+        locks = self.facts.locks_for_object(sid, operation.object_id)
+        if type(operation) in (LockObject, UnlockObject):
+            lock_id = operation.lock_id
+        elif len(locks) == 1:
+            lock_id = locks[0][0]
+        else:
+            raise StateMachineError("ambiguous_lock", "Explicit lock identity required")
+        selected = next((lock for lock in locks if lock[0] == lock_id), None)
+        if selected is None:
+            raise StateMachineError("invalid_target", "Lock does not belong to object")
+        locked = bool(selected[1])
+        definition = self.facts.object_definition(package, operation.object_id)
+        config = definition.capability("locks") if definition else None
+        policy = (
+            next((lock for lock in config.locks if lock.lock_id == lock_id), None)
+            if config
+            else None
+        )
+        if policy and policy.operable_sides and position.scene_id not in policy.operable_sides:
+            raise StateMachineError("operation_side_forbidden", "Lock inaccessible from this side")
+        if self.facts.object_hp(sid, operation.object_id) == 0:
+            raise StateMachineError("object_destroyed", "Destroyed object is unusable")
         # No distinction between absent, foreign, ground and mismatched credentials.
         item = self._conn.execute(
             "SELECT * FROM objects WHERE session_id=? AND object_id=?",
@@ -552,7 +578,7 @@ class WorldHandler:
             or operation.credential_instance_id
             not in {i.instance_id for i in package.portable_items}
             or not self.facts.accepts_credential(
-                sid, operation.object_id, operation.credential_instance_id
+                sid, operation.object_id, operation.credential_instance_id, lock_id
             )
         ):
             raise StateMachineError("credential_unavailable", "No usable owned credential")
@@ -577,7 +603,7 @@ class WorldHandler:
             or not entry["accessible"]
         ):
             raise StateMachineError("credential_unavailable", "No usable owned credential")
-        if type(operation) is LockDoor and obj[1] != "closed":
+        if type(operation) in (LockDoor, LockObject) and obj[1] != "closed":
             raise StateMachineError("door_must_be_closed", "Close the door before locking")
         self._validate_door_occupancy(
             sid,
@@ -588,11 +614,13 @@ class WorldHandler:
 
     def _operate_lock(self, row, actor_id, operation, package):
         position, passage, before = self._validate_lock(row, actor_id, operation, package)
-        locked = type(operation) is LockDoor
+        locked = type(operation) in (LockDoor, LockObject)
         if before == locked:
             return []
         sid = row["session_id"]
-        self.facts.set_door_lock(sid, operation.object_id, locked)
+        self.facts.set_door_lock(
+            sid, operation.object_id, locked, getattr(operation, "lock_id", None)
+        )
         return [
             self._capture_event(
                 sid,
@@ -603,7 +631,8 @@ class WorldHandler:
                     "actor_id": actor_id,
                     "actor_cell": position.cell,
                     "object_id": operation.object_id,
-                    "passage_id": passage.passage_id,
+                    "passage_id": passage.passage_id if passage else None,
+                    "lock_id": getattr(operation, "lock_id", None),
                     "credential_instance_id": operation.credential_instance_id,
                     "locked": locked,
                     "execution": _execution_data(actor_id, None),

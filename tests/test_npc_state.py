@@ -512,7 +512,7 @@ def test_actual_schema_1_to_9_upgrade_preserves_data_and_marks_legacy(
             return sm._conn.execute("PRAGMA user_version").fetchone()[0]
 
     with ThreadPoolExecutor(max_workers=3) as pool:
-        assert list(pool.map(upgrade, range(3))) == [25] * 3
+        assert list(pool.map(upgrade, range(3))) == [28] * 3
     assert_preserved(database, before)
     with StateMachine(database) as sm:
         for sid in sids:

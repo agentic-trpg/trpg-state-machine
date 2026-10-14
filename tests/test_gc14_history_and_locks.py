@@ -79,13 +79,16 @@ def test_original_receipt_and_historical_move_are_not_backfilled_after_upgrade(t
     with StateMachine(database) as sm:
         sid = old["sid"]
         sm.resume_session(sid, p, context=context)
-        assert sm._conn.execute("PRAGMA user_version").fetchone()[0] == 25
-        assert stored_rows(database) == original
+        assert sm._conn.execute("PRAGMA user_version").fetchone()[0] == 28
+        from test_migrations import assert_original_rows_equal
+
+        upgraded = stored_rows(database)
+        assert_original_rows_equal(original, upgraded)
         raw = old["command"]
         del raw["check_world_effects"]
         receipt = sm.submit_command(world_command_from_data(raw), p, context=context)
         assert json.loads(json.dumps(asdict(receipt))) == old["receipt"]
-        assert stored_rows(database) == original
+        assert stored_rows(database) == upgraded
         new = submit(sm, sid, p, context, MoveActor(MOVER, A), "new.move", MOVER)
         assert new.status == "committed"
         assert [e.event_type for e in events_for(sm, sid, p, context, new)] == [

@@ -35,7 +35,13 @@ from .navigation_models import (
     StartNavigation,
 )
 from .package import canonical_json
-from .world_commands import WORLD_CAPABILITY_COMMANDS, BarObject, UnbarObject
+from .world_commands import (
+    WORLD_CAPABILITY_COMMANDS,
+    BarObject,
+    LockObject,
+    UnbarObject,
+    UnlockObject,
+)
 
 OPERATIONS = {
     "world.unlock_door": UnlockDoor,
@@ -81,7 +87,9 @@ class TypedCommand:
     actor_id: str
     command_type: str
     payload: (
-        BarObject
+        LockObject
+        | UnlockObject
+        | BarObject
         | UnbarObject
         | EnterScene
         | SetSceneFlag

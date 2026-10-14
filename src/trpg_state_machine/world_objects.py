@@ -3,7 +3,7 @@
 from dataclasses import asdict
 
 from .errors import StateMachineError
-from .world_commands import BarObject, UnbarObject
+from .world_commands import BarObject, LockObject, UnbarObject, UnlockObject
 
 
 class WorldObjectService:
@@ -13,6 +13,9 @@ class WorldObjectService:
 
     def validate(self, row, actor_id, operation, package):
         h, sid = self.handler, row["session_id"]
+        if type(operation) in (LockObject, UnlockObject):
+            h._validate_lock(row, actor_id, operation, package)
+            return
         h._world_operation_capability(row, operation)
         h._world_actor_ready(sid, actor_id)
         h._manual_object_target(sid, actor_id, operation, package)
@@ -49,6 +52,8 @@ class WorldObjectService:
             return WorldActionAvailability("available", "available", row["world_version"])
 
     def operate(self, row, actor_id, operation, package):
+        if type(operation) in (LockObject, UnlockObject):
+            return self.handler._operate_lock(row, actor_id, operation, package)
         self.validate(row, actor_id, operation, package)
         h, sid = self.handler, row["session_id"]
         barred = type(operation) is BarObject
@@ -134,6 +139,11 @@ class WorldObjectService:
                 available[name] = False
         return {
             **available,
+            "locks_for_object": tuple(
+                {"lock_id": lock[0], "locked": bool(lock[1])}
+                for lock in self.facts.locks_for_object(sid, oid)
+            ),
+            "effective_locked": self.facts.door_lock(sid, oid),
             "openable": openable,
             "current_hp": hp,
             "destroyed": destroyed,

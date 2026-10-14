@@ -800,7 +800,11 @@ def _validate(data: dict, *, allow_legacy_audit=False) -> AdventurePackage:
     lockable = validate_locks(root["lockable_doors"], scenes, passages, portable) if locks else ()
     from .world_package import validate_world_objects
 
-    world_objects = validate_world_objects(root["world_objects"], scenes) if world_enabled else ()
+    world_objects = (
+        validate_world_objects(root["world_objects"], scenes, portable, lockable)
+        if world_enabled
+        else ()
+    )
     return AdventurePackage(
         adventure_id,
         version,

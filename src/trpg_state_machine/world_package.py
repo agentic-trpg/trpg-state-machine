@@ -27,6 +27,21 @@ class Durability:
 
 
 @dataclass(frozen=True, slots=True)
+class LockDefinition:
+    lock_id: str
+    initial_locked: bool
+    credential_instance_ids: tuple[str, ...]
+    operable_sides: tuple[str, ...]
+    policy: str = "public_owned_credential"
+
+
+@dataclass(frozen=True, slots=True)
+class LockSet:
+    locks: tuple[LockDefinition, ...]
+    kind: str = "locks"
+
+
+@dataclass(frozen=True, slots=True)
 class WorldObjectDefinition:
     object_id: str
     definition_ref: str
@@ -35,13 +50,13 @@ class WorldObjectDefinition:
     material: str | None
     size_category: str | None
     weight_lb: int | None
-    capabilities: tuple[Openable | Durability, ...]
+    capabilities: tuple[Openable | Durability | LockSet, ...]
 
     def capability(self, kind):
         return next((c for c in self.capabilities if c.kind == kind), None)
 
 
-def validate_world_objects(raw, scenes):
+def validate_world_objects(raw, scenes, portable=(), legacy_locks=()):
     result = []
     objects = {o.object_id: o for s in scenes for o in s.objects}
     for value in _list(raw, "world_objects"):
@@ -76,6 +91,40 @@ def validate_world_objects(raw, scenes):
         for config in _list(d["capabilities"], p + ".capabilities"):
             if not isinstance(config, dict):
                 _fail("schema_error", p, "Capability must be a mapping")
+            if config.get("kind") == "locks":
+                c = _mapping(config, "kind locks", p)
+                locks = []
+                for value in _list(c["locks"], p, nonempty=True):
+                    lock = _mapping(
+                        value,
+                        "lock_id initial_locked credential_instance_ids operable_sides policy",
+                        p,
+                    )
+                    _identifier(lock["lock_id"], p, "lock")
+                    if (
+                        type(lock["initial_locked"]) is not bool
+                        or lock["policy"] != "public_owned_credential"
+                    ):
+                        _fail("schema_error", p, "Unsupported ordinary lock policy")
+                    if lock["initial_locked"] and objects[d["object_id"]].state != "closed":
+                        _fail("invalid_reference", p, "Locked object must be closed")
+                    creds = _list(lock["credential_instance_ids"], p, nonempty=True)
+                    for iid in creds:
+                        _reference(iid, {i.instance_id for i in portable}, p)
+                    sides = _list(lock["operable_sides"], p)
+                    for side in sides:
+                        _reference(side, {s.scene_id for s in scenes}, p)
+                    _unique(creds, p)
+                    _unique(sides, p)
+                    locks.append(
+                        LockDefinition(
+                            lock["lock_id"], lock["initial_locked"], tuple(creds), tuple(sides)
+                        )
+                    )
+                if d["object_id"] in {lock.object_id for lock in legacy_locks}:
+                    _fail("invalid_reference", p, "Duplicate legacy and capability locks")
+                capabilities.append(LockSet(tuple(locks)))
+                continue
             if isinstance(config, dict) and config.get("kind") == "durability":
                 c = _mapping(
                     config,
@@ -142,6 +191,13 @@ def validate_world_objects(raw, scenes):
             c.kind == "openable" for c in capabilities
         ):
             _fail("invalid_reference", p, "State and openable declaration must agree")
+        if any(c.kind == "locks" for c in capabilities) and not any(
+            c.kind == "openable" for c in capabilities
+        ):
+            _fail("invalid_reference", p, "Locks require an openable capability")
         result.append(WorldObjectDefinition(**{**d, "capabilities": tuple(capabilities)}))
     _unique([d.object_id for d in result], "world_objects")
+    _unique(
+        [lock.lock_id for d in result if (c := d.capability("locks")) for lock in c.locks], "locks"
+    )
     return tuple(result)

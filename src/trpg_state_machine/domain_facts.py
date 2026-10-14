@@ -581,21 +581,25 @@ class WorldFacts:
             "UPDATE objects SET state=? WHERE session_id=? AND object_id=?", (state, sid, object_id)
         )
 
+    def locks_for_object(self, sid, oid):
+        return self._conn.execute(
+            "SELECT lock_id,locked FROM door_locks WHERE session_id=? AND object_id=? "
+            "ORDER BY lock_id",
+            (sid, oid),
+        ).fetchall()
+
     def door_lock(self, sid, object_id):
-        row = self._conn.execute(
-            "SELECT l.locked,o.state FROM door_locks l JOIN objects o "
-            "USING(session_id,object_id) WHERE l.session_id=? AND l.object_id=?",
-            (sid, object_id),
-        ).fetchone()
-        if row is None:
+        locks = self.locks_for_object(sid, object_id)
+        if not locks:
             return None
+        obj = self.object(sid, object_id)
         if (
-            row[0] not in (0, 1)
-            or row[1] not in ("open", "closed")
-            or (row[0] and row[1] != "closed")
+            obj is None
+            or obj["state"] not in ("open", "closed")
+            or (any(lock[1] for lock in locks) and obj["state"] != "closed")
         ):
-            raise StateMachineError("invalid_lock_state", "Contradictory shared door state")
-        return bool(row[0])
+            raise StateMachineError("invalid_lock_state", "Contradictory shared object state")
+        return any(bool(lock[1]) for lock in locks)
 
     def validate_door_switch(self, sid, object_id, state):
         if self.object_hp(sid, object_id) == 0:
@@ -611,7 +615,7 @@ class WorldFacts:
         if locked and state == "open":
             raise StateMachineError("door_locked", "Door is locked")
 
-    def set_door_lock(self, sid, object_id, locked):
+    def set_door_lock(self, sid, object_id, locked, lock_id=None):
         self.store.require_write()
         if self.door_lock(sid, object_id) is None:
             raise StateMachineError("unsupported_object_capability", "Door has no lock")
@@ -620,31 +624,63 @@ class WorldFacts:
         ).fetchone()[0]
         if locked and state != "closed":
             raise StateMachineError("door_must_be_closed", "Close the door before locking")
+        locks = self.locks_for_object(sid, object_id)
+        if lock_id is None:
+            if len(locks) != 1:
+                raise StateMachineError("ambiguous_lock", "Explicit lock identity required")
+            lock_id = locks[0][0]
+        if lock_id not in {lock[0] for lock in locks}:
+            raise StateMachineError("invalid_target", "Lock does not belong to object")
+        if self.object_hp(sid, object_id) == 0:
+            raise StateMachineError("object_destroyed", "Destroyed object is unusable")
         self._conn.execute(
-            "UPDATE door_locks SET locked=? WHERE session_id=? AND object_id=?",
-            (int(locked), sid, object_id),
+            "UPDATE door_locks SET locked=? WHERE session_id=? AND object_id=? AND lock_id=?",
+            (int(locked), sid, object_id, lock_id),
         )
 
     def initialize_locks(self, row, package):
         self.store.require_write()
         if row["world_version"] or row["event_seq"]:
             raise StateMachineError("invalid_lock_foundation", "Locks require a fresh session")
+        for d in package.world_objects:
+            c = d.capability("locks")
+            if c:
+                for lock in c.locks:
+                    self._conn.execute(
+                        "INSERT INTO door_locks VALUES (?,?,?,?)",
+                        (row["session_id"], d.object_id, int(lock.initial_locked), lock.lock_id),
+                    )
+                    self._conn.executemany(
+                        "INSERT INTO door_credentials VALUES (?,?,?,?)",
+                        [
+                            (row["session_id"], d.object_id, iid, lock.lock_id)
+                            for iid in lock.credential_instance_ids
+                        ],
+                    )
         for door in package.lockable_doors:
             self._conn.execute(
-                "INSERT INTO door_locks VALUES (?,?,?)",
-                (row["session_id"], door.object_id, int(door.initial_locked)),
+                "INSERT INTO door_locks VALUES (?,?,?,?)",
+                (
+                    row["session_id"],
+                    door.object_id,
+                    int(door.initial_locked),
+                    "lock." + door.object_id,
+                ),
             )
             self._conn.executemany(
-                "INSERT INTO door_credentials VALUES (?,?,?)",
-                [(row["session_id"], door.object_id, iid) for iid in door.credential_instance_ids],
+                "INSERT INTO door_credentials VALUES (?,?,?,?)",
+                [
+                    (row["session_id"], door.object_id, iid, "lock." + door.object_id)
+                    for iid in door.credential_instance_ids
+                ],
             )
 
-    def accepts_credential(self, sid, object_id, instance_id):
+    def accepts_credential(self, sid, object_id, instance_id, lock_id=None):
         return (
             self._conn.execute(
                 "SELECT 1 FROM door_credentials WHERE session_id=? AND object_id=? "
-                "AND instance_id=?",
-                (sid, object_id, instance_id),
+                "AND instance_id=? AND (? IS NULL OR lock_id=?)",
+                (sid, object_id, instance_id, lock_id, lock_id),
             ).fetchone()
             is not None
         )
