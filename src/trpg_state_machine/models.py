@@ -18,6 +18,7 @@ class TrustedContext:
     controlled_npc_ids: tuple[str, ...] = ()
     can_adjudicate_checks: bool = False
     can_advance_time: bool = False
+    can_place_world_objects: bool = False
 
 
 @dataclass(frozen=True, slots=True)

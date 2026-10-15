@@ -31,6 +31,7 @@ from .errors import StateMachineError
 from .game_time import AdvanceGameTime, advance_game_time
 from .models import TrustedContext
 from .package import AdventurePackage, canonical_json
+from .world_commands import WORLD_CAPABILITY_OPERATIONS, LockObject, UnlockObject
 
 
 @dataclass(frozen=True, slots=True)
@@ -108,6 +109,10 @@ class WorldHandler:
         self.npc_bootstrap = npc_bootstrap
         self.activities = activities if activities is not None else ActivityRecords(store)
         self.loader = loader
+        from .world_objects import WorldObjectService
+
+        self.objects = WorldObjectService(self)
+        self.capture.lights = self.objects.lights
 
     @property
     def _conn(self):
@@ -134,6 +139,7 @@ class WorldHandler:
     def _initialize_scene(self, sid, scene_id, package):
         if not self.facts.initialize_scene(sid, scene_id, package):
             return
+        self.facts.initialize_object_capabilities(sid, scene_id, package)
         for actor in package.actors:
             if actor.initial_scene_id == scene_id and self.characters.initialize_npc_actor(
                 sid, actor
@@ -265,7 +271,15 @@ class WorldHandler:
         cells.update(
             cell
             for oid, cell in objects
-            if oid != exclude_object and definitions[oid].blocks_passage and cell is not None
+            if oid != exclude_object
+            and definitions[oid].blocks_passage
+            and cell is not None
+            and self.objects.spatial.config(package, oid) is None
+        )
+        cells.update(
+            self.objects.spatial.movement_cells(
+                sid, scene_id, package, exclude_object=exclude_object
+            )
         )
         for passage in package.passages:
             if passage.door_object_id and self._door_closed(sid, passage, package):
@@ -280,7 +294,7 @@ class WorldHandler:
 
     def _visible_target(self, sid, actor_id, cell, package):
         position = self._public_scope(sid, actor_id, package)
-        topology = self._base_topology(sid, position.scene_id)
+        topology = self._base_topology(sid, position.scene_id, package)
         if not cell_in_bounds(topology, cell) or not cell_in_bounds(topology, position.cell):
             raise StateMachineError(
                 "invalid_spatial_state", "Position is missing or outside its map"
@@ -295,7 +309,7 @@ class WorldHandler:
         position = self._public_scope(sid, actor_id, package)
         if position.scene_id != operation.scene_id or position.cell != operation.expected_cell:
             raise StateMachineError("position_conflict", "Position precondition differs")
-        base = self._base_topology(sid, position.scene_id)
+        base = self._base_topology(sid, position.scene_id, package)
         if not cell_in_bounds(base, operation.to_cell):
             raise StateMachineError("invalid_cell", "Target is outside this local map")
         if position.cell == operation.to_cell:
@@ -319,6 +333,10 @@ class WorldHandler:
         except StateMachineError as exc:
             raise StateMachineError("invalid_target", "No authorized local object") from exc
         self.facts.require_ordinary_object(sid, operation.object_id)
+        if self.objects.spatial.config(package, operation.object_id):
+            raise StateMachineError(
+                "unsupported_object_capability", "Use authorized placement policy"
+            )
         definition = next(
             o for s in package.scenes for o in s.objects if o.object_id == operation.object_id
         )
@@ -394,7 +412,7 @@ class WorldHandler:
             )
         if type(operation) is PickupItem and target != operation.expected_cell:
             raise StateMachineError("position_conflict", "Item position precondition differs")
-        base = self._base_topology(sid, position.scene_id)
+        base = self._base_topology(sid, position.scene_id, package)
         topology = self._movement_topology(sid, position.scene_id, package, exclude_actor=actor_id)
         if not base.is_valid_cell(target) or (
             target != position.cell and topology.edge_distance(position.cell, target) is None
@@ -418,6 +436,8 @@ class WorldHandler:
                 "unsupported_actor_state", "Active effects need unsupported adjudication"
             )
         if type(operation) is DropItem:
+            if self.facts.contents(sid, operation.instance_id):
+                self.objects.containers.require_unbound(sid, actor_id, operation.instance_id)
             state = self.characters.rule_actors(sid)[actor_id]
             casting = components["casting_state"]
             if casting is not None and any(
@@ -508,7 +528,16 @@ class WorldHandler:
             version = self._conn.execute(
                 "SELECT world_version FROM sessions WHERE session_id=?", (session_id,)
             ).fetchone()[0]
-            return CarriedItemsView(actor_id, version, inventory.entries)
+            visible = tuple(
+                entry
+                for entry in inventory.entries
+                if entry.accessible
+                or not (
+                    (obj := self.facts.object(session_id, entry.instance_id)) is not None
+                    and obj["container_id"] is not None
+                )
+            )
+            return CarriedItemsView(actor_id, version, visible)
 
     def _door_ports(self, scene_id, object_id, package):
         return tuple(
@@ -521,7 +550,11 @@ class WorldHandler:
 
     def _door_lock_status(self, sid, object_id, package):
         locked = self.facts.door_lock(sid, object_id)
-        if (locked is not None) != any(d.object_id == object_id for d in package.lockable_doors):
+        definition = self.facts.object_definition(package, object_id)
+        configured = any(d.object_id == object_id for d in package.lockable_doors) or bool(
+            definition and definition.capability("locks")
+        )
+        if (locked is not None) != configured:
             raise StateMachineError("invalid_lock_state", "Lock capability contradicts package")
         return locked
 
@@ -531,13 +564,35 @@ class WorldHandler:
         self._world_actor_ready(sid, actor_id)
         position = self._public_scope(sid, actor_id, package)
         obj, passage = self._manual_object_target(sid, actor_id, operation, package)
-        if passage is None:
+        if passage is None and type(operation) in (LockDoor, UnlockDoor):
             raise StateMachineError("unsupported_object_capability", "No approved shared lock")
         if position.cell != operation.expected_cell:
             raise StateMachineError("position_conflict", "Door interaction position differs")
         locked = self._door_lock_status(sid, operation.object_id, package)
         if locked is None:
             raise StateMachineError("unsupported_object_capability", "No approved shared lock")
+        locks = self.facts.locks_for_object(sid, operation.object_id)
+        if type(operation) in (LockObject, UnlockObject):
+            lock_id = operation.lock_id
+        elif len(locks) == 1:
+            lock_id = locks[0][0]
+        else:
+            raise StateMachineError("ambiguous_lock", "Explicit lock identity required")
+        selected = next((lock for lock in locks if lock[0] == lock_id), None)
+        if selected is None:
+            raise StateMachineError("invalid_target", "Lock does not belong to object")
+        locked = bool(selected[1])
+        definition = self.facts.object_definition(package, operation.object_id)
+        config = definition.capability("locks") if definition else None
+        policy = (
+            next((lock for lock in config.locks if lock.lock_id == lock_id), None)
+            if config
+            else None
+        )
+        if policy and policy.operable_sides and position.scene_id not in policy.operable_sides:
+            raise StateMachineError("operation_side_forbidden", "Lock inaccessible from this side")
+        if self.facts.object_hp(sid, operation.object_id) == 0:
+            raise StateMachineError("object_destroyed", "Destroyed object is unusable")
         # No distinction between absent, foreign, ground and mismatched credentials.
         item = self._conn.execute(
             "SELECT * FROM objects WHERE session_id=? AND object_id=?",
@@ -545,12 +600,13 @@ class WorldHandler:
         ).fetchone()
         if (
             item is None
-            or item["carrier_id"] != actor_id
+            or self.facts.placement(sid, operation.credential_instance_id)["carrier_id"] != actor_id
             or item["item_json"] is None
             or operation.credential_instance_id
             not in {i.instance_id for i in package.portable_items}
+            or not self.facts.item_accessible(sid, operation.credential_instance_id)
             or not self.facts.accepts_credential(
-                sid, operation.object_id, operation.credential_instance_id
+                sid, operation.object_id, operation.credential_instance_id, lock_id
             )
         ):
             raise StateMachineError("credential_unavailable", "No usable owned credential")
@@ -575,7 +631,7 @@ class WorldHandler:
             or not entry["accessible"]
         ):
             raise StateMachineError("credential_unavailable", "No usable owned credential")
-        if type(operation) is LockDoor and obj[1] != "closed":
+        if type(operation) in (LockDoor, LockObject) and obj[1] != "closed":
             raise StateMachineError("door_must_be_closed", "Close the door before locking")
         self._validate_door_occupancy(
             sid,
@@ -586,11 +642,13 @@ class WorldHandler:
 
     def _operate_lock(self, row, actor_id, operation, package):
         position, passage, before = self._validate_lock(row, actor_id, operation, package)
-        locked = type(operation) is LockDoor
+        locked = type(operation) in (LockDoor, LockObject)
         if before == locked:
             return []
         sid = row["session_id"]
-        self.facts.set_door_lock(sid, operation.object_id, locked)
+        self.facts.set_door_lock(
+            sid, operation.object_id, locked, getattr(operation, "lock_id", None)
+        )
         return [
             self._capture_event(
                 sid,
@@ -601,7 +659,8 @@ class WorldHandler:
                     "actor_id": actor_id,
                     "actor_cell": position.cell,
                     "object_id": operation.object_id,
-                    "passage_id": passage.passage_id,
+                    "passage_id": passage.passage_id if passage else None,
+                    "lock_id": getattr(operation, "lock_id", None),
                     "credential_instance_id": operation.credential_instance_id,
                     "locked": locked,
                     "execution": _execution_data(actor_id, None),
@@ -616,6 +675,16 @@ class WorldHandler:
         position = self._actor_position(sid, actor_id)
         if operation.scene_id != position.scene_id:
             raise StateMachineError("invalid_target", "Interaction must be in the actor's scene")
+        definition = self.facts.object_definition(package, operation.object_id)
+        capability = definition.capability("openable") if definition else None
+        if (
+            capability
+            and capability.operation_sides
+            and position.scene_id not in capability.operation_sides
+        ):
+            raise StateMachineError(
+                "operation_side_forbidden", "Operation unavailable from this side"
+            )
         fine = package.scene(position.scene_id).grid_json is not None
         if fine:
             self._world_actor_ready(sid, actor_id, navigation_scope=navigation_scope)
@@ -626,9 +695,13 @@ class WorldHandler:
         ).fetchone()
         if obj is None:
             raise StateMachineError("invalid_target", "No authorized local object")
+        full = self.facts.object(sid, operation.object_id)
+        if full["container_id"] is not None or full["carrier_id"] is not None:
+            self.objects.containers.reachable(sid, actor_id, operation.object_id, package)
+            return obj, None
         ports = self._door_ports(position.scene_id, operation.object_id, package)
         if ports:
-            base = self._base_topology(sid, position.scene_id)
+            base = self._base_topology(sid, position.scene_id, package)
             visible = [(p, e) for p, e in ports if base.can_see(position.cell, e.threshold_cell)]
             if not visible:
                 raise StateMachineError("invalid_target", "No authorized local door")
@@ -654,7 +727,7 @@ class WorldHandler:
         actor = self._conn.execute(
             "SELECT kind FROM actors WHERE session_id=? AND actor_id=?", (sid, actor_id)
         ).fetchone()
-        if actor[0] != "pc" or obj[0] != position.scene_id:
+        if (actor[0] != "pc" and definition is None) or obj[0] != position.scene_id:
             raise StateMachineError("invalid_target", "No authorized local switch")
         if fine:
             self._validate_switch_range(sid, actor_id, operation, package)
@@ -804,6 +877,8 @@ class WorldHandler:
         from .commands import OPERATIONS, TypedCommand, validate_command
 
         kind = next((k for k, v in OPERATIONS.items() if type(operation) is v), None)
+        if type(operation) in WORLD_CAPABILITY_OPERATIONS:
+            return self.objects.query(session_id, actor_id, operation, package, context=context)
         if type(operation) not in (
             StepActor,
             PlaceObject,
@@ -852,7 +927,7 @@ class WorldHandler:
                     "unsupported_spatial_view", "Active combat needs its perception adapter"
                 )
             position = self._public_scope(session_id, actor_id, package)
-            topology = self._base_topology(session_id, position.scene_id)
+            topology = self._base_topology(session_id, position.scene_id, package)
             objects = []
             for obj in self._conn.execute(
                 "SELECT object_id,cell FROM objects WHERE session_id=? AND scene_id=? "
@@ -863,7 +938,15 @@ class WorldHandler:
                     definition = next(
                         o for s in package.scenes for o in s.objects if o.object_id == obj[0]
                     )
-                    objects.append((obj[0], obj[1], definition.movable, definition.blocks_passage))
+                    blocking = self.objects.spatial.blocks(session_id, obj[0], package)
+                    objects.append(
+                        (
+                            obj[0],
+                            obj[1],
+                            definition.movable,
+                            definition.blocks_passage if blocking is None else blocking,
+                        )
+                    )
             exits = tuple(
                 (target, pid, e.standing_cell, e.threshold_cell)
                 for target, pid in package.scene(position.scene_id).exit_passages
@@ -990,11 +1073,14 @@ class WorldHandler:
     def _spatial_scene(self, sid, scene_id):
         return self.facts.spatial_scene(sid, scene_id)
 
-    def _base_topology(self, sid, scene_id):
+    def _base_topology(self, sid, scene_id, package=None):
         scene = self._spatial_scene(sid, scene_id)
         if scene is None:
             raise StateMachineError("spatial_unconfigured", "Scene has no fine spatial capability")
-        return GridTopology(GridScene(**scene["grid"]))
+        grid = scene["grid"]
+        if package is not None:
+            grid, _, _ = self.objects.lights.project(sid, scene_id, package, grid)
+        return GridTopology(GridScene(**grid))
 
     def _current_actor_cells(self, sid, scene_id, roster):
         topology = self._base_topology(sid, scene_id)
@@ -1013,6 +1099,16 @@ class WorldHandler:
     def _spatial_combat_guard(self, sid, scene_id, package):
         if self._spatial_scene(sid, scene_id) is None:
             return
+        if self.objects.lights.sources(sid, scene_id, package):
+            raise StateMachineError(
+                "unsupported_combat_dynamic_lighting",
+                "Local emitter lighting needs combat integration",
+            )
+        if self.objects.spatial.movement_cells(sid, scene_id, package):
+            raise StateMachineError(
+                "unsupported_combat_dynamic_obstacles",
+                "Dynamic object geometry needs RE integration",
+            )
         definitions = {o.object_id: o for s in package.scenes for o in s.objects}
         objects = self._conn.execute(
             "SELECT object_id FROM objects WHERE session_id=? AND scene_id=?", (sid, scene_id)
@@ -1032,6 +1128,9 @@ class WorldHandler:
                 )
 
     def _door_closed(self, sid, passage, package):
+        blocking = self.objects.spatial.blocks(sid, passage.door_object_id, package)
+        if blocking is not None:
+            return blocking
         self._door_lock_status(sid, passage.door_object_id, package)
         door = self._conn.execute(
             "SELECT state FROM objects WHERE session_id=? AND object_id=?",
@@ -1072,6 +1171,7 @@ class WorldHandler:
             return self._spatial_reader(session_id, actor_id, package, context)
 
     def _assert_spatial_consistency(self, sid, package):
+        self.objects.spatial.audit(sid, package)
         definitions = {o.object_id: o for s in package.scenes for o in s.objects}
         for scene in package.scenes:
             if scene.grid_json is None:
@@ -1107,6 +1207,7 @@ class WorldHandler:
         actor_id=None,
         effect_origin=None,
         navigation_scope=None,
+        source_command_id=None,
     ):
         self.store.require_write()
         if navigation_scope is not None and (
@@ -1123,6 +1224,10 @@ class WorldHandler:
             raise StateMachineError("unsupported_operation", "Unsupported automatic world effect")
         self._world_operation_capability(row, operation)
         sid = row["session_id"]
+        if type(operation) in WORLD_CAPABILITY_OPERATIONS:
+            return self.objects.operate(
+                row, actor_id, operation, package, source_command_id=source_command_id
+            )
         if type(operation) in (UnlockDoor, LockDoor):
             return self._operate_lock(row, actor_id, operation, package)
         if type(operation) is AdvanceGameTime:

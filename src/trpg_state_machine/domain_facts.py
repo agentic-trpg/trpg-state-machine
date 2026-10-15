@@ -328,57 +328,67 @@ class CharacterFacts:
                     )
 
     def project_item_transfer(self, sid, before, after):
-        """Only one admitted instance transition, never arbitrary inventory replacement."""
+        self.store.require_write()
+        if before["object_id"] != after["object_id"] or before["item_json"] != after["item_json"]:
+            raise StateMachineError("invalid_mechanical_state", "Invalid instance transition")
+        stored = self._conn.execute(
+            "SELECT inventory_json FROM mechanical_components WHERE session_id=?", (sid,)
+        ).fetchone()
+        inventory = json.loads(stored[0]) if stored else None
+        if inventory is None or next(
+            (e for e in inventory["entries"] if e["instance_id"] == before["object_id"]), None
+        ) != self.world.item_entry(before):
+            raise StateMachineError(
+                "invalid_mechanical_state", "Item projection precondition differs"
+            )
+        self.sync_world_inventory(sid)
+
+    def sync_world_inventory(self, sid):
+        """Rebuild only the authoritative portable subset; preserve every other entry."""
         self.store.require_write()
         stored = self._conn.execute(
             "SELECT inventory_json FROM mechanical_components WHERE session_id=?", (sid,)
         ).fetchone()
         if stored is None:
-            raise StateMachineError(
-                "unsupported_mechanical_version", "Explicit inventory is missing"
-            )
+            if self._conn.execute(
+                "SELECT 1 FROM objects WHERE session_id=? AND item_json IS NOT NULL", (sid,)
+            ).fetchone():
+                raise StateMachineError(
+                    "unsupported_mechanical_version", "Explicit inventory missing"
+                )
+            return
         inventory = InventoryState.model_validate_json(stored[0]).model_dump(mode="json")
-        iid = before["object_id"]
-        old_entry = self.world.item_entry(before)
-        actual = next((e for e in inventory["entries"] if e["instance_id"] == iid), None)
-        if (
-            actual != old_entry
-            or after["object_id"] != iid
-            or before["item_json"] != after["item_json"]
-        ):
-            raise StateMachineError(
-                "invalid_mechanical_state", "Item transition precondition differs"
-            )
-        inventory["entries"] = [e for e in inventory["entries"] if e["instance_id"] != iid]
-        if entry := self.world.item_entry(after):
-            inventory["entries"].append(entry)
+        identities, entries = self.world.portable_inventory(sid)
+        old_order = [
+            e["instance_id"] for e in inventory["entries"] if e["instance_id"] in identities
+        ]
+        others = [e for e in inventory["entries"] if e["instance_id"] not in identities]
+        inventory["entries"] = others + [entries[i] for i in old_order if i in entries]
+        inventory["entries"].extend(entries[i] for i in entries if i not in old_order)
+        InventoryState.model_validate_json(canonical_json(inventory))
         self._conn.execute(
             "UPDATE mechanical_components SET inventory_json=? WHERE session_id=?",
             (canonical_json(inventory), sid),
         )
-        for aid in {before["carrier_id"], after["carrier_id"]} - {None}:
+        for actor in self.rule_actors(sid):
+            slugs = sorted(
+                {
+                    e["item_slug"]
+                    for e in inventory["entries"]
+                    if e["owner_id"] == actor and e["quantity"] > 0
+                }
+            )
             core = self._conn.execute(
                 "SELECT inventory_json FROM characters WHERE session_id=? AND actor_id=?",
-                (sid, aid),
+                (sid, actor),
             ).fetchone()
-            if core is None:
-                raise StateMachineError(
-                    "invalid_mechanical_state", "Item carrier lacks character facts"
-                )
-            current = json.loads(core[0])
-            slug = json.loads(after["item_json"])["item_slug"]
-            owned = any(
-                e["owner_id"] == aid and e["item_slug"] == slug and e["quantity"] > 0
-                for e in inventory["entries"]
-            )
-            projected = (
-                current
-                if owned and slug in current
-                else ([*current, slug] if owned else [s for s in current if s != slug])
-            )
+            old = json.loads(core[0])
+            slugs = [slug for slug in old if slug in slugs] + [
+                slug for slug in slugs if slug not in old
+            ]
             self._conn.execute(
                 "UPDATE characters SET inventory_json=? WHERE session_id=? AND actor_id=?",
-                (canonical_json(projected), sid, aid),
+                (canonical_json(slugs), sid, actor),
             )
         self.validate_portable_inventory(sid, inventory)
 
@@ -437,6 +447,15 @@ class CharacterFacts:
 
 
 class WorldFacts:
+    def object(self, sid, oid):
+        return self._conn.execute(
+            "SELECT * FROM objects WHERE session_id=? AND object_id=?", (sid, oid)
+        ).fetchone()
+
+    @staticmethod
+    def object_definition(package, oid):
+        return next((d for d in package.world_objects if d.object_id == oid), None)
+
     def __init__(self, store):
         self.store = store
 
@@ -475,6 +494,113 @@ class WorldFacts:
         )
         return True
 
+    def initialize_object_capabilities(self, sid, scene_id, package):
+        self.store.require_write()
+        for d in package.world_objects:
+            obj = self.object(sid, d.object_id)
+            if obj is None or obj["scene_id"] != scene_id:
+                continue
+            if c := d.capability("mechanism"):
+                self._conn.execute(
+                    "INSERT INTO object_mechanisms VALUES (?,?,?)",
+                    (sid, d.object_id, c.initial_status),
+                )
+            if c := d.capability("light"):
+                self._conn.execute(
+                    "INSERT INTO object_lights VALUES (?,?,?,?)",
+                    (sid, d.object_id, int(c.initial_enabled), c.initial_mode),
+                )
+            if c := d.capability("openable"):
+                self._conn.execute(
+                    "INSERT INTO object_openables VALUES (?,?,?,?)",
+                    (
+                        sid,
+                        d.object_id,
+                        int(c.initial_jammed),
+                        None if c.initial_barred is None else int(c.initial_barred),
+                    ),
+                )
+            if c := d.capability("durability"):
+                self._conn.execute(
+                    "INSERT INTO object_durability VALUES (?,?,?)", (sid, d.object_id, c.initial_hp)
+                )
+
+    def mechanism_status(self, sid, oid):
+        row = self._conn.execute(
+            "SELECT status FROM object_mechanisms WHERE session_id=? AND object_id=?", (sid, oid)
+        ).fetchone()
+        return row[0] if row else None
+
+    def consume_mechanism(self, sid, oid):
+        self.store.require_write()
+        if not self._conn.execute(
+            "UPDATE object_mechanisms SET status='spent' "
+            "WHERE session_id=? AND object_id=? AND status='armed'",
+            (sid, oid),
+        ).rowcount:
+            raise StateMachineError("mechanism_spent", "Mechanism is not armed")
+
+    def light_state(self, sid, oid):
+        row = self._conn.execute(
+            "SELECT enabled,mode FROM object_lights WHERE session_id=? AND object_id=?", (sid, oid)
+        ).fetchone()
+        return {"enabled": bool(row[0]), "mode": row[1]} if row else None
+
+    def set_light_state(self, sid, oid, enabled, mode):
+        self.store.require_write()
+        if self.light_state(sid, oid) is None or type(enabled) is not bool or type(mode) is not str:
+            raise StateMachineError("unsupported_object_capability", "No valid emitter state")
+        self._conn.execute(
+            "UPDATE object_lights SET enabled=?,mode=? WHERE session_id=? AND object_id=?",
+            (int(enabled), mode, sid, oid),
+        )
+
+    def openable_state(self, sid, oid):
+        row = self._conn.execute(
+            "SELECT jammed,barred FROM object_openables WHERE session_id=? AND object_id=?",
+            (sid, oid),
+        ).fetchone()
+        return (
+            {"jammed": bool(row[0]), "barred": None if row[1] is None else bool(row[1])}
+            if row
+            else None
+        )
+
+    def set_object_bar(self, sid, oid, barred):
+        self.store.require_write()
+        obj = self.object(sid, oid)
+        state = self.openable_state(sid, oid)
+        if state is None or state["barred"] is None:
+            raise StateMachineError("unsupported_object_capability", "Object has no bar")
+        if self.object_hp(sid, oid) == 0:
+            raise StateMachineError("object_destroyed", "Destroyed object is unusable")
+        if barred and obj["state"] != "closed":
+            raise StateMachineError("object_must_be_closed", "Close object before barring")
+        self._conn.execute(
+            "UPDATE object_openables SET barred=? WHERE session_id=? AND object_id=?",
+            (int(barred), sid, oid),
+        )
+
+    def object_hp(self, sid, oid):
+        row = self._conn.execute(
+            "SELECT current_hp FROM object_durability WHERE session_id=? AND object_id=?",
+            (sid, oid),
+        ).fetchone()
+        return row[0] if row else None
+
+    def apply_object_hp(self, sid, oid, expected, value):
+        self.store.require_write()
+        if (
+            type(value) is not int
+            or not 0 <= value <= expected
+            or not self._conn.execute(
+                "UPDATE object_durability SET current_hp=? "
+                "WHERE session_id=? AND object_id=? AND current_hp=?",
+                (value, sid, oid, expected),
+            ).rowcount
+        ):
+            raise StateMachineError("invalid_rule_result", "Invalid durability transition")
+
     def mark_unvisited(self, sid, scene_id):
         self.store.require_write()
         self._conn.execute(
@@ -499,34 +625,46 @@ class WorldFacts:
 
     def switch(self, sid, object_id, state):
         self.store.require_write()
-        self.require_ordinary_object(sid, object_id)
         self.validate_door_switch(sid, object_id, state)
         self._conn.execute(
             "UPDATE objects SET state=? WHERE session_id=? AND object_id=?", (state, sid, object_id)
         )
 
+    def locks_for_object(self, sid, oid):
+        return self._conn.execute(
+            "SELECT lock_id,locked FROM door_locks WHERE session_id=? AND object_id=? "
+            "ORDER BY lock_id",
+            (sid, oid),
+        ).fetchall()
+
     def door_lock(self, sid, object_id):
-        row = self._conn.execute(
-            "SELECT l.locked,o.state FROM door_locks l JOIN objects o "
-            "USING(session_id,object_id) WHERE l.session_id=? AND l.object_id=?",
-            (sid, object_id),
-        ).fetchone()
-        if row is None:
+        locks = self.locks_for_object(sid, object_id)
+        if not locks:
             return None
+        obj = self.object(sid, object_id)
         if (
-            row[0] not in (0, 1)
-            or row[1] not in ("open", "closed")
-            or (row[0] and row[1] != "closed")
+            obj is None
+            or obj["state"] not in ("open", "closed")
+            or (any(lock[1] for lock in locks) and obj["state"] != "closed")
         ):
-            raise StateMachineError("invalid_lock_state", "Contradictory shared door state")
-        return bool(row[0])
+            raise StateMachineError("invalid_lock_state", "Contradictory shared object state")
+        return any(bool(lock[1]) for lock in locks)
 
     def validate_door_switch(self, sid, object_id, state):
+        if self.object_hp(sid, object_id) == 0:
+            raise StateMachineError("object_destroyed", "Destroyed object is unusable")
+        current = self.object(sid, object_id)
+        openable = self.openable_state(sid, object_id)
+        if openable and current["state"] != state:
+            if openable["jammed"]:
+                raise StateMachineError("object_jammed", "Object is jammed")
+            if openable["barred"]:
+                raise StateMachineError("object_barred", "Object is barred")
         locked = self.door_lock(sid, object_id)
         if locked and state == "open":
             raise StateMachineError("door_locked", "Door is locked")
 
-    def set_door_lock(self, sid, object_id, locked):
+    def set_door_lock(self, sid, object_id, locked, lock_id=None):
         self.store.require_write()
         if self.door_lock(sid, object_id) is None:
             raise StateMachineError("unsupported_object_capability", "Door has no lock")
@@ -535,31 +673,63 @@ class WorldFacts:
         ).fetchone()[0]
         if locked and state != "closed":
             raise StateMachineError("door_must_be_closed", "Close the door before locking")
+        locks = self.locks_for_object(sid, object_id)
+        if lock_id is None:
+            if len(locks) != 1:
+                raise StateMachineError("ambiguous_lock", "Explicit lock identity required")
+            lock_id = locks[0][0]
+        if lock_id not in {lock[0] for lock in locks}:
+            raise StateMachineError("invalid_target", "Lock does not belong to object")
+        if self.object_hp(sid, object_id) == 0:
+            raise StateMachineError("object_destroyed", "Destroyed object is unusable")
         self._conn.execute(
-            "UPDATE door_locks SET locked=? WHERE session_id=? AND object_id=?",
-            (int(locked), sid, object_id),
+            "UPDATE door_locks SET locked=? WHERE session_id=? AND object_id=? AND lock_id=?",
+            (int(locked), sid, object_id, lock_id),
         )
 
     def initialize_locks(self, row, package):
         self.store.require_write()
         if row["world_version"] or row["event_seq"]:
             raise StateMachineError("invalid_lock_foundation", "Locks require a fresh session")
+        for d in package.world_objects:
+            c = d.capability("locks")
+            if c:
+                for lock in c.locks:
+                    self._conn.execute(
+                        "INSERT INTO door_locks VALUES (?,?,?,?)",
+                        (row["session_id"], d.object_id, int(lock.initial_locked), lock.lock_id),
+                    )
+                    self._conn.executemany(
+                        "INSERT INTO door_credentials VALUES (?,?,?,?)",
+                        [
+                            (row["session_id"], d.object_id, iid, lock.lock_id)
+                            for iid in lock.credential_instance_ids
+                        ],
+                    )
         for door in package.lockable_doors:
             self._conn.execute(
-                "INSERT INTO door_locks VALUES (?,?,?)",
-                (row["session_id"], door.object_id, int(door.initial_locked)),
+                "INSERT INTO door_locks VALUES (?,?,?,?)",
+                (
+                    row["session_id"],
+                    door.object_id,
+                    int(door.initial_locked),
+                    "lock." + door.object_id,
+                ),
             )
             self._conn.executemany(
-                "INSERT INTO door_credentials VALUES (?,?,?)",
-                [(row["session_id"], door.object_id, iid) for iid in door.credential_instance_ids],
+                "INSERT INTO door_credentials VALUES (?,?,?,?)",
+                [
+                    (row["session_id"], door.object_id, iid, "lock." + door.object_id)
+                    for iid in door.credential_instance_ids
+                ],
             )
 
-    def accepts_credential(self, sid, object_id, instance_id):
+    def accepts_credential(self, sid, object_id, instance_id, lock_id=None):
         return (
             self._conn.execute(
                 "SELECT 1 FROM door_credentials WHERE session_id=? AND object_id=? "
-                "AND instance_id=?",
-                (sid, object_id, instance_id),
+                "AND instance_id=? AND (? IS NULL OR lock_id=?)",
+                (sid, object_id, instance_id, lock_id, lock_id),
             ).fetchone()
             is not None
         )
@@ -614,15 +784,63 @@ class WorldFacts:
                 ),
             )
 
-    @staticmethod
-    def item_entry(row):
-        if row["carrier_id"] is None:
-            return None
+    def placement(self, sid, oid, *, row=None):
+        obj = row if row is not None else self.object(sid, oid)
+        if obj is None:
+            raise StateMachineError("invalid_target", "Missing object")
+        ancestry, seen = [], {oid}
+        current = obj
+        while current["container_id"] is not None:
+            parent = current["container_id"]
+            if parent in seen or len(ancestry) >= 8:
+                raise StateMachineError("invalid_world_state", "Invalid containment ancestry")
+            seen.add(parent)
+            ancestry.append(parent)
+            current = self.object(sid, parent)
+            if current is None:
+                raise StateMachineError("invalid_world_state", "Missing parent container")
+        if current["carrier_id"] is not None:
+            position = self._conn.execute(
+                "SELECT current_scene_id,cell FROM actors WHERE session_id=? AND actor_id=?",
+                (sid, current["carrier_id"]),
+            ).fetchone()
+            scene, cell = position
+        else:
+            scene, cell = current["scene_id"], current["cell"]
         return {
-            "instance_id": row["object_id"],
-            "owner_id": row["carrier_id"],
-            **json.loads(row["item_json"]),
+            "scene_id": scene,
+            "cell": cell,
+            "carrier_id": current["carrier_id"],
+            "container_id": obj["container_id"],
+            "ancestry": tuple(ancestry),
         }
+
+    def item_accessible(self, sid, oid, *, row=None, include_self=True):
+        placement = self.placement(sid, oid, row=row)
+        if include_self and self.object_hp(sid, oid) == 0:
+            return False
+        for parent in placement["ancestry"]:
+            obj = self.object(sid, parent)
+            if self.object_hp(sid, parent) != 0 and (
+                obj["state"] == "closed" or self.door_lock(sid, parent)
+            ):
+                return False
+        return True
+
+    def contents(self, sid, oid):
+        return self._conn.execute(
+            "SELECT * FROM objects WHERE session_id=? AND container_id=? ORDER BY object_id",
+            (sid, oid),
+        ).fetchall()
+
+    def item_entry(self, row):
+        sid, oid = row["session_id"], row["object_id"]
+        placement = self.placement(sid, oid, row=row)
+        if placement["carrier_id"] is None:
+            return None
+        data = json.loads(row["item_json"])
+        data["accessible"] = data["accessible"] and self.item_accessible(sid, oid, row=row)
+        return {"instance_id": oid, "owner_id": placement["carrier_id"], **data}
 
     def portable_inventory(self, sid):
         identities, entries = set(), {}
@@ -640,7 +858,9 @@ class WorldFacts:
                 entries[row["object_id"]] = entry
         return identities, entries
 
-    def transfer_item(self, sid, before, *, carrier_id=None, scene_id=None, cell=None):
+    def transfer_item(
+        self, sid, before, *, carrier_id=None, scene_id=None, cell=None, container_id=None
+    ):
         self.store.require_write()
         current = self._conn.execute(
             "SELECT * FROM objects WHERE session_id=? AND object_id=?", (sid, before["object_id"])
@@ -648,24 +868,17 @@ class WorldFacts:
         if current is None or dict(current) != dict(before) or current["item_json"] is None:
             raise StateMachineError("position_conflict", "Item location changed")
         self._conn.execute(
-            "UPDATE objects SET carrier_id=?,scene_id=?,cell=? WHERE session_id=? AND object_id=?",
-            (carrier_id, scene_id, cell, sid, before["object_id"]),
+            "UPDATE objects SET carrier_id=?,scene_id=?,cell=?,container_id=? "
+            "WHERE session_id=? AND object_id=?",
+            (carrier_id, scene_id, cell, container_id, sid, before["object_id"]),
         )
         return self._conn.execute(
             "SELECT * FROM objects WHERE session_id=? AND object_id=?", (sid, before["object_id"])
         ).fetchone()
 
     def object_position(self, sid, object_id):
-        """Current physical source position, including a carried object's actual actor."""
-        obj = self._conn.execute(
-            "SELECT o.state,COALESCE(a.current_scene_id,o.scene_id) AS scene_id,"
-            "CASE WHEN o.carrier_id IS NULL THEN o.cell ELSE a.cell END AS cell "
-            "FROM objects o LEFT JOIN actors a "
-            "ON a.session_id=o.session_id AND a.actor_id=o.carrier_id "
-            "WHERE o.session_id=? AND o.object_id=?",
-            (sid, object_id),
-        ).fetchone()
-        return dict(obj) if obj else None
+        obj = self.object(sid, object_id)
+        return {**self.placement(sid, object_id), "state": obj["state"]} if obj else None
 
     def set_scene_flags(self, sid, scene_id, flags):
         self.store.require_write()

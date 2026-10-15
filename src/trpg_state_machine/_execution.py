@@ -10,6 +10,7 @@ from .errors import StateMachineError
 
 
 class _WorldEffectKind(StrEnum):
+    MECHANISM = "mechanism"
     PACKAGE = "package"
     CHECK = "check_consequence"
     SYNTHETIC = "synthetic_delta"

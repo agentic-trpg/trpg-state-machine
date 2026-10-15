@@ -152,7 +152,7 @@ class CombatHandler:
         self.rules._verify_dnd_binding(package)
         with self.store.transaction():
             return self.rules._noncombat_snapshot(
-                self.sessions._session(session_id, package, context)
+                self.sessions._session(session_id, package, context), package
             )
 
     def read_combat_snapshot(self, session_id, package, *, context):
@@ -188,7 +188,7 @@ class CombatHandler:
 
     async def _submit_dnd(self, command, package, context, fingerprint):
         build_snapshot = (
-            self.rules._noncombat_snapshot
+            (lambda value: self.rules._noncombat_snapshot(value, package))
             if type(command.payload) is CheckPayload
             else self.rules._combat_snapshot
         )

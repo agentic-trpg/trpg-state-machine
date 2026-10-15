@@ -35,6 +35,19 @@ from .navigation_models import (
     StartNavigation,
 )
 from .package import canonical_json
+from .world_commands import (
+    WORLD_CAPABILITY_COMMANDS,
+    ActivateMechanism,
+    BarObject,
+    LockObject,
+    PutItem,
+    RepositionObject,
+    SetLightEnabled,
+    SwitchLightMode,
+    TakeItem,
+    UnbarObject,
+    UnlockObject,
+)
 
 OPERATIONS = {
     "world.unlock_door": UnlockDoor,
@@ -60,6 +73,8 @@ OPERATIONS = {
     "move_actor": MoveActor,
 }
 
+OPERATIONS.update(WORLD_CAPABILITY_COMMANDS)
+
 
 @dataclass(frozen=True, slots=True)
 class CheckWorldEffects:
@@ -78,7 +93,17 @@ class TypedCommand:
     actor_id: str
     command_type: str
     payload: (
-        EnterScene
+        ActivateMechanism
+        | SetLightEnabled
+        | SwitchLightMode
+        | RepositionObject
+        | PutItem
+        | TakeItem
+        | LockObject
+        | UnlockObject
+        | BarObject
+        | UnbarObject
+        | EnterScene
         | SetSceneFlag
         | SetObjectState
         | MoveActor
@@ -240,7 +265,7 @@ def validate_command(command: TypedCommand) -> None:
     else:
         fields = asdict(command.payload)
     for key, value in fields.items():
-        if key == "value":
+        if key in ("value", "enabled"):
             if type(value) is not bool:
                 raise StateMachineError("invalid_operation", "Flag must be boolean")
         elif not isinstance(value, str) or not value or len(value) > 256:
@@ -319,6 +344,11 @@ class CommandRuntime:
             else:
                 self._conn.execute("SAVEPOINT command_effects")
                 try:
+                    if package.portable_items:
+                        self._characters.rule_components(
+                            command.session_id,
+                            set(self._characters.rule_actors(command.session_id)),
+                        )
                     if type(command.payload) in NAVIGATION_OPERATIONS:
                         events = self._activities.operate(
                             row,
@@ -332,7 +362,11 @@ class CommandRuntime:
                             self._initialize_combat(row, package, prepared)
                             if isinstance(command.payload, InitializeCombat)
                             else self._operate(
-                                row, package, command.payload, actor_id=command.actor_id
+                                row,
+                                package,
+                                command.payload,
+                                actor_id=command.actor_id,
+                                source_command_id=command.command_id,
                             )
                         )
                     events = self._expand_events(row, package, events, command.command_id)
@@ -347,6 +381,8 @@ class CommandRuntime:
                                 "event_cascade_limit", "Bounded schedule cascade exceeded"
                             )
                     if events:
+                        if package.portable_items:
+                            self._characters.sync_world_inventory(command.session_id)
                         self._assert_spatial_consistency(command.session_id, package)
                         version += 1
                         self._sessions.set_world_version(command.session_id, version)
@@ -411,6 +447,7 @@ def world_command_from_data(data):
         raise StateMachineError("invalid_command", "Expected the complete local command envelope")
     kind = data["command_type"]
     if type(kind) is not str or kind not in (
+        *WORLD_CAPABILITY_COMMANDS,
         "world.step_actor",
         "world.traverse_passage",
         "world.place_object",

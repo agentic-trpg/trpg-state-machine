@@ -17,7 +17,7 @@ class PortableItem:
     policy: str
 
 
-def validate_items(raw, scenes, foundation, definitions):
+def validate_items(raw, scenes, foundation, definitions, *, world=False):
     path = "item_transfers"
     if foundation is None:
         _fail("unsupported_mechanism", path, "Portable items require complete noncombat facts")
@@ -43,7 +43,7 @@ def validate_items(raw, scenes, foundation, definitions):
         if (
             not scene.public_interactions
             or scene.grid_json is None
-            or obj.state is not None
+            or (obj.state is not None and not world)
             or obj.movable
             or obj.blocks_passage
         ):

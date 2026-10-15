@@ -10,6 +10,27 @@ RF-1 将现有世界交互和战斗编排改为显式组件组合，角色、世
 实现。字段责任与提交链见 [RF-1 设计](docs/RF1_DOMAIN_RUNTIME.md)，实际验证见
 [RF-1 Review](docs/reviews/RF1_DOMAIN_RUNTIME_REVIEW.md)。
 
+## World W1–W8：可组合非战斗世界能力
+
+Package `/6` / SQLite Schema 31 增加显式对象定义、内部耐久结果应用、独立卡住/门闩、
+多锁、嵌套容器、受权 GM 多格布置、普通场景光源与一次性手动联动机关。
+普通操作仍通过 `submit_command` / `submit_command_async` 的既有命令、版本与回执入口；
+对象、角色位置、库存投影与事件证据在共享事务中提交。
+
+运行原创贯穿示例（包含真正的新进程恢复与继续执行）：
+
+```powershell
+uv run --locked python examples/world_station.py
+```
+
+玩家取放/开锁/开合/光源/拉杆与 GM `RepositionObject` 分别报告。
+当前 RE pin 没有可用的物体 HP 结算链，因此**玩家攻击物体与修复仍 unsupported**；
+内部合成结果测试只验证耐久应用。战斗世界互动、撬锁、有限燃料、动态视觉遮挡/Cover、
+自动称重压力板与新操作的 NPC Evaluation 意图转换均未宣称支持。
+`get_object`、`list_scene_objects`、`get_illumination` 沿用受权范围；封闭容器内容被过滤。
+完整字段/Facts/Handler/存储映射、迁移、验证与限制见 [实施记录](docs/WORLD_W1_W8.md)，
+最终审阅见 [World 审阅](docs/reviews/WORLD_W1_W8_REVIEW.md)。以下 GC 章节保留各批历史范围。
+
 ## GC-4：共享通路锁与实际持有凭据
 
 Schema 25 / Package `/5` 为显式批准的共享门增加独立锁状态；

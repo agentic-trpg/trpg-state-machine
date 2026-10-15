@@ -40,6 +40,7 @@ from .npc_modes import NPCModeRuntime
 from .npc_outputs import NPCOutputRuntime
 from .npc_results import NPCResultRuntime
 from .npc_state import NPCRuntime
+from .object_durability import ObjectDurabilityService
 from .observation_lifecycle import ObservationLifecycleRuntime
 from .package import (
     SYNTHETIC_EVALUATION_RULESET,
@@ -108,6 +109,8 @@ class StateMachine(
             self._activity_records,
             loader=loader,
         )
+        self._durability = ObjectDurabilityService(self._world)
+        self._objects = self._world.objects
         self._activities = ActivityHandler(
             self._store,
             self._activity_records,
@@ -404,9 +407,15 @@ class StateMachine(
         *,
         actor_id=None,
         effect_origin=None,
+        source_command_id=None,
     ):
         return self._world._operate(
-            row, package, operation, actor_id=actor_id, effect_origin=effect_origin
+            row,
+            package,
+            operation,
+            actor_id=actor_id,
+            effect_origin=effect_origin,
+            source_command_id=source_command_id,
         )
 
     def _snapshot(self, row, package) -> SessionSnapshot:
@@ -524,6 +533,17 @@ class StateMachine(
 
     def read_actor_position(self, session_id, actor_id, package, *, context):
         return self._world.read_actor_position(session_id, actor_id, package, context=context)
+
+    def get_illumination(self, session_id, actor_id, cell, package, *, context):
+        return self._objects.lights.query_illumination(
+            session_id, actor_id, cell, package, context=context
+        )
+
+    def get_object(self, session_id, actor_id, object_id, package, *, context):
+        return self._objects.get_object(session_id, actor_id, object_id, package, context=context)
+
+    def list_scene_objects(self, session_id, actor_id, package, *, context):
+        return self._objects.list_objects(session_id, actor_id, package, context=context)
 
     def read_carried_items(self, session_id, actor_id, package, *, context):
         return self._world.read_carried_items(session_id, actor_id, package, context=context)
