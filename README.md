@@ -10,9 +10,36 @@ RF-1 将现有世界交互和战斗编排改为显式组件组合，角色、世
 实现。字段责任与提交链见 [RF-1 设计](docs/RF1_DOMAIN_RUNTIME.md)，实际验证见
 [RF-1 Review](docs/reviews/RF1_DOMAIN_RUNTIME_REVIEW.md)。
 
+## WorldTimeService：Session 固定时间协议
+
+SQLite Schema 32 提供 `sm.world_time`（WorldHandler 实际装配的同一 Service）。
+显式 `TimeBinding()` 使用 `world-time/1`：**1 tick = 1 游戏秒**；默认日长 86400 秒，
+起始第 1 日 00:00，06:00 开始白天、18:00 开始夜晚。Package 可提供完整的可选
+`time_binding` 配置；`CreateSessionRequest(time_binding=...)` 可整体覆盖并固定保存。
+未指定配置的旧／兼容 Session 继续使用 `game-clock/1` 抽象 tick，绝不换算历史时间。
+
+```python
+from dataclasses import replace
+from trpg_state_machine import TimeBinding
+
+# request / package / context 是宿主已有的可信 Session 初始化输入。
+result = sm.create_session(replace(request, time_binding=TimeBinding()), package, context=context)
+time = sm.world_time.read(result.session_id, package, context=context)
+# 推进仍使用 TypedCommand + world.advance_time + AdvanceGameTime(expected_tick, next_tick)。
+```
+
+支持秒／分钟／小时／自定义日长的精确换算、当前日与日内时刻、昼夜阶段和
+`(start_tick, end_tick]` 有界分页边界查询。`game.time_advanced` 提供实际起止 tick；
+授权、版本、幂等、事件证据、Outbox、回滚和战斗期间拒绝手动推进均沿用真实命令链。
+旧 NPC schedule、OB 100 tick、Gate 20／60 tick 策略保留抽象语义；秒制 Session
+当前拒绝配置型 NPC Runtime 和 NPC 观察访问，等待专门的秒制消费策略。
+整个 Combat Round 约六游戏秒；本轮没有 Round 接线或实时驱动，Turn 不独占六秒。
+目标默认实时倍率为现实 1 秒对应游戏 6 秒，尚未实现。
+已实现、迁移策略、接口和后续 TIME 依赖见 [WorldTimeService 进度](docs/WORLD_TIME_SERVICE_PROGRESS.md)。
+
 ## World W1–W8：可组合非战斗世界能力
 
-Package `/6` / SQLite Schema 31 增加显式对象定义、内部耐久结果应用、独立卡住/门闩、
+Package `/6` / SQLite Schema 31（当前存储版本 32）增加显式对象定义、内部耐久结果应用、独立卡住/门闩、
 多锁、嵌套容器、受权 GM 多格布置、普通场景光源与一次性手动联动机关。
 普通操作仍通过 `submit_command` / `submit_command_async` 的既有命令、版本与回执入口；
 对象、角色位置、库存投影与事件证据在共享事务中提交。

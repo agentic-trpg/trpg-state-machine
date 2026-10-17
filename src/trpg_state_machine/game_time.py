@@ -1,4 +1,4 @@
-"""Local game-clock/1 and deterministic lifecycle of existing NPC Runtime entries."""
+"""Compatible command DTO and legacy NPC schedules (future TIME-08 ownership)."""
 
 import json
 from dataclasses import dataclass
@@ -13,22 +13,17 @@ class AdvanceGameTime:
     next_tick: int
 
 
-def advance_game_time(runtime, row, operation):
-    sid = row["session_id"]
-    tick = runtime._conn.execute(
-        "SELECT game_tick FROM world_states WHERE session_id=?", (sid,)
-    ).fetchone()[0]
-    if tick != operation.expected_tick:
-        raise StateMachineError("game_time_conflict", "Game time precondition differs")
-    if operation.next_tick == tick:
-        return []
-    runtime.facts.set_tick(sid, operation.next_tick)
-    return [("game.time_advanced", {"previous_tick": tick, "game_tick": operation.next_tick})]
-
-
 def sync_npc_schedules(runtime, sid, command_id, package):
     """Called only inside the original world-command savepoint. Never starts EVA."""
     db = runtime._conn
+    if db.execute("SELECT 1 FROM world_time_bindings WHERE session_id=?", (sid,)).fetchone():
+        if db.execute(
+            "SELECT 1 FROM npc_states WHERE session_id=? AND runtime_json IS NOT NULL", (sid,)
+        ).fetchone():
+            raise StateMachineError(
+                "unsupported_time_consumer", "NPC schedules require legacy time"
+            )
+        return []
     tick = db.execute("SELECT game_tick FROM world_states WHERE session_id=?", (sid,)).fetchone()[0]
     if tick == 0:
         return []  # Preserve old initial_activity until the first authorized time advance.

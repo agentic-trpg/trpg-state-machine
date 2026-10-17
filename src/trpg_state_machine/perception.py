@@ -282,6 +282,7 @@ class PerceptionRuntime:
             raise StateMachineError("invalid_context", "Expected authenticated NPC principal")
         with self._transaction(write=True):
             self._session(session_id, package, context)
+            self._sessions.require_legacy_npc_time(session_id)
             actor = self._conn.execute(
                 "SELECT kind FROM actors WHERE session_id=? AND actor_id=?",
                 (session_id, observer_id),
@@ -325,6 +326,7 @@ class PerceptionRuntime:
     def _projection_authorized(self, sid, package, context, npc):
         if npc is None:
             self._session(sid, package, context)
+            self._sessions.require_legacy_npc_time(sid)
         else:
             self._npc_authorized(sid, package, context)
 

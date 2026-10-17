@@ -27,7 +27,7 @@ from ._operations import (
     UnlockDoor,
 )
 from .errors import StateMachineError
-from .game_time import AdvanceGameTime, advance_game_time
+from .game_time import AdvanceGameTime
 from .models import TrustedContext
 from .package import AdventurePackage, canonical_json
 from .world_commands import WORLD_CAPABILITY_OPERATIONS
@@ -111,6 +111,9 @@ class WorldHandler:
         from .world_objects import WorldObjectService
 
         self.objects = WorldObjectService(self)
+        from .world_time import WorldTimeService
+
+        self.time = WorldTimeService(store, sessions, facts)
         self.capture.lights = self.objects.lights
 
     @property
@@ -1092,7 +1095,7 @@ class WorldHandler:
         if type(operation) is AdvanceGameTime:
             return [
                 self._capture_event(sid, package, kind, payload, phase="clock.after_advance")
-                for kind, payload in advance_game_time(self, row, operation)
+                for kind, payload in self.time.advance(row, operation)
             ]
         if isinstance(
             operation,

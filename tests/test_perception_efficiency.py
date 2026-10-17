@@ -290,7 +290,7 @@ with StateMachine(sys.argv[1]) as sm:
     ]
     for worker in workers:
         stdout, stderr = worker.communicate(timeout=30)
-        assert worker.returncode == 0 and stdout.strip() == b"31", stderr
+        assert worker.returncode == 0 and stdout.strip() == b"32", stderr
     package = _validate(queue_data)
     for _ in range(2):
         with StateMachine(db) as sm:
@@ -306,6 +306,7 @@ with StateMachine(sys.argv[1]) as sm:
     after = stored_rows(db)
     assert "npc_perception_cursors" not in after
     assert set(before) - {"npc_perception_cursors"} == set(after) - {
+        "world_time_bindings",
         "navigation_activities",
         "mechanical_components",
         "door_locks",
@@ -321,6 +322,7 @@ with StateMachine(sys.argv[1]) as sm:
     assert after["door_locks"][1] == set()
     assert after["door_credentials"][1] == set()
     for table in (
+        "world_time_bindings",
         "object_durability",
         "world_result_adoptions",
         "object_openables",
@@ -385,4 +387,4 @@ def test_schema20_sql_failure_rolls_back_then_reopens(tmp_path, queue_data, monk
     with sqlite3.connect(db) as conn:
         assert conn.execute("PRAGMA user_version").fetchone()[0] == 19
     with StateMachine(db) as sm:
-        assert sm._conn.execute("PRAGMA user_version").fetchone()[0] == 31
+        assert sm._conn.execute("PRAGMA user_version").fetchone()[0] == 32

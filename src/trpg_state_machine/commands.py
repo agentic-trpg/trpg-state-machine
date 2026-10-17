@@ -239,7 +239,7 @@ def validate_command(command: TypedCommand) -> None:
         if any(
             type(v) is not int or not 0 <= v <= 2147483647 for v in asdict(command.payload).values()
         ):
-            raise StateMachineError("invalid_operation", "Expected bounded abstract game ticks")
+            raise StateMachineError("invalid_operation", "Expected bounded integer game ticks")
         if command.payload.next_tick < command.payload.expected_tick:
             raise StateMachineError("invalid_operation", "Game time cannot move backwards")
         return
@@ -467,6 +467,7 @@ def world_command_from_data(data):
     if type(kind) is not str or kind not in (
         *WORLD_CAPABILITY_COMMANDS,
         "world.step_actor",
+        "world.advance_time",
         "world.traverse_passage",
         "world.place_object",
         "world.unlock_door",

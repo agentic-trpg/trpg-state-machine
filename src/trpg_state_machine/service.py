@@ -56,6 +56,7 @@ from .rules_adapter import RulesAdapter
 from .session_access import SessionAccess, _binding, _trusted
 from .spatial import WorldHandler
 from .storage import SqliteStore
+from .time_binding import TimeBinding
 
 
 def _result(raw: str) -> CreationResult:
@@ -111,6 +112,7 @@ class StateMachine(
         )
         self._durability = ObjectDurabilityService(self._world)
         self._objects = self._world.objects
+        self.world_time = self._world.time
         self._activities = ActivityHandler(
             self._store,
             self._activity_records,
@@ -233,15 +235,20 @@ class StateMachine(
             raise StateMachineError(
                 "unauthorized", "Trusted context does not control the requested player"
             )
-        fingerprint = _creation_fingerprint(
-            {
-                "adventure_id": request.adventure_id,
-                "package_version": request.package_version,
-                "package_digest": request.package_digest,
-                "players": [asdict(player)],
-            },
-            package.ruleset_binding,
+        selected_time = (
+            request.time_binding if request.time_binding is not None else package.time_binding
         )
+        if selected_time is not None and type(selected_time) is not TimeBinding:
+            raise StateMachineError("invalid_time_binding", "Expected typed TimeBinding")
+        request_data = {
+            "adventure_id": request.adventure_id,
+            "package_version": request.package_version,
+            "package_digest": request.package_digest,
+            "players": [asdict(player)],
+        }
+        if selected_time is not None:
+            request_data["time_binding"] = asdict(selected_time)
+        fingerprint = _creation_fingerprint(request_data, package.ruleset_binding)
         with self._transaction():
             replay = self._replay(context, request.command_id, fingerprint)
         if (request.adventure_id, request.package_version) != (
@@ -257,6 +264,11 @@ class StateMachine(
             )
         if replay is not None:
             return replay
+        if selected_time is not None and any(a.npc_state is not None for a in package.actors):
+            raise StateMachineError(
+                "unsupported_time_consumer",
+                "Configured NPC Runtime/OB/Gate require legacy time until reviewed second policies",
+            )
         if package.ruleset_binding.ruleset_id == DND_RULESET:
             self._verify_dnd_binding(package)
         pc = next(
@@ -284,6 +296,7 @@ class StateMachine(
                 return replay
             self._sessions.initialize(session_id, package, context, pc, pc_actor_id, rng_ref)
             self._world_facts.initialize_world(session_id, package)
+            self.world_time.initialize(session_id, selected_time)
             self._initialize_scene(session_id, package.entry_scene_id, package)
             for scene in package.scenes:
                 if scene.grid_json is not None and scene.scene_id != package.entry_scene_id:
@@ -473,7 +486,7 @@ class StateMachine(
             row["current_scene_id"],
             row["world_version"],
             row["event_seq"],
-            WorldState(json.loads(world[0]), world[1]),
+            WorldState(json.loads(world[0]), world[1], self._world_facts.time_state(sid)[0]),
             scenes,
             actors,
             CharacterState(

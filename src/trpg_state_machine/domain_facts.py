@@ -908,6 +908,27 @@ class WorldFacts:
         self.store.require_write()
         self._conn.execute("UPDATE world_states SET game_tick=? WHERE session_id=?", (tick, sid))
 
+    def initialize_time_binding(self, sid, binding):
+        from dataclasses import asdict
+
+        self.store.require_write()
+        self._conn.execute(
+            "INSERT INTO world_time_bindings VALUES (?,?)", (sid, canonical_json(asdict(binding)))
+        )
+
+    def time_state(self, sid):
+        from .time_binding import LegacyTimeBinding, time_binding_from_data
+
+        row = self._conn.execute(
+            "SELECT w.game_tick,b.binding_json FROM world_states w "
+            "LEFT JOIN world_time_bindings b USING(session_id) WHERE w.session_id=?",
+            (sid,),
+        ).fetchone()
+        if row is None:
+            raise StateMachineError("session_not_found", "Unknown clock")
+        binding = time_binding_from_data(json.loads(row[1])) if row[1] else LegacyTimeBinding()
+        return binding, row[0]
+
     def initialize_rule_scene(self, sid, scene):
         self.store.require_write()
         self._conn.execute(

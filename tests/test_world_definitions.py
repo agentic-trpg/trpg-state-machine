@@ -38,7 +38,7 @@ def test_public_definition_identity_pin_and_process_restore(tmp_path, context):
 
     run = subprocess.run(
         [sys.executable, "-c", code, str(db), sid, DOOR],
-        env={**os.environ, "PYTHONPATH": "src;tests"},
+        env={**os.environ, "PYTHONPATH": os.pathsep.join(("src", "tests"))},
         check=True,
         capture_output=True,
         text=True,

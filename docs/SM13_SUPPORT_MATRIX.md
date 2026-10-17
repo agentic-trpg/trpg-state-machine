@@ -4,6 +4,18 @@ Historical implementation record. Current dependency/schema/compatibility and
 component ownership are specified in [RF-RE4](RF_RE4_HISTORY_FREE_RULES.md).
 The 2026-10-17 Openable pin, verified increments and unfinished boundaries are
 recorded in [Openable progress](OPENABLE_SERVICE_PROGRESS.md).
+Current Schema 32 time support and compatibility are specified in
+[WorldTimeService progress](WORLD_TIME_SERVICE_PROGRESS.md).
+
+| Current World time capability | Actual support / boundary |
+|---|---|
+| Session time binding | `world-time/1`, immutable integer-second configuration persisted at creation; optional complete Package default and complete request override. Existing Sessions keep their saved interpretation. |
+| Clock authority / advance | `WorldFacts.world_states.game_tick`; WorldHandler calls the real WorldTimeService inside the original command/savepoint. Same authorization, OCC, fingerprints, receipts, event evidence, Outbox and rollback. |
+| Calendar / phase queries | Custom positive day length, starting day/time, cyclic day/night including midnight wrap, or no cycle. Exact seconds/minutes/hours/days, elapsed/remaining/reached, read-only queries. |
+| Interval boundaries | `(start,end]`; combined simultaneous kinds; strictly exclusive continuation cursor, limit 1–1000, O(limit) work for arbitrarily large supported spans. |
+| Legacy abstract time | Absent binding means `game-clock/1`; no tick scaling or history rewriting. Old command and creation fingerprints preserved; actual Schema31 save and receipt replay tested. |
+| NPC schedule / OB / Gate | Existing legacy schedule sync remains in the original transaction, with NPC versions/task cancellation preserved. OB 100 and Gate 20/60/10 abstract-tick policies unchanged. Second-based configured NPC Runtime and observation access explicitly unsupported pending reviewed policies. |
+| TimeDriver / Combat / other due work | NOT IMPLEMENTED: wall-clock sampling/rate/pause, Round integration, Activity deadlines, Effects, fuel/charges, weather/light changes, NPC scheduling and runtime segmentation. Manual advance during active combat remains rejected. |
 
 | Capability | Actual status and evidence |
 |---|---|

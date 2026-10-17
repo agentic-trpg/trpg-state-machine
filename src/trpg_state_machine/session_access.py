@@ -196,7 +196,16 @@ class SessionAccess:
         # Use the owner check only for package pins, never expose its snapshot to NPC.
 
         self._session(session_id, package, TrustedContext(row["principal_id"], row["player_id"]))
+        self.require_legacy_npc_time(session_id)
         return context.observer_id
+
+    def require_legacy_npc_time(self, sid):
+        if self._conn.execute(
+            "SELECT 1 FROM world_time_bindings WHERE session_id=?", (sid,)
+        ).fetchone():
+            raise StateMachineError(
+                "unsupported_time_consumer", "NPC OB/Gate second policies are not configured"
+            )
 
     def move_pc_scene(self, sid, scene_id):
         self.store.require_write()

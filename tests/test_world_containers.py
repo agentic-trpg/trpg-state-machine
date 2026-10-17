@@ -140,7 +140,7 @@ def test_nested_carried_location_closed_key_access_and_restore(tmp_path, context
         check=True,
         capture_output=True,
         text=True,
-        env={**os.environ, "PYTHONPATH": "src;tests"},
+        env={**os.environ, "PYTHONPATH": os.pathsep.join(("src", "tests"))},
     )
     assert json.loads(restored_process.stdout)["location"]["container_id"] == BOX
     from lock_support import lock_loader

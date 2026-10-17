@@ -3,6 +3,7 @@
 from dataclasses import dataclass
 
 from .package import RulesetBinding
+from .time_binding import LegacyTimeBinding, TimeBinding
 
 
 @dataclass(frozen=True, slots=True)
@@ -34,6 +35,7 @@ class CreateSessionRequest:
     package_version: str
     package_digest: str
     players: tuple[PlayerSelection, ...]
+    time_binding: TimeBinding | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -53,6 +55,7 @@ class CreationResult:
 class WorldState:
     flags: dict[str, bool]
     game_tick: int = 0
+    time_binding: TimeBinding | LegacyTimeBinding = LegacyTimeBinding()
 
 
 @dataclass(frozen=True, slots=True)

@@ -170,7 +170,7 @@ def test_current_perception_uses_frozen_local_grid_and_recovery(tmp_path, contex
     )
     process = subprocess.run(
         [sys.executable, "-c", code, str(db), sid, CRED],
-        env={**os.environ, "PYTHONPATH": "src;tests"},
+        env={**os.environ, "PYTHONPATH": os.pathsep.join(("src", "tests"))},
         capture_output=True,
         text=True,
         check=True,

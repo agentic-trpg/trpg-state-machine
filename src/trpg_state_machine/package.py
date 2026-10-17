@@ -11,6 +11,7 @@ import yaml
 
 from ._operations import ObjectState, SetObjectState, SetSceneFlag
 from .errors import Issue, StateMachineError
+from .time_binding import TimeBinding, time_binding_from_data
 
 if TYPE_CHECKING:
     from .item_package import PortableItem
@@ -174,6 +175,7 @@ class AdventurePackage:
     portable_items: tuple["PortableItem", ...] = ()
     lockable_doors: tuple["LockableDoor", ...] = ()
     world_objects: tuple["WorldObjectDefinition", ...] = ()
+    time_binding: TimeBinding | None = None
 
     def scene(self, scene_id: str) -> SceneDefinition:
         for scene in self.scenes:
@@ -341,7 +343,8 @@ def _validate(data: dict, *, allow_legacy_audit=False) -> AdventurePackage:
         + (" navigation" if navigation else "")
         + (" item_transfers" if items else "")
         + (" lockable_doors" if locks else "")
-        + (" world_objects" if world_enabled else ""),
+        + (" world_objects" if world_enabled else "")
+        + (" time_binding" if isinstance(data, dict) and "time_binding" in data else ""),
         # Package versioning keeps legacy raw-data digests unchanged.
         "$",
     )
@@ -843,6 +846,7 @@ def _validate(data: dict, *, allow_legacy_audit=False) -> AdventurePackage:
         portable,
         lockable,
         world_objects,
+        time_binding_from_data(root["time_binding"]) if "time_binding" in root else None,
     )
 
 
