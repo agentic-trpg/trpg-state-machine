@@ -183,7 +183,7 @@ ancestry checks guard the relation. No child absolute coordinates or second owne
 
 | Fields | Actual model/storage | Class | Writer / consumer |
 |---|---|---|---|
-| container, capacity weight/volume, nesting, accepts, opening | Container typed config | T | Package / ContainerService.audit |
+| container, capacity weight/volume, nesting, accepts, opening | Container typed config | T | Package / scoped ContainerService.audit; see current correction below |
 | item external volume, explicit fit and content group | WorldObjectDefinition | T conditional | Package / only enabled capacity/fit checks |
 | placement kind/scene/cell/carrier/container | objects exclusive relation | S/R | WorldFacts.transfer_item / recursive placement |
 | quantity/charges | existing objects.item_json | S | existing mechanical unit / preserved on whole-instance transfer |
@@ -201,7 +201,9 @@ are not wired into NPC Evaluation. Existing pickup/drop intents continue to work
 
 Capacity null means explicitly no such limit; unknown item measurements stay null
 and fail any enabled corresponding limit. Fit groups are explicit scenario data,
-not inferred from size. Nesting 1..8 is an engineering bound, not a D&D rule.
+not inferred from size. Current admission allows at most two container levels;
+ordinary items do not count. The legacy nesting_limit 1..8 field is parsed for
+Package compatibility, but no longer controls runtime depth.
 Closed/locked ancestors prevent key use and set mechanical inventory accessible=false.
 Pinned Engine item and equipment consumers check accessible; tool checks remain
 unsupported in the pinned check evaluator. Equipment/casting/effect bindings reject
@@ -211,7 +213,15 @@ Destruction policy retains parent/contents identity and permits contents access
 through the destroyed shell; the shell's operations remain disabled. No guessed
 spillage locations. Queries hide closed contents and contents weight. Transfer
 before/after evidence freezes each actual stage. Candidate audit is pure and
-shared savepoint rollback includes facts, projection, evidence and receipts.
+shared savepoint rollback includes facts, projection and evidence; a rejection
+receipt is still committed by the existing command protocol.
+
+Current correction after the Openable merge: candidate admission checks the moved
+subtree plus old and new ancestors, not every Session container. Aggregation may
+read their other contents. OpenableService.allows_contents / contents_accessible
+now own shell and ancestor-chain access semantics, reused by WorldFacts,
+ContainerService and object views. See [ContainerService progress and remaining
+dependencies](CONTAINER_SERVICE_PROGRESS.md) for verified scope and tests.
 
 Checks: 72 container/openable/multi-lock/legacy-item cases passed, including all
 legacy transfer fault injections. Added cross-role nested ownership, synthetic
@@ -466,7 +476,7 @@ resolution and combined testing. No automatic merge is performed.
 | W2 | d6cdfe2 | object HP and private admitted settlement application | confirmed |
 | W3 | 00a6db7 | shared open state, independent jam/bar and sides | confirmed |
 | W4 | 878d93b | stable multi-lock instances and genuine-save migration | confirmed |
-| W5 | b48995e | unique nested placement and scoped inventory projection | confirmed |
+| W5 | b48995e + current ContainerService correction | unique placement; scoped admission; two container levels; shared Openable access | see CONTAINER_SERVICE_PROGRESS.md |
 | W6 | c63c296 | dynamic multi-cell movement geometry and GM placement | confirmed |
 | W7 | 3bf1989 | ordinary local emitters, snapshot and frozen stage evidence | confirmed |
 | W8 | c2e8b7b | atomic one-shot mechanisms, complete public scenario and final review fixes | confirmed |

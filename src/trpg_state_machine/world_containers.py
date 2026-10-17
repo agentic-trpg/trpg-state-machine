@@ -47,11 +47,8 @@ class ContainerService:
             raise StateMachineError(
                 "unsupported_object_capability", "Object has no container capability"
             )
-        obj = self.facts.object(sid, oid)
-        if self.facts.object_hp(sid, oid) != 0 and (
-            obj["state"] == "closed" or self.facts.door_lock(sid, oid)
-        ):
-            raise StateMachineError("container_inaccessible", "Container is closed or locked")
+        if not self.h.objects.openable.contents_accessible(sid, oid):
+            raise StateMachineError("container_inaccessible", "Container contents are inaccessible")
         return c
 
     def _rows(self, sid):
@@ -60,7 +57,9 @@ class ContainerService:
             for r in self.h._conn.execute("SELECT * FROM objects WHERE session_id=?", (sid,))
         }
 
-    def total_weight(self, oid, rows, package):
+    def total_weight(self, oid, rows, package, *, path=frozenset()):
+        if oid in path or oid not in rows:
+            raise StateMachineError("container_cycle", "Invalid parent relation")
         d = self.facts.object_definition(package, oid)
         if d is None or d.weight_lb is None:
             return None
@@ -68,32 +67,53 @@ class ContainerService:
         total = d.weight_lb * data.get("quantity", 1)
         for child in rows.values():
             if child["container_id"] == oid:
-                weight = self.total_weight(child["object_id"], rows, package)
+                weight = self.total_weight(child["object_id"], rows, package, path=path | {oid})
                 if weight is None:
                     return None
                 total += weight
         return total
 
-    def audit(self, rows, package):
-        for oid, obj in rows.items():
-            seen, current, depth = {oid}, obj, 0
-            while current["container_id"] is not None:
-                parent = current["container_id"]
-                if parent in seen or parent not in rows:
-                    raise StateMachineError("container_cycle", "Invalid parent relation")
-                seen.add(parent)
-                depth += 1
+    def ancestry(self, oid, rows):
+        seen, parents = {oid}, []
+        while rows[oid]["container_id"] is not None:
+            oid = rows[oid]["container_id"]
+            if oid in seen or oid not in rows:
+                raise StateMachineError("container_cycle", "Invalid parent relation")
+            seen.add(oid)
+            parents.append(oid)
+        return parents
+
+    def subtree(self, oid, rows):
+        affected, pending = set(), [oid]
+        while pending:
+            current = pending.pop()
+            if current in affected:
+                raise StateMachineError("container_cycle", "Invalid parent relation")
+            affected.add(current)
+            pending.extend(r["object_id"] for r in rows.values() if r["container_id"] == current)
+        return affected
+
+    def audit(self, rows, package, *, affected=None):
+        """Global diagnostic by default; command admission passes its dependency scope."""
+        selected = rows.keys() if affected is None else sorted(affected)
+        for oid in selected:
+            parents = self.ancestry(oid, rows)
+            configs = []
+            for parent in parents:
                 config = self.config(package, parent)
                 if config is None:
                     raise StateMachineError(
                         "unsupported_object_capability", "Parent is not a container"
                     )
-                if depth > config.nesting_limit or depth > 8:
-                    raise StateMachineError(
-                        "container_nesting_limit", "Containment depth exceeds policy"
-                    )
-                current = rows[parent]
-        for oid in rows:
+                configs.append(config)
+            if own := self.config(package, oid):
+                configs.append(own)
+            # Count containers, including a moved container itself, never ordinary items.
+            if len(configs) > 2:
+                raise StateMachineError(
+                    "container_nesting_limit", "Containment exceeds two container levels"
+                )
+        for oid in selected:
             c = self.config(package, oid)
             if c is None:
                 continue
@@ -133,18 +153,16 @@ class ContainerService:
                             "container_capacity_exceeded", "Container capacity exceeded"
                         )
 
-    def require_unbound(self, sid, actor, iid):
+    def require_unbound(self, sid, actor, iid, *, rows=None, affected=None):
         h = self.h
         known = set(h.characters.rule_actors(sid))
         if actor not in known:
             raise StateMachineError("unsupported_actor_state", "Explicit mechanical facts required")
         components = h.characters.rule_components(sid, known)
-        if any(e["target_id"] == actor for e in components["effect_states"]):
+        if any(e["target_id"] == actor and not e["disabled"] for e in components["effect_states"]):
             raise StateMachineError("unsupported_actor_state", "Active effect transfer unsupported")
-        affected = {iid}
-        for obj in self._rows(sid).values():
-            if iid in self.facts.placement(sid, obj["object_id"])["ancestry"]:
-                affected.add(obj["object_id"])
+        rows = self._rows(sid) if rows is None else rows
+        affected = self.subtree(iid, rows) if affected is None else affected
         casting = components["casting_state"]
         if casting and any(
             m["inventory_instance_id"] in affected
@@ -161,6 +179,14 @@ class ContainerService:
                 continue
             slug = json.loads(obj["item_json"])["item_slug"]
             asset = h.loader.get_item(slug)
+            if asset and (asset.requires_attunement or asset.passive_effects):
+                raise StateMachineError(
+                    "unsupported_item_binding", "Item effect/attunement lifecycle is unsupported"
+                )
+            # Equipment fields are slug-based. Only already-owned instances can be
+            # bound to the actor's equipment; ground instances with the same slug cannot.
+            if self.facts.placement(sid, oid)["carrier_id"] != actor:
+                continue
             if (
                 state["weapon_in_hands"] == slug
                 or state["other_hand_occupied"]
@@ -169,6 +195,7 @@ class ContainerService:
                     state["worn_armor"] is not None
                     and asset is not None
                     and asset.item_kind == "armor"
+                    and asset.armor_category == state["worn_armor"]
                 )
             ):
                 raise StateMachineError(
@@ -193,15 +220,18 @@ class ContainerService:
             )
         if type(op) is TakeItem and item["container_id"] != op.container_id:
             raise StateMachineError("position_conflict", "Item is not in the specified container")
-        self.require_unbound(sid, actor, op.instance_id)
         candidate = self._rows(sid)
+        moved = self.subtree(op.instance_id, candidate)
+        affected = moved | set(self.ancestry(op.instance_id, candidate))
+        self.require_unbound(sid, actor, op.instance_id, rows=candidate, affected=moved)
         candidate[op.instance_id].update(
             carrier_id=actor if type(op) is TakeItem else None,
             container_id=op.container_id if type(op) is PutItem else None,
             scene_id=None,
             cell=None,
         )
-        self.audit(candidate, package)
+        affected.update(self.ancestry(op.instance_id, candidate))
+        self.audit(candidate, package, affected=affected)
         return item
 
     def operate(self, row, actor, op, package):

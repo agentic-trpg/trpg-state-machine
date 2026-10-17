@@ -834,14 +834,13 @@ class WorldFacts:
         }
 
     def item_accessible(self, sid, oid, *, row=None, include_self=True):
+        from .world_openable import OpenableService
+
         placement = self.placement(sid, oid, row=row)
         if include_self and self.object_hp(sid, oid) == 0:
             return False
         for parent in placement["ancestry"]:
-            obj = self.object(sid, parent)
-            if self.object_hp(sid, parent) != 0 and (
-                obj["state"] == "closed" or self.door_lock(sid, parent)
-            ):
+            if not OpenableService.allows_contents(self, sid, parent):
                 return False
         return True
 

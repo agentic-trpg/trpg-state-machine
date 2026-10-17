@@ -28,6 +28,9 @@ uv run --locked python examples/world_station.py
 内部合成结果测试只验证耐久应用。战斗世界互动、撬锁、有限燃料、动态视觉遮挡/Cover、
 自动称重压力板与新操作的 NPC Evaluation 意图转换均未宣称支持。
 `get_object`、`list_scene_objects`、`get_illumination` 沿用受权范围；封闭容器内容被过滤。
+容器取放仅校验移动子树及原／目标祖先，统一最多两个容器层级，普通物品不计层数；
+内容访问复用 Openable 的只读接口。实际修复、必要数据与未完成事项见
+[ContainerService 专项记录](docs/CONTAINER_SERVICE_PROGRESS.md)。
 完整字段/Facts/Handler/存储映射、迁移、验证与限制见 [实施记录](docs/WORLD_W1_W8.md)，
 最终审阅见 [World 审阅](docs/reviews/WORLD_W1_W8_REVIEW.md)。以下 GC 章节保留各批历史范围。
 
