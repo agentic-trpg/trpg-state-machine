@@ -164,10 +164,14 @@ class WorldObjectService:
                 available[name] = True
             except StateMachineError:
                 available[name] = False
-        contents_visible = self.containers.config(package, oid) and (
-            destroyed or (obj["state"] != "closed" and not self.facts.door_lock(sid, oid))
+        contents_visible = self.containers.config(
+            package, oid
+        ) and self.openable.contents_accessible(sid, oid)
+        total_weight = (
+            self.containers.total_weight(oid, self.containers._rows(sid), package)
+            if contents_visible
+            else None
         )
-        total_weight = self.containers.total_weight(oid, self.containers._rows(sid), package)
         return {
             "contents": tuple(c["object_id"] for c in self.facts.contents(sid, oid))
             if contents_visible

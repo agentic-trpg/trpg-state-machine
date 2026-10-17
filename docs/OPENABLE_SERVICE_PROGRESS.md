@@ -26,6 +26,12 @@
 
 ## 架构与命令
 
+后续 ContainerService 专项新增最小只读接口 `allows_contents(facts, sid, oid)` 与
+`contents_accessible(sid, oid)`：前者统一 shell 访问语义，后者组合祖先链。
+WorldFacts.item_accessible、ContainerService.require_contents_access 和对象内容查询复用该语义；
+开合／锁具状态仍只有既有 WorldFacts 一份。详见 [容器专项记录](CONTAINER_SERVICE_PROGRESS.md)。
+此接口补充不改变下列 Openable 战斗／魔法等未完成边界。
+
 WorldFacts 保有唯一对象实际状态及必要一致性保护；OpenableService 组织状态转换与检查，不缓存第二份状态。WorldHandler 保留流程和通用位置／授权辅助。WorldObjectService 调用服务，不回调 Handler 执行锁具业务。空间计算、HP、容器、事件／感知与角色机械事实仍由各自所有者管理。
 
 `world.pick_lock`: `PickLock(scene_id, object_id, lock_id, tool_instance_id, expected_cell)`。

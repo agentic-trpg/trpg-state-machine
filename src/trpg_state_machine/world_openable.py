@@ -13,6 +13,29 @@ class OpenableService:
         self.h = handler
         self.facts = handler.facts
 
+    @staticmethod
+    def allows_contents(facts, sid, oid):
+        """Read the shell only; no reach, ownership, transition, or rule evaluation.
+
+        A destroyed shell preserves accessible contents. A jam blocks transitions,
+        not an already open aperture. Locks/bars still seal an intact shell.
+        """
+        obj = facts.object(sid, oid)
+        if obj is None:
+            return False
+        if facts.object_hp(sid, oid) == 0:
+            return True
+        state = facts.openable_state(sid, oid)
+        return not (
+            obj["state"] == "closed" or facts.door_lock(sid, oid) or (state and state["barred"])
+        )
+
+    def contents_accessible(self, sid, oid):
+        """Read-only shell plus enclosing-chain access, independent of spatial reach."""
+        return self.facts.item_accessible(sid, oid, include_self=False) and self.allows_contents(
+            self.facts, sid, oid
+        )
+
     def manual_target(self, sid, actor_id, operation, package, *, navigation_scope=None):
         position = self.h._actor_position(sid, actor_id)
         if operation.scene_id != position.scene_id:

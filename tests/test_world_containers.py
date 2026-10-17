@@ -47,7 +47,7 @@ def container_data():
                     "capacity_volume_cu_ft": 10,
                     "opening_profiles": ["station.small"],
                     "allowed_content_kinds": ["station.unit"],
-                    "nesting_limit": 3,
+                    "nesting_limit": 2,
                     "light_transmission_open": "transmit",
                     "light_transmission_closed": "block",
                 },
