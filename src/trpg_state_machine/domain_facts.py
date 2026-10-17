@@ -581,6 +581,16 @@ class WorldFacts:
             (int(barred), sid, oid),
         )
 
+    def clear_object_jam(self, sid, oid):
+        self.store.require_write()
+        if self.openable_state(sid, oid) is None:
+            raise StateMachineError("unsupported_object_capability", "No jam state")
+        if self.object_hp(sid, oid) == 0:
+            raise StateMachineError("object_destroyed", "Destroyed object is unusable")
+        self._conn.execute(
+            "UPDATE object_openables SET jammed=0 WHERE session_id=? AND object_id=?", (sid, oid)
+        )
+
     def object_hp(self, sid, oid):
         row = self._conn.execute(
             "SELECT current_hp FROM object_durability WHERE session_id=? AND object_id=?",
@@ -623,9 +633,9 @@ class WorldFacts:
             "UPDATE objects SET cell=? WHERE session_id=? AND object_id=?", (cell, sid, object_id)
         )
 
-    def switch(self, sid, object_id, state):
+    def switch(self, sid, object_id, state, *, jam_policy="prevent_transitions"):
         self.store.require_write()
-        self.validate_door_switch(sid, object_id, state)
+        self.validate_door_switch(sid, object_id, state, jam_policy=jam_policy)
         self._conn.execute(
             "UPDATE objects SET state=? WHERE session_id=? AND object_id=?", (state, sid, object_id)
         )
@@ -650,13 +660,21 @@ class WorldFacts:
             raise StateMachineError("invalid_lock_state", "Contradictory shared object state")
         return any(bool(lock[1]) for lock in locks)
 
-    def validate_door_switch(self, sid, object_id, state):
+    def validate_door_switch(self, sid, object_id, state, *, jam_policy="prevent_transitions"):
+        if jam_policy not in ("prevent_transitions", "prevent_opening", "prevent_closing"):
+            raise StateMachineError("invalid_rule_result", "Unknown jam policy")
+        if state not in ("open", "closed"):
+            raise StateMachineError("invalid_rule_result", "Unknown open state")
         if self.object_hp(sid, object_id) == 0:
             raise StateMachineError("object_destroyed", "Destroyed object is unusable")
         current = self.object(sid, object_id)
         openable = self.openable_state(sid, object_id)
         if openable and current["state"] != state:
-            if openable["jammed"]:
+            if openable["jammed"] and (
+                jam_policy == "prevent_transitions"
+                or (jam_policy == "prevent_opening" and state == "open")
+                or (jam_policy == "prevent_closing" and state == "closed")
+            ):
                 raise StateMachineError("object_jammed", "Object is jammed")
             if openable["barred"]:
                 raise StateMachineError("object_barred", "Object is barred")

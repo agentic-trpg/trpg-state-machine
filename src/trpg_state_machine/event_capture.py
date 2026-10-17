@@ -37,6 +37,7 @@ class EventCapture:
             "mechanism.spent": "A mechanism completes its operation.",
             "object.light_changed": "Someone operates a light source.",
             "object.bar_changed": "Someone operates an object bar.",
+            "object.jam_cleared": "Someone frees a stuck object.",
             "object.durability_changed": "An object is damaged.",
             "door.lock_changed": "Someone operates a door lock.",
             "object.state_changed": "An object changes position.",

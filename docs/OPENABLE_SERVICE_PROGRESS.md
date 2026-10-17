@@ -18,7 +18,7 @@ is historical and is not delivery evidence.
 | 1 ordinary open/close, keyed single/multi-lock, bar, reach/sides | Implemented W1-W8 | Unified in OpenableService | Implemented; 62 focused regressions passed |
 | 1 player/NPC/activity/package/check/mechanism sources | Existing sources; mechanism wrote directly | All open writes routed through the same transition validation/application | Implemented; 62 focused regressions passed |
 | 1 repeated operations / actual keys | Existing no-op/identity semantics | Retained; explicit query/no-op regression added | Verified (read/no-op regression passed) |
-| 2 picking, forcing, unjamming | Not implemented | Pending | Unfinished |
+| 2 picking, forcing, unjamming | Not implemented | Typed operations; explicit Package /7 policies; real RE checks and configured consequences | 126 frozen focused regressions passed; RE runtime pinned to `cf808270`; remote/locked install verification pending |
 | 2 durability | Internal admitted HP settlement only | Existing; no public attack/damage formula | Integration pending |
 | 3 actual fixed RE | `675552406e67470bf3456fe90e88c4f1595bf324` | Inspected installed evaluation_checks: rejects tools/action checks | Dependency work required |
 | 3 combat costs, Arcane Lock / Knock | Not implemented | Pending | Unfinished; guards retained |
@@ -48,3 +48,47 @@ Phase 1: 62 tests passed in 21.01s, including real checks, rollback and fresh-pr
 recovery. Ruff check and format pass for changed Python files. Initial pytest invocation failed in temporary
 fixture creation due to sandbox default-temp permissions; rerun uses repo-local
 `--basetemp`. This is not a behavior failure or passing evidence.
+
+
+## Phase 2 implementation notes
+
+`PickLock(scene_id, object_id, lock_id, tool_instance_id, expected_cell)`,
+`ForceOpen` / `ClearJam(scene_id, object_id, method_id, tool_instance_id, expected_cell)`
+use ordinary player/NPC command authorization. No caller-supplied DC, success,
+trusted flag or state patch exists. Tool-less force methods use an explicit null
+instance. Special locks require configured DC; ordinary SRD locks select srd_lock.
+Legacy keys and Package /1-/6 retain their raw Package digests and do not gain
+invented picking policies. Extended definitions require Package /7.
+
+Each force method declares ability, optional skill, DC, optional required tool,
+leverage applicability, and the exact lock/bar/jam/open consequences. Failure
+causes no tool damage, jam, trap, or invented HP damage. Successful unlocking and
+unjamming do not imply opening. Every attempted open still checks remaining
+obstacles and spatial occupancy. HP remains exclusively in ObjectDurabilityService.
+Directional jam policies are immutable definitions; existing rows remain valid,
+with prevent_transitions as the default. No storage migration is necessary.
+
+RuleExecution now owns the existing shared prepare/evaluate/commit function;
+CombatHandler delegates. Object checks reuse its receipts, RNG, savepoint, events,
+OCC, and final spatial validation. Invalid operations and conflicts do not draw or
+pay. Valid failed checks commit their actual CheckRolled and RNG transition.
+Already-completed operations do not evaluate or emit another event.
+
+RE branch starts at the actual pinned dependency, not latest main. engine-openable/1
+is an additive typed RE API using the same immutable snapshot, binding, result
+and RNG contracts; generic rules.check retains its previous admitted range.
+Availability uses the identical draw-free RE capability validator.
+
+
+Phase 2 frozen focused gate: 126 passed in 41.93s; Ruff check and format pass
+(150 Python files). Additional new behavior tests total 19, including actual
+unjamming Signal -> ordered Perception -> authorized NPC Observation. The broad
+RE integration gate is still pending; no complete dependency validation claimed.
+
+
+Phase 2 dependency code commit: RE `cf808270e5778fbde91fc5077f862b568b5774d5`
+on `feat/world-openable-support`, based on the previously fixed `67555240`.
+Both Engine and SRD source references are changed together in pyproject/uv.lock.
+Focused development used that source checkout via PYTHONPATH; actual locked
+installation and frozen combined validation must run after the RE push, before
+final delivery. RE full engine rerun remains pending at this phase commit.

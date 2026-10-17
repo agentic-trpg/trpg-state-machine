@@ -25,6 +25,7 @@ NAVIGATION_SCHEMA_VERSION = "state-machine-foundation/3"
 ITEM_SCHEMA_VERSION = "state-machine-foundation/4"
 LOCK_SCHEMA_VERSION = "state-machine-foundation/5"
 WORLD_SCHEMA_VERSION = "state-machine-foundation/6"
+OPENABLE_SCHEMA_VERSION = "state-machine-foundation/7"
 MAX_PACKAGE_BYTES = 1_048_576
 _ID = re.compile(r"[a-z][a-z0-9_]*(?:\.[a-z][a-z0-9_]*)+")
 
@@ -308,23 +309,30 @@ def _validate(data: dict, *, allow_legacy_audit=False) -> AdventurePackage:
             ITEM_SCHEMA_VERSION,
             LOCK_SCHEMA_VERSION,
             WORLD_SCHEMA_VERSION,
+            OPENABLE_SCHEMA_VERSION,
         )
     )
-    world_enabled = interactions and data["manifest"]["schema_version"] == WORLD_SCHEMA_VERSION
+    world_enabled = interactions and data["manifest"]["schema_version"] in (
+        WORLD_SCHEMA_VERSION,
+        OPENABLE_SCHEMA_VERSION,
+    )
     locks = interactions and data["manifest"]["schema_version"] in (
         LOCK_SCHEMA_VERSION,
         WORLD_SCHEMA_VERSION,
+        OPENABLE_SCHEMA_VERSION,
     )
     items = interactions and data["manifest"]["schema_version"] in (
         ITEM_SCHEMA_VERSION,
         LOCK_SCHEMA_VERSION,
         WORLD_SCHEMA_VERSION,
+        OPENABLE_SCHEMA_VERSION,
     )
     navigation = interactions and data["manifest"]["schema_version"] in (
         NAVIGATION_SCHEMA_VERSION,
         ITEM_SCHEMA_VERSION,
         LOCK_SCHEMA_VERSION,
         WORLD_SCHEMA_VERSION,
+        OPENABLE_SCHEMA_VERSION,
     )
     root = _mapping(
         data,
@@ -350,6 +358,7 @@ def _validate(data: dict, *, allow_legacy_audit=False) -> AdventurePackage:
         ITEM_SCHEMA_VERSION,
         LOCK_SCHEMA_VERSION,
         WORLD_SCHEMA_VERSION,
+        OPENABLE_SCHEMA_VERSION,
     ):
         _fail("unsupported_schema", "manifest.schema_version", f"Expected {SCHEMA_VERSION}")
     adventure_id = _identifier(m["adventure_id"], "manifest.adventure_id")
@@ -803,7 +812,14 @@ def _validate(data: dict, *, allow_legacy_audit=False) -> AdventurePackage:
     from .world_package import validate_world_objects
 
     world_objects = (
-        validate_world_objects(root["world_objects"], scenes, portable, lockable, passages)
+        validate_world_objects(
+            root["world_objects"],
+            scenes,
+            portable,
+            lockable,
+            passages,
+            extended=m["schema_version"] == OPENABLE_SCHEMA_VERSION,
+        )
         if world_enabled
         else ()
     )

@@ -553,15 +553,6 @@ class WorldHandler:
         if operation.scene_id != position.scene_id:
             raise StateMachineError("invalid_target", "Interaction must be in the actor's scene")
         definition = self.facts.object_definition(package, operation.object_id)
-        capability = definition.capability("openable") if definition else None
-        if (
-            capability
-            and capability.operation_sides
-            and position.scene_id not in capability.operation_sides
-        ):
-            raise StateMachineError(
-                "operation_side_forbidden", "Operation unavailable from this side"
-            )
         fine = package.scene(position.scene_id).grid_json is not None
         if fine:
             self._world_actor_ready(sid, actor_id, navigation_scope=navigation_scope)

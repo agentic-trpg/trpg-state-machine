@@ -4,6 +4,7 @@ from dataclasses import asdict
 
 from .errors import StateMachineError
 from .world_commands import (
+    OPENABLE_CHECK_OPERATIONS,
     ActivateMechanism,
     BarObject,
     LockObject,
@@ -33,6 +34,8 @@ class WorldObjectService:
         self.openable = OpenableService(handler)
 
     def validate(self, row, actor_id, operation, package):
+        if type(operation) in OPENABLE_CHECK_OPERATIONS:
+            return self.openable.check_availability(row, actor_id, operation, package)
         if type(operation) is ActivateMechanism:
             self.mechanisms.validate(row, actor_id, operation, package)
             return
@@ -70,6 +73,10 @@ class WorldObjectService:
             return WorldActionAvailability("available", "available", row["world_version"])
 
     def operate(self, row, actor_id, operation, package, *, source_command_id=None):
+        if type(operation) in OPENABLE_CHECK_OPERATIONS:
+            raise StateMachineError(
+                "invalid_execution_origin", "Object checks require shared rule execution"
+            )
         if type(operation) is ActivateMechanism:
             return self.mechanisms.operate(row, actor_id, operation, package, source_command_id)
         if type(operation) in (SetLightEnabled, SwitchLightMode):
