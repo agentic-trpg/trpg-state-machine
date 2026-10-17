@@ -622,6 +622,15 @@ submit/replay protocol for execution. Failed valid attempts produce actual check
 results; illegal/stale requests do not consume RNG. Repeated completed operations
 produce no new roll/event.
 
+For an accessible, explicitly selected unlocked lock, the PickLock query returns
+`status="available", reason="already_unlocked"` (该锁已解开，无须撬锁), regardless
+of the supplied tool's availability. Execution commits a replayable no-op receipt
+without a rule request, roll, event or world/RNG version change. Identity, access,
+authorization and version checks still apply. Locked targets retain tool checks.
+Openable checks retain the generic check data and verified original operation in
+`rules.check_rolled.payload.adjudication.openable_operation`, associated through
+the existing `source_command_id`; this audit data does not create sensory Signals.
+
 This is **not completion of the full requested World scope**: combat object costs,
 Arcane Lock/Knock and their Effects/TimeBinding lifecycle, real object attacks,
 and new NPC EVA picking/forcing DTOs remain unfinished. Existing guards remain.

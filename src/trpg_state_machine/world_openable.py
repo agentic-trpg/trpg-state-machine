@@ -312,6 +312,15 @@ class OpenableService:
                 raise StateMachineError(
                     "operation_side_forbidden", "Lock inaccessible from this side"
                 )
+            # Identity and access are checked above, before exposing lock state.
+            if not bool(
+                next(
+                    value[1]
+                    for value in self.facts.locks_for_object(sid, op.object_id)
+                    if value[0] == op.lock_id
+                )
+            ):
+                return None, "pick_lock", "thieves-tools", False, None, True
             if lock.pick_policy == "unconfigured":
                 raise StateMachineError(
                     "unsupported_lock_policy", "Picking rules are not configured"
@@ -322,13 +331,7 @@ class OpenableService:
                 15 if lock.pick_policy == "srd_lock" else lock.pick_dc,
             )
             tool, leverage, kind = "thieves-tools", False, "pick_lock"
-            noop = not bool(
-                next(
-                    lock[1]
-                    for lock in self.facts.locks_for_object(sid, op.object_id)
-                    if lock[0] == op.lock_id
-                )
-            )
+            noop = False
         else:
             method = next((m for m in c.force_methods if m.method_id == op.method_id), None)
             if method is None or (type(op) is ClearJam and not method.clear_jam):
@@ -479,6 +482,8 @@ class OpenableService:
         from .commands import TypedCommand
 
         plan = self.prepare_check(row, actor_id, op, package)
+        if type(op) is PickLock and plan[5]:
+            return plan
         rules = getattr(self, "rules", None)
         if rules is None:
             raise StateMachineError("rules_unavailable", "No composed Rule Engine adapter")

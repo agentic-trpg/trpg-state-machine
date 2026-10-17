@@ -326,7 +326,9 @@ def validate_world_objects(
             if config.get("kind") == "locks":
                 c = _mapping(config, "kind locks", p)
                 locks = []
-                for value in _list(c["locks"], p, nonempty=True):
+                for index, value in enumerate(_list(c["locks"], p, nonempty=True)):
+                    if not isinstance(value, dict):
+                        _fail("schema_error", f"{p}.locks[{index}]", "Lock must be a mapping")
                     lock = _mapping(
                         {"pick_policy": "unconfigured", "pick_dc": None, **value},
                         "lock_id initial_locked credential_instance_ids operable_sides policy "

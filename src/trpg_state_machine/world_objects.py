@@ -8,6 +8,7 @@ from .world_commands import (
     ActivateMechanism,
     BarObject,
     LockObject,
+    PickLock,
     PutItem,
     RepositionObject,
     SetLightEnabled,
@@ -67,10 +68,11 @@ class WorldObjectService:
                     context, "can_place_world_objects", False
                 ):
                     raise StateMachineError("unauthorized", "Trusted GM placement grant required")
-                self.validate(row, actor_id, operation, package)
+                plan = self.validate(row, actor_id, operation, package)
             except StateMachineError as exc:
                 return WorldActionAvailability("unavailable", exc.code, row["world_version"])
-            return WorldActionAvailability("available", "available", row["world_version"])
+            reason = "already_unlocked" if type(operation) is PickLock and plan[5] else "available"
+            return WorldActionAvailability("available", reason, row["world_version"])
 
     def operate(self, row, actor_id, operation, package, *, source_command_id=None):
         if type(operation) in OPENABLE_CHECK_OPERATIONS:

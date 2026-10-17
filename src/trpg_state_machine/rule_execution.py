@@ -14,7 +14,7 @@ from .commands import CommandReceipt
 from .dnd_checks import world_effects_ready
 from .errors import StateMachineError
 from .rules_adapter import validate_dnd_result
-from .world_commands import OPENABLE_CHECK_OPERATIONS
+from .world_commands import OPENABLE_CHECK_OPERATIONS, PickLock
 
 
 class RuleExecution:
@@ -61,7 +61,8 @@ class RuleExecution:
                     plan = self.world.objects.openable.prepare_check(
                         row, command.actor_id, command.payload, package
                     )
-                    rule_command = replace(command, command_type="rules.check", payload=plan[0])
+                    if plan[0] is not None:
+                        rule_command = replace(command, command_type="rules.check", payload=plan[0])
                 except StateMachineError as exc:
                     prepare_error = exc.code
 
@@ -81,7 +82,11 @@ class RuleExecution:
                         "combat_unrestorable",
                         "Interrupted combat requires explicit recovery support",
                     )
-        if object_check and prepare_error is not None:
+        noop = object_check and plan is not None and plan[5]
+        unlocked_pick = noop and type(command.payload) is PickLock
+        if unlocked_pick:
+            request, capability = None, None
+        elif object_check and prepare_error is not None:
             request = None
             capability = prepare_error
         else:
@@ -89,7 +94,6 @@ class RuleExecution:
             capability = self.rules._dnd_capability(
                 rule_command.payload, command.actor_id, snapshot
             )
-        noop = object_check and plan is not None and plan[5]
         spec = (
             OpenableCheckRequest(
                 schema_version="engine-openable/1",
@@ -99,7 +103,7 @@ class RuleExecution:
                 required_tool=plan[2],
                 leverage_applicable=plan[3],
             )
-            if object_check and prepare_error is None
+            if object_check and prepare_error is None and not unlocked_pick
             else None
         )
         if capability is None and not world_ready:
@@ -147,7 +151,14 @@ class RuleExecution:
             elif capability is not None:
                 status, error = "rejected", capability
             elif noop:
-                pass
+                try:
+                    current_plan = self.world.objects.openable.prepare_check(
+                        row, command.actor_id, command.payload, package
+                    )
+                    if current_plan != plan:
+                        status, error = "conflict", "version_conflict"
+                except StateMachineError as exc:
+                    status, error = "rejected", exc.code
             elif not world_effects_ready(self.world, row, command):
                 status, error = "rejected", "world_precondition_failed"
             elif result.status != "accepted":
@@ -179,6 +190,16 @@ class RuleExecution:
                                         "adjudication": {
                                             "principal_id": context.principal_id,
                                             "payload": rule_command.payload.model_dump(mode="json"),
+                                            **(
+                                                {
+                                                    "openable_operation": {
+                                                        "command_type": command.command_type,
+                                                        "payload": asdict(command.payload),
+                                                    }
+                                                }
+                                                if object_check
+                                                else {}
+                                            ),
                                             **(
                                                 {
                                                     "world_effects": asdict(

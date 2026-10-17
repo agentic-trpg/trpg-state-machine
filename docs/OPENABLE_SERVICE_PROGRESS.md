@@ -84,3 +84,26 @@ RE 求值在 SQLite 事务外；提交前重验快照、版本、RNG 和对象�
 最后交付的生产代码在全部成功分区间保持冻结；安装校验的单行测试预期变更已由修复分区覆盖。
 
 **完整原任务仍未完成；1,295 项通过不是战斗费用、魔法生命周期或真实物体攻击完成的证据。**
+
+## 2026-10-17 审阅修复
+
+基线与修复前 HEAD：`018ea8cc4452b6e412eb3c92bb40e753efb9337d`；在原分支、原目录修复，开始时工作区干净，无额外 worktree。未修改 RE 仓库及依赖，未涉及 ContainerService 接口或重构；GC5 stash 保持原对象 `d24e26fb305b37c04794a10cfa1c2bd5e0826ca5`。
+
+| 审阅项 | 本轮新增修复／验证 | 状态 |
+|---|---|---|
+| locks 非 mapping 条目异常 | 在默认字段合并前校验类型；公开 YAML 加载的空条目、null、字符串、数字、列表返回 invalid / schema_error 与条目路径；保留未知字段、引用和策略约束 | 已实现；专项验证 |
+| 合法旧 Package | 单锁、多锁公开加载；对照基线校验函数计算的 digest 金值，解释与 digest 不变 | 已验证 |
+| 已解锁 PickLock | 先校验身份、授权、访问及操作侧；查询 available / already_unlocked（该锁已解开，无须撬锁）；执行仅提交幂等回执，不检查工具／撬锁策略，不建立规则请求，不消耗 RNG、事件或世界版本 | 已实现；专项验证 |
+| 多锁与访问协议 | 错误／不存在工具、仍锁住的另一把锁、未知锁、无权限、错误场景、超出触及、操作侧、过期版本、重复提交与关闭数据库重放 | 已验证；不自动打开对象 |
+| 原始操作事件审计 | 在既有 rules.check_rolled 的 adjudication.openable_operation 保存 command_type 和原 payload；保留通用检定与 source_command_id；无需历史事件包含新字段 | 已实现；真实 PickLock / ForceOpen / ClearJam 成功与有效失败、落盘重开、幂等及回滚验证 |
+| 感知边界 | 审计字段不生成 Signals，无重复事件，无新增 LLM / JEV / EVA 调用；EventPersistence 无需理解撬锁业务 | 已验证事件 Signals 隔离；现有投影回归覆盖 |
+| 跨平台测试 | 新进程重放测试 PYTHONPATH 改用 os.pathsep.join；本轮其他新增测试无同类硬编码；保留重启和数据库全表不变断言 | 已实现；新进程回归验证 |
+
+本轮最终验证（旧段落的 1,295 项属于审阅基线的历史结果）：
+
+- 新增回归 33 项；Openable／Package／规则提交／事件追溯／重启及回滚专项合计 **210 passed**，退出码 0。
+- 完整测试文件清单 `.test-tmp/openable-review-manifest.json`：65 个文件，核对无重复或遗漏；四分区 **375 / 368 / 331 / 254，共 1,328 passed**，退出码全部为 0。日志 `.test-tmp/openable-review-full-p0.log` 至 `p3.log`；各组 pytest 时间 149.24 / 153.48 / 180.71 / 163.54 秒。生产代码在全部最终回归期间保持冻结。
+- Ruff 检查、格式检查（217 文件）、git diff --check 通过；uv lock --check --offline 通过，安装的 Engine／SRD 元数据 SHA 均为未变更的 `d596161060555630019163ab301e1d25fd816549`。首次受限沙箱的 uv 缓存无权限，改在正常本机缓存核对成功。
+- 初轮新增测试的地图越界夹具及适配器属性名错误已修正；未跳过或削弱测试。仅有现存 Lark 正则模块弃用警告，无远端 CI 通过的声明。
+
+完整 Openable 原任务仍未完成：战斗费用、Arcane Lock／Knock 魔法生命周期及真实物体攻击等上述未完成项没有因本轮修复改变状态。
