@@ -18,6 +18,7 @@ from .world_commands import (
 from .world_containers import ContainerService
 from .world_lights import LightService
 from .world_mechanisms import MechanismService
+from .world_openable import OpenableService
 from .world_spatial import ObjectSpatialService
 
 
@@ -29,9 +30,9 @@ class WorldObjectService:
         self.spatial = ObjectSpatialService(handler)
         self.lights = LightService(handler)
         self.mechanisms = MechanismService(handler)
+        self.openable = OpenableService(handler)
 
     def validate(self, row, actor_id, operation, package):
-        h, sid = self.handler, row["session_id"]
         if type(operation) is ActivateMechanism:
             self.mechanisms.validate(row, actor_id, operation, package)
             return
@@ -45,26 +46,8 @@ class WorldObjectService:
             self.containers.validate(row, actor_id, operation, package)
             return
         if type(operation) in (LockObject, UnlockObject):
-            h._validate_lock(row, actor_id, operation, package)
-            return
-        h._world_operation_capability(row, operation)
-        h._world_actor_ready(sid, actor_id)
-        h._manual_object_target(sid, actor_id, operation, package)
-        if h._actor_position(sid, actor_id).cell != operation.expected_cell:
-            raise StateMachineError("position_conflict", "Actor position changed")
-        definition = self.facts.object_definition(package, operation.object_id)
-        c = definition.capability("openable") if definition else None
-        if c is None or c.initial_barred is None:
-            raise StateMachineError("unsupported_object_capability", "Object has no bar")
-        if c.bar_operable_sides and operation.scene_id not in c.bar_operable_sides:
-            raise StateMachineError("operation_side_forbidden", "Bar inaccessible from this side")
-        if self.facts.object_hp(sid, operation.object_id) == 0:
-            raise StateMachineError("object_destroyed", "Destroyed object is unusable")
-        if (
-            type(operation) is BarObject
-            and self.facts.object(sid, operation.object_id)["state"] != "closed"
-        ):
-            raise StateMachineError("object_must_be_closed", "Close object before barring")
+            return self.openable.validate_lock(row, actor_id, operation, package)
+        return self.openable.validate_bar(row, actor_id, operation, package)
 
     def query(self, sid, actor_id, operation, package, *, context):
         from .commands import OPERATIONS, TypedCommand, validate_command
@@ -96,23 +79,8 @@ class WorldObjectService:
         if type(operation) in (PutItem, TakeItem):
             return self.containers.operate(row, actor_id, operation, package)
         if type(operation) in (LockObject, UnlockObject):
-            return self.handler._operate_lock(row, actor_id, operation, package)
-        self.validate(row, actor_id, operation, package)
-        h, sid = self.handler, row["session_id"]
-        barred = type(operation) is BarObject
-        if self.facts.openable_state(sid, operation.object_id)["barred"] == barred:
-            return []
-        self.facts.set_object_bar(sid, operation.object_id, barred)
-        return [
-            h._capture_event(
-                sid,
-                package,
-                "object.bar_changed",
-                {**asdict(operation), "barred": barred, "actor_id": actor_id},
-                phase="world.after_bar_update",
-                source_actor_id=actor_id,
-            )
-        ]
+            return self.openable.operate_lock(row, actor_id, operation, package)
+        return self.openable.operate_bar(row, actor_id, operation, package)
 
     def _visible(self, sid, actor_id, oid, package):
         h = self.handler
@@ -181,7 +149,7 @@ class WorldObjectService:
         ):
             try:
                 if isinstance(op, SetObjectState):
-                    self.handler._world_destination(row, actor_id, op, package)
+                    self.openable.validate_open(row, actor_id, op, package)
                 else:
                     self.validate(row, actor_id, op, package)
                 available[name] = True
