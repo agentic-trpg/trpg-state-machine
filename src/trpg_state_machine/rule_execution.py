@@ -34,11 +34,16 @@ class RuleExecution:
     async def submit(self, command, package, context, fingerprint):
         object_check = type(command.payload) in OPENABLE_CHECK_OPERATIONS
         plan, prepare_error, rule_command = None, None, command
-        build_snapshot = (
-            (lambda value: self.rules._noncombat_snapshot(value, package))
-            if type(command.payload) is CheckPayload or object_check
-            else self.rules._combat_snapshot
-        )
+
+        def build_snapshot(value):
+            if object_check and self.world._active_combat(command.session_id):
+                # Preserve a durable rejected receipt without pretending a combat
+                # snapshot is a noncombat check or relaxing any capability guard.
+                return self.rules._combat_snapshot(value)
+            if type(command.payload) is CheckPayload or object_check:
+                return self.rules._noncombat_snapshot(value, package)
+            return self.rules._combat_snapshot(value)
+
         with self.store.transaction():
             row = self.sessions._session(command.session_id, package, context)
             self.sessions._authorize_command(row, command.actor_id, command.payload, context)

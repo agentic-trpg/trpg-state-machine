@@ -21,7 +21,7 @@ is historical and is not delivery evidence.
 | 2 picking, forcing, unjamming | Not implemented | Typed operations; explicit Package /7 policies; real RE checks and configured consequences | 126 frozen focused regressions passed; RE runtime pinned to `cf808270`; remote/locked install verification pending |
 | 2 durability | Internal admitted HP settlement only | Existing; no public attack/damage formula | Integration pending |
 | 3 actual fixed RE | `675552406e67470bf3456fe90e88c4f1595bf324` | Inspected installed evaluation_checks: rejects tools/action checks | Dependency work required |
-| 3 combat costs, Arcane Lock / Knock | Not implemented | Pending | Unfinished; guards retained |
+| 3 combat costs, Arcane Lock / Knock | Not implemented | Dependency audit and no-bypass regression only | UNFINISHED; guards retained; not gameplay completion |
 | 4 common final validation / behavior coverage | Ordinary writes have final audit; rule consequence path incomplete | Pending | Unfinished |
 
 WorldFacts retains all state and defensive constraints. OpenableService holds no
@@ -92,3 +92,32 @@ Both Engine and SRD source references are changed together in pyproject/uv.lock.
 Focused development used that source checkout via PYTHONPATH; actual locked
 installation and frozen combined validation must run after the RE push, before
 final delivery. RE full engine rerun remains pending at this phase commit.
+
+
+## Phase 3 - dependency audit and integration boundary (NOT COMPLETE)
+
+The requested combat/magic gameplay is not implemented by this increment. These
+are concrete missing dependencies, not statements that the requested rules are
+unsupported by D&D:
+
+| Required capability | Actual missing contract/owner | Status |
+|---|---|---|
+| World object interaction / Utilize / Fast Hands | RE has no object interaction payment request; SM has no free interaction ledger or admitted object budget delta | Unfinished |
+| Combat open/close on blocking doors | `_spatial_combat_guard` refuses closed passage doors; `_combat_snapshot` does not project dynamic door environment | Dependency blocked |
+| Turn/Round Episodes | No Episode implementation exists in src; EventCapture still has per-event attack signals | Dependency blocked; no new combat sensory pipeline added |
+| Arcane Lock / Knock casting and effects | Fixed RE uses UtilityActivity data but SM admits only basic attack combat intents; no admitted world-target spell result or object Effects lifecycle exists | Unfinished |
+| Suppression expiry / password minute | v0.4 C12 requires TimeBinding; game-clock/1 still stores abstract ticks without conversion. Old ticks cannot be relabeled seconds | Dependency blocked |
+| Actual object attack / addressable lock HP | No RE object-target attack settlement ingress. Existing internal durability settlement does not implement attacks or separate lock HP | Unfinished |
+| New NPC EVA picking/forcing intents | Trusted NPC commands use the shared service, but NPC Result DTO/handoff has no new picking/forcing vocabulary | Unfinished |
+
+Stage 3 adds consistent rejected receipts for object-check commands during actual
+active combat; no evaluation, RNG, budgets, events or world state are adopted.
+This is refusal/atomicity coverage, not completion of combat costs. Unknown trusted
+or bypass fields continue to be rejected by the public DTO parser. Existing
+player/NPC/activity/package/mechanism open/close routes remain unified.
+
+To finish the original scope, implement admitted combat object payment and
+geometry, Episode delivery, explicit TimeBinding migration, and world-target
+spell/effect deltas together with their owners. Do not close these checklist items
+or claim Arcane Lock/Knock, combat costs, or real object attacks based on these
+refusal tests. No new placeholder spell interface is introduced.
