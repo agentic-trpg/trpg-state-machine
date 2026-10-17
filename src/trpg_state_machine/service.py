@@ -127,6 +127,7 @@ class StateMachine(
             self._combat_records,
             self._world,
         )
+        self._objects.openable.rules = self._rules
         self._combat = CombatHandler(
             self._store,
             self._sessions,

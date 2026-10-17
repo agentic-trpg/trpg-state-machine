@@ -52,3 +52,22 @@ def test_jam_policy_is_independent_of_lock(tmp_path, context, initial_jammed):
     with sm:
         receipt = submit(sm, sid, p, context, SetObjectState(A, DOOR, ObjectState.OPEN), "open")
         assert receipt.error_code == ("object_jammed" if initial_jammed else None)
+
+
+def test_repeated_open_is_a_noop_and_queries_are_read_only(tmp_path, context):
+    d = world_data()
+    d["lockable_doors"] = []
+    sm, sid, p, _ = setup(tmp_path, context, d)
+    with sm:
+        actor = sm.read_session(sid, p, context=context).pc_actor_id
+        op = SetObjectState(A, DOOR, ObjectState.OPEN)
+        first = submit(sm, sid, p, context, op, "open.once")
+        assert first.status == "committed" and first.event_seqs
+        before = sm._conn.total_changes
+        for _ in range(2):
+            assert sm.query_world_action(sid, actor, op, p, context=context).status == "available"
+            assert sm.get_object(sid, actor, DOOR, p, context=context)["open_state"] == "open"
+        assert sm._conn.total_changes == before
+        again = submit(sm, sid, p, context, op, "open.again")
+        assert again.status == "committed" and not again.event_seqs
+        assert again.world_version == first.world_version

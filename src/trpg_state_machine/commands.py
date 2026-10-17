@@ -36,10 +36,14 @@ from .navigation_models import (
 )
 from .package import canonical_json
 from .world_commands import (
+    OPENABLE_CHECK_OPERATIONS,
     WORLD_CAPABILITY_COMMANDS,
     ActivateMechanism,
     BarObject,
+    ClearJam,
+    ForceOpen,
     LockObject,
+    PickLock,
     PutItem,
     RepositionObject,
     SetLightEnabled,
@@ -93,7 +97,10 @@ class TypedCommand:
     actor_id: str
     command_type: str
     payload: (
-        ActivateMechanism
+        PickLock
+        | ForceOpen
+        | ClearJam
+        | ActivateMechanism
         | SetLightEnabled
         | SwitchLightMode
         | RepositionObject
@@ -268,6 +275,12 @@ def validate_command(command: TypedCommand) -> None:
         if key in ("value", "enabled"):
             if type(value) is not bool:
                 raise StateMachineError("invalid_operation", "Flag must be boolean")
+        elif (
+            key == "tool_instance_id"
+            and value is None
+            and type(command.payload) in (ForceOpen, ClearJam)
+        ):
+            continue
         elif not isinstance(value, str) or not value or len(value) > 256:
             raise StateMachineError("invalid_operation", "Invalid operation field")
 
@@ -310,7 +323,12 @@ class CommandRuntime:
                 "legacy_rules_audit_only", "Old package permits audit reads only"
             )
         fingerprint = command_fingerprint(command, package, context)
-        if type(command.payload) in (CombatIntentPayload, CombatClosePayload, CheckPayload):
+        if type(command.payload) in (
+            CombatIntentPayload,
+            CombatClosePayload,
+            CheckPayload,
+            *OPENABLE_CHECK_OPERATIONS,
+        ):
             import asyncio
 
             try:

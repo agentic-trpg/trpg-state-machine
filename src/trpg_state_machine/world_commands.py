@@ -82,7 +82,40 @@ class ActivateMechanism:
     expected_cell: str
 
 
+@dataclass(frozen=True, slots=True)
+class PickLock:
+    scene_id: str
+    object_id: str
+    lock_id: str
+    tool_instance_id: str
+    expected_cell: str
+
+
+@dataclass(frozen=True, slots=True)
+class ForceOpen:
+    scene_id: str
+    object_id: str
+    method_id: str
+    tool_instance_id: str | None
+    expected_cell: str
+
+
+@dataclass(frozen=True, slots=True)
+class ClearJam:
+    scene_id: str
+    object_id: str
+    method_id: str
+    tool_instance_id: str | None
+    expected_cell: str
+
+
+OPENABLE_CHECK_OPERATIONS = (PickLock, ForceOpen, ClearJam)
+
+
 WORLD_CAPABILITY_COMMANDS = {
+    "world.pick_lock": PickLock,
+    "world.force_open": ForceOpen,
+    "world.clear_jam": ClearJam,
     "world.activate_mechanism": ActivateMechanism,
     "world.set_light_enabled": SetLightEnabled,
     "world.switch_light_mode": SwitchLightMode,
@@ -95,6 +128,7 @@ WORLD_CAPABILITY_COMMANDS = {
     "world.unbar_object": UnbarObject,
 }
 WORLD_CAPABILITY_OPERATIONS = (
+    *OPENABLE_CHECK_OPERATIONS,
     BarObject,
     UnbarObject,
     LockObject,

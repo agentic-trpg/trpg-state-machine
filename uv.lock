@@ -45,7 +45,7 @@ wheels = [
 [[package]]
 name = "dnd5e-engine"
 version = "0.6.0"
-source = { git = "https://github.com/agentic-trpg/trpg-rules-engine.git?subdirectory=packages%2Fdnd5e-engine&rev=675552406e67470bf3456fe90e88c4f1595bf324#675552406e67470bf3456fe90e88c4f1595bf324" }
+source = { git = "https://github.com/agentic-trpg/trpg-rules-engine.git?subdirectory=packages%2Fdnd5e-engine&rev=d596161060555630019163ab301e1d25fd816549#d596161060555630019163ab301e1d25fd816549" }
 dependencies = [
     { name = "d20" },
     { name = "dnd5e-srd-data" },
@@ -55,7 +55,7 @@ dependencies = [
 [[package]]
 name = "dnd5e-srd-data"
 version = "0.6.0"
-source = { git = "https://github.com/agentic-trpg/trpg-rules-engine.git?subdirectory=packages%2Fdnd5e-srd-data&rev=675552406e67470bf3456fe90e88c4f1595bf324#675552406e67470bf3456fe90e88c4f1595bf324" }
+source = { git = "https://github.com/agentic-trpg/trpg-rules-engine.git?subdirectory=packages%2Fdnd5e-srd-data&rev=d596161060555630019163ab301e1d25fd816549#d596161060555630019163ab301e1d25fd816549" }
 dependencies = [
     { name = "pydantic" },
 ]
@@ -328,8 +328,8 @@ dev = [
 
 [package.metadata]
 requires-dist = [
-    { name = "dnd5e-engine", git = "https://github.com/agentic-trpg/trpg-rules-engine.git?subdirectory=packages%2Fdnd5e-engine&rev=675552406e67470bf3456fe90e88c4f1595bf324" },
-    { name = "dnd5e-srd-data", git = "https://github.com/agentic-trpg/trpg-rules-engine.git?subdirectory=packages%2Fdnd5e-srd-data&rev=675552406e67470bf3456fe90e88c4f1595bf324" },
+    { name = "dnd5e-engine", git = "https://github.com/agentic-trpg/trpg-rules-engine.git?subdirectory=packages%2Fdnd5e-engine&rev=d596161060555630019163ab301e1d25fd816549" },
+    { name = "dnd5e-srd-data", git = "https://github.com/agentic-trpg/trpg-rules-engine.git?subdirectory=packages%2Fdnd5e-srd-data&rev=d596161060555630019163ab301e1d25fd816549" },
     { name = "pyyaml", specifier = ">=6.0.2,<7" },
 ]
 

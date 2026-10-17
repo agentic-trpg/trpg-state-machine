@@ -473,3 +473,13 @@ resolution and combined testing. No automatic merge is performed.
 
 A following documentation-only delivery commit records this table. The W8 push
 returned c2e8b7b on the authorized task branch; no main change or PR merge occurred.
+
+
+## Follow-up status (2026-10-17)
+
+The historical W1-W8 evidence above is unchanged. The Openable extraction and
+bounded noncombat picking/forcing increment is tracked in
+[OPENABLE_SERVICE_PROGRESS.md](OPENABLE_SERVICE_PROGRESS.md). Its acceptance table
+supersedes historical picking/forcing TODO descriptions only within its explicitly
+verified range. Combat, magic, real object attacks and missing lifecycle/projection
+contracts remain OPEN; the new service does not close those dependencies.

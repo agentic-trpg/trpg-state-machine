@@ -2,7 +2,7 @@
 
 from dataclasses import asdict
 
-from ._execution import _execution_data, _WorldEffectKind, _WorldEffectOrigin
+from ._execution import _WorldEffectKind, _WorldEffectOrigin
 from ._operations import ObjectState, SetObjectState
 from .errors import StateMachineError
 from .world_commands import SetLightEnabled
@@ -43,8 +43,7 @@ class MechanismService:
         if action.kind == "set_open_state":
             if d.capability("openable") is None:
                 raise StateMachineError("unsupported_object_capability", "Target is not openable")
-            h.facts.validate_door_switch(sid, action.target_object_id, action.value)
-            h._validate_door_occupancy(
+            h.objects.openable.validate_transition(
                 sid,
                 SetObjectState(
                     h.facts.placement(sid, action.target_object_id)["scene_id"],
@@ -123,25 +122,17 @@ class MechanismService:
                     )
                 )
             else:
-                before = h.facts.object(sid, action.target_object_id)["state"]
-                if before != action.value:
-                    h.facts.switch(sid, action.target_object_id, action.value)
-                    h.objects.spatial.audit(sid, package)
-                    events.append(
-                        h._capture_event(
-                            sid,
-                            package,
-                            "object.state_changed",
-                            {
-                                "scene_id": location["scene_id"],
-                                "object_id": action.target_object_id,
-                                "state": action.value,
-                                "execution": _execution_data(None, origin),
-                            },
-                            phase="world.after_mechanism_open_update",
-                            source_actor_id=action.target_object_id,
-                        )
+                events.extend(
+                    h.objects.openable.operate_open(
+                        row,
+                        None,
+                        SetObjectState(
+                            location["scene_id"], action.target_object_id, ObjectState(action.value)
+                        ),
+                        package,
+                        origin=origin,
                     )
+                )
         h.facts.consume_mechanism(sid, op.object_id)
         h._conn.execute(
             "INSERT INTO trigger_history VALUES (?,?,?,?,'linked')",

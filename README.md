@@ -240,8 +240,8 @@ SQLite 测试。Schema 20 不提供降级迁移，旧运行时不能直接打开
 
 ## 安装与验证
 
-RF-RE4 当前固定 Engine/SRD 完整 Git SHA
-`675552406e67470bf3456fe90e88c4f1595bf324`，Evaluator `/36`、Evaluation `/23`、
+当前固定 Engine/SRD 完整 Git SHA（包含 Openable 支持；通用 RF-RE4 协议保留）
+`d596161060555630019163ab301e1d25fd816549`，Evaluator `/36`、Evaluation `/23`、
 Snapshot `/17`、Availability `/13`，RF-4 引入 SQLite Schema 23（GC-3 升至 24，GC-4 升至 25）。当前 Snapshot/OCC 从受控事实
 组件读取，不加载完整战斗事件历史；历史事件继续通过授权审计入口读取。
 [RF-RE4 契约、归属、兼容与验证记录](docs/RF_RE4_HISTORY_FREE_RULES.md) 说明了当前边界。
@@ -602,3 +602,37 @@ interruption; missed windows never pretend to have run. No teleport, cognition
 update, automatic EVA or D&D time calculation occurs. Active combat advancement,
 overlap priority, recurrence and arbitrary schedule-condition AST are unsupported.
 See `docs/reviews/SM22_GAME_TIME_SCHEDULE_REVIEW.md` for migration and test evidence.
+
+
+## OpenableService (partial scope, 2026-10-17)
+
+Open/close, keyed locks, multiple locks, bars and their availability now share
+OpenableService; WorldHandler retains command orchestration and WorldFacts
+retains the single authoritative state. Mechanism, existing NPC handoff,
+Activity, Package and check consequences use the same transition validation.
+
+Package state-machine-foundation/7 adds explicit picking and force policies.
+`world.pick_lock` / `PickLock(scene_id, object_id, lock_id, tool_instance_id,
+expected_cell)` and `world.force_open` / `ForceOpen(scene_id, object_id, method_id,
+tool_instance_id, expected_cell)` resolve through the real RE shared check
+pipeline. `world.clear_jam` / `ClearJam` uses a configured method that clears jam.
+No client-provided DC, success, trusted flag or arbitrary state patch is accepted.
+Use query_world_action for read-only admission and the existing TypedCommand
+submit/replay protocol for execution. Failed valid attempts produce actual check
+results; illegal/stale requests do not consume RNG. Repeated completed operations
+produce no new roll/event.
+
+For an accessible, explicitly selected unlocked lock, the PickLock query returns
+`status="available", reason="already_unlocked"` (该锁已解开，无须撬锁), regardless
+of the supplied tool's availability. Execution commits a replayable no-op receipt
+without a rule request, roll, event or world/RNG version change. Identity, access,
+authorization and version checks still apply. Locked targets retain tool checks.
+Openable checks retain the generic check data and verified original operation in
+`rules.check_rolled.payload.adjudication.openable_operation`, associated through
+the existing `source_command_id`; this audit data does not create sensory Signals.
+
+This is **not completion of the full requested World scope**: combat object costs,
+Arcane Lock/Knock and their Effects/TimeBinding lifecycle, real object attacks,
+and new NPC EVA picking/forcing DTOs remain unfinished. Existing guards remain.
+The acceptance checklist, pins, validation and missing dependencies are in
+[Openable progress](docs/OPENABLE_SERVICE_PROGRESS.md).

@@ -7,6 +7,20 @@ from .package import _fail, _identifier, _list, _mapping, _reference, _text, _un
 
 
 @dataclass(frozen=True, slots=True)
+class ForceMethod:
+    method_id: str
+    ability: str
+    skill: str | None
+    dc: int
+    required_tool: str | None
+    leverage_applicable: bool
+    unlock_lock_id: str | None
+    clear_bar: bool
+    clear_jam: bool
+    open_after: bool
+
+
+@dataclass(frozen=True, slots=True)
 class Openable:
     initial_jammed: bool = False
     initial_barred: bool | None = None
@@ -14,6 +28,7 @@ class Openable:
     operation_sides: tuple[str, ...] = ()
     bar_operable_sides: tuple[str, ...] = ()
     kind: str = "openable"
+    force_methods: tuple[ForceMethod, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -34,6 +49,8 @@ class LockDefinition:
     credential_instance_ids: tuple[str, ...]
     operable_sides: tuple[str, ...]
     policy: str = "public_owned_credential"
+    pick_policy: str = "unconfigured"
+    pick_dc: int | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -120,7 +137,9 @@ class WorldObjectDefinition:
         return next((c for c in self.capabilities if c.kind == kind), None)
 
 
-def validate_world_objects(raw, scenes, portable=(), legacy_locks=(), passages=()):
+def validate_world_objects(
+    raw, scenes, portable=(), legacy_locks=(), passages=(), *, extended=False
+):
     result = []
     objects = {o.object_id: o for s in scenes for o in s.objects}
     for value in _list(raw, "world_objects"):
@@ -165,6 +184,15 @@ def validate_world_objects(raw, scenes, portable=(), legacy_locks=(), passages=(
         for config in _list(d["capabilities"], p + ".capabilities"):
             if not isinstance(config, dict):
                 _fail("schema_error", p, "Capability must be a mapping")
+            if not extended and (
+                "force_methods" in config
+                or config.get("jam_policy", "prevent_transitions") != "prevent_transitions"
+                or any(
+                    isinstance(lock, dict) and ("pick_policy" in lock or "pick_dc" in lock)
+                    for lock in _list(config.get("locks", []), p)
+                )
+            ):
+                _fail("schema_error", p, "Extended openable definitions require Package /7")
             if config.get("kind") == "mechanism":
                 c = _mapping(
                     config,
@@ -298,10 +326,13 @@ def validate_world_objects(raw, scenes, portable=(), legacy_locks=(), passages=(
             if config.get("kind") == "locks":
                 c = _mapping(config, "kind locks", p)
                 locks = []
-                for value in _list(c["locks"], p, nonempty=True):
+                for index, value in enumerate(_list(c["locks"], p, nonempty=True)):
+                    if not isinstance(value, dict):
+                        _fail("schema_error", f"{p}.locks[{index}]", "Lock must be a mapping")
                     lock = _mapping(
-                        value,
-                        "lock_id initial_locked credential_instance_ids operable_sides policy",
+                        {"pick_policy": "unconfigured", "pick_dc": None, **value},
+                        "lock_id initial_locked credential_instance_ids operable_sides policy "
+                        "pick_policy pick_dc",
                         p,
                     )
                     _identifier(lock["lock_id"], p, "lock")
@@ -320,9 +351,21 @@ def validate_world_objects(raw, scenes, portable=(), legacy_locks=(), passages=(
                         _reference(side, {s.scene_id for s in scenes}, p)
                     _unique(creds, p)
                     _unique(sides, p)
+                    if lock["pick_policy"] not in ("unconfigured", "srd_lock", "scenario"):
+                        _fail("schema_error", p, "Unknown picking policy")
+                    if lock["pick_policy"] == "scenario":
+                        if type(lock["pick_dc"]) is not int or not 0 <= lock["pick_dc"] <= 100:
+                            _fail("schema_error", p, "Scenario picking requires an explicit DC")
+                    elif lock["pick_dc"] is not None:
+                        _fail("schema_error", p, "DC override requires scenario policy")
                     locks.append(
                         LockDefinition(
-                            lock["lock_id"], lock["initial_locked"], tuple(creds), tuple(sides)
+                            lock["lock_id"],
+                            lock["initial_locked"],
+                            tuple(creds),
+                            tuple(sides),
+                            pick_policy=lock["pick_policy"],
+                            pick_dc=lock["pick_dc"],
                         )
                     )
                 if d["object_id"] in {lock.object_id for lock in legacy_locks}:
@@ -357,6 +400,7 @@ def validate_world_objects(raw, scenes, portable=(), legacy_locks=(), passages=(
                 continue
             c = _mapping(
                 {
+                    "force_methods": [],
                     "initial_jammed": False,
                     "initial_barred": None,
                     "jam_policy": "prevent_transitions",
@@ -364,7 +408,8 @@ def validate_world_objects(raw, scenes, portable=(), legacy_locks=(), passages=(
                     "bar_operable_sides": [],
                     **config,
                 },
-                "kind initial_jammed initial_barred jam_policy operation_sides bar_operable_sides",
+                "kind initial_jammed initial_barred jam_policy operation_sides "
+                "bar_operable_sides force_methods",
                 p + ".capabilities",
             )
             if c["kind"] != "openable":
@@ -374,7 +419,7 @@ def validate_world_objects(raw, scenes, portable=(), legacy_locks=(), passages=(
             jammed, barred = c.get("initial_jammed", False), c.get("initial_barred")
             if type(jammed) is not bool or (barred is not None and type(barred) is not bool):
                 _fail("schema_error", p, "Invalid openable state")
-            if c.get("jam_policy", "prevent_transitions") != "prevent_transitions":
+            if c["jam_policy"] not in ("prevent_transitions", "prevent_opening", "prevent_closing"):
                 _fail("unsupported_mechanism", p, "Unsupported jam policy")
             sides, bar_sides = [], []
             for field, target in (("operation_sides", sides), ("bar_operable_sides", bar_sides)):
@@ -386,8 +431,55 @@ def validate_world_objects(raw, scenes, portable=(), legacy_locks=(), passages=(
                 _fail("invalid_reference", p, "Barred object must be closed")
             if barred is None and bar_sides:
                 _fail("invalid_reference", p, "Bar sides need a bar capability")
+            methods = []
+            from typing import get_args
+
+            from dnd5e_engine.events import Ability
+            from dnd5e_engine.rules.skills import Skill
+
+            for raw_method in _list(c["force_methods"], p):
+                m = _mapping(
+                    raw_method,
+                    "method_id ability skill dc required_tool leverage_applicable "
+                    "unlock_lock_id clear_bar clear_jam open_after",
+                    p,
+                )
+                _text(m["method_id"], p)
+                if m["unlock_lock_id"] is not None:
+                    _identifier(m["unlock_lock_id"], p, "lock")
+                if (
+                    m["ability"] not in get_args(Ability)
+                    or m["skill"] not in (None, *get_args(Skill))
+                    or type(m["dc"]) is not int
+                    or not 0 <= m["dc"] <= 100
+                    or m["required_tool"] not in (None, "crowbar", "smiths-tools")
+                    or any(
+                        type(m[k]) is not bool
+                        for k in ("leverage_applicable", "clear_bar", "clear_jam", "open_after")
+                    )
+                ):
+                    _fail("schema_error", p, "Invalid force method")
+                if m["leverage_applicable"] and (
+                    m["ability"] != "str" or m["required_tool"] != "crowbar"
+                ):
+                    _fail("schema_error", p, "Leverage requires a Strength/crowbar method")
+                if m["clear_bar"] and barred is None:
+                    _fail("invalid_reference", p, "Force result requires a bar")
+                if not any(
+                    m[k] for k in ("unlock_lock_id", "clear_bar", "clear_jam", "open_after")
+                ):
+                    _fail("schema_error", p, "Force method requires explicit consequences")
+                methods.append(ForceMethod(**m))
+            _unique([m.method_id for m in methods], p)
             capabilities.append(
-                Openable(jammed, barred, "prevent_transitions", tuple(sides), tuple(bar_sides))
+                Openable(
+                    jammed,
+                    barred,
+                    c["jam_policy"],
+                    tuple(sides),
+                    tuple(bar_sides),
+                    force_methods=tuple(methods),
+                )
             )
         if any(c.kind == "light" for c in capabilities) and any(
             c.kind == "spatial" for c in capabilities
@@ -397,6 +489,15 @@ def validate_world_objects(raw, scenes, portable=(), legacy_locks=(), passages=(
                 p,
                 "Light anchors on independent spatial geometry are not supported",
             )
+        lock_ids = {lock.lock_id for c in capabilities if c.kind == "locks" for lock in c.locks}
+        lock_ids.update(
+            "lock." + lock.object_id for lock in legacy_locks if lock.object_id == d["object_id"]
+        )
+        for capability in capabilities:
+            if capability.kind == "openable":
+                for method in capability.force_methods:
+                    if method.unlock_lock_id is not None and method.unlock_lock_id not in lock_ids:
+                        _fail("invalid_reference", p, "Force result names a foreign lock")
         _unique([c.kind for c in capabilities], p)
         if (objects[d["object_id"]].state is not None) != any(
             c.kind == "openable" for c in capabilities

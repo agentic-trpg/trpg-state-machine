@@ -6,7 +6,10 @@ from enum import StrEnum
 from .world_commands import (
     ActivateMechanism,
     BarObject,
+    ClearJam,
+    ForceOpen,
     LockObject,
+    PickLock,
     PutItem,
     RepositionObject,
     SetLightEnabled,
@@ -109,7 +112,10 @@ class LockDoor:
 
 
 type FoundationOperation = (
-    ActivateMechanism
+    PickLock
+    | ForceOpen
+    | ClearJam
+    | ActivateMechanism
     | BarObject
     | UnbarObject
     | LockObject
