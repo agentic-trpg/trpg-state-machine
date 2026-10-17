@@ -245,8 +245,25 @@ class RuleExecution:
                         package=package,
                     )
                 except StateMachineError as exc:
+                    if exc.code not in {
+                        "event_cascade_limit",
+                        "door_locked",
+                        "invalid_lock_state",
+                        "object_jammed",
+                        "object_barred",
+                        "object_destroyed",
+                        "passage_unavailable",
+                        "invalid_spatial_state",
+                        "object_obstructed",
+                        "position_conflict",
+                        "version_conflict",
+                    }:
+                        # Malformed rule results/storage failures remain faults: the
+                        # outer transaction rolls back without persisting a refusal.
+                        raise
                     self._conn.execute("ROLLBACK TO dnd_effects")
-                    status, error, version = "rejected", exc.code, row["world_version"]
+                    status = "conflict" if exc.code == "version_conflict" else "rejected"
+                    error, version = exc.code, row["world_version"]
                 finally:
                     self._conn.execute("RELEASE dnd_effects")
             end = self._conn.execute(

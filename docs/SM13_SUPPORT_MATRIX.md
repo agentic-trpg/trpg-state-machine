@@ -2,6 +2,8 @@
 
 Historical implementation record. Current dependency/schema/compatibility and
 component ownership are specified in [RF-RE4](RF_RE4_HISTORY_FREE_RULES.md).
+The 2026-10-17 Openable pin, verified increments and unfinished boundaries are
+recorded in [Openable progress](OPENABLE_SERVICE_PROGRESS.md).
 
 | Capability | Actual status and evidence |
 |---|---|

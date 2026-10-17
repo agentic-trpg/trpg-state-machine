@@ -443,6 +443,8 @@ def validate_world_objects(
                     p,
                 )
                 _text(m["method_id"], p)
+                if m["unlock_lock_id"] is not None:
+                    _identifier(m["unlock_lock_id"], p, "lock")
                 if (
                     m["ability"] not in get_args(Ability)
                     or m["skill"] not in (None, *get_args(Skill))

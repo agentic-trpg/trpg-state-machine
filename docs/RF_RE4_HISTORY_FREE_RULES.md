@@ -1,5 +1,9 @@
 # RF-RE4: history-free Rules adapter
 
+2026-10-17 follow-up: the current RE pin and bounded Openable additions are in
+[Openable progress](OPENABLE_SERVICE_PROGRESS.md); the RF-RE4 baseline evidence below
+remains historical. Combat/magic Openable gaps remain explicitly unfinished.
+
 ## Delivery boundaries and progress
 
 This batch changes `trpg-state-machine` only, on
