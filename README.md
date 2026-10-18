@@ -69,6 +69,12 @@ GM `RepositionObject` 命令。WorldFacts 保存锚点和方向，OSS 即时推�
 Schema33 保留旧行、旧 Package digest 和旧摆放回执指纹；详见
 [ObjectSpatialService 实施与支持边界](docs/OBJECT_SPATIAL_SERVICE_PROGRESS.md)。
 
+OSS 新增只读挡雨／挡风贡献：显式局部挡雨格、四来向背风 N 格等高延伸、逐来源高度区间，
+与实体占地／移动阻挡分别表达。强类型当前属性输入和 provider 接口就绪；真实 WO／Package
+接入及 Environment 联调尚未完成，测试 provider 不代表生产动态防护已完成。
+总体职责、接口、示例与支持范围见 [ObjectSpatialService 总体说明](docs/OBJECT_SPATIAL_SERVICE.md)，
+本轮验证继续记入上述专项历史文档。
+
 ## GC-4：共享通路锁与实际持有凭据
 
 Schema 25 / Package `/5` 为显式批准的共享门增加独立锁状态；
