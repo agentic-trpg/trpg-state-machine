@@ -182,6 +182,10 @@ class RuleExecution:
                                 "version_conflict", "Object check dependencies changed"
                             )
                     self.rules._apply_dnd_changes(row, changes)
+                    # Failure consequences and automatic hooks both consume the
+                    # original rule result's candidate RNG successor. Never
+                    # overwrite a mechanism successor with this earlier state.
+                    self.sessions.advance_rule_rng(command.session_id, result.rng_transition, rng)
                     events = [
                         self.capture._capture_event(
                             command.session_id,
@@ -275,9 +279,7 @@ class RuleExecution:
                     events = self.effects._expand_events(row, package, events, command.command_id)
                     self.world._assert_spatial_consistency(command.session_id, package)
                     version += 1
-                    transition = result.rng_transition
                     self.sessions.set_world_version(command.session_id, version)
-                    self.sessions.advance_rule_rng(command.session_id, transition, rng)
                     self.persistence._append_events(
                         command.session_id,
                         version,
@@ -308,12 +310,24 @@ class RuleExecution:
                         "mechanism_blocked",
                         "mechanism_disarmed",
                         "mechanism_frequency_limited",
+                        "unsupported_mechanism_effect",
+                        "unsupported_mechanism_effect_lifecycle",
+                        "unsupported_mechanism_effect_delta",
+                        "invalid_mechanism_targets",
+                        "mechanism_rule_rejected",
+                        "mechanism_needs_choice",
                     }:
                         # Malformed rule results/storage failures remain faults: the
                         # outer transaction rolls back without persisting a refusal.
                         raise
                     self._conn.execute("ROLLBACK TO dnd_effects")
-                    status = "conflict" if exc.code == "version_conflict" else "rejected"
+                    status = (
+                        "conflict"
+                        if exc.code == "version_conflict"
+                        else "pending_choice"
+                        if exc.code == "mechanism_needs_choice"
+                        else "rejected"
+                    )
                     error, version = exc.code, row["world_version"]
                 finally:
                     self._conn.execute("RELEASE dnd_effects")

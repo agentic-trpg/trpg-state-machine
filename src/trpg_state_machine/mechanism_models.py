@@ -6,6 +6,7 @@ from typing import Literal, get_args
 from dnd5e_engine.rules.skills import Skill
 
 from .errors import StateMachineError
+from .mechanism_effects import RuleEffectAction, RuleEffectDefinition
 
 
 @dataclass(frozen=True, slots=True)
@@ -18,7 +19,7 @@ class MechanismAction:
 @dataclass(frozen=True, slots=True)
 class MechanismOperation:
     operation_id: str
-    actions: tuple[MechanismAction, ...]
+    actions: tuple[MechanismAction | RuleEffectAction, ...]
     consume_on_noop: bool
 
 
@@ -53,7 +54,7 @@ class Mechanism:
     reset_policy: Literal["none", "manual", "after_seconds"]
     actions: tuple[MechanismAction, ...]
     kind: str = "mechanism"
-    schema_version: Literal["mechanism/1", "mechanism/2"] = "mechanism/1"
+    schema_version: Literal["mechanism/1", "mechanism/2", "mechanism/3"] = "mechanism/1"
     operations: tuple[MechanismOperation, ...] = ()
     triggers: tuple[MechanismTrigger, ...] = ()
     methods: tuple[MechanismMethod, ...] = ()
@@ -63,6 +64,7 @@ class Mechanism:
     reset_delay_seconds: int | None = None
     components: tuple[str, ...] = ()
     destruction_policy: Literal["disable"] = "disable"
+    rule_effects: tuple[RuleEffectDefinition, ...] = ()
 
     def operation(self, identity):
         if self.schema_version == "mechanism/1" and identity == "activate":
@@ -92,15 +94,31 @@ def parse_mechanism(config, objects, scenes, *, enabled):
     p = "world_objects.mechanism"
     if not enabled:
         _fail("schema_error", p, "mechanism/2 requires Package /10")
+    version = config.get("schema_version")
     c = _mapping(
         config,
         "kind schema_version initial_status operations triggers methods "
         "max_uses reset_policy reset_delay_seconds frequency placement_policy "
-        "components destruction_policy",
+        "components destruction_policy" + (" rule_effects" if version == "mechanism/3" else ""),
         p,
     )
-    if c["schema_version"] != "mechanism/2":
+    if c["schema_version"] not in ("mechanism/2", "mechanism/3"):
         _fail("unsupported_mechanism", p, "Unknown mechanism definition version")
+    from pydantic import TypeAdapter, ValidationError
+
+    from .package import canonical_json
+
+    effects = []
+    for raw in _list(c.get("rule_effects", []), p):
+        try:
+            effects.append(TypeAdapter(RuleEffectDefinition).validate_json(canonical_json(raw)))
+        except (ValidationError, ValueError, TypeError) as exc:
+            raise StateMachineError(
+                "unsupported_mechanism_effect_definition", "Invalid typed effect parameters"
+            ) from exc
+    _unique([e.effect_ref for e in effects], p)
+    if len(effects) > 16:
+        _fail("schema_error", p, "At most sixteen rule effect definitions")
     if c["initial_status"] not in ("armed", "unprepared"):
         _fail("schema_error", p, "Invalid initial readiness")
     if c["max_uses"] is not None and (
@@ -129,6 +147,32 @@ def parse_mechanism(config, objects, scenes, *, enabled):
             _fail("schema_error", p, "Invalid operation identity or noop policy")
         actions = []
         for value in _list(op["actions"], p, nonempty=True):
+            if (
+                version == "mechanism/3"
+                and isinstance(value, dict)
+                and value.get("kind") == "rule_effect"
+            ):
+                try:
+                    action = TypeAdapter(RuleEffectAction).validate_json(canonical_json(value))
+                except (ValidationError, TypeError, ValueError) as exc:
+                    raise StateMachineError(
+                        "invalid_mechanism_targets", "Invalid effect selector"
+                    ) from exc
+                _reference(action.effect_ref, {e.effect_ref for e in effects}, p)
+                # Area is absolute in the instance's declared scene, never an
+                # untrusted client target list. Runtime rechecks a portable pose.
+                for cell in action.targets.cells:
+                    from dnd5e_engine.spatial import canonical_cell_id
+
+                    try:
+                        if canonical_cell_id(cell) != cell:
+                            raise ValueError("Noncanonical cell")
+                    except (TypeError, ValueError, AttributeError) as exc:
+                        raise StateMachineError(
+                            "invalid_mechanism_targets", "Invalid area cell"
+                        ) from exc
+                actions.append(action)
+                continue
             a = _mapping(value, "kind target_object_id value", p)
             _reference(a["target_object_id"], objects, p)
             if not (
@@ -266,5 +310,6 @@ def parse_mechanism(config, objects, scenes, *, enabled):
             "triggers": tuple(triggers),
             "methods": tuple(methods),
             "components": tuple(components),
+            "rule_effects": tuple(effects),
         },
     )

@@ -19,7 +19,7 @@ New immutable declarations require Package `state-machine-foundation/10` and
 Package /9 is reserved for the original worktree's uncommitted Environment work;
 this isolated main-based branch does not implement or accept that Package shape.
 Unknown fields, scripts, arbitrary property writes and unsupported consequences
-are rejected. The closed consequence set is `set_open_state` and
+are rejected. For mechanism/1-/2 the closed consequence set is `set_open_state` and
 `set_light_enabled`, at most eight steps per operation, sixteen operations,
 sixteen trigger selectors, sixteen methods and sixteen destruction components.
 A /2 target may itself have Mechanism plus the required capability; this never
@@ -220,3 +220,17 @@ changes roll back together on failure. See [Environment storage compatibility](E
 
 These are explicit refusals or absent command/configuration variants, not empty
 implementations. No other component's pending item is closed by this work.
+
+## Mechanism effects contract increment — 2026-10-18
+
+mechanism/3 adds a declared effect catalog and ordered rule_effect actions with
+typed attack/save/damage/status parameters and single/area target selectors.
+The separate SM `mechanism-effect/1` port retains actual mechanism source,
+original command correlation, complete candidate snapshot/binding/RNG and bounded
+owner validation. See [the effect contract](MECHANISM_EFFECTS_CONTRACT.md) for
+types, ordering, four-state result mapping, fixtures and remaining capabilities.
+Fixed RE /23 has no world-source rules.effect request. Production returns
+unsupported; accepted damage adoption is fixture-verified and bounded.
+Status/lifecycle, zero-HP/death packets, real effect integration, remote evaluation
+and combat Episodes remain OPEN. Existing world linkage and lifecycle retain
+their owners; no mechanism damage formula or status timer was added.

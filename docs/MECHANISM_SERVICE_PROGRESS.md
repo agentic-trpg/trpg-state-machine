@@ -129,3 +129,88 @@ delivery at that time; the integrated feature now supplies this compatibility
 path. Real archived Schema33/main34/ENV34 saves, both services and rollback are
 covered by the 90 passing focused tests. Final combined regression results and
 commands are recorded in [Environment implementation record](ENVIRONMENT_SERVICE_PROGRESS.md).
+
+## Mechanism effect interface increment — 2026-10-18
+
+User-authorized branch: `feat/world-mechanism-effects-contract`, local and remote
+starting HEAD `f2cd863811475ee9b5571641e58a181a73b1d6ec`. The pre-existing clean
+branch worktree was moved from `trpg-state-machine-env-main` into
+`.test-tmp/mechanism-effects` to put task writes inside the workspace. Original
+Environment/OSS uncommitted files remain in the original worktree, unstaged by
+this task. No main merge, dependency upgrade or RE repository change is included.
+
+Current architecture was read and verified at
+`98e8d36b03bdc6b9578082bcdae1ed99ccbc5997`. Both uv.lock and the installed Engine's
+direct_url.json identify `d596161060555630019163ab301e1d25fd816549`.
+The actual /23 request has no rules.effect and requires actor_id. Therefore this
+work implements the distinct local `mechanism-effect/1` port, with a production
+unsupported adapter and fixtures confined to tests. See
+[full contract and RE follow-up](MECHANISM_EFFECTS_CONTRACT.md).
+
+Implemented: compatible mechanism/3 effect catalog; closed attack/save/damage/
+status parameters; single/area selection and filters; true object source and
+stable original-command activation/consequence correlation; complete current
+noncombat snapshot, owner poses/OSS contributions, fixed binding and authoritative
+RNG; strict result/source/read-fence/target/Delta/RNG validation; bounded
+CharacterFacts adoption; ordered world/rule candidates; rejection/unsupported/
+pending-choice semantics; original-command replay/conflict/reopen and rollback.
+Rule audit stays within activation records, without a new OB/JEV/LLM route.
+
+Fixed a candidate RNG ordering issue exposed by the new integration test:
+ordinary real RE checks must adopt their candidate RNG before direct failed-check
+activation as well as automatic hooks. Otherwise a rule effect could read the
+pre-check state and later be overwritten by the earlier check transition.
+Both successful chaining and whole-command rollback now have public-command tests.
+
+No damage/save formula or status timer was added. Actual RE effect evaluation,
+status/Effects lifecycle and source termination, zero-HP/death packets, durable
+choice continuation, asynchronous/remote evaluation and combat Episode adoption
+remain OPEN or explicitly unsupported. The bounded fixture adopter refuses these
+incomplete packets instead of storing partial state.
+
+Validation commands explicitly use this worktree's src in PYTHONPATH, repository
+Python, PYTHONUTF8=1 and separate local --basetemp directories:
+
+- Final effect contract: `python -m pytest tests/test_mechanism_effects.py -q
+  --basetemp=.test-tmp/contract-final -o faulthandler_timeout=40`: **51 passed**,
+  two dependency deprecation warnings, exit 0 (12.70 seconds).
+- Earlier combined mechanism lifecycle/legacy/migration/Environment compatibility
+  and effect contract run: **85 passed**, two dependency deprecation warnings,
+  exit 0 (63.97 seconds). This preceded the additional final effect cases; counts
+  are separate runs, not additive unique coverage.
+- Ruff check src/tests passed; Ruff format --check src/tests: 171 files unchanged.
+  git diff --check passed.
+- A restricted lifecycle run stalled on real RE tests and was stopped using its
+  exact pytest command/process identity; the successful combined and final runs
+  used unrestricted execution. Initial fixture development also corrected test
+  directory creation/fixture field errors; those failed attempts are not passes.
+
+Full-suite and final delivery evidence follows below when available. Commit SHA
+is reported in the final response, avoiding a self-referential documentation SHA.
+
+### Final verification and delivery
+
+- Full `python -m pytest -q --basetemp=.test-tmp/full-final
+  -o faulthandler_timeout=45`: **1647 passed, 1 failed**, exit 1 (721.80 seconds).
+  The sole failure was test_versioned_state's Schema8 historical subprocess:
+  the task's explicit PYTHONPATH made its old RE environment import current SM,
+  producing ImportError for CheckPayload before creating its historical database.
+  This is a test invocation environment error, not a mechanism/save failure.
+- Removed that process-local PYTHONPATH override; pytest's configured pythonpath
+  still loads this worktree's src while the historical child loads its own
+  installed source. `python -m pytest tests/test_versioned_state.py -q
+  --basetemp=.test-tmp/versioned-clean-env -o faulthandler_timeout=40`:
+  **13 passed**, exit 0 (5.08 seconds), including the sole failed full-run case.
+  No production/test source change was needed. No single all-green full-suite
+  invocation is claimed; the full run and corrected module rerun are separate.
+- Public perception smoke: after granting the existing NPC access and processing
+  the existing event prefix, two rule consequences produced exactly one additional
+  authorized activation OB. Observation content contained no rule_results,
+  hp_current or state_delta. Original attempts omitted the grant/prefix; those
+  setup failures were corrected before claiming this smoke pass.
+- Final Ruff lint and format checks passed (171 source/test files), diff checks
+  passed, and document links/fences/JSON examples validated.
+
+Only the mechanism implementation/tests and associated module documentation are
+staged for the authorized commit and normal push to this feature branch. Main
+and the original worktree's uncommitted feature files are not merged/staged.

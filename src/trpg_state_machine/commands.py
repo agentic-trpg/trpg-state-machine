@@ -447,11 +447,24 @@ class CommandRuntime:
                             package=package,
                         )
                 except StateMachineError as exc:
-                    if exc.code == "storage_error":
+                    if exc.code in {
+                        "storage_error",
+                        "invalid_rule_result",
+                        "rule_evaluation_failed",
+                        "rule_schema_error",
+                        "ruleset_binding_mismatch",
+                    }:
                         raise
                     self._conn.execute("ROLLBACK TO command_effects")
                     version = row["world_version"]
-                    status, error = "rejected", exc.code
+                    status = (
+                        "pending_choice"
+                        if exc.code == "mechanism_needs_choice"
+                        else "conflict"
+                        if exc.code == "version_conflict"
+                        else "rejected"
+                    )
+                    error = exc.code
                 finally:
                     self._conn.execute("RELEASE command_effects")
             end_seq = self._conn.execute(

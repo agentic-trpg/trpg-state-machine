@@ -1,5 +1,11 @@
 # Agentic TRPG — State Machine Foundation
 
+MechanismService 的 `mechanism/3` 配置和独立 `mechanism-effect/1` 端口支持强类型
+规则效果定义、单体／区域目标筛选、原命令关联及有序事务采用验证。固定 RE /23
+尚无真实机关来源的 `rules.effect`，生产明确返回 unsupported；接受结果仅通过契约
+fixtures 验证。持续状态、零 HP／死亡、完整 Effects 生命周期和战斗采用仍 OPEN。
+详见 [机关效果契约](docs/MECHANISM_EFFECTS_CONTRACT.md)。
+
 Batch 1 实现了一个可运行的本地闭环：**验证原创合成 Adventure Package → 创建隔离 Session → 初始化/重访 Scene → 修改实际状态 → SQLite 持久化 → 新进程恢复**。
 
 State Machine 是全部已实现可变游戏状态的唯一权威拥有者和提交者。Package 是不可变模板；返回的 Snapshot 是独立副本，修改副本不会写入数据库。已接入固定候选 SHA 的真实 D&D 基础攻击及受限胜利/TPK 关闭，同时保留隔离的合成测试路径；没有第二份运行态权威。正常关闭后可以保存并在新进程恢复；活跃战斗跨进程精确续玩仍不支持。
