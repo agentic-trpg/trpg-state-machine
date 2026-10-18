@@ -5,7 +5,7 @@ must never be passed to the Engine or perception as a mechanical Grid.
 """
 
 import json
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, replace
 
 from dnd5e_engine.evaluation_state import InventoryEntry, InventoryState
 from dnd5e_engine.spatial import GridTopology, canonical_cell_id
@@ -380,6 +380,15 @@ class WorldHandler:
         actors, _ = self._scene_occupants(sid, position.scene_id, package)
         if any(cell == operation.to_cell for _, cell in actors):
             raise StateMachineError("movement_unavailable", "Object destination is occupied")
+        self.objects.spatial.check_candidate(
+            sid,
+            operation.object_id,
+            package,
+            replace(
+                self.objects.spatial.state(sid, operation.object_id, package),
+                anchor=operation.to_cell,
+            ),
+        )
         return position
 
     def _validate_item_transfer(self, row, actor_id, operation, package):
@@ -606,22 +615,7 @@ class WorldHandler:
 
     def _validate_switch_range(self, sid, actor_id, operation, package):
         self._world_actor_ready(sid, actor_id)
-        obj = self._conn.execute(
-            "SELECT cell FROM objects WHERE session_id=? AND object_id=?",
-            (sid, operation.object_id),
-        ).fetchone()
-        try:
-            position = self._visible_target(sid, actor_id, obj[0], package)
-        except StateMachineError as exc:
-            raise StateMachineError("invalid_target", "No authorized local object") from exc
-        topology = self._movement_topology(
-            sid,
-            position.scene_id,
-            package,
-            exclude_actor=actor_id,
-        )
-        if obj[0] != position.cell and topology.edge_distance(position.cell, obj[0]) is None:
-            raise StateMachineError("object_out_of_reach", "Switch requires clear adjacent reach")
+        self.objects.spatial.contact_cell(sid, actor_id, operation.object_id, package)
 
     def _validate_door_occupancy(self, sid, operation, package):
         if operation.state.value == "closed":
@@ -971,6 +965,14 @@ class WorldHandler:
                 "unsupported_combat_dynamic_obstacles",
                 "Dynamic object geometry needs RE integration",
             )
+        if any(
+            p.difficult_terrain_cells or p.vision_occlusion_cells or p.cover_cells
+            for p in self.objects.spatial.scene_contributions(sid, scene_id, package).values()
+        ):
+            raise StateMachineError(
+                "unsupported_combat_dynamic_obstacles",
+                "Object spatial properties need RE integration",
+            )
         definitions = {o.object_id: o for s in package.scenes for o in s.objects}
         objects = self._conn.execute(
             "SELECT object_id FROM objects WHERE session_id=? AND scene_id=?", (sid, scene_id)
@@ -1057,7 +1059,11 @@ class WorldHandler:
             ):
                 if not cell_in_bounds(topology, obj[1]):
                     raise StateMachineError("invalid_spatial_state", "Invalid object location")
-                if definitions[obj[0]].blocks_passage and obj[1] in cells:
+                if (
+                    self.objects.spatial.config(package, obj[0]) is None
+                    and definitions[obj[0]].blocks_passage
+                    and obj[1] in cells
+                ):
                     raise StateMachineError("invalid_spatial_state", "Object overlaps an actor")
 
     def _operate(

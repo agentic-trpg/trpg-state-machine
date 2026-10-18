@@ -4,7 +4,7 @@ This is invoked inside an admitted caller's shared commit scope. It cannot admit
 rule results itself and must not be exposed through an RPC/command adapter.
 """
 
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, replace
 
 from ._execution import _execution_data, _WorldEffectOrigin
 from .errors import StateMachineError
@@ -67,6 +67,17 @@ class ObjectDurabilityService:
             0 <= result.current_hp <= hp <= capability.max_hp
         ):
             raise StateMachineError("invalid_rule_result", "Invalid damage settlement bounds")
+        if h.objects.spatial.config(package, result.object_id):
+            h.objects.spatial.check_candidate(
+                result.session_id,
+                result.object_id,
+                package,
+                replace(
+                    h.objects.spatial.state(result.session_id, result.object_id, package),
+                    destroyed=result.current_hp == 0,
+                ),
+                error_code="invalid_spatial_state",
+            )
         h.facts.apply_object_hp(result.session_id, result.object_id, hp, result.current_hp)
         h._conn.execute(
             "INSERT INTO world_result_adoptions VALUES (?,?,?)",

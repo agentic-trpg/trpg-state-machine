@@ -39,7 +39,7 @@ time = sm.world_time.read(result.session_id, package, context=context)
 
 ## World W1–W8：可组合非战斗世界能力
 
-Package `/6` / SQLite Schema 31（当前存储版本 32）增加显式对象定义、内部耐久结果应用、独立卡住/门闩、
+Package `/6` / SQLite Schema 31（当前存储版本 33）增加显式对象定义、内部耐久结果应用、独立卡住/门闩、
 多锁、嵌套容器、受权 GM 多格布置、普通场景光源与一次性手动联动机关。
 普通操作仍通过 `submit_command` / `submit_command_async` 的既有命令、版本与回执入口；
 对象、角色位置、库存投影与事件证据在共享事务中提交。
@@ -60,6 +60,14 @@ uv run --locked python examples/world_station.py
 [ContainerService 专项记录](docs/CONTAINER_SERVICE_PROGRESS.md)。
 完整字段/Facts/Handler/存储映射、迁移、验证与限制见 [实施记录](docs/WORLD_W1_W8.md)，
 最终审阅见 [World 审阅](docs/reviews/WORLD_W1_W8_REVIEW.md)。以下 GC 章节保留各批历史范围。
+
+ObjectSpatialService 现支持 Package `/8` 的四向实例朝向、原地旋转及移动并旋转，复用获准
+GM `RepositionObject` 命令。WorldFacts 保存锚点和方向，OSS 即时推导完整占地；候选检查
+与最终 audit 共用墙线、静态障碍、占格与通道约束。普通物体查询使用任一可见部分，
+交互与容器外壳使用可达接触格。对象侧分别输出移动阻挡、困难地形、视觉遮挡和掩护
+整格贡献；综合动态视觉、地形成本及 Combat / Perception 接线仍未实现。
+Schema33 保留旧行、旧 Package digest 和旧摆放回执指纹；详见
+[ObjectSpatialService 实施与支持边界](docs/OBJECT_SPATIAL_SERVICE_PROGRESS.md)。
 
 ## GC-4：共享通路锁与实际持有凭据
 

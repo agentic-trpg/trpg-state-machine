@@ -57,6 +57,8 @@ class RepositionObject:
     object_id: str
     expected_cell: str
     to_cell: str
+    expected_orientation: str | None = None
+    to_orientation: str | None = None
 
 
 @dataclass(frozen=True, slots=True)

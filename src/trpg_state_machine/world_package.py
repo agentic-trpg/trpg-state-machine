@@ -72,6 +72,15 @@ class Container:
 
 
 @dataclass(frozen=True, slots=True)
+class SpatialProperties:
+    """Independent, full-cell contributions; never rule bonuses or inferred senses."""
+
+    difficult_terrain: bool = False
+    vision_occlusion: bool = False
+    cover: str = "none"
+
+
+@dataclass(frozen=True, slots=True)
 class SpatialObject:
     footprint: tuple[tuple[int, int], ...]
     mobility_policy: str
@@ -79,6 +88,10 @@ class SpatialObject:
     closed_blocks_movement: bool
     destroyed_blocks_movement: bool
     kind: str = "spatial"
+    allowed_orientations: tuple[str, ...] = ("north",)
+    open_properties: SpatialProperties = SpatialProperties()
+    closed_properties: SpatialProperties = SpatialProperties()
+    destroyed_properties: SpatialProperties = SpatialProperties()
 
 
 @dataclass(frozen=True, slots=True)
@@ -138,7 +151,7 @@ class WorldObjectDefinition:
 
 
 def validate_world_objects(
-    raw, scenes, portable=(), legacy_locks=(), passages=(), *, extended=False
+    raw, scenes, portable=(), legacy_locks=(), passages=(), *, extended=False, oriented=False
 ):
     result = []
     objects = {o.object_id: o for s in scenes for o in s.objects}
@@ -261,9 +274,23 @@ def validate_world_objects(
                 continue
             if config.get("kind") == "spatial":
                 c = _mapping(
-                    config,
+                    {
+                        "allowed_orientations": ["north"],
+                        "open_properties": {},
+                        "closed_properties": {},
+                        "destroyed_properties": {},
+                        **config,
+                    }
+                    if oriented
+                    else config,
                     "kind footprint mobility_policy open_blocks_movement "
-                    "closed_blocks_movement destroyed_blocks_movement",
+                    "closed_blocks_movement destroyed_blocks_movement"
+                    + (
+                        " allowed_orientations open_properties closed_properties"
+                        " destroyed_properties"
+                        if oriented
+                        else ""
+                    ),
                     p,
                 )
                 offsets = _list(c["footprint"], p, nonempty=True)
@@ -280,6 +307,54 @@ def validate_world_objects(
                     _fail("schema_error", p, "Bounded explicit relative grid footprint required")
                 c["footprint"] = tuple(tuple(v) for v in offsets)
                 _unique(c["footprint"], p)
+                if oriented:
+                    if not any(
+                        s.grid_json is not None and objects[d["object_id"]] in s.objects
+                        for s in scenes
+                    ):
+                        _fail("unsupported_mechanism", p, "Spatial objects require a local grid")
+                    directions = _list(c["allowed_orientations"], p, nonempty=True)
+                    if any(v not in ("north", "east", "south", "west") for v in directions):
+                        _fail("unsupported_mechanism", p, "Only four orthogonal orientations")
+                    _unique(directions, p)
+                    c["allowed_orientations"] = tuple(directions)
+                    if objects[d["object_id"]].initial_orientation not in directions:
+                        _fail("invalid_reference", p, "Initial orientation is not allowed")
+                    # A rigid full-cell shape is a bounded orthogonally connected polyomino.
+                    reached, pending = set(), [(0, 0)]
+                    while pending:
+                        xy = pending.pop()
+                        if xy in reached:
+                            continue
+                        reached.add(xy)
+                        x, y = xy
+                        pending.extend(
+                            v
+                            for v in ((x + 1, y), (x - 1, y), (x, y + 1), (x, y - 1))
+                            if v in c["footprint"] and v not in reached
+                        )
+                    if reached != set(c["footprint"]):
+                        _fail("unsupported_mechanism", p, "Disconnected rigid shapes unsupported")
+                    for field in ("open_properties", "closed_properties", "destroyed_properties"):
+                        raw_props = c[field]
+                        if not isinstance(raw_props, dict):
+                            _fail("schema_error", p, "Expected full-cell spatial properties")
+                        props = _mapping(
+                            {
+                                "difficult_terrain": False,
+                                "vision_occlusion": False,
+                                "cover": "none",
+                                **raw_props,
+                            },
+                            "difficult_terrain vision_occlusion cover",
+                            p,
+                        )
+                        if any(
+                            type(props[k]) is not bool
+                            for k in ("difficult_terrain", "vision_occlusion")
+                        ) or props["cover"] not in ("none", "half", "three_quarters", "total"):
+                            _fail("unsupported_mechanism", p, "Unsupported full-cell properties")
+                        c[field] = SpatialProperties(**props)
                 if c["mobility_policy"] not in ("fixed", "gm_placement") or any(
                     type(c[f]) is not bool
                     for f in (
@@ -508,6 +583,8 @@ def validate_world_objects(
         ):
             _fail("invalid_reference", p, "Locks require an openable capability")
         spatial = next((c for c in capabilities if c.kind == "spatial"), None)
+        if not spatial and objects[d["object_id"]].initial_orientation != "north":
+            _fail("invalid_reference", p, "Orientation requires spatial capability")
         if (
             spatial
             and d["object_id"] in {p.door_object_id for p in passages}

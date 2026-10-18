@@ -89,7 +89,7 @@ def test_genuine_schema24_upgrade_is_atomic_and_does_not_grant_locks(
             assert conn.execute("PRAGMA user_version").fetchone()[0] == 24
     p = load_adventure_package(document).package
     with StateMachine(db, dnd_loader=item_loader()) as sm:
-        assert sm._conn.execute("PRAGMA user_version").fetchone()[0] == 32
+        assert sm._conn.execute("PRAGMA user_version").fetchone()[0] == 33
         assert_original_rows_equal(original, stored_rows(db))
         assert sm._conn.execute("SELECT count(*) FROM door_locks").fetchone()[0] == 0
         assert sm._conn.execute("SELECT count(*) FROM door_credentials").fetchone()[0] == 0

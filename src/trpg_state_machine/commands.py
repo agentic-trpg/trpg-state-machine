@@ -272,7 +272,13 @@ def validate_command(command: TypedCommand) -> None:
     else:
         fields = asdict(command.payload)
     for key, value in fields.items():
-        if key in ("value", "enabled"):
+        if type(command.payload) is RepositionObject and key in (
+            "expected_orientation",
+            "to_orientation",
+        ):
+            if value is not None and value not in ("north", "east", "south", "west"):
+                raise StateMachineError("invalid_operation", "Invalid object orientation")
+        elif key in ("value", "enabled"):
             if type(value) is not bool:
                 raise StateMachineError("invalid_operation", "Flag must be boolean")
         elif (
@@ -287,6 +293,11 @@ def validate_command(command: TypedCommand) -> None:
 
 def command_fingerprint(command, package, context):
     data = asdict(command)
+    if type(command.payload) is RepositionObject:
+        # Old receipts used exactly the four original fields.
+        for field in ("expected_orientation", "to_orientation"):
+            if data["payload"][field] is None:
+                data["payload"].pop(field)
     if command.check_world_effects is None:
         # Preserve canonical fingerprints of all pre-SM21 stored commands.
         data.pop("check_world_effects")

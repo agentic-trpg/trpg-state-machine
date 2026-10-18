@@ -93,7 +93,6 @@ class WorldObjectService:
 
     def _visible(self, sid, actor_id, oid, package):
         h = self.handler
-        position = h._actor_position(sid, actor_id)
         h._public_scope(sid, actor_id, package)
         obj = self.facts.object(sid, oid)
         if obj is None:
@@ -106,14 +105,7 @@ class WorldObjectService:
             return obj
         if obj["carrier_id"] == actor_id:
             return obj
-        targets = [e.threshold_cell for _, e in h._door_ports(position.scene_id, oid, package)]
-        if obj["scene_id"] == position.scene_id:
-            targets.append(obj["cell"])
-        if not any(
-            cell is not None
-            and h._base_topology(sid, position.scene_id, package).can_see(position.cell, cell)
-            for cell in targets
-        ):
+        if not self.spatial.visible_cells(sid, actor_id, oid, package):
             raise StateMachineError("invalid_target", "No authorized local object")
         return obj
 
@@ -142,6 +134,7 @@ class WorldObjectService:
         openable = self.facts.openable_state(sid, oid)
         hp = self.facts.object_hp(sid, oid)
         destroyed = hp == 0 if hp is not None else None
+        projection = self.spatial.project(sid, oid, package)
         from ._operations import ObjectState, SetObjectState
 
         position = self.handler._actor_position(sid, actor_id)
@@ -188,9 +181,12 @@ class WorldObjectService:
             "spatial": asdict(self.spatial.config(package, oid))
             if self.spatial.config(package, oid)
             else None,
-            "occupied_cells": self.spatial.cells(package, oid, obj["cell"]),
-            "vision_occlusion": "unsupported",
-            "cover_candidates": "unsupported",
+            "orientation": obj["orientation"],
+            "occupied_cells": projection.occupied_cells,
+            "movement_blocking_cells": projection.movement_blocking_cells,
+            "difficult_terrain_cells": projection.difficult_terrain_cells,
+            "vision_occlusion": projection.vision_occlusion_cells,
+            "cover_candidates": projection.cover_cells,
             **available,
             "locks_for_object": tuple(
                 {"lock_id": lock[0], "locked": bool(lock[1])}

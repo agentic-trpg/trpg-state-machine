@@ -27,6 +27,7 @@ ITEM_SCHEMA_VERSION = "state-machine-foundation/4"
 LOCK_SCHEMA_VERSION = "state-machine-foundation/5"
 WORLD_SCHEMA_VERSION = "state-machine-foundation/6"
 OPENABLE_SCHEMA_VERSION = "state-machine-foundation/7"
+OBJECT_SPATIAL_SCHEMA_VERSION = "state-machine-foundation/8"
 MAX_PACKAGE_BYTES = 1_048_576
 _ID = re.compile(r"[a-z][a-z0-9_]*(?:\.[a-z][a-z0-9_]*)+")
 
@@ -63,6 +64,7 @@ class ObjectDefinition:
     movable: bool = False
     blocks_passage: bool = False
     initial_cell: str | None = None
+    initial_orientation: str = "north"
 
 
 @dataclass(frozen=True, slots=True)
@@ -312,22 +314,26 @@ def _validate(data: dict, *, allow_legacy_audit=False) -> AdventurePackage:
             LOCK_SCHEMA_VERSION,
             WORLD_SCHEMA_VERSION,
             OPENABLE_SCHEMA_VERSION,
+            OBJECT_SPATIAL_SCHEMA_VERSION,
         )
     )
     world_enabled = interactions and data["manifest"]["schema_version"] in (
         WORLD_SCHEMA_VERSION,
         OPENABLE_SCHEMA_VERSION,
+        OBJECT_SPATIAL_SCHEMA_VERSION,
     )
     locks = interactions and data["manifest"]["schema_version"] in (
         LOCK_SCHEMA_VERSION,
         WORLD_SCHEMA_VERSION,
         OPENABLE_SCHEMA_VERSION,
+        OBJECT_SPATIAL_SCHEMA_VERSION,
     )
     items = interactions and data["manifest"]["schema_version"] in (
         ITEM_SCHEMA_VERSION,
         LOCK_SCHEMA_VERSION,
         WORLD_SCHEMA_VERSION,
         OPENABLE_SCHEMA_VERSION,
+        OBJECT_SPATIAL_SCHEMA_VERSION,
     )
     navigation = interactions and data["manifest"]["schema_version"] in (
         NAVIGATION_SCHEMA_VERSION,
@@ -335,6 +341,7 @@ def _validate(data: dict, *, allow_legacy_audit=False) -> AdventurePackage:
         LOCK_SCHEMA_VERSION,
         WORLD_SCHEMA_VERSION,
         OPENABLE_SCHEMA_VERSION,
+        OBJECT_SPATIAL_SCHEMA_VERSION,
     )
     root = _mapping(
         data,
@@ -362,6 +369,7 @@ def _validate(data: dict, *, allow_legacy_audit=False) -> AdventurePackage:
         LOCK_SCHEMA_VERSION,
         WORLD_SCHEMA_VERSION,
         OPENABLE_SCHEMA_VERSION,
+        OBJECT_SPATIAL_SCHEMA_VERSION,
     ):
         _fail("unsupported_schema", "manifest.schema_version", f"Expected {SCHEMA_VERSION}")
     adventure_id = _identifier(m["adventure_id"], "manifest.adventure_id")
@@ -505,9 +513,16 @@ def _validate(data: dict, *, allow_legacy_audit=False) -> AdventurePackage:
         objects = []
         for j, value in enumerate(_list(s["objects"], path + ".objects")):
             ob = _mapping(
-                value,
+                {"initial_orientation": "north", **value}
+                if m["schema_version"] == OBJECT_SPATIAL_SCHEMA_VERSION and isinstance(value, dict)
+                else value,
                 "object_id state"
-                + (" movable blocks_passage initial_cell" if interactions else ""),
+                + (" movable blocks_passage initial_cell" if interactions else "")
+                + (
+                    " initial_orientation"
+                    if m["schema_version"] == OBJECT_SPATIAL_SCHEMA_VERSION
+                    else ""
+                ),
                 f"{path}.objects[{j}]",
             )
             oid = _identifier(ob["object_id"], path + ".objects", "object")
@@ -527,7 +542,10 @@ def _validate(data: dict, *, allow_legacy_audit=False) -> AdventurePackage:
             cell = _initial_cell(
                 ob.get("initial_cell"), grid_json, path + ".objects", standing=False
             )
-            objects.append(ObjectDefinition(oid, ob["state"], movable, blocks, cell))
+            orientation = ob.get("initial_orientation", "north")
+            if orientation not in ("north", "east", "south", "west"):
+                _fail("schema_error", path + ".objects", "Invalid initial orientation")
+            objects.append(ObjectDefinition(oid, ob["state"], movable, blocks, cell, orientation))
         scenes.append(
             SceneDefinition(
                 key,
@@ -821,11 +839,20 @@ def _validate(data: dict, *, allow_legacy_audit=False) -> AdventurePackage:
             portable,
             lockable,
             passages,
-            extended=m["schema_version"] == OPENABLE_SCHEMA_VERSION,
+            extended=m["schema_version"]
+            in (OPENABLE_SCHEMA_VERSION, OBJECT_SPATIAL_SCHEMA_VERSION),
+            oriented=m["schema_version"] == OBJECT_SPATIAL_SCHEMA_VERSION,
         )
         if world_enabled
         else ()
     )
+    spatial_definitions = {d.object_id for d in world_objects if d.capability("spatial")}
+    if any(
+        o.initial_orientation != "north" and o.object_id not in spatial_definitions
+        for s in scenes
+        for o in s.objects
+    ):
+        _fail("invalid_reference", "scenes.objects", "Orientation requires spatial capability")
     return AdventurePackage(
         adventure_id,
         version,

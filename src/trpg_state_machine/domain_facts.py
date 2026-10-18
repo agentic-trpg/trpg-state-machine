@@ -489,8 +489,12 @@ class WorldFacts:
             (sid, scene_id, canonical_json(dict(scene.flags))),
         )
         self._conn.executemany(
-            "INSERT INTO objects(session_id,object_id,scene_id,state,cell) VALUES (?,?,?,?,?)",
-            [(sid, ob.object_id, scene_id, ob.state, ob.initial_cell) for ob in scene.objects],
+            "INSERT INTO objects(session_id,object_id,scene_id,state,cell,orientation) "
+            "VALUES (?,?,?,?,?,?)",
+            [
+                (sid, ob.object_id, scene_id, ob.state, ob.initial_cell, ob.initial_orientation)
+                for ob in scene.objects
+            ],
         )
         return True
 
@@ -626,11 +630,13 @@ class WorldFacts:
             (sid, scene_id),
         )
 
-    def place(self, sid, object_id, cell):
+    def place(self, sid, object_id, cell, *, orientation=None):
         self.store.require_write()
         self.require_ordinary_object(sid, object_id)
         self._conn.execute(
-            "UPDATE objects SET cell=? WHERE session_id=? AND object_id=?", (cell, sid, object_id)
+            "UPDATE objects SET cell=?,orientation=COALESCE(?,orientation) "
+            "WHERE session_id=? AND object_id=?",
+            (cell, orientation, sid, object_id),
         )
 
     def switch(self, sid, object_id, state, *, jam_policy="prevent_transitions"):
@@ -895,7 +901,15 @@ class WorldFacts:
 
     def object_position(self, sid, object_id):
         obj = self.object(sid, object_id)
-        return {**self.placement(sid, object_id), "state": obj["state"]} if obj else None
+        return (
+            {
+                **self.placement(sid, object_id),
+                "state": obj["state"],
+                "orientation": obj["orientation"],
+            }
+            if obj
+            else None
+        )
 
     def set_scene_flags(self, sid, scene_id, flags):
         self.store.require_write()
