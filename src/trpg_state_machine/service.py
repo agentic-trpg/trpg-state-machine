@@ -113,6 +113,7 @@ class StateMachine(
         self._durability = ObjectDurabilityService(self._world)
         self._objects = self._world.objects
         self.world_time = self._world.time
+        self.scene_lifecycle = self._world.scenes
         self._activities = ActivityHandler(
             self._store,
             self._activity_records,
@@ -297,12 +298,7 @@ class StateMachine(
             self._sessions.initialize(session_id, package, context, pc, pc_actor_id, rng_ref)
             self._world_facts.initialize_world(session_id, package)
             self.world_time.initialize(session_id, selected_time)
-            self._initialize_scene(session_id, package.entry_scene_id, package)
-            for scene in package.scenes:
-                if scene.grid_json is not None and scene.scene_id != package.entry_scene_id:
-                    self._initialize_scene(session_id, scene.scene_id, package)
-                    self._world_facts.mark_unvisited(session_id, scene.scene_id)
-            self._characters.initialize_pc(session_id, pc_actor_id, package.entry_scene_id, pc)
+            self.scene_lifecycle.initialize_session(session_id, pc_actor_id, pc, package)
             if package.combat_foundation_json is not None:
                 initial = json.loads(package.combat_foundation_json)["snapshot"]
                 from .combat import _remap
@@ -372,7 +368,7 @@ class StateMachine(
         return result
 
     def _initialize_scene(self, session_id: str, scene_id: str, package: AdventurePackage) -> None:
-        return self._world._initialize_scene(session_id, scene_id, package)
+        return self.scene_lifecycle.ensure_scene(session_id, scene_id, package)
 
     def _append_events(
         self,

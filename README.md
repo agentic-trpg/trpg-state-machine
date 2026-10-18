@@ -2,13 +2,23 @@
 
 Batch 1 实现了一个可运行的本地闭环：**验证原创合成 Adventure Package → 创建隔离 Session → 初始化/重访 Scene → 修改实际状态 → SQLite 持久化 → 新进程恢复**。
 
-State Machine 是全部已实现可变游戏状态的唯一权威拥有者和提交者。Package 是不可变模板；返回的 Snapshot 是独立副本，修改副本不会写入数据库。已接入固定候选 SHA 的真实 D&D 基础攻击及受限胜利/TPK 关闭，同时保留隔离的合成测试路径；没有第二份运行态权威。正常关闭后可以保存并在新进程恢复；活跃战斗跨进程精确续玩仍不支持。
+StateMachine 是统一 API 与组件装配入口；各领域 Facts / Records 管理所属权威事实，通过共享事务共同提交。Package 是不可变模板；返回的 Snapshot 是独立副本，修改副本不会写入数据库。已接入固定候选 SHA 的真实 D&D 基础攻击及受限胜利/TPK 关闭，同时保留隔离的合成测试路径；没有第二份运行态权威。正常关闭后可以保存并在新进程恢复；活跃战斗跨进程精确续玩仍不支持。
 
 RF-1 将现有世界交互和战斗编排改为显式组件组合，角色、世界、战斗和 Session
 事实经受控写入口共享同一 SQLite 事务。RF-1 保留了公开 API、Schema 21、GC-1 门与效果来源
 语义及固定 RE/SRD 依赖保持兼容；NPC/感知仍采用受控过渡，完整战斗日志解耦尚未
 实现。字段责任与提交链见 [RF-1 设计](docs/RF1_DOMAIN_RUNTIME.md)，实际验证见
 [RF-1 Review](docs/reviews/RF1_DOMAIN_RUNTIME_REVIEW.md)。
+
+## SceneLifecycleService：场景生命周期提取
+
+`sm.scene_lifecycle` 与 `WorldHandler.scenes` 引用同一组件，协调幂等初始化、
+PC／NPC 进入与离开、PC 访问和声明式布尔 Flags。初始化不记录访问，只有 PC
+实际进入才递增已有 `visited_count`；恢复与重访不重套 Package 默认值。
+位置仍由 CharacterFacts 写入，访问／场景事实由 WorldFacts 写入，全部参与既有命令事务。
+WorldHandler 保留移动合法性与其他世界业务。仅 W-01 的生命周期切片完成，W-01 整体仍未完成。
+接口／调用链与兼容边界见 [生命周期设计](docs/SCENE_LIFECYCLE_SERVICE.md)，
+验收与剩余职责见 [生命周期进度](docs/SCENE_LIFECYCLE_SERVICE_PROGRESS.md)。
 
 ## WorldTimeService：Session 固定时间协议
 

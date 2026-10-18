@@ -1,5 +1,13 @@
 # RF-1: domain runtime and shared commit
 
+2026-10-18 follow-up: SceneLifecycleService now owns the existing scene
+initialization/entry/departure/PC-visit/flag coordination previously in WorldHandler.
+The historical RF-1 baseline and verification below remain historical. Current
+ownership, admission paths and the bounded W-01 status are recorded in
+[Scene lifecycle](SCENE_LIFECYCLE_SERVICE.md) and
+[its progress](SCENE_LIFECYCLE_SERVICE_PROGRESS.md). Facts/Records still own data;
+this extraction introduces no schema, command protocol or second position store.
+
 Authority: the merged architecture decision `e6cde66` in the orchestration
 repository. This document records the bounded implementation in SM, not a new
 cross-module contract. Baseline: `802599a`, including GC-1 fix `9e9eac8`.

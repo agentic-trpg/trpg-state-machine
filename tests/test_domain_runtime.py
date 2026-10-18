@@ -48,12 +48,7 @@ def seed(c, package, context, sid="session.domain", pc="pc.domain"):
     with c.store.transaction(write=True):
         c.sessions.initialize(sid, package, context, package.pc_templates[0], pc, "rng." + sid)
         c.facts.initialize_world(sid, package)
-        c.world._initialize_scene(sid, package.entry_scene_id, package)
-        for scene in package.scenes:
-            if scene.grid_json and scene.scene_id != package.entry_scene_id:
-                c.world._initialize_scene(sid, scene.scene_id, package)
-                c.facts.mark_unvisited(sid, scene.scene_id)
-        c.characters.initialize_pc(sid, pc, package.entry_scene_id, package.pc_templates[0])
+        c.world.scenes.initialize_session(sid, pc, package.pc_templates[0], package)
         c.sessions.initialize_rng(
             sid, "rng." + sid, synthetic=package.ruleset_binding == SYNTHETIC_EVALUATION_RULESET
         )
@@ -268,6 +263,7 @@ def test_production_writers_and_dependency_direction():
         "domain_facts.py",
         "session_access.py",
         "spatial.py",
+        "scene_lifecycle.py",
         "combat_handler.py",
         "rules_adapter.py",
         "event_capture.py",

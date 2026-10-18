@@ -485,12 +485,12 @@ class WorldFacts:
             return False
         scene = package.scene(scene_id)
         self._conn.execute(
-            "INSERT INTO scene_instances VALUES (?,?,?,1)",
+            "INSERT INTO scene_instances VALUES (?,?,?,0)",
             (sid, scene_id, canonical_json(dict(scene.flags))),
         )
         self._conn.executemany(
             "INSERT INTO objects(session_id,object_id,scene_id,state,cell,orientation) "
-            "VALUES (?,?,?,?,?,?)",
+            "VALUES (?,?,?,?,?,?) ON CONFLICT(session_id,object_id) DO NOTHING",
             [
                 (sid, ob.object_id, scene_id, ob.state, ob.initial_cell, ob.initial_orientation)
                 for ob in scene.objects
@@ -506,17 +506,20 @@ class WorldFacts:
                 continue
             if c := d.capability("mechanism"):
                 self._conn.execute(
-                    "INSERT INTO object_mechanisms VALUES (?,?,?)",
+                    "INSERT INTO object_mechanisms VALUES (?,?,?) "
+                    "ON CONFLICT(session_id,object_id) DO NOTHING",
                     (sid, d.object_id, c.initial_status),
                 )
             if c := d.capability("light"):
                 self._conn.execute(
-                    "INSERT INTO object_lights VALUES (?,?,?,?)",
+                    "INSERT INTO object_lights VALUES (?,?,?,?) "
+                    "ON CONFLICT(session_id,object_id) DO NOTHING",
                     (sid, d.object_id, int(c.initial_enabled), c.initial_mode),
                 )
             if c := d.capability("openable"):
                 self._conn.execute(
-                    "INSERT INTO object_openables VALUES (?,?,?,?)",
+                    "INSERT INTO object_openables VALUES (?,?,?,?) "
+                    "ON CONFLICT(session_id,object_id) DO NOTHING",
                     (
                         sid,
                         d.object_id,
@@ -526,7 +529,9 @@ class WorldFacts:
                 )
             if c := d.capability("durability"):
                 self._conn.execute(
-                    "INSERT INTO object_durability VALUES (?,?,?)", (sid, d.object_id, c.initial_hp)
+                    "INSERT INTO object_durability VALUES (?,?,?) "
+                    "ON CONFLICT(session_id,object_id) DO NOTHING",
+                    (sid, d.object_id, c.initial_hp),
                 )
 
     def mechanism_status(self, sid, oid):
@@ -614,13 +619,6 @@ class WorldFacts:
             ).rowcount
         ):
             raise StateMachineError("invalid_rule_result", "Invalid durability transition")
-
-    def mark_unvisited(self, sid, scene_id):
-        self.store.require_write()
-        self._conn.execute(
-            "UPDATE scene_instances SET visited_count=0 WHERE session_id=? AND scene_id=?",
-            (sid, scene_id),
-        )
 
     def visit(self, sid, scene_id):
         self.store.require_write()
@@ -910,6 +908,13 @@ class WorldFacts:
             if obj
             else None
         )
+
+    def scene_flags(self, sid, scene_id):
+        row = self._conn.execute(
+            "SELECT flags_json FROM scene_instances WHERE session_id=? AND scene_id=?",
+            (sid, scene_id),
+        ).fetchone()
+        return json.loads(row[0]) if row else None
 
     def set_scene_flags(self, sid, scene_id, flags):
         self.store.require_write()

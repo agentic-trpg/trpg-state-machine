@@ -5,7 +5,7 @@ must never be passed to the Engine or perception as a mechanical Grid.
 """
 
 import json
-from dataclasses import asdict, dataclass, replace
+from dataclasses import dataclass, replace
 
 from dnd5e_engine.evaluation_state import InventoryEntry, InventoryState
 from dnd5e_engine.spatial import GridTopology, canonical_cell_id
@@ -114,6 +114,11 @@ class WorldHandler:
         from .world_time import WorldTimeService
 
         self.time = WorldTimeService(store, sessions, facts)
+        from .scene_lifecycle import SceneLifecycleService
+
+        self.scenes = SceneLifecycleService(
+            store, sessions, characters, facts, capture, npc_bootstrap
+        )
         self.capture.lights = self.objects.lights
 
     @property
@@ -139,15 +144,7 @@ class WorldHandler:
         return self.sessions._world_operation_capability(row, operation)
 
     def _initialize_scene(self, sid, scene_id, package):
-        if not self.facts.initialize_scene(sid, scene_id, package):
-            return
-        self.facts.initialize_object_capabilities(sid, scene_id, package)
-        for actor in package.actors:
-            if actor.initial_scene_id == scene_id and self.characters.initialize_npc_actor(
-                sid, actor
-            ):
-                self.npc_bootstrap.initialize(sid, actor)
-        self.facts.initialize_mechanical_scene(sid, scene_id, package)
+        return self.scenes.ensure_scene(sid, scene_id, package)
 
     def _world_actor_ready(self, sid, actor_id, *, navigation_scope=None):
         qualified = self.activities.qualifies(navigation_scope, sid, actor_id)
@@ -863,65 +860,7 @@ class WorldHandler:
                     source_actor_id=operation.object_id,
                 )
             ]
-        if before == destination:
-            return []
-        is_pc = actor_id == row["pc_actor_id"]
-        events = []
-        if before.scene_id != destination.scene_id:
-            events.append(
-                self._capture_event(
-                    sid,
-                    package,
-                    "scene.exited" if is_pc else "actor.departed",
-                    {
-                        "scene_id": before.scene_id,
-                        **({} if is_pc else {"actor_id": actor_id, "from_cell": before.cell}),
-                    },
-                    phase="scene.before_departure" if is_pc else "world.before_actor_departure",
-                    source_actor_id=actor_id,
-                )
-            )
-        existed = self._conn.execute(
-            "SELECT 1 FROM scene_instances WHERE session_id=? AND scene_id=?",
-            (sid, destination.scene_id),
-        ).fetchone()
-        self._initialize_scene(sid, destination.scene_id, package)
-        self.characters.move(sid, actor_id, destination)
-        if is_pc:
-            self.sessions.move_pc_scene(sid, destination.scene_id)
-            if before.scene_id != destination.scene_id and existed:
-                self.facts.visit(sid, destination.scene_id)
-        if is_pc and before.scene_id != destination.scene_id:
-            events.append(
-                self._capture_event(
-                    sid,
-                    package,
-                    "scene.entered",
-                    {"scene_id": destination.scene_id},
-                    phase="scene.after_arrival",
-                    source_actor_id=actor_id,
-                )
-            )
-        else:
-            events.append(
-                self._capture_event(
-                    sid,
-                    package,
-                    "actor.stepped" if before.scene_id == destination.scene_id else "actor.moved",
-                    {
-                        "actor_id": actor_id,
-                        "to_scene_id": destination.scene_id,
-                        **(
-                            {"from_cell": before.cell, "to_cell": destination.cell}
-                            if destination.cell is not None
-                            else {}
-                        ),
-                    },
-                    phase="world.after_actor_move",
-                    source_actor_id=actor_id,
-                )
-            )
-        return events
+        return self.scenes.move_admitted(row, package, actor_id, destination)
 
     def _actor_position(self, sid, actor_id):
         return self.characters.position(sid, actor_id)
@@ -1086,7 +1025,7 @@ class WorldHandler:
             )
         ):
             raise StateMachineError("unauthorized", "No persisted navigation step qualification")
-        execution = _execution_data(actor_id, effect_origin)
+        _execution_data(actor_id, effect_origin)
         automatic = effect_origin is not None
         if automatic and type(operation) not in (SetSceneFlag, SetObjectState):
             raise StateMachineError("unsupported_operation", "Unsupported automatic world effect")
@@ -1110,38 +1049,13 @@ class WorldHandler:
             return self._operate_spatial(
                 row, package, operation, actor_id, navigation_scope=navigation_scope
             )
-        if isinstance(operation, (SetSceneFlag, SetObjectState)):
-            if (automatic or isinstance(operation, SetSceneFlag)) and operation.scene_id != row[
-                "current_scene_id"
-            ]:
+        if isinstance(operation, SetSceneFlag):
+            return self.scenes.set_flag(
+                row, package, operation, actor_id=actor_id, effect_origin=effect_origin
+            )
+        if isinstance(operation, SetObjectState):
+            if automatic and operation.scene_id != row["current_scene_id"]:
                 raise StateMachineError("invalid_target", "Only the current scene can be modified")
-            if isinstance(operation, SetSceneFlag):
-                if type(operation.value) is not bool:
-                    raise StateMachineError("invalid_operation", "Flag value must be boolean")
-                flags = json.loads(
-                    self._conn.execute(
-                        (
-                            "SELECT flags_json FROM scene_instances WHERE session_id = ? AND "
-                            "scene_id = ?"
-                        ),
-                        (sid, operation.scene_id),
-                    ).fetchone()[0]
-                )
-                if operation.flag_id not in flags:
-                    raise StateMachineError("invalid_target", "Flag must be declared in this scene")
-                if flags[operation.flag_id] == operation.value:
-                    return []
-                flags[operation.flag_id] = operation.value
-                self.facts.set_scene_flags(sid, operation.scene_id, flags)
-                return [
-                    self._capture_event(
-                        sid,
-                        package,
-                        "scene.flag_changed",
-                        {**asdict(operation), "execution": execution},
-                        phase="world.after_flag_update",
-                    )
-                ]
             return self.objects.openable.operate_open(
                 row,
                 actor_id,

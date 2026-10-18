@@ -27,6 +27,7 @@ from .navigation_models import (
     StartNavigation,
 )
 from .package import load_adventure_package
+from .scene_lifecycle import SceneLifecycleService
 from .service import StateMachine
 from .time_binding import LegacyTimeBinding, TimeBinding, time_binding_from_data
 from .world_commands import (
@@ -100,6 +101,7 @@ __all__ = [
     "CreateSessionRequest",
     "PlayerSelection",
     "StateMachine",
+    "SceneLifecycleService",
     "StateMachineError",
     "TrustedContext",
     "load_adventure_package",
