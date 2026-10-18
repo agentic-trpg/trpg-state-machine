@@ -222,3 +222,16 @@ OSS／Environment 延期待办。W-02 与 MECH-01 保持独立跟踪，不因本
 候选四向测试同时使用 SQLite `query_only=ON`。覆盖来源、高度空隙、提供方变化、
 显式输入优先、方向和规模校验、旧消费者以及未初始化场景无初始化副作用。
 实际命令和最终结果见 [本轮实施记录](OBJECT_SPATIAL_SERVICE_PROGRESS.md#挡雨挡风扩展2026-10-18)。
+
+
+## Mechanism follow-up — 2026-10-18
+
+The historical statements above retain their original scope. MECH-01 is now
+verified complete on `feat/world-mechanism-service`: local typed candidate maps
+advance in action order, Openable retains each qualification check, and OSS checks
+the given complete candidate scene. Both legal free-then-occupy and real-conflict
+cases are tested through Session query/submission without query writes. The bounded
+repeatable/lifecycle/automatic extension and its OPEN dependencies are documented
+in [MechanismService contract](MECHANISM_SERVICE.md) and
+[progress](MECHANISM_SERVICE_PROGRESS.md). W-02, SA-01 and other component work
+are not closed. No main merge is implied.

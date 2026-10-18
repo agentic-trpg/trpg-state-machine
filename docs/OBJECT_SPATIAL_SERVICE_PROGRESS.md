@@ -261,3 +261,16 @@ git diff --check
 - 实际安装的 Engine / SRD 都为 0.6.0，direct_url 的 commit_id 均为
   `d596161060555630019163ab301e1d25fd816549`；pyproject.toml 与 uv.lock 无改动。
 - 测试仅有既有 lark `sre_parse` / `sre_constants` 弃用警告。
+
+
+## Mechanism follow-up — 2026-10-18
+
+The historical statements above retain their original scope. MECH-01 is now
+verified complete on `feat/world-mechanism-service`: local typed candidate maps
+advance in action order, Openable retains each qualification check, and OSS checks
+the given complete candidate scene. Both legal free-then-occupy and real-conflict
+cases are tested through Session query/submission without query writes. The bounded
+repeatable/lifecycle/automatic extension and its OPEN dependencies are documented
+in [MechanismService contract](MECHANISM_SERVICE.md) and
+[progress](MECHANISM_SERVICE_PROGRESS.md). W-02, SA-01 and other component work
+are not closed. No main merge is implied.

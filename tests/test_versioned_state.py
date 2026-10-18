@@ -145,7 +145,7 @@ def test_schema9_interrupt_rolls_back_and_restart_completes(tmp_path, monkeypatc
         assert "xp" not in {r[1] for r in db.execute("PRAGMA table_info(characters)")}
     for _ in range(2):
         with StateMachine(database) as sm:
-            assert sm._conn.execute("PRAGMA user_version").fetchone()[0] == 34
+            assert sm._conn.execute("PRAGMA user_version").fetchone()[0] == 35
 
 
 def test_check_only_package_has_no_encounter_dependency(tmp_path, package_data, context):

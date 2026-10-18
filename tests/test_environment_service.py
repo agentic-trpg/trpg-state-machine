@@ -808,8 +808,8 @@ print(json.dumps([sid,sm._conn.execute('PRAGMA user_version').fetchone()[0]]));s
     def broken(path, *args, **kwargs):
         content = read(path, *args, **kwargs)
         return (
-            content.replace("PRAGMA user_version = 34;", "INVALID MIGRATION;")
-            if path.name == "_migration_34.sql"
+            content.replace("PRAGMA user_version = 35;", "INVALID MIGRATION;")
+            if path.name == "_migration_35.sql"
             else content
         )
 
@@ -824,7 +824,7 @@ print(json.dumps([sid,sm._conn.execute('PRAGMA user_version').fetchone()[0]]));s
     with StateMachine(db, dnd_loader=lock_loader()) as sm:
         sm.resume_session(sid, p, context=context)
         assert_original_rows_equal(before, stored_rows(db))
-        assert sm._conn.execute("PRAGMA user_version").fetchone()[0] == 34
+        assert sm._conn.execute("PRAGMA user_version").fetchone()[0] == 35
         assert sm._conn.execute("SELECT * FROM scene_environments").fetchall() == []
         assert sm.environment.read_facts(sid, A, p, context=gm(context)) is None
         assert sm.world_time.read(sid, p, context=context).binding.schema_version == "game-clock/1"

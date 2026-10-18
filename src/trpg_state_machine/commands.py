@@ -49,12 +49,14 @@ from .world_commands import (
     WORLD_CAPABILITY_COMMANDS,
     ActivateMechanism,
     BarObject,
+    CheckMechanism,
     ClearJam,
     ForceOpen,
     LockObject,
     PickLock,
     PutItem,
     RepositionObject,
+    ServiceMechanism,
     SetLightEnabled,
     SwitchLightMode,
     TakeItem,
@@ -113,6 +115,8 @@ class TypedCommand:
         | ForceOpen
         | ClearJam
         | ActivateMechanism
+        | ServiceMechanism
+        | CheckMechanism
         | SetLightEnabled
         | SwitchLightMode
         | RepositionObject
@@ -299,7 +303,7 @@ def validate_command(command: TypedCommand) -> None:
         elif (
             key == "tool_instance_id"
             and value is None
-            and type(command.payload) in (ForceOpen, ClearJam)
+            and type(command.payload) in (ForceOpen, ClearJam, ServiceMechanism, CheckMechanism)
         ):
             continue
         elif not isinstance(value, str) or not value or len(value) > 256:
@@ -315,6 +319,8 @@ def command_fingerprint(command, package, context):
         for field in ("expected_orientation", "to_orientation"):
             if data["payload"][field] is None:
                 data["payload"].pop(field)
+    if type(command.payload) is ActivateMechanism and command.payload.operation_id == "activate":
+        data["payload"].pop("operation_id")
     if command.check_world_effects is None:
         # Preserve canonical fingerprints of all pre-SM21 stored commands.
         data.pop("check_world_effects")
@@ -356,6 +362,7 @@ class CommandRuntime:
             CombatClosePayload,
             CheckPayload,
             *OPENABLE_CHECK_OPERATIONS,
+            CheckMechanism,
         ):
             import asyncio
 

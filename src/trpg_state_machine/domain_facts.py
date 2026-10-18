@@ -528,9 +528,15 @@ class WorldFacts:
             if obj is None or obj["scene_id"] != scene_id:
                 continue
             if c := d.capability("mechanism"):
+                components = (d, *(self.object_definition(package, oid) for oid in c.components))
+                broken = any(
+                    definition.capability("durability")
+                    and definition.capability("durability").initial_hp == 0
+                    for definition in components
+                )
                 self._conn.execute(
-                    "INSERT INTO object_mechanisms VALUES (?,?,?)",
-                    (sid, d.object_id, c.initial_status),
+                    "INSERT INTO object_mechanisms VALUES (?,?,?,?,0,NULL,NULL)",
+                    (sid, d.object_id, "broken" if broken else c.initial_status, c.max_uses),
                 )
             if c := d.capability("light"):
                 self._conn.execute(
@@ -558,14 +564,36 @@ class WorldFacts:
         ).fetchone()
         return row[0] if row else None
 
-    def consume_mechanism(self, sid, oid):
-        self.store.require_write()
-        if not self._conn.execute(
-            "UPDATE object_mechanisms SET status='spent' "
-            "WHERE session_id=? AND object_id=? AND status='armed'",
+    def mechanism_state(self, sid, oid):
+        from .mechanism_models import MechanismState
+
+        row = self._conn.execute(
+            "SELECT status,remaining_uses,activation_count,reset_at_tick,resume_status "
+            "FROM object_mechanisms WHERE session_id=? AND object_id=?",
             (sid, oid),
+        ).fetchone()
+        return MechanismState(*row) if row else None
+
+    def set_mechanism_state(self, sid, oid, state):
+        from .mechanism_models import MechanismState
+
+        self.store.require_write()
+        if type(state) is not MechanismState:
+            raise StateMachineError("invalid_rule_result", "Typed mechanism state required")
+        if not self._conn.execute(
+            "UPDATE object_mechanisms SET status=?,remaining_uses=?,activation_count=?,"
+            "reset_at_tick=?,resume_status=? WHERE session_id=? AND object_id=?",
+            (
+                state.status,
+                state.remaining_uses,
+                state.activation_count,
+                state.reset_at_tick,
+                state.resume_status,
+                sid,
+                oid,
+            ),
         ).rowcount:
-            raise StateMachineError("mechanism_spent", "Mechanism is not armed")
+            raise StateMachineError("invalid_target", "Mechanism not initialized")
 
     def light_state(self, sid, oid):
         row = self._conn.execute(
@@ -689,7 +717,9 @@ class WorldFacts:
             raise StateMachineError("invalid_lock_state", "Contradictory shared object state")
         return any(bool(lock[1]) for lock in locks)
 
-    def validate_door_switch(self, sid, object_id, state, *, jam_policy="prevent_transitions"):
+    def validate_door_switch(
+        self, sid, object_id, state, *, jam_policy="prevent_transitions", current_state=None
+    ):
         if jam_policy not in ("prevent_transitions", "prevent_opening", "prevent_closing"):
             raise StateMachineError("invalid_rule_result", "Unknown jam policy")
         if state not in ("open", "closed"):
@@ -698,7 +728,7 @@ class WorldFacts:
             raise StateMachineError("object_destroyed", "Destroyed object is unusable")
         current = self.object(sid, object_id)
         openable = self.openable_state(sid, object_id)
-        if openable and current["state"] != state:
+        if openable and (current["state"] if current_state is None else current_state) != state:
             if openable["jammed"] and (
                 jam_policy == "prevent_transitions"
                 or (jam_policy == "prevent_opening" and state == "open")

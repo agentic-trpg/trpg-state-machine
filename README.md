@@ -12,7 +12,7 @@ RF-1 将现有世界交互和战斗编排改为显式组件组合，角色、世
 
 ## EnvironmentService：Scene 环境事实与有效查询
 
-`sm.environment` 独立管理温度、四向来风／风速、降水及自然雾烟，SQLite Schema 34
+`sm.environment` 独立管理温度、四向来风／风速、降水及自然雾烟，SQLite Schema 35
 保存 Session 隔离的基础／局部来源和静态防护。受控初始化与批量修改经 TypedCommand、
 明确 `can_manage_environment` 权限、版本／幂等回执及共享事务执行；首次访问前的变化
 不会被模板覆盖，查询不会初始化场景或写库。
@@ -53,7 +53,7 @@ time = sm.world_time.read(result.session_id, package, context=context)
 
 ## World W1–W8：可组合非战斗世界能力
 
-Package `/6` / SQLite Schema 31（当前存储版本 34）增加显式对象定义、内部耐久结果应用、独立卡住/门闩、
+Package `/6` / SQLite Schema 31（当前存储版本 35）增加显式对象定义、内部耐久结果应用、独立卡住/门闩、
 多锁、嵌套容器、受权 GM 多格布置、普通场景光源与一次性手动联动机关。
 普通操作仍通过 `submit_command` / `submit_command_async` 的既有命令、版本与回执入口；
 对象、角色位置、库存投影与事件证据在共享事务中提交。
@@ -694,3 +694,25 @@ Arcane Lock/Knock and their Effects/TimeBinding lifecycle, real object attacks,
 and new NPC EVA picking/forcing DTOs remain unfinished. Existing guards remain.
 The acceptance checklist, pins, validation and missing dependencies are in
 [Openable progress](docs/OPENABLE_SERVICE_PROGRESS.md).
+
+
+## MechanismService (bounded extension, 2026-10-18)
+
+Package /10 `mechanism/2` adds named repeatable operations, finite/unlimited uses,
+no-op consumption policy, block/disarm/prepare/reset methods, real ordinary RE
+checks and explicit failure activation. Ordered read-only candidates fix MECH-01
+without removing lock/jam/bar/occupancy checks. Actual region entry, object
+operations and adopted object checks feed the existing bounded PackageEffects
+queue; NPC Signals/OB are not trigger authority. Portable instances retain their
+original identity/location and Container/Item paths. Second deadlines use
+WorldTimeService; per-Turn and public combat operations remain unsupported.
+
+Schema33→34 preserves old armed/spent rows and receipts, and adds activation
+adoptions. Schema35 adds Environment storage. Historical ENV34 saves are recognized
+by their actual table structure, retain all environment data and atomically receive
+the missing main34 mechanism upgrade; existing main34 mechanism data is retained.
+Unknown/partial structures are refused without writes. See
+[Environment compatibility](docs/ENVIRONMENT_SERVICE.md).
+Damage/save/condition/Effects and material/tool-proficiency/timed-Activity work
+remain OPEN by their respective owners. See the [exact contract](docs/MECHANISM_SERVICE.md)
+and [progress/validation record](docs/MECHANISM_SERVICE_PROGRESS.md).

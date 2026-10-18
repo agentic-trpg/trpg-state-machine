@@ -28,6 +28,7 @@ from ._operations import (
 )
 from .environment_commands import ENVIRONMENT_OPERATIONS
 from .errors import StateMachineError
+from .events import _ActorMotion
 from .game_time import AdvanceGameTime
 from .models import TrustedContext
 from .package import AdventurePackage, canonical_json
@@ -925,6 +926,12 @@ class WorldHandler:
                     source_actor_id=actor_id,
                 )
             )
+        events[-1] = replace(
+            events[-1],
+            mechanical_motion=_ActorMotion(
+                actor_id, before.scene_id, before.cell, destination.scene_id, destination.cell
+            ),
+        )
         return events
 
     def _actor_position(self, sid, actor_id):

@@ -7,7 +7,7 @@ SceneLifecycle、Grid 或 Terrain 重构。本文描述本仓库实际接口，�
 ## 所有权与真实提交路径
 
 当前环境事实由 WorldFacts 的 `environment` / `set_environment` 读取和受控写入，
-SQLite Schema 34 的 `scene_environments(session_id, scene_id, facts_json)` 为唯一存储。
+SQLite Schema 35 的 `scene_environments(session_id, scene_id, facts_json)` 为唯一存储。
 该表没有对懒初始化 `scene_instances` 的外键，因此可以在首次访问／初始化之前修改
 获准场景。没有每格合成结果表、第二份角色高度、效果状态或天气时钟。
 
@@ -24,7 +24,22 @@ WorldHandler → EnvironmentService.operate → WorldFacts → environment.chang
 不会补套模板覆盖变化。需要补充基础条件时显式提交 `SetEnvironmentBase`。
 旧 Session 无环境行时为未配置，查询不自动加载初值。重访／恢复读取已保存事实。
 
-Schema 33→34 只添加空表，不修改旧行、Package digest、WorldTime 绑定或抽象 tick。
+Schema34 保留 main 的机关表升级；Schema35 添加环境表，不修改已有环境行、
+Package digest、WorldTime 绑定、抽象 tick、事件、RNG 或回执。
+两个历史 Schema34 分支按真实表结构识别，不能仅凭 user_version 判断：
+
+| 打开时的存档 | 原子升级到 Schema35 |
+|---|---|
+| 新数据库／Schema33 及更早版本 | 顺序执行全部缺失迁移：main34 机关升级，然后 ENV35 |
+| 机关版 Schema34 | 保留完整机关状态／激活记录，只执行 ENV35，环境表初始为空 |
+| ENV 版 Schema34 | 校验现有环境表和旧三列机关表，补执行原样 main34，再执行 ENV35；复用已校验环境表，保留所有环境 JSON |
+| Schema35 | 校验已完成的结构，重启不重复升级或导入默认值 |
+
+兼容识别校验列、类型、非空／主键、外键以及机关激活表和索引；未知或部分升级的
+结构返回 `unsupported_storage_schema`，不猜测、不清库。ENV35 的幂等建表只复用
+已通过校验的现有环境表。整个兼容修复和顺序迁移共用原有 `BEGIN IMMEDIATE` 写锁、
+事务和最终外键检查；任一步失败均回滚 DDL、数据和 user_version，可修复故障后重试。
+旧 armed／spent 机关仍按 main34 映射次数，已有新版机关状态不会再次映射。
 原 WorldTime 仍是需要时间的消费者的唯一时间输入；本服务当前不使用期限或自动循环。
 
 ## 强类型与单位
@@ -235,7 +250,7 @@ local = sm.environment.query_cell(
 | 项目 | 本轮状态 |
 |---|---|
 | 环境事实／受控修改／导入 | 完成，真实 CommandRuntime / WorldHandler / WorldFacts / SQLite 运行 |
-| 持久化／重访／新进程恢复／Session 隔离 | 完成，真实 Session 和 Schema33 历史存档验证 |
+| 持久化／重访／新进程恢复／Session 隔离 | 完成，真实 Session、Schema33 及机关／ENV 两种 Schema34 历史存档验证 |
 | 场景静态防护 | 完成，通过强类型受控导入与命令保存读取 |
 | OSS 有效环境合成 | 完成，调用真实几何接口；测试的 WO 当前属性是明确 fixture |
 | Package 默认环境解析与自动加载 | 接入契约就绪，PKG-01 尚未接通；不自动修改 Package schema/digest |
@@ -252,6 +267,7 @@ Effects provider 返回当前有效来源 tuple；空 tuple 明确没有效果�
 
 不做气候／流体模拟、天气继承树、降雨涨水／结冰／地下室进水因果、火源熄灭、
 燃烧结束、伤害／力竭／攻击骰修改；水域、水位、水深仍归 Terrain。
-不决定累计暴露最终所有者；不关闭 W-02、MECH-01 或其他独立事项。
+不决定累计暴露最终所有者；不改变 W-02 或其他独立事项。
+MECH-01 沿用最新 main 的机关实施结论，本次环境整合不重新裁定该问题。
 本轮 Environment 功能已实现，不另新增 Environment 延期待办；外围组件按既有归属接入。
 实际验证命令与结果见 [实施记录](ENVIRONMENT_SERVICE_PROGRESS.md)。

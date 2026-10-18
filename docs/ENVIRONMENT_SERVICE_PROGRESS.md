@@ -127,3 +127,84 @@ feat/world-mechanism-service 或其改动，不合并 main。
 
 本次仅提交上述 3 个生产文件、2 个测试文件、2 份 Environment 文档，并推送
 feat/scene-environment-service；不合并 main，具体提交号随最终报告提供。
+
+## 与最新 origin/main 整合及 Schema35（2026-10-18）
+
+用户随后明确授权把最新 main 整合进原 ENV 分支，不授权把 ENV 合并到 main。
+fetch 后 main 为 `afe6871f550fef395ee48b3af5c7cb7f712071f7`，原 ENV 分支为
+`06c7af8fedc7a7db89f4b8f78a60b61bf9d37b4d`。适用 AGENTS.md 未发现。
+原交付 worktree 起始干净，将其在原 HEAD 分离后，在新的干净
+`.test-tmp/environment-main-integration` worktree 检出原 ENV 分支；
+`git merge --no-ff --no-commit origin/main` 仅产生 migration34 的 add/add 冲突。
+原目录分支、HEAD 和全部 38 个既有未提交文件保留，用执行前 SHA256 快照核对。
+
+解决方案：逐字保留 main 的 `_migration_34.sql`；ENV 移至 `_migration_35.sql`，
+user_version=35。存储加载器按 1～35 顺序执行；在既有 SQLite 迁移锁／事务内部，
+按环境表、机关表、键和激活索引识别两种真实 Schema34。旧 ENV34 保留环境 JSON，
+补齐原样机关 migration34，随后 ENV35 复用已验证的环境表。main34 不重复映射机关；
+未知／部分结构无写入拒绝。失败回滚包含兼容修复、后续 DDL、所有数据和版本。
+当前版本测试期望同步为35，历史版本断言和旧行／旧列保留断言保持原语义。
+
+逐项核对自动合并的 CommandRuntime／注册表／历史指纹、WorldFacts、WorldHandler、
+Package、OSS 候选校验和防护投影、WorldTime：保留 ENV 批量类型编码和场景／字段
+公开披露修复，同时保留 main 的机关操作／生命周期、事件触发、顺序候选与定时重置。
+Package `/9` ENV 预留与 main `/10` 机关模型均保留；外部 Effects／角色高度 provider、
+PKG-01／SESSION-01 自动环境导入等边界没有新增生产接线。
+
+新增 `tests/test_environment_mechanism_migration.py`，通过 `git archive` 分别运行
+`9ce60cb`、`afe6871`、`06c7af8` 的真实旧解释器，创建两个 Session、已激活／未激活机关、
+命令回执和已推进时间；ENV34 另含已访问与未访问场景基础条件／局部来源。
+验证所有旧表／列／行、环境数据和完整机关状态保留、重启无变化、Session 隔离、
+新环境命令可用、三线程旧 ENV34 同时打开只升级一次；分别在34复制后和35末尾
+注入失败，确认 SQLite schema／全表数据／版本完全回滚并可重试。
+新数据库升级／失败空库、未知／部分结构拒绝也有实际测试。
+
+实际验证命令（cwd 为新 worktree；专项使用共享 Python，全套使用下述独立环境）：
+
+- `python -m pytest -q -x tests/test_environment_mechanism_migration.py
+  tests/test_mechanism_migration.py tests/test_mechanism_service.py
+  tests/test_environment_service.py tests/test_environment_review_regressions.py
+  --basetemp=.test-tmp/integration-focused -o faulthandler_timeout=45 --durations=10`：
+  **90 passed**，74.74 秒，exit 0。
+
+首轮全套使用共享虚拟环境时，四个分区各在新进程恢复测试失败：共享环境的
+editable `.pth` 指向原目录旧 src，子进程因此拒绝 Schema35。没有更改断言或原目录；
+执行共享 Python 的 `-m venv --without-pip .venv`，在新 worktree 的 site-packages
+写入 `integration-dependencies.pth`，依次引用本 worktree 的 src 和共享已安装依赖目录。
+明确验证独立 Python 的 `trpg_state_machine.__file__` 位于新 worktree。
+移除外层 PYTHONPATH，真实历史解释器仍使用各自明确的旧源码路径；重新完整执行四区。
+初次失败轮次不计入最终通过数。
+
+全套实际调用（各分区原生并行；独立 basetemp，日志和文件清单均留在本 worktree）：
+
+```powershell
+$env:PYTHONUTF8='1'
+$env:PYTHONUNBUFFERED='1'
+Remove-Item Env:PYTHONPATH -ErrorAction SilentlyContinue
+$env:UV_CACHE_DIR='D:\Projects\agentic-trpg\trpg-state-machine\.uv-cache'
+$testFiles=@(Get-ChildItem tests/test_*.py | Sort-Object Name)
+$members=@(for($index=$part;$index -lt $testFiles.Count;$index+=4){
+    $testFiles[$index].FullName
+})
+.venv/Scripts/python.exe -m pytest -q -x @members `
+    --basetemp=.test-tmp/integration-isolated-$part `
+    -o faulthandler_timeout=45 --durations=10
+```
+
+核对74个测试文件的分区并集无遗漏／重复，全套 `--collect-only -q` 为1597项。
+提交前 fetch 的一次 GitHub 连接失败，HTTP/1.1 重试成功；origin/main 仍为 afe6871，
+远端 ENV 分支仍为06c7af8，没有覆盖新的远端提交。
+
+最终四区0／1／2／3分别为 **377 / 439 / 387 / 394 passed**，合计
+**1597 passed**，退出码全部为0；耗时366.00 / 206.87 / 277.07 / 338.93秒。
+通过数与1597项完整收集数一致，覆盖环境、机关、命令指纹、OSS、权限和恢复回归。
+只有既有 lark `sre_parse`／`sre_constants` 弃用警告。
+`python -m ruff check .`、`python -m ruff format --check .`、
+`git diff --check`、`git diff --cached --check` 均通过，241个文件格式一致；
+README及环境／机关两组文档的本地链接与代码块 fence 检查通过。
+整套回归后207个源码／测试文件的 SHA256 与运行中快照一致；
+main migration34 的 Git blob 为 `b800bd23018bf70cf1ca30cbe1df6e41d7c0e8d5`，
+与 origin/main 完全相同。原目录38个既有修改文件字节不变。
+
+选择性暂存本次整合文件和已合并的 main 内容，在原 ENV 分支生成合并提交，
+正常推送该分支，不强制推送、不修改 main。最终提交号及远端核对结果随交付报告提供。

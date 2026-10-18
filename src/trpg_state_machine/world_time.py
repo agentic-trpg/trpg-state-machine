@@ -134,6 +134,14 @@ class WorldTimeService:
             raise StateMachineError("invalid_time_query", "Unknown duration unit")
         return integer(amount * scales[unit], "duration")
 
+    def seconds_deadline(self, session_id, seconds):
+        """Internal consistent-snapshot conversion; caller owns admission/transaction."""
+        integer(seconds, "seconds", minimum=1)
+        binding, tick = self.facts.time_state(session_id)
+        if type(binding) is not TimeBinding:
+            raise StateMachineError("unsupported_time_protocol", "Seconds need world-time/1")
+        return integer(tick + seconds, "deadline")
+
     def boundaries(
         self, session_id, start_tick, end_tick, package, *, context, limit=100, after_tick=None
     ):

@@ -28,6 +28,7 @@ LOCK_SCHEMA_VERSION = "state-machine-foundation/5"
 WORLD_SCHEMA_VERSION = "state-machine-foundation/6"
 OPENABLE_SCHEMA_VERSION = "state-machine-foundation/7"
 OBJECT_SPATIAL_SCHEMA_VERSION = "state-machine-foundation/8"
+MECHANISM_SCHEMA_VERSION = "state-machine-foundation/10"
 MAX_PACKAGE_BYTES = 1_048_576
 _ID = re.compile(r"[a-z][a-z0-9_]*(?:\.[a-z][a-z0-9_]*)+")
 
@@ -315,18 +316,21 @@ def _validate(data: dict, *, allow_legacy_audit=False) -> AdventurePackage:
             WORLD_SCHEMA_VERSION,
             OPENABLE_SCHEMA_VERSION,
             OBJECT_SPATIAL_SCHEMA_VERSION,
+            MECHANISM_SCHEMA_VERSION,
         )
     )
     world_enabled = interactions and data["manifest"]["schema_version"] in (
         WORLD_SCHEMA_VERSION,
         OPENABLE_SCHEMA_VERSION,
         OBJECT_SPATIAL_SCHEMA_VERSION,
+        MECHANISM_SCHEMA_VERSION,
     )
     locks = interactions and data["manifest"]["schema_version"] in (
         LOCK_SCHEMA_VERSION,
         WORLD_SCHEMA_VERSION,
         OPENABLE_SCHEMA_VERSION,
         OBJECT_SPATIAL_SCHEMA_VERSION,
+        MECHANISM_SCHEMA_VERSION,
     )
     items = interactions and data["manifest"]["schema_version"] in (
         ITEM_SCHEMA_VERSION,
@@ -334,6 +338,7 @@ def _validate(data: dict, *, allow_legacy_audit=False) -> AdventurePackage:
         WORLD_SCHEMA_VERSION,
         OPENABLE_SCHEMA_VERSION,
         OBJECT_SPATIAL_SCHEMA_VERSION,
+        MECHANISM_SCHEMA_VERSION,
     )
     navigation = interactions and data["manifest"]["schema_version"] in (
         NAVIGATION_SCHEMA_VERSION,
@@ -342,6 +347,7 @@ def _validate(data: dict, *, allow_legacy_audit=False) -> AdventurePackage:
         WORLD_SCHEMA_VERSION,
         OPENABLE_SCHEMA_VERSION,
         OBJECT_SPATIAL_SCHEMA_VERSION,
+        MECHANISM_SCHEMA_VERSION,
     )
     root = _mapping(
         data,
@@ -370,6 +376,7 @@ def _validate(data: dict, *, allow_legacy_audit=False) -> AdventurePackage:
         WORLD_SCHEMA_VERSION,
         OPENABLE_SCHEMA_VERSION,
         OBJECT_SPATIAL_SCHEMA_VERSION,
+        MECHANISM_SCHEMA_VERSION,
     ):
         _fail("unsupported_schema", "manifest.schema_version", f"Expected {SCHEMA_VERSION}")
     adventure_id = _identifier(m["adventure_id"], "manifest.adventure_id")
@@ -514,13 +521,15 @@ def _validate(data: dict, *, allow_legacy_audit=False) -> AdventurePackage:
         for j, value in enumerate(_list(s["objects"], path + ".objects")):
             ob = _mapping(
                 {"initial_orientation": "north", **value}
-                if m["schema_version"] == OBJECT_SPATIAL_SCHEMA_VERSION and isinstance(value, dict)
+                if m["schema_version"] in (OBJECT_SPATIAL_SCHEMA_VERSION, MECHANISM_SCHEMA_VERSION)
+                and isinstance(value, dict)
                 else value,
                 "object_id state"
                 + (" movable blocks_passage initial_cell" if interactions else "")
                 + (
                     " initial_orientation"
-                    if m["schema_version"] == OBJECT_SPATIAL_SCHEMA_VERSION
+                    if m["schema_version"]
+                    in (OBJECT_SPATIAL_SCHEMA_VERSION, MECHANISM_SCHEMA_VERSION)
                     else ""
                 ),
                 f"{path}.objects[{j}]",
@@ -840,8 +849,10 @@ def _validate(data: dict, *, allow_legacy_audit=False) -> AdventurePackage:
             lockable,
             passages,
             extended=m["schema_version"]
-            in (OPENABLE_SCHEMA_VERSION, OBJECT_SPATIAL_SCHEMA_VERSION),
-            oriented=m["schema_version"] == OBJECT_SPATIAL_SCHEMA_VERSION,
+            in (OPENABLE_SCHEMA_VERSION, OBJECT_SPATIAL_SCHEMA_VERSION, MECHANISM_SCHEMA_VERSION),
+            oriented=m["schema_version"]
+            in (OBJECT_SPATIAL_SCHEMA_VERSION, MECHANISM_SCHEMA_VERSION),
+            mechanisms=m["schema_version"] == MECHANISM_SCHEMA_VERSION,
         )
         if world_enabled
         else ()

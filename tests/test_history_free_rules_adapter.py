@@ -340,7 +340,7 @@ def test_actual_schema22_upgrade_failure_is_atomic_and_retry_preserves_every_old
     monkeypatch.undo()
     assert stored_rows(db) == before
     with StateMachine(db) as sm:
-        assert sm._conn.execute("PRAGMA user_version").fetchone()[0] == 34
+        assert sm._conn.execute("PRAGMA user_version").fetchone()[0] == 35
         assert not sm._conn.execute("SELECT * FROM mechanical_components").fetchall()
     assert_original_rows_equal(before, stored_rows(db))
 
