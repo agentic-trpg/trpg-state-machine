@@ -30,6 +30,7 @@ from .environment_commands import (
     BatchEnvironment,
     EnvironmentMutation,
     environment_operation_from_data,
+    environment_operation_to_data,
     validate_environment_operation,
 )
 from .errors import StateMachineError
@@ -307,6 +308,8 @@ def validate_command(command: TypedCommand) -> None:
 
 def command_fingerprint(command, package, context):
     data = asdict(command)
+    if type(command.payload) in ENVIRONMENT_OPERATIONS:
+        data["payload"] = environment_operation_to_data(command.payload)["payload"]
     if type(command.payload) is RepositionObject:
         # Old receipts used exactly the four original fields.
         for field in ("expected_orientation", "to_orientation"):

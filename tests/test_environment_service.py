@@ -540,11 +540,11 @@ def test_hidden_vertical_source_cannot_disclose_height_boundaries(tmp_path, cont
         seed(sm, sid, p, context, Facts(WEATHER, (hidden,)))
         pc = sm.read_session(sid, p, context=context).pc_actor_id
         before = stored_rows(db)
-        with pytest.raises(StateMachineError) as hidden_range:
-            sm.environment.query_height_range(
-                sid, pc, A, "0,0", HeightInterval(0, 6), p, context=context
-            )
-        assert hidden_range.value.code == "unsupported_environment_visibility"
+        hidden_range = sm.environment.query_height_range(
+            sid, pc, A, "0,0", HeightInterval(0, 6), p, context=context
+        )
+        assert tuple(segment.heights for segment in hidden_range) == (HeightInterval(0, 6),)
+        assert all(segment.environment.temperature.status == "unknown" for segment in hidden_range)
         public = sm.environment.query_cell(sid, pc, A, "0,0", p, context=context, height_ft=3)
         assert public.temperature.status == "unknown" and public.temperature.contributions == ()
         assert "script.secret" not in repr(public)

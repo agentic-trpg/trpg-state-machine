@@ -118,9 +118,23 @@ exposure=`local`、observable=False；Effects 提供方同样必须明确声明�
 
 公开查询复用 `_spatial_reader`、`_public_scope`、`_visible_target` 的 Actor 控制、场景
 公共访问及可见性边界，只允许 Actor 当前场景。不会因 GM 可写天气就暴露全 Session。
-公开结果不返回任何来源 ID、效果名称或防护几何来源。隐蔽来源影响的字段直接 unknown；
-其余可观察字段保留数值。高度范围若涉及未获准披露的来源直接拒绝，避免从分段端点
-泄漏隐蔽效果范围。`observable=True` 必须由可信配置／Effects 明确证明，非 LLM 自报。
+公开结果不返回任何来源 ID、效果名称或防护几何来源。披露粒度为**整个 Scene／字段**：
+只要该场景的任一持久或 Effects 来源在某字段有贡献且 observable=False，该字段在场景
+全部 Cell、全部高度均返回 unknown、空贡献元组，不考虑来源范围、优先级、当前点是否生效
+或是否被公开来源覆盖。hidden wind 同时屏蔽 wind_exposure 与防风状态，hidden precipitation
+同时屏蔽 ground_precipitation 与挡雨状态；防护来源／几何元组始终不对外披露。
+同一策略下仅改变隐藏来源的身份、数值、水平范围或垂直范围，不改变这些公开输出。
+
+query_cell、query_area、query_height_range、query_unit 共用该策略，不因隐藏范围返回
+不同的 ready／unknown／拒绝。公开高度分段只使用可披露来源及 OSS 的独立几何构造，
+再屏蔽上述字段并合并公开结果相同的相邻段，隐藏范围不会成为端点或分段规模错误来源。
+被屏蔽字段不返回基础天气冒充有效结果；不受隐藏贡献影响的字段仍按原授权提供。
+内部 project_cell／project_height_range 不过滤，继续返回全部真实条件、来源和高度段。
+
+这是有意保守的场景字段级披露策略，不是完整 Perception 实现，不保证隐藏贡献的存在、
+移出整个 Scene、字段集合或 observable 权限变更本身不可见；这些改变披露策略适用范围。
+仅在同一 Scene 和相同受屏蔽字段集合内提供范围／数值／身份变化的不泄露保证。
+`observable=True` 必须由可信配置／Effects 明确证明，非 LLM 自报。
 这些查询不产生感知事实、NPC 记忆或可见性机械收益。
 
 公开查询每次在一个只读事务内读取事实／当前提供方／OSS；不建库表、不初始化场景、
@@ -155,8 +169,20 @@ scene_id、操作类型、source_id（基础／静态时 None）、旧／新影�
 }}]}
 ```
 
-Python 的 BatchEnvironment 直接包含强类型 DTO；wire 标签不能用 `asdict(batch)` 自动恢复。
-未知字段／嵌套批量／权限字段拒绝。现有命令指纹算法与旧回执兼容，不修改旧操作编码。
+Python 的 BatchEnvironment 直接包含强类型 DTO；不能用 `asdict(batch)` 代替带标签的编码。
+`environment_commands.environment_operation_to_data` 是唯一规范化编码入口，与现有
+ENVIRONMENT_COMMANDS 注册表、environment_operation_from_data 的 wire 联合对应。
+每项保留 command_type 和完整 payload，批量列表保持原始操作顺序，只有对象字段在
+canonical JSON 中排序。TypedCommand 指纹使用该编码的 payload；环境单命令 payload
+仍为原 asdict 形状，其他已合并命令指纹算法不变。相同请求返回原成功／拒绝回执；
+类型、内容、顺序不同则 idempotency_conflict，不执行、不改原回执或状态。
+未知字段／嵌套批量／权限字段继续拒绝。
+
+631d957 的旧批量哈希没有子操作类型，无法可靠还原 Add 与 Replace 等歧义。
+新版本**不回退匹配无类型旧批量指纹**；同一旧 command_id 的重试也会得到
+idempotency_conflict，保留原回执与已提交事实，可通过 get_command_receipt 审计。
+宿主须人工／受控核对旧回执与实际事实，确需新操作时显式使用新 command_id；
+不猜测旧类型、不自动重执行、不自动迁移或清空回执。新编码批量可正常跨重启重放。
 
 ## 使用实例
 

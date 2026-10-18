@@ -489,10 +489,32 @@ class EnvironmentService:
         )
 
     @staticmethod
-    def _public(result):
+    def _disclosure_inputs(inputs):
+        """One Scene/field policy, independent of query Cell, height or priority.
+
+        Exclude hidden sources from PUBLIC partition construction, then mask every
+        field they might affect across the entire Scene. This is not a substitute
+        base-weather answer: those fields (including dependent values) are unknown.
+        Internal projections keep all true sources and their original geometry.
+        """
+        facts, effects, status = inputs
+        hidden_fields = frozenset(
+            field
+            for source in (*facts.sources, *effects)
+            if not source.observable
+            for field in CONDITION_TYPES
+            if getattr(source.conditions, field) is not None
+        )
+        public_inputs = (
+            replace(facts, sources=tuple(s for s in facts.sources if s.observable)),
+            tuple(s for s in effects if s.observable),
+            status,
+        )
+        return public_inputs, hidden_fields
+
+    @staticmethod
+    def _public(result, hidden_fields):
         def redact(condition):
-            if any(not c.observable for c in condition.contributions):
-                return ResolvedCondition("unknown")
             return replace(
                 condition,
                 contributions=tuple(
@@ -501,13 +523,26 @@ class EnvironmentService:
                 ),
             )
 
+        masked = set(hidden_fields)
+        if "wind" in masked:
+            masked.add("wind_exposure")
+        if "precipitation" in masked:
+            masked.add("ground_precipitation")
         return replace(
             result,
             **{
-                k: redact(getattr(result, k))
+                k: ResolvedCondition("unknown") if k in masked else redact(getattr(result, k))
                 for k in (*CONDITION_TYPES, "ground_precipitation", "wind_exposure")
             },
-            protection=replace(result.protection, rain_sources=(), wind_bands=()),
+            protection=replace(
+                result.protection,
+                rain_sources=(),
+                wind_bands=(),
+                rain_status="unknown"
+                if "precipitation" in masked
+                else result.protection.rain_status,
+                wind_status="unknown" if "wind" in masked else result.protection.wind_status,
+            ),
         )
 
     def query_area(self, sid, actor_id, scene_id, area, package, *, context, height_ft=None):
@@ -522,9 +557,13 @@ class EnvironmentService:
             cells = self._area(sid, scene_id, area, package, query=True)
             for cell in cells:
                 self.h._visible_target(sid, actor_id, cell, package)
-            inputs, cache = self._inputs(sid, scene_id, package), {}
+            inputs, hidden_fields = self._disclosure_inputs(self._inputs(sid, scene_id, package))
+            cache = {}
             return tuple(
-                self._public(self._cell(sid, scene_id, cell, package, height_ft, inputs, cache))
+                self._public(
+                    self._cell(sid, scene_id, cell, package, height_ft, inputs, cache),
+                    hidden_fields,
+                )
                 for cell in cells
             )
 
@@ -548,17 +587,9 @@ class EnvironmentService:
             return self._public_range(sid, scene_id, cell, heights, package)
 
     def _public_range(self, sid, scene, cell, heights, package):
-        inputs = self._inputs(sid, scene, package)
-        # Hidden contribution boundaries must not leak through segment endpoints.
-        if any(
-            not s.observable and (not s.area.cells or cell in s.area.cells)
-            for s in (*inputs[0].sources, *inputs[1])
-        ):
-            raise StateMachineError(
-                "unsupported_environment_visibility", "Height range disclosure is unproven"
-            )
+        inputs, hidden_fields = self._disclosure_inputs(self._inputs(sid, scene, package))
         segments = tuple(
-            replace(segment, environment=self._public(segment.environment))
+            replace(segment, environment=self._public(segment.environment, hidden_fields))
             for segment in self._range(sid, scene, cell, package, heights, inputs)
         )
         # Do not disclose unrelated/hidden OSS geometry via irrelevant boundary endpoints.

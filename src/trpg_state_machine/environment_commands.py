@@ -1,6 +1,6 @@
 """Closed typed environment mutations and strict data adapter."""
 
-from dataclasses import dataclass, fields
+from dataclasses import asdict, dataclass, fields
 
 from .environment_models import (
     CONDITION_TYPES,
@@ -103,6 +103,22 @@ def validate_environment_operation(op):
         invalid("Invalid typed mutation value")
     if type(op) is RemoveEnvironmentSource:
         identity(op.source_id)
+
+
+def environment_operation_to_data(op):
+    """Canonical tagged wire encoding; preserve mutation identity AND list order.
+
+    The existing registry is the sole type/name authority. Single payloads keep
+    their historical asdict shape; only batches need recursive union tags.
+    """
+    validate_environment_operation(op)
+    kind = next(name for name, cls in ENVIRONMENT_COMMANDS.items() if type(op) is cls)
+    payload = (
+        {"changes": [environment_operation_to_data(change) for change in op.changes]}
+        if type(op) is BatchEnvironment
+        else asdict(op)
+    )
+    return {"command_type": kind, "payload": payload}
 
 
 def _decode(cls, raw, converters=None):

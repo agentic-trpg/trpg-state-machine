@@ -78,3 +78,52 @@ $members = @(for ($index=$part; $index -lt $testFiles.Count; $index+=4) {
 完整回归结束后核对共享文件与交付快照无差异；隔离工作树明确使用自己的 src 导入，
 再次运行 **40 passed**（20.69 秒），Ruff／格式／diff 检查通过。
 仅暂存上述任务文件，提交推送原定分支，不合并 main。具体提交及远端身份随最终交付报告提供。
+
+## 631d957 审查修复：批量指纹与隐藏范围披露（2026-10-18）
+
+工作位置为上述原分支工作树，开始时干净；fetch 后本地／远端原分支均为
+631d95752101f9faeb286af1b75f4b812fa43ca6。重新检查适用 AGENTS.md（未发现）、
+现有注册表、wire 协议、指纹／回执、环境事实和公开／内部查询。不改共享目录的
+feat/world-mechanism-service 或其改动，不合并 main。
+
+先新增并实际运行 `tests/test_environment_review_regressions.py`：修复前
+**7 failed / 2 passed**。失败明确覆盖 Add/Replace 成功和拒绝回执被冒用、指纹类型碰撞、
+无类型历史回退和公开点／范围探测；保留这些失败断言后修复生产代码。
+
+环境编码由 environment_operation_to_data 统一生成，复用已有 ENVIRONMENT_COMMANDS
+和带标签 wire 联合，保留操作类型／内容／顺序；环境单操作和其他已合并命令历史编码不变。
+旧批量回执的类型歧义不可恢复，明确拒绝无类型哈希回退，保留原记录供受控核对。
+
+四个公开查询统一使用整个 Scene／字段的披露规则；受隐藏来源影响的字段及依赖结果
+全场景 unknown，贡献为空，关联防护状态同样屏蔽。公开分段不使用隐藏范围；内部投影
+继续真实合成。更新原范围测试为“保留查询、返回场景统一 unknown”，未删除查询接口。
+新增 SQLite 全表／total_changes／query_only 断言验证查询只读，以及隐藏来源移动、
+数值／身份变化、公开来源混合时的点／区域／范围／单位输出一致性。
+
+实际验证（使用共享仓库现有 `.venv/Scripts/python.exe`，工作目录为本分支工作树）：
+
+- `python -m pytest tests/test_environment_review_regressions.py -q
+  --basetemp=.test-tmp/environment-review-red`：修复前 **7 failed / 2 passed**。
+- `python -m pytest tests/test_environment_review_regressions.py tests/test_environment_service.py
+  -q --basetemp=.test-tmp/environment-review-confirmed`：**50 passed**（12.40 秒）。
+  随后补强恢复及分别只改变隐藏身份／数值／范围的断言，新回归单独执行
+  `--basetemp=.test-tmp/environment-review-final-focused`：**10 passed**（2.50 秒）。
+  原有 40 项和最终增强的 10 项均包含在下述最终全套中。
+- 全套沿用上述 PowerShell 按文件排序、索引 mod 4 的分区算法，实际调用
+  `python -m pytest -q -x @members --basetemp=.test-tmp/environment-review-shard-$part
+  -o faulthandler_timeout=45 --durations=10`。最终分区 0／1／2／3 为
+  **441 / 375 / 388 / 350 passed**，全部 exit 0，合计 **1,554 passed**；
+  耗时 309.46 / 315.20 / 132.52 / 243.23 秒。核对 71 个测试文件分区并集无遗漏／重复，
+  通过数与全套收集数完全一致，覆盖命令／历史指纹、OSS、权限、持久化和恢复。
+- 分区 2 首轮受到外层 PYTHONPATH 指向当前 src 的影响，Schema8 解释器误读新源码；
+  只移除测试进程外层 PYTHONPATH，保留 pytest 项目自身的 `pythonpath=src`，
+  确认旧解释器实际导入 `.test-tmp/legacy-sm8/src`、存储版本为 8，再以
+  `--basetemp=.test-tmp/environment-review-shard-2-clean-env` 完整重跑该分区通过。
+  没有改历史测试或生产代码来接受该环境错误，失败轮次不计入最终合计。
+- `python -m ruff check .`、`python -m ruff format --check .`、`git diff --check`：
+  全部通过，235 个文件格式一致；两份 Environment Markdown 链接和 fence 检查通过。
+- 最终回归期间核对 3 个生产文件及 2 个测试文件 SHA256 未变。仅有原有 lark
+  `sre_parse` / `sre_constants` 弃用警告。未改 Schema、Package、依赖 pin 或其他消费者。
+
+本次仅提交上述 3 个生产文件、2 个测试文件、2 份 Environment 文档，并推送
+feat/scene-environment-service；不合并 main，具体提交号随最终报告提供。
