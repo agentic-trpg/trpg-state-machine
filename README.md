@@ -680,3 +680,22 @@ Arcane Lock/Knock and their Effects/TimeBinding lifecycle, real object attacks,
 and new NPC EVA picking/forcing DTOs remain unfinished. Existing guards remain.
 The acceptance checklist, pins, validation and missing dependencies are in
 [Openable progress](docs/OPENABLE_SERVICE_PROGRESS.md).
+
+
+## MechanismService (bounded extension, 2026-10-18)
+
+Package /10 `mechanism/2` adds named repeatable operations, finite/unlimited uses,
+no-op consumption policy, block/disarm/prepare/reset methods, real ordinary RE
+checks and explicit failure activation. Ordered read-only candidates fix MECH-01
+without removing lock/jam/bar/occupancy checks. Actual region entry, object
+operations and adopted object checks feed the existing bounded PackageEffects
+queue; NPC Signals/OB are not trigger authority. Portable instances retain their
+original identity/location and Container/Item paths. Second deadlines use
+WorldTimeService; per-Turn and public combat operations remain unsupported.
+
+Schema33→34 preserves old armed/spent rows and receipts, and adds activation
+adoptions. The original dirty Environment Schema34 is a different development
+lineage and is explicitly refused; branch integration must coordinate migrations.
+Damage/save/condition/Effects and material/tool-proficiency/timed-Activity work
+remain OPEN by their respective owners. See the [exact contract](docs/MECHANISM_SERVICE.md)
+and [progress/validation record](docs/MECHANISM_SERVICE_PROGRESS.md).

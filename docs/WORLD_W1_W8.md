@@ -493,3 +493,16 @@ bounded noncombat picking/forcing increment is tracked in
 supersedes historical picking/forcing TODO descriptions only within its explicitly
 verified range. Combat, magic, real object attacks and missing lifecycle/projection
 contracts remain OPEN; the new service does not close those dependencies.
+
+
+## Mechanism follow-up — 2026-10-18
+
+The historical statements above retain their original scope. MECH-01 is now
+verified complete on `feat/world-mechanism-service`: local typed candidate maps
+advance in action order, Openable retains each qualification check, and OSS checks
+the given complete candidate scene. Both legal free-then-occupy and real-conflict
+cases are tested through Session query/submission without query writes. The bounded
+repeatable/lifecycle/automatic extension and its OPEN dependencies are documented
+in [MechanismService contract](MECHANISM_SERVICE.md) and
+[progress](MECHANISM_SERVICE_PROGRESS.md). W-02, SA-01 and other component work
+are not closed. No main merge is implied.

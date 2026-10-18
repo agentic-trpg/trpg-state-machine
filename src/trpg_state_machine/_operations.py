@@ -6,12 +6,14 @@ from enum import StrEnum
 from .world_commands import (
     ActivateMechanism,
     BarObject,
+    CheckMechanism,
     ClearJam,
     ForceOpen,
     LockObject,
     PickLock,
     PutItem,
     RepositionObject,
+    ServiceMechanism,
     SetLightEnabled,
     SwitchLightMode,
     TakeItem,
@@ -116,6 +118,8 @@ type FoundationOperation = (
     | ForceOpen
     | ClearJam
     | ActivateMechanism
+    | ServiceMechanism
+    | CheckMechanism
     | BarObject
     | UnbarObject
     | LockObject

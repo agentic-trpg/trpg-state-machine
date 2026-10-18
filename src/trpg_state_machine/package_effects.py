@@ -26,6 +26,11 @@ class PackageEffects:
                 )
             event_type, payload = queue[index].event_type, queue[index].payload
             index += 1
+            queue.extend(
+                self.world.objects.mechanisms.automatic(
+                    row, package, queue[index - 1], command_id, row["event_seq"] + index
+                )
+            )
             scene_id = payload.get("scene_id", payload.get("to_scene_id"))
             for definition in package.events:
                 if definition.trigger_type != event_type or definition.scene_id != scene_id:
