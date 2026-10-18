@@ -20,6 +20,8 @@ class _WorldEffectKind(StrEnum):
 class _WorldEffectOrigin:
     kind: _WorldEffectKind
     reference_id: str
+    activation_id: str | None = None
+    consequence_id: str | None = None
 
 
 def _execution_data(actor_id, origin):
@@ -32,5 +34,13 @@ def _execution_data(actor_id, origin):
         and type(origin.reference_id) is str
         and 0 < len(origin.reference_id) <= 256
     ):
-        return {"kind": origin.kind.value, "reference_id": origin.reference_id}
+        return {
+            "kind": origin.kind.value,
+            "reference_id": origin.reference_id,
+            **(
+                {"activation_id": origin.activation_id, "consequence_id": origin.consequence_id}
+                if origin.activation_id
+                else {}
+            ),
+        }
     raise StateMachineError("invalid_execution_origin", "An explicit admitted origin is required")

@@ -322,7 +322,7 @@ class ObjectSpatialService:
         return result
 
     def _check_scene(
-        self, sid, scene_id, package, *, replacement=None, error_code="invalid_spatial_state"
+        self, sid, scene_id, package, *, replacements=None, error_code="invalid_spatial_state"
     ):
         """The same rules for candidate admission and final audit.
 
@@ -344,7 +344,7 @@ class ObjectSpatialService:
             for cell in (e.threshold_cell, e.standing_cell)
         }
         for oid, _ in objects:
-            state = replacement[1] if replacement and replacement[0] == oid else None
+            state = (replacements or {}).get(oid)
             projection = self.project(sid, oid, package, candidate=state)
             cells = set(projection.occupied_cells)
             if oid in doors:
@@ -375,7 +375,14 @@ class ObjectSpatialService:
             blocking.update(current)
 
     def check_candidate(
-        self, sid, oid, package, candidate, *, error_code="object_placement_blocked"
+        self,
+        sid,
+        oid,
+        package,
+        candidate,
+        *,
+        candidates=None,
+        error_code="object_placement_blocked",
     ):
         if type(candidate) is not ObjectSpatialState or candidate.scene_id is None:
             raise StateMachineError("invalid_spatial_state", "Ground candidate required")
@@ -384,7 +391,11 @@ class ObjectSpatialService:
                 "unsupported_object_geometry", "Cross-scene placement unsupported"
             )
         self._check_scene(
-            sid, candidate.scene_id, package, replacement=(oid, candidate), error_code=error_code
+            sid,
+            candidate.scene_id,
+            package,
+            replacements={**(candidates or {}), oid: candidate},
+            error_code=error_code,
         )
         return self.project(sid, oid, package, candidate=candidate)
 

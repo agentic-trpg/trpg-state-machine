@@ -18,6 +18,15 @@ class CommittedWorldEvent:
 
 
 @dataclass(frozen=True, slots=True)
+class _ActorMotion:
+    actor_id: str
+    from_scene_id: str
+    from_cell: str | None
+    to_scene_id: str
+    to_cell: str | None
+
+
+@dataclass(frozen=True, slots=True)
 class _StagedEvent:
     """Transaction-local candidate, never an additional authoritative state."""
 
@@ -25,6 +34,8 @@ class _StagedEvent:
     payload: dict
     signals: tuple[Signal, ...]
     evidence_json: str
+    mechanical_phase: str | None = None
+    mechanical_motion: _ActorMotion | None = None
 
 
 class EventRuntime:

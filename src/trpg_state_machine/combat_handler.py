@@ -166,13 +166,14 @@ class CombatHandler:
             raise StateMachineError(
                 "legacy_rules_audit_only", "Old package permits audit reads only"
             )
-        from .world_commands import OPENABLE_CHECK_OPERATIONS
+        from .world_commands import OPENABLE_CHECK_OPERATIONS, CheckMechanism
 
         if type(command.payload) not in (
             CombatIntentPayload,
             CombatClosePayload,
             CheckPayload,
             *OPENABLE_CHECK_OPERATIONS,
+            CheckMechanism,
         ):
             raise StateMachineError(
                 "unsupported_operation", "Expected an admitted real Engine command"

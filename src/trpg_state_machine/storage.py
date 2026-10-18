@@ -77,7 +77,7 @@ class SqliteStore:
 
     def _migrate(self):
         scripts = [Path(__file__).with_name("_schema.sql")] + [
-            Path(__file__).with_name(f"_migration_{v}.sql") for v in range(2, 34)
+            Path(__file__).with_name(f"_migration_{v}.sql") for v in range(2, 35)
         ]
         steps = [_migration_statements(path.read_text("utf-8")) for path in scripts]
         # Migration 4 rebuilds a referenced table. Disable FK enforcement only on
@@ -87,9 +87,24 @@ class SqliteStore:
             self._conn.execute("BEGIN IMMEDIATE")
             # Read AFTER acquiring the cross-process SQLite migration write lock.
             version = self._conn.execute("PRAGMA user_version").fetchone()[0]
-            if version not in range(34):
+            if version not in range(35):
                 raise StateMachineError(
                     "unsupported_storage_schema", f"Unsupported storage version: {version}"
+                )
+            if version == 34 and {
+                r[1] for r in self._conn.execute("PRAGMA table_info(object_mechanisms)")
+            } != {
+                "session_id",
+                "object_id",
+                "status",
+                "remaining_uses",
+                "activation_count",
+                "reset_at_tick",
+                "resume_status",
+            }:
+                raise StateMachineError(
+                    "unsupported_storage_schema",
+                    "Schema34 belongs to a different development lineage",
                 )
             if (
                 version == 0
@@ -100,7 +115,7 @@ class SqliteStore:
                 raise StateMachineError(
                     "unsupported_storage_schema", "Unversioned nonempty database"
                 )
-            for target in range(version + 1, 34):
+            for target in range(version + 1, 35):
                 for statement in steps[target - 1]:
                     self._conn.execute(statement)
                 if self._conn.execute("PRAGMA user_version").fetchone()[0] != target:

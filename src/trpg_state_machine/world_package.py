@@ -3,6 +3,7 @@
 from dataclasses import asdict, dataclass
 from typing import Literal
 
+from .mechanism_models import Mechanism, MechanismAction, parse_mechanism
 from .package import _fail, _identifier, _list, _mapping, _reference, _text, _unique
 
 
@@ -114,23 +115,6 @@ class LightEmitter:
 
 
 @dataclass(frozen=True, slots=True)
-class MechanismAction:
-    kind: str
-    target_object_id: str
-    value: str | bool
-
-
-@dataclass(frozen=True, slots=True)
-class Mechanism:
-    trigger_kind: str
-    trigger_conditions: str
-    initial_status: str
-    reset_policy: str
-    actions: tuple[MechanismAction, ...]
-    kind: str = "mechanism"
-
-
-@dataclass(frozen=True, slots=True)
 class WorldObjectDefinition:
     object_id: str
     definition_ref: str
@@ -140,7 +124,7 @@ class WorldObjectDefinition:
     size_category: str | None
     weight_lb: int | None
     capabilities: tuple[
-        Openable | Durability | LockSet | Container | SpatialObject | LightEmitter, ...
+        Openable | Durability | LockSet | Container | SpatialObject | LightEmitter | Mechanism, ...
     ]
     volume_cu_ft: int | None = None
     fit_profile: str | None = None
@@ -151,7 +135,15 @@ class WorldObjectDefinition:
 
 
 def validate_world_objects(
-    raw, scenes, portable=(), legacy_locks=(), passages=(), *, extended=False, oriented=False
+    raw,
+    scenes,
+    portable=(),
+    legacy_locks=(),
+    passages=(),
+    *,
+    extended=False,
+    oriented=False,
+    mechanisms=False,
 ):
     result = []
     objects = {o.object_id: o for s in scenes for o in s.objects}
@@ -207,6 +199,11 @@ def validate_world_objects(
             ):
                 _fail("schema_error", p, "Extended openable definitions require Package /7")
             if config.get("kind") == "mechanism":
+                if "schema_version" in config:
+                    capabilities.append(
+                        parse_mechanism(config, objects, scenes, enabled=mechanisms)
+                    )
+                    continue
                 c = _mapping(
                     config,
                     "kind trigger_kind trigger_conditions initial_status reset_policy actions",
@@ -625,13 +622,21 @@ def validate_world_objects(
     for d in result:
         mechanism = d.capability("mechanism")
         if mechanism:
-            for action in mechanism.actions:
+            for component in mechanism.components:
+                if (
+                    component not in definitions
+                    or definitions[component].capability("durability") is None
+                ):
+                    _fail("invalid_reference", "world_objects", "Component needs durability facts")
+            for action in mechanism.all_actions():
                 target = definitions.get(action.target_object_id)
                 required = "openable" if action.kind == "set_open_state" else "light"
                 if (
                     target is None
                     or target.capability(required) is None
-                    or target.capability("mechanism")
+                    or (
+                        mechanism.schema_version == "mechanism/1" and target.capability("mechanism")
+                    )
                 ):
                     _fail(
                         "invalid_reference",

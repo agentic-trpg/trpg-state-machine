@@ -87,7 +87,7 @@ class ObjectDurabilityService:
         if package.portable_items:
             h.characters.sync_world_inventory(result.session_id)
         position = h.facts.object_position(result.session_id, result.object_id)
-        return [
+        events = [
             h._capture_event(
                 result.session_id,
                 package,
@@ -96,3 +96,6 @@ class ObjectDurabilityService:
                 phase="world.after_durability_update",
             )
         ]
+        if result.current_hp == 0:
+            events.extend(h.objects.mechanisms.component_destroyed(row, package, result.object_id))
+        return events

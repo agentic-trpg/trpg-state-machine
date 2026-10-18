@@ -7,10 +7,12 @@ from .world_commands import (
     OPENABLE_CHECK_OPERATIONS,
     ActivateMechanism,
     BarObject,
+    CheckMechanism,
     LockObject,
     PickLock,
     PutItem,
     RepositionObject,
+    ServiceMechanism,
     SetLightEnabled,
     SwitchLightMode,
     TakeItem,
@@ -37,6 +39,10 @@ class WorldObjectService:
     def validate(self, row, actor_id, operation, package):
         if type(operation) in OPENABLE_CHECK_OPERATIONS:
             return self.openable.check_availability(row, actor_id, operation, package)
+        if type(operation) is CheckMechanism:
+            return self.mechanisms.check_availability(row, actor_id, operation, package)
+        if type(operation) is ServiceMechanism:
+            return self.mechanisms.method_plan(row, actor_id, operation, package)
         if type(operation) is ActivateMechanism:
             self.mechanisms.validate(row, actor_id, operation, package)
             return
@@ -79,6 +85,8 @@ class WorldObjectService:
             raise StateMachineError(
                 "invalid_execution_origin", "Object checks require shared rule execution"
             )
+        if type(operation) is ServiceMechanism:
+            return self.mechanisms.service(row, actor_id, operation, package)
         if type(operation) is ActivateMechanism:
             return self.mechanisms.operate(row, actor_id, operation, package, source_command_id)
         if type(operation) in (SetLightEnabled, SwitchLightMode):
@@ -176,6 +184,9 @@ class WorldObjectService:
             and total_weight is not None
             else None,
             "mechanism_status": self.facts.mechanism_status(sid, oid),
+            "mechanism_state": asdict(self.facts.mechanism_state(sid, oid))
+            if self.facts.mechanism_state(sid, oid)
+            else None,
             "linked_result_preview": "hidden" if self.mechanisms.config(package, oid) else None,
             "light": self.facts.light_state(sid, oid),
             "spatial": asdict(self.spatial.config(package, oid))

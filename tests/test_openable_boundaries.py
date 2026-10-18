@@ -7,11 +7,14 @@ from dnd5e_engine.evaluation_contracts import CombatIntentPayload
 from test_dnd_runtime import authority, setup
 
 from trpg_state_machine import (
+    ActivateMechanism,
     BarObject,
+    CheckMechanism,
     ClearJam,
     ForceOpen,
     ObjectState,
     PickLock,
+    ServiceMechanism,
     SetObjectState,
     StateMachineError,
     TypedCommand,
@@ -23,6 +26,9 @@ from trpg_state_machine.commands import OPERATIONS, world_command_from_data
 @pytest.mark.parametrize(
     "op",
     [
+        ActivateMechanism("scene.platform", "object.trap", "0,0", "up"),
+        ServiceMechanism("scene.platform", "object.trap", "0,0", "disarm"),
+        CheckMechanism("scene.platform", "object.trap", "0,0", "disarm"),
         SetObjectState("scene.platform", "object.platform_gate", ObjectState.OPEN),
         BarObject("scene.platform", "object.platform_gate", "0,0"),
         UnlockObject("scene.platform", "object.platform_gate", "lock.public", "object.key", "0,0"),
