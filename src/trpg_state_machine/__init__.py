@@ -16,6 +16,29 @@ from ._operations import (
 )
 from .combat import InitializeCombat
 from .commands import CheckWorldEffects, CommandReceipt, TypedCommand, world_command_from_data
+from .environment import EnvironmentService
+from .environment_commands import (
+    AddEnvironmentSource,
+    BatchEnvironment,
+    InitializeEnvironment,
+    RemoveEnvironmentSource,
+    ReplaceEnvironmentSource,
+    SetEnvironmentBase,
+    SetEnvironmentProtection,
+)
+from .environment_models import (
+    EnvironmentArea,
+    EnvironmentConditions,
+    EnvironmentSceneFacts,
+    EnvironmentSource,
+    HeightInterval,
+    Obscurant,
+    Precipitation,
+    SceneEnvironmentProtection,
+    StaticWindProtection,
+    Temperature,
+    Wind,
+)
 from .errors import StateMachineError
 from .game_time import AdvanceGameTime
 from .models import CreateSessionRequest, PlayerSelection, TrustedContext
@@ -53,6 +76,25 @@ from .world_time import (
 )
 
 __all__ = [
+    "EnvironmentService",
+    "EnvironmentArea",
+    "EnvironmentConditions",
+    "EnvironmentSceneFacts",
+    "EnvironmentSource",
+    "HeightInterval",
+    "Obscurant",
+    "Precipitation",
+    "SceneEnvironmentProtection",
+    "StaticWindProtection",
+    "Temperature",
+    "Wind",
+    "AddEnvironmentSource",
+    "BatchEnvironment",
+    "InitializeEnvironment",
+    "RemoveEnvironmentSource",
+    "ReplaceEnvironmentSource",
+    "SetEnvironmentBase",
+    "SetEnvironmentProtection",
     "TimeBinding",
     "LegacyTimeBinding",
     "time_binding_from_data",

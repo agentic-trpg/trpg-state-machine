@@ -447,6 +447,29 @@ class CharacterFacts:
 
 
 class WorldFacts:
+    def environment(self, sid, scene_id):
+        from .environment_commands import facts_from_data
+
+        row = self._conn.execute(
+            "SELECT facts_json FROM scene_environments WHERE session_id=? AND scene_id=?",
+            (sid, scene_id),
+        ).fetchone()
+        return facts_from_data(json.loads(row[0])) if row else None
+
+    def set_environment(self, sid, scene_id, facts):
+        from dataclasses import asdict
+
+        from .environment_models import EnvironmentSceneFacts
+
+        self.store.require_write()
+        if type(facts) is not EnvironmentSceneFacts:
+            raise StateMachineError("invalid_environment", "Expected typed Scene environment facts")
+        self._conn.execute(
+            "INSERT INTO scene_environments VALUES (?,?,?) "
+            "ON CONFLICT(session_id,scene_id) DO UPDATE SET facts_json=excluded.facts_json",
+            (sid, scene_id, canonical_json(asdict(facts))),
+        )
+
     def object(self, sid, oid):
         return self._conn.execute(
             "SELECT * FROM objects WHERE session_id=? AND object_id=?", (sid, oid)

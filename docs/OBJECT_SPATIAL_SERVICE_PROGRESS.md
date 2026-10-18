@@ -174,6 +174,15 @@ Mechanism、Durability、Light 与导航测试。运行仓库 Ruff check / forma
   `d596161060555630019163ab301e1d25fd816549` 一致；未修改依赖或 lockfile。
 - 测试仅有既有 lark `sre_parse` / `sre_constants` 弃用警告。
 
+### 后续 Environment 消费接入（2026-10-18）
+
+`feat/scene-environment-service` 基于已合并 `main@9ce60cb` 实现 EnvironmentService，
+实际消费上述 OSS 防护几何，组合场景静态防护、当前风来向和显式高度区间。
+前述矩阵“Environment 联调未完成”是 OSS 批次当时状态；现已完成这一服务消费链。
+真实 WO／Package 属性、角色实际高度及机械消费者仍按原职责接入，测试 provider 不代表
+生产接通。详见 [EnvironmentService](ENVIRONMENT_SERVICE.md) 和
+[本次验证记录](ENVIRONMENT_SERVICE_PROGRESS.md)。W-02、MECH-01 状态不变。
+
 仍 OPEN / NOT IMPLEMENTED：
 
 - 地形系统对多对象及静态地形的合并、困难地形移动消耗、对象高度模型。

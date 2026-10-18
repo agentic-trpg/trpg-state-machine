@@ -24,6 +24,14 @@ from ._operations import (
     UnlockDoor,
 )
 from .combat import InitializeCombat
+from .environment_commands import (
+    ENVIRONMENT_COMMANDS,
+    ENVIRONMENT_OPERATIONS,
+    BatchEnvironment,
+    EnvironmentMutation,
+    environment_operation_from_data,
+    validate_environment_operation,
+)
 from .errors import StateMachineError
 from .game_time import AdvanceGameTime, sync_npc_schedules
 from .mechanics import RuleOperation
@@ -78,6 +86,7 @@ OPERATIONS = {
 }
 
 OPERATIONS.update(WORLD_CAPABILITY_COMMANDS)
+OPERATIONS.update(ENVIRONMENT_COMMANDS)
 
 
 @dataclass(frozen=True, slots=True)
@@ -97,7 +106,9 @@ class TypedCommand:
     actor_id: str
     command_type: str
     payload: (
-        PickLock
+        EnvironmentMutation
+        | BatchEnvironment
+        | PickLock
         | ForceOpen
         | ClearJam
         | ActivateMechanism
@@ -202,6 +213,9 @@ def validate_command(command: TypedCommand) -> None:
     operation_type = OPERATIONS.get(command.command_type)
     if operation_type is None or type(command.payload) is not operation_type:
         raise StateMachineError("unsupported_operation", "Unknown command or payload type")
+    if type(command.payload) in ENVIRONMENT_OPERATIONS:
+        validate_environment_operation(command.payload)
+        return
     if type(command.payload) in NAVIGATION_OPERATIONS:
         payload = command.payload
         if (
@@ -477,6 +491,7 @@ def world_command_from_data(data):
     kind = data["command_type"]
     if type(kind) is not str or kind not in (
         *WORLD_CAPABILITY_COMMANDS,
+        *ENVIRONMENT_COMMANDS,
         "world.step_actor",
         "world.advance_time",
         "world.traverse_passage",
@@ -500,7 +515,12 @@ def world_command_from_data(data):
         payload = data["payload"]
         if kind == "set_object_state":
             payload = {**payload, "state": ObjectState(payload["state"])}
-        command = TypedCommand(**{**data, "payload": OPERATIONS[kind](**payload)})
+        operation = (
+            environment_operation_from_data(kind, payload)
+            if kind in ENVIRONMENT_COMMANDS
+            else OPERATIONS[kind](**payload)
+        )
+        command = TypedCommand(**{**data, "payload": operation})
     except (TypeError, ValueError, KeyError) as exc:
         raise StateMachineError("invalid_command", "Unknown or missing payload fields") from exc
     validate_command(command)

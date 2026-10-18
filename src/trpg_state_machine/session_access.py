@@ -19,6 +19,7 @@ from ._operations import (
     UnlockDoor,
 )
 from .commands import receipt_from_json
+from .environment_commands import ENVIRONMENT_OPERATIONS
 from .errors import StateMachineError
 from .game_time import AdvanceGameTime
 from .models import TrustedContext
@@ -43,6 +44,7 @@ def _trusted(context: TrustedContext) -> None:
         type(context.can_place_world_objects) is not bool
         or type(context.can_adjudicate_checks) is not bool
         or type(context.can_advance_time) is not bool
+        or type(context.can_manage_environment) is not bool
     ):
         raise StateMachineError(
             "invalid_context", "GM adjudication grant must be a trusted boolean"
@@ -93,6 +95,8 @@ class SessionAccess:
             )
 
     def _authorize_command(self, row, actor_id, payload, context):
+        if type(payload) in ENVIRONMENT_OPERATIONS and not context.can_manage_environment:
+            raise StateMachineError("unauthorized", "Trusted environment management grant required")
         if type(payload) is RepositionObject and not context.can_place_world_objects:
             raise StateMachineError("unauthorized", "Trusted GM placement grant required")
         if type(payload) is AdvanceGameTime and not context.can_advance_time:
@@ -137,7 +141,7 @@ class SessionAccess:
             raise StateMachineError("invalid_actor", "Command requires the selected PC")
 
     def _world_operation_capability(self, row, payload):
-        if type(payload) in WORLD_CAPABILITY_OPERATIONS or isinstance(
+        if type(payload) in (*WORLD_CAPABILITY_OPERATIONS, *ENVIRONMENT_OPERATIONS) or isinstance(
             payload,
             (
                 EnterScene,

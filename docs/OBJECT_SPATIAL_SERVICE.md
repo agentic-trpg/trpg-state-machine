@@ -7,6 +7,11 @@
 架构依据是顶层仓库 `docs/MODULE_CONTRACTS.md` 的 World / Scene 责任与环境边界，
 以及 `docs/STATE_MACHINE_ARCHITECTURE.md`；本文说明代码支持，不能反向将目标设计标为已实现。
 
+后续集成更新（2026-10-18）：`main@9ce60cb` 的防护接口已由
+[EnvironmentService](ENVIRONMENT_SERVICE.md) 实际消费，组合静态防护、当前天气来向和
+Cell／高度条件。WO／Package 生产当前属性及实际角色高度仍需所属组件接入；
+Environment 的契约 fixture 不代表生产 WO 动态防护已完成。
+
 ## 职责与数据来源
 
 WorldObjectService（WOS）组合 OSS、Openable、Container、Mechanism、Light，继续承接
@@ -20,7 +25,7 @@ WorldObjectService（WOS）组合 OSS、Openable、Container、Mechanism、Light
 | 挡雨／挡风当前属性 | WO 侧提供 `CurrentProtectionProperties`，通过显式参数或 `CurrentProtectionProvider` 只读取得 |
 | 物体基准高度 | 当前属性的 `base_height_ft`，相对场景统一高度基准，不能从 Cell、地面或 HP 猜测 |
 | 天气／风向 | 调用方传入 `wind_from`；OSS 不保存或生成天气 |
-| 地面高度、单位实际高度与有效环境 | 后续 Environment / Terrain 消费者组合；OSS 不裁决暴露、部分防护后果或环境规则 |
+| 地面高度、单位实际高度与有效环境 | Environment 已实现 Cell／显式高度组合，实际单位高度提供方尚未生产接通；OSS 不裁决暴露、部分防护后果或环境规则 |
 
 WO-01 负责开合、展开、损坏等变化如何变成当前防护属性。本轮建立可供真实 WO 接入的
 强类型只读契约和计算接口，**未接入生产 WO 动态防护**。PKG-01 负责 Package 配置解析，
@@ -121,8 +126,8 @@ scene_upper = base_height_ft + local_upper_height_ft
 同一对象的完全相同 `(cell, lower, upper)` 去重；同格不同高度段、不同物体来源分别保留。
 不取最高上界拼成一个连续区间。例如同格 `[0,2)` 与 `[4,6)`，高度 3 无覆盖。
 `wind_at(cell,height_ft)` 返回覆盖该**场景高度点**的原始贡献，帮助消费者检索几何；
-它不是单位全身防护判断。Environment 后续结合地面和实际单位高度处理暴露及部分防护，
-本轮不规定其规则后果。
+它不是单位全身防护判断。Environment 已提供显式高度点和保留空隙的高度区间查询；
+实际单位高度须由角色／位置提供方供给，缺失时明确报告。本轮不规定部分防护的规则后果。
 
 计算限制：雨最多 64 个局部格；风最多 64 条边界；局部坐标为整数且绝对值不超过 32；
 N 为 1–256 的整数（bool／浮点数不接受）；单物体全部边界的 N 之和最多 4096，
@@ -200,8 +205,8 @@ Schema 仍为 33，Package 仍为 `/8`，RE／SRD 固定 SHA
 Package 字段或命令。原 Package digest、旧摆放命令指纹、授权、版本、幂等、事务、回执、
 恢复与 NPC handoff 语义保持。原 Schema33 朝向迁移历史见专项记录。
 
-几何计算与当前属性接口已实现；真实 WO／Package 动态属性读取和 Environment 联调尚未
-接入，测试 provider 不代表生产动态防护已交付。本页记录这些配套接入点，不新增
+几何计算与当前属性接口已实现；Environment 已接入真实几何接口，真实 WO／Package
+动态属性读取尚未接通，测试 provider 不代表生产动态防护已交付。本页记录这些配套接入点，不新增
 OSS／Environment 延期待办。W-02 与 MECH-01 保持独立跟踪，不因本扩展标记完成。
 
 原 Combat 支持边界不变：动态移动障碍、灯光以及未接入的困难地形／视觉／掩护贡献

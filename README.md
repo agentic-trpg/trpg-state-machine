@@ -10,6 +10,20 @@ RF-1 将现有世界交互和战斗编排改为显式组件组合，角色、世
 实现。字段责任与提交链见 [RF-1 设计](docs/RF1_DOMAIN_RUNTIME.md)，实际验证见
 [RF-1 Review](docs/reviews/RF1_DOMAIN_RUNTIME_REVIEW.md)。
 
+## EnvironmentService：Scene 环境事实与有效查询
+
+`sm.environment` 独立管理温度、四向来风／风速、降水及自然雾烟，SQLite Schema 34
+保存 Session 隔离的基础／局部来源和静态防护。受控初始化与批量修改经 TypedCommand、
+明确 `can_manage_environment` 权限、版本／幂等回执及共享事务执行；首次访问前的变化
+不会被模板覆盖，查询不会初始化场景或写库。
+
+有效查询组合静态防护与真实 OSS 几何，区分场景下雨和地面 Cell 实际淋雨，按来向与
+显式高度保留挡风覆盖及空隙。区域逐格返回；公开结果复用访问／可见性授权并隐藏来源。
+Effects 只读贡献、WO 属性及角色实际高度依赖注入就绪，真实法术／WO 动态属性、
+Package 默认加载和 Session 自动接线仍待对应组件接入；其他消费者的规则后果未联调。
+完整模型、来源组合、接口、实例和支持边界见 [EnvironmentService](docs/ENVIRONMENT_SERVICE.md)，
+实际验证见 [实施记录](docs/ENVIRONMENT_SERVICE_PROGRESS.md)。
+
 ## WorldTimeService：Session 固定时间协议
 
 SQLite Schema 32 提供 `sm.world_time`（WorldHandler 实际装配的同一 Service）。
@@ -39,7 +53,7 @@ time = sm.world_time.read(result.session_id, package, context=context)
 
 ## World W1–W8：可组合非战斗世界能力
 
-Package `/6` / SQLite Schema 31（当前存储版本 33）增加显式对象定义、内部耐久结果应用、独立卡住/门闩、
+Package `/6` / SQLite Schema 31（当前存储版本 34）增加显式对象定义、内部耐久结果应用、独立卡住/门闩、
 多锁、嵌套容器、受权 GM 多格布置、普通场景光源与一次性手动联动机关。
 普通操作仍通过 `submit_command` / `submit_command_async` 的既有命令、版本与回执入口；
 对象、角色位置、库存投影与事件证据在共享事务中提交。
@@ -71,7 +85,7 @@ Schema33 保留旧行、旧 Package digest 和旧摆放回执指纹；详见
 
 OSS 新增只读挡雨／挡风贡献：显式局部挡雨格、四来向背风 N 格等高延伸、逐来源高度区间，
 与实体占地／移动阻挡分别表达。强类型当前属性输入和 provider 接口就绪；真实 WO／Package
-接入及 Environment 联调尚未完成，测试 provider 不代表生产动态防护已完成。
+接入尚未完成；Environment 已消费真实 OSS 几何接口，测试 provider 不代表生产动态防护已完成。
 总体职责、接口、示例与支持范围见 [ObjectSpatialService 总体说明](docs/OBJECT_SPATIAL_SERVICE.md)，
 本轮验证继续记入上述专项历史文档。
 
