@@ -1,6 +1,6 @@
 """Openable operations over the single WorldFacts state, in the caller's transaction."""
 
-from dataclasses import asdict
+from dataclasses import asdict, replace
 
 from ._execution import _execution_data, _WorldEffectKind
 from ._operations import LockDoor, ObjectState, SetObjectState, UnlockDoor
@@ -200,6 +200,17 @@ class OpenableService:
             operation.state.value,
             jam_policy=self.jam_policy(package, operation.object_id),
         )
+        if self.h.objects.spatial.config(package, operation.object_id):
+            self.h.objects.spatial.check_candidate(
+                sid,
+                operation.object_id,
+                package,
+                replace(
+                    self.h.objects.spatial.state(sid, operation.object_id, package),
+                    open_state=operation.state.value,
+                ),
+                error_code="invalid_spatial_state",
+            )
 
     def validate_open(
         self, row, actor_id, operation, package, *, origin=None, navigation_scope=None

@@ -4,8 +4,14 @@ Historical implementation record. Current dependency/schema/compatibility and
 component ownership are specified in [RF-RE4](RF_RE4_HISTORY_FREE_RULES.md).
 The 2026-10-17 Openable pin, verified increments and unfinished boundaries are
 recorded in [Openable progress](OPENABLE_SERVICE_PROGRESS.md).
-Current Schema 32 time support and compatibility are specified in
+Time support introduced in Schema 32 and its compatibility are specified in
 [WorldTimeService progress](WORLD_TIME_SERVICE_PROGRESS.md).
+
+Current storage Schema 33 and Package `/8` object orientation/geometry support are specified in
+[ObjectSpatialService progress](OBJECT_SPATIAL_SERVICE_PROGRESS.md). WOS provides full-cell
+movement, difficult-terrain, occlusion and cover contributions; merged terrain, dynamic visibility,
+Perception and Combat consumption remain OPEN. Candidate placement and final audit share wall-edge
+and occupancy rules. Old Package digests and placement receipt fingerprints remain compatible.
 
 | Current World time capability | Actual support / boundary |
 |---|---|
