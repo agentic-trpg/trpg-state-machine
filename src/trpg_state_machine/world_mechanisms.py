@@ -11,6 +11,7 @@ from dataclasses import asdict, replace
 from ._execution import _WorldEffectKind, _WorldEffectOrigin
 from ._operations import ObjectState, SetObjectState
 from .errors import StateMachineError
+from .mechanism_effects import MechanismEffectRunner
 from .world_commands import CheckMechanism, SetLightEnabled
 
 
@@ -20,6 +21,7 @@ class MechanismService:
         self._invocation = None
         self._index_digest = None
         self._index = {}
+        self.effects = MechanismEffectRunner(handler)
 
     def config(self, package, oid):
         d = self.h.facts.object_definition(package, oid)
@@ -71,6 +73,15 @@ class MechanismService:
     def preflight(self, sid, actions, package):
         candidates, lights, changed = {}, {}, False
         for action in actions:
+            if action.kind == "rule_effect":
+                # Production refusal occurs before any lifecycle/world write.
+                if not self.effects.available():
+                    raise StateMachineError(
+                        "unsupported_mechanism_effect",
+                        "Pinned RE has no mechanism effect capability",
+                    )
+                changed = True
+                continue
             before = (
                 (
                     candidates.get(action.target_object_id)
@@ -208,6 +219,20 @@ class MechanismService:
             origin = _WorldEffectOrigin(
                 _WorldEffectKind.MECHANISM, oid, activation, activation + "." + str(index)
             )
+            if action.kind == "rule_effect":
+                audit = self.effects.apply(
+                    row,
+                    package,
+                    oid,
+                    actor,
+                    activation,
+                    activation + "." + str(index),
+                    source_seq,
+                    command_id,
+                    action,
+                )
+                payload.setdefault("rule_results", []).append(audit)
+                continue
             self._invocation = (sid, origin, action.target_object_id, action.kind, action.value)
             try:
                 target = h.facts.placement(sid, action.target_object_id)

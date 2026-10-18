@@ -629,6 +629,28 @@ def validate_world_objects(
                 ):
                     _fail("invalid_reference", "world_objects", "Component needs durability facts")
             for action in mechanism.all_actions():
+                if action.kind == "rule_effect":
+                    import json
+
+                    scene = next(
+                        s for s in scenes if any(o.object_id == d.object_id for o in s.objects)
+                    )
+                    grid = json.loads(scene.grid_json) if scene.grid_json else None
+                    if grid is None:
+                        _fail(
+                            "invalid_mechanism_targets",
+                            "world_objects",
+                            "Rule effects require grid geometry",
+                        )
+                    for cell in action.targets.cells:
+                        x, y = map(int, cell.split(","))
+                        if not (0 <= x < grid["width"] and 0 <= y < grid["height"]):
+                            _fail(
+                                "invalid_mechanism_targets",
+                                "world_objects",
+                                "Area outside source scene",
+                            )
+                    continue
                 target = definitions.get(action.target_object_id)
                 required = "openable" if action.kind == "set_open_state" else "light"
                 if (

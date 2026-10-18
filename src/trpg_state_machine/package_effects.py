@@ -20,7 +20,15 @@ class PackageEffects:
         queue = list(events)
         index = 0
         while index < len(queue):
-            if len(queue) > 32:
+            if (
+                len(queue)
+                + sum(
+                    len(e.payload.get("rule_results", ()))
+                    for e in queue
+                    if e.event_type == "mechanism.activated"
+                )
+                > 32
+            ):
                 raise StateMachineError(
                     "event_cascade_limit", "At most 32 consequences per command"
                 )
