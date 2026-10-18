@@ -26,6 +26,17 @@ WorldHandler 保留移动合法性与其他世界业务。仅 W-01 的生命周�
 接口／调用链与兼容边界见 [生命周期设计](docs/SCENE_LIFECYCLE_SERVICE.md)，
 验收与剩余职责见 [生命周期进度](docs/SCENE_LIFECYCLE_SERVICE_PROGRESS.md)。
 
+## GridService：当前空间组合与几何查询
+
+WorldHandler 的 GridService 统一网格读取、当前实体占格与 OSS 空间贡献、距离／邻接／范围
+候选及基础通行几何，复用 RE 公开接口。占用、移动阻挡、困难地形、视觉遮挡和掩护保持
+区分；查询使用一个读取事务或当前操作事务，没有位置副本和缓存。原探索、交互、导航、
+Light／Environment 调用点已迁移，原地图授权与 Combat guard 保留。
+
+角色目前只表示单锚点；动态视觉阻挡组合显式 unsupported，不能宣称完整动态 LoS 或战斗
+几何已接通。探索不结算战斗移动额度。接口与限制见 [GridService](docs/GRID_SERVICE.md)，
+验证和跨系统项见 [Grid 进度](docs/GRID_SERVICE_PROGRESS.md)；W-01 整体仍未完成。
+
 ## EnvironmentService：Scene 环境事实与有效查询
 
 `sm.environment` 独立管理温度、四向来风／风速、降水及自然雾烟，SQLite Schema 35

@@ -8,8 +8,6 @@ import json
 from dataclasses import dataclass, replace
 
 from dnd5e_engine.evaluation_state import InventoryEntry, InventoryState
-from dnd5e_engine.spatial import GridTopology, canonical_cell_id
-from dnd5e_engine.specs import GridScene
 
 from ._execution import _execution_data
 from ._operations import (
@@ -29,6 +27,7 @@ from ._operations import (
 from .environment_commands import ENVIRONMENT_OPERATIONS
 from .errors import StateMachineError
 from .game_time import AdvanceGameTime
+from .grid import GridService, cell_in_bounds
 from .models import TrustedContext
 from .package import AdventurePackage, canonical_json
 from .world_commands import WORLD_CAPABILITY_OPERATIONS
@@ -73,18 +72,6 @@ class CarriedItemsView:
     entries: tuple[InventoryEntry, ...]
 
 
-def cell_in_bounds(topology, cell):
-    """Upstream bounds/distance, deliberately distinct from walkability."""
-    try:
-        return (
-            type(cell) is str
-            and canonical_cell_id(cell) == cell
-            and topology.distance_ft(cell, cell) is not None
-        )
-    except ValueError:
-        return False
-
-
 class WorldHandler:
     def __init__(
         self,
@@ -112,6 +99,7 @@ class WorldHandler:
         from .world_objects import WorldObjectService
 
         self.objects = WorldObjectService(self)
+        self.grid = GridService(self)
         from .world_time import WorldTimeService
 
         self.time = WorldTimeService(store, sessions, facts)
@@ -208,97 +196,9 @@ class WorldHandler:
             )
         return position
 
-    def _scene_grid(self, sid, scene_id, package):
-        stored = self._spatial_scene(sid, scene_id)
-        raw = (
-            stored["grid"]
-            if stored
-            else (
-                json.loads(package.scene(scene_id).grid_json)
-                if package.scene(scene_id).grid_json
-                else None
-            )
-        )
-        if raw is None:
-            raise StateMachineError("spatial_unconfigured", "Fine spatial data is unavailable")
-        return raw
-
-    def _scene_occupants(self, sid, scene_id, package):
-        """Rows if initialized; otherwise still-uninstantiated configured facts only."""
-        initialized = self._conn.execute(
-            "SELECT 1 FROM scene_instances WHERE session_id=? AND scene_id=?", (sid, scene_id)
-        ).fetchone()
-        actors = [
-            tuple(r)
-            for r in self._conn.execute(
-                "SELECT actor_id,cell FROM actors WHERE session_id=? AND current_scene_id=?",
-                (sid, scene_id),
-            )
-        ]
-        objects = [
-            tuple(r)
-            for r in self._conn.execute(
-                "SELECT object_id,cell FROM objects WHERE session_id=? AND scene_id=?",
-                (sid, scene_id),
-            )
-        ]
-        if not initialized:
-            existing = {
-                r[0]
-                for r in self._conn.execute(
-                    "SELECT actor_id FROM actors WHERE session_id=?", (sid,)
-                )
-            }
-            actors.extend(
-                (a.actor_id, a.initial_cell)
-                for a in package.actors
-                if a.initial_scene_id == scene_id and a.actor_id not in existing
-            )
-            objects.extend((o.object_id, o.initial_cell) for o in package.scene(scene_id).objects)
-        return actors, objects
-
-    def _movement_topology(
-        self,
-        sid,
-        scene_id,
-        package,
-        *,
-        exclude_actor=None,
-        exclude_object=None,
-        handled_thresholds=(),
-    ):
-        raw = self._scene_grid(sid, scene_id, package)
-        actors, objects = self._scene_occupants(sid, scene_id, package)
-        definitions = {o.object_id: o for s in package.scenes for o in s.objects}
-        cells = set(raw["blocked_cells"])
-        cells.update(cell for aid, cell in actors if aid != exclude_actor and cell is not None)
-        cells.update(
-            cell
-            for oid, cell in objects
-            if oid != exclude_object
-            and definitions[oid].blocks_passage
-            and cell is not None
-            and self.objects.spatial.config(package, oid) is None
-        )
-        cells.update(
-            self.objects.spatial.movement_cells(
-                sid, scene_id, package, exclude_object=exclude_object
-            )
-        )
-        for passage in package.passages:
-            if passage.door_object_id and self._door_closed(sid, passage, package):
-                cells.update(
-                    e.threshold_cell
-                    for e in passage.endpoints
-                    if e.scene_id == scene_id
-                    and (passage.passage_id, e.threshold_cell) not in handled_thresholds
-                )
-        # This projection is movement-only and exists for this single calculation.
-        return GridTopology(GridScene(**{**raw, "blocked_cells": sorted(cells)}))
-
     def _visible_target(self, sid, actor_id, cell, package):
         position = self._public_scope(sid, actor_id, package)
-        topology = self._base_topology(sid, position.scene_id, package)
+        topology = self.grid.base_topology(sid, position.scene_id, package)
         if not cell_in_bounds(topology, cell) or not cell_in_bounds(topology, position.cell):
             raise StateMachineError(
                 "invalid_spatial_state", "Position is missing or outside its map"
@@ -313,12 +213,14 @@ class WorldHandler:
         position = self._public_scope(sid, actor_id, package)
         if position.scene_id != operation.scene_id or position.cell != operation.expected_cell:
             raise StateMachineError("position_conflict", "Position precondition differs")
-        base = self._base_topology(sid, position.scene_id, package)
+        base = self.grid.base_topology(sid, position.scene_id, package)
         if not cell_in_bounds(base, operation.to_cell):
             raise StateMachineError("invalid_cell", "Target is outside this local map")
         if position.cell == operation.to_cell:
             return position
-        topology = self._movement_topology(sid, position.scene_id, package, exclude_actor=actor_id)
+        topology = self.grid.exploration_topology(
+            sid, position.scene_id, package, exclude_actor=actor_id
+        )
         if topology.edge_distance(position.cell, operation.to_cell) is None:
             raise StateMachineError("movement_unavailable", "No legal adjacent step")
         # No cost, time or battle-budget calculation is performed for exploration.
@@ -357,7 +259,7 @@ class WorldHandler:
             and e.standing_cell == position.cell
             and e.threshold_cell in (obj[1], operation.to_cell)
         }
-        topology = self._movement_topology(
+        topology = self.grid.exploration_topology(
             sid,
             position.scene_id,
             package,
@@ -379,7 +281,7 @@ class WorldHandler:
             raise StateMachineError(
                 "movement_unavailable", "Object must move by a legal adjacent step"
             )
-        actors, _ = self._scene_occupants(sid, position.scene_id, package)
+        actors, _ = self.grid.reader.scene_occupants(sid, position.scene_id, package)
         if any(cell == operation.to_cell for _, cell in actors):
             raise StateMachineError("movement_unavailable", "Object destination is occupied")
         self.objects.spatial.check_candidate(
@@ -425,8 +327,10 @@ class WorldHandler:
             )
         if type(operation) is PickupItem and target != operation.expected_cell:
             raise StateMachineError("position_conflict", "Item position precondition differs")
-        base = self._base_topology(sid, position.scene_id, package)
-        topology = self._movement_topology(sid, position.scene_id, package, exclude_actor=actor_id)
+        base = self.grid.base_topology(sid, position.scene_id, package)
+        topology = self.grid.exploration_topology(
+            sid, position.scene_id, package, exclude_actor=actor_id
+        )
         if not base.is_valid_cell(target) or (
             target != position.cell and topology.edge_distance(position.cell, target) is None
         ):
@@ -435,7 +339,7 @@ class WorldHandler:
             )
         if type(operation) is DropItem and any(
             aid != actor_id and cell == target
-            for aid, cell in self._scene_occupants(sid, position.scene_id, package)[0]
+            for aid, cell in self.grid.reader.scene_occupants(sid, position.scene_id, package)[0]
         ):
             raise StateMachineError("item_out_of_reach", "Item destination is occupied")
         known = set(self.characters.rule_actors(sid))
@@ -583,7 +487,7 @@ class WorldHandler:
             return obj, None
         ports = self._door_ports(position.scene_id, operation.object_id, package)
         if ports:
-            base = self._base_topology(sid, position.scene_id, package)
+            base = self.grid.base_topology(sid, position.scene_id, package)
             visible = [(p, e) for p, e in ports if base.can_see(position.cell, e.threshold_cell)]
             if not visible:
                 raise StateMachineError("invalid_target", "No authorized local door")
@@ -596,7 +500,7 @@ class WorldHandler:
                     for p, e in ports
                     if e.threshold_cell == endpoint.threshold_cell
                 }
-                topology = self._movement_topology(
+                topology = self.grid.exploration_topology(
                     sid,
                     position.scene_id,
                     package,
@@ -624,7 +528,9 @@ class WorldHandler:
             for passage in package.passages:
                 if passage.door_object_id == operation.object_id:
                     for endpoint in passage.endpoints:
-                        actors, _ = self._scene_occupants(sid, endpoint.scene_id, package)
+                        actors, _ = self.grid.reader.scene_occupants(
+                            sid, endpoint.scene_id, package
+                        )
                         if any(cell == endpoint.threshold_cell for _, cell in actors):
                             raise StateMachineError(
                                 "passage_unavailable", "Door threshold is occupied"
@@ -668,7 +574,7 @@ class WorldHandler:
                 "passage_out_of_reach", "Actor must be at the declared standing point"
             )
         for endpoint in (a, b):
-            topology = self._movement_topology(
+            topology = self.grid.exploration_topology(
                 sid, endpoint.scene_id, package, exclude_actor=actor_id
             )
             if (
@@ -785,7 +691,7 @@ class WorldHandler:
                     "unsupported_spatial_view", "Active combat needs its perception adapter"
                 )
             position = self._public_scope(session_id, actor_id, package)
-            topology = self._base_topology(session_id, position.scene_id, package)
+            topology = self.grid.base_topology(session_id, position.scene_id, package)
             objects = []
             for obj in self._conn.execute(
                 "SELECT object_id,cell FROM objects WHERE session_id=? AND scene_id=? "
@@ -873,17 +779,8 @@ class WorldHandler:
     def _spatial_scene(self, sid, scene_id):
         return self.facts.spatial_scene(sid, scene_id)
 
-    def _base_topology(self, sid, scene_id, package=None):
-        scene = self._spatial_scene(sid, scene_id)
-        if scene is None:
-            raise StateMachineError("spatial_unconfigured", "Scene has no fine spatial capability")
-        grid = scene["grid"]
-        if package is not None:
-            grid, _, _ = self.objects.lights.project(sid, scene_id, package, grid)
-        return GridTopology(GridScene(**grid))
-
     def _current_actor_cells(self, sid, scene_id, roster):
-        topology = self._base_topology(sid, scene_id)
+        topology = self.grid.base_topology(sid, scene_id)
         positions = {}
         for actor_id in roster:
             position = self._actor_position(sid, actor_id)
@@ -986,7 +883,7 @@ class WorldHandler:
                 continue
             if self._spatial_scene(sid, scene.scene_id) is None:
                 continue  # Lazy initialization is still allowed.
-            topology = self._base_topology(sid, scene.scene_id)
+            topology = self.grid.base_topology(sid, scene.scene_id)
             cells = []
             for actor in self._conn.execute(
                 "SELECT cell FROM actors WHERE session_id=? AND current_scene_id=?",

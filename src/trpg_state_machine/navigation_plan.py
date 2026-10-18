@@ -1,15 +1,11 @@
 """Static granted endpoint composition, reusing RE local pathfinding verbatim."""
 
 import heapq
-import json
 from dataclasses import asdict
-
-from dnd5e_engine.spatial import GridTopology
-from dnd5e_engine.specs import GridScene
 
 from ._operations import StepActor, TraversePassage
 from .errors import StateMachineError
-from .spatial import cell_in_bounds
+from .grid import GridService, cell_in_bounds
 
 
 def granted_layout(row, actor, package):
@@ -35,10 +31,7 @@ def plan_navigation(row, actor, position, operation, package):
         raise StateMachineError(
             "navigation_knowledge_unavailable", "Target is outside approved knowledge"
         )
-    topologies = {
-        sid: GridTopology(GridScene(**json.loads(package.scene(sid).grid_json)))
-        for sid in sorted(scenes)
-    }
+    topologies = {sid: GridService.package_topology(package, sid) for sid in sorted(scenes)}
     target = (operation.target_scene_id, operation.target_cell)
     start = (position.scene_id, position.cell)
     if not cell_in_bounds(topologies[target[0]], target[1]) or not topologies[

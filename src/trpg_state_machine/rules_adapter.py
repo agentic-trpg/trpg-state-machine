@@ -361,7 +361,7 @@ class RulesAdapter:
             ) from exc
 
     def _current_cells(self, sid, scene_id, roster, grid):
-        from .spatial import cell_in_bounds
+        from .grid import cell_in_bounds
 
         topology = GridTopology(GridScene.model_validate(grid))
         positions = {}

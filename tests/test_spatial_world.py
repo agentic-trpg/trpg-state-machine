@@ -173,8 +173,8 @@ def test_walls_corners_and_movement_only_visibility(tmp_path, package_data, cont
             == "movement_unavailable"
         )
         # Movement projection rejects a diagonal past the object; visual base grid is unchanged.
-        assert sm._world._base_topology(sid, A).can_see("2,1", "4,1")
-        assert sm._world._movement_topology(sid, A, p, exclude_actor=pc).shortest_path(
+        assert sm._world.grid.base_topology(sid, A).can_see("2,1", "4,1")
+        assert sm._world.grid.exploration_topology(sid, A, p, exclude_actor=pc).shortest_path(
             "2,1", "3,2"
         ) != [
             "2,1",
@@ -517,10 +517,10 @@ def test_bounds_and_object_source_evidence_are_distinct_from_walkability(
     p = _validate(data)
     with StateMachine(tmp_path / "source.db") as sm:
         sid = create(sm, p, context)
-        assert not sm._world._base_topology(sid, A).is_valid_cell("4,4")
-        from trpg_state_machine.spatial import cell_in_bounds
+        assert not sm._world.grid.base_topology(sid, A).is_valid_cell("4,4")
+        from trpg_state_machine.grid import cell_in_bounds
 
-        assert cell_in_bounds(sm._world._base_topology(sid, A), "4,4")
+        assert cell_in_bounds(sm._world.grid.base_topology(sid, A), "4,4")
         assert (
             sm.read_session(sid, p, context=context).scenes[A].object_cells["object.platform_gate"]
             == "4,4"

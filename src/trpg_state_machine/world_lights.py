@@ -68,7 +68,7 @@ class LightService:
             return grid, (), {}
         candidates = self.h.objects.spatial.movement_cells(sid, scene, package)
         legacy = {o.object_id: o for s in package.scenes for o in s.objects}
-        _, actual = self.h._scene_occupants(sid, scene, package)
+        _, actual = self.h.grid.reader.scene_occupants(sid, scene, package)
         candidates.update(
             cell for oid, cell in actual if legacy[oid].blocks_passage and cell is not None
         )
