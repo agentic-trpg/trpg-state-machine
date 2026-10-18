@@ -14,7 +14,7 @@ from .commands import CommandReceipt
 from .dnd_checks import world_effects_ready
 from .errors import StateMachineError
 from .rules_adapter import validate_dnd_result
-from .world_commands import OPENABLE_CHECK_OPERATIONS, PickLock
+from .world_commands import OPENABLE_CHECK_OPERATIONS, CheckMechanism, PickLock
 
 
 class RuleExecution:
@@ -33,14 +33,19 @@ class RuleExecution:
 
     async def submit(self, command, package, context, fingerprint):
         object_check = type(command.payload) in OPENABLE_CHECK_OPERATIONS
+        mechanism_check = type(command.payload) is CheckMechanism
+        domain_check = object_check or mechanism_check
+        check_service = (
+            self.world.objects.mechanisms if mechanism_check else self.world.objects.openable
+        )
         plan, prepare_error, rule_command = None, None, command
 
         def build_snapshot(value):
-            if object_check and self.world._active_combat(command.session_id):
+            if domain_check and self.world._active_combat(command.session_id):
                 # Preserve a durable rejected receipt without pretending a combat
                 # snapshot is a noncombat check or relaxing any capability guard.
                 return self.rules._combat_snapshot(value)
-            if type(command.payload) is CheckPayload or object_check:
+            if type(command.payload) is CheckPayload or domain_check:
                 return self.rules._noncombat_snapshot(value, package)
             return self.rules._combat_snapshot(value)
 
@@ -56,9 +61,9 @@ class RuleExecution:
                     "ruleset_binding_mismatch", "Pinned evaluator version is not installed"
                 )
             snapshot = build_snapshot(row)
-            if object_check:
+            if domain_check:
                 try:
-                    plan = self.world.objects.openable.prepare_check(
+                    plan = check_service.prepare_check(
                         row, command.actor_id, command.payload, package
                     )
                     if plan[0] is not None:
@@ -73,7 +78,7 @@ class RuleExecution:
                 else True
             )
             rng = self.rules._rng_context(row)
-            if type(command.payload) is not CheckPayload and not object_check:
+            if type(command.payload) is not CheckPayload and not domain_check:
                 combat = self._conn.execute(
                     "SELECT process_id FROM combats WHERE session_id=?", (command.session_id,)
                 ).fetchone()
@@ -86,7 +91,7 @@ class RuleExecution:
         unlocked_pick = noop and type(command.payload) is PickLock
         if unlocked_pick:
             request, capability = None, None
-        elif object_check and prepare_error is not None:
+        elif domain_check and prepare_error is not None:
             request = None
             capability = prepare_error
         else:
@@ -152,7 +157,7 @@ class RuleExecution:
                 status, error = "rejected", capability
             elif noop:
                 try:
-                    current_plan = self.world.objects.openable.prepare_check(
+                    current_plan = check_service.prepare_check(
                         row, command.actor_id, command.payload, package
                     )
                     if current_plan != plan:
@@ -168,8 +173,8 @@ class RuleExecution:
                 result, changes = validate_dnd_result(request, result)
                 self._conn.execute("SAVEPOINT dnd_effects")
                 try:
-                    if object_check:
-                        current_plan = self.world.objects.openable.prepare_check(
+                    if domain_check:
+                        current_plan = check_service.prepare_check(
                             row, command.actor_id, command.payload, package
                         )
                         if current_plan != plan:
@@ -177,12 +182,16 @@ class RuleExecution:
                                 "version_conflict", "Object check dependencies changed"
                             )
                     self.rules._apply_dnd_changes(row, changes)
+                    # Failure consequences and automatic hooks both consume the
+                    # original rule result's candidate RNG successor. Never
+                    # overwrite a mechanism successor with this earlier state.
+                    self.sessions.advance_rule_rng(command.session_id, result.rng_transition, rng)
                     events = [
                         self.capture._capture_event(
                             command.session_id,
                             package,
                             "rules.check_rolled"
-                            if type(command.payload) is CheckPayload or object_check
+                            if type(command.payload) is CheckPayload or domain_check
                             else "combat.engine_event",
                             {
                                 **(
@@ -192,12 +201,16 @@ class RuleExecution:
                                             "payload": rule_command.payload.model_dump(mode="json"),
                                             **(
                                                 {
-                                                    "openable_operation": {
+                                                    (
+                                                        "mechanism_operation"
+                                                        if mechanism_check
+                                                        else "openable_operation"
+                                                    ): {
                                                         "command_type": command.command_type,
                                                         "payload": asdict(command.payload),
                                                     }
                                                 }
-                                                if object_check
+                                                if domain_check
                                                 else {}
                                             ),
                                             **(
@@ -211,7 +224,7 @@ class RuleExecution:
                                             ),
                                         }
                                     }
-                                    if type(command.payload) is CheckPayload or object_check
+                                    if type(command.payload) is CheckPayload or domain_check
                                     else {"combat_id": snapshot.combat_state.combat_id}
                                 ),
                                 "scene_id": snapshot.scene_state.scene_id,
@@ -222,7 +235,18 @@ class RuleExecution:
                         )
                         for event in result.proposed_events
                     ]
-                    if object_check:
+                    if mechanism_check:
+                        events.extend(
+                            self.world.objects.mechanisms.service(
+                                row,
+                                command.actor_id,
+                                command.payload,
+                                package,
+                                succeeded=result.proposed_events[0].succeeded,
+                                command_id=command.command_id,
+                            )
+                        )
+                    elif object_check:
                         events.extend(
                             self.world.objects.openable.apply_check(
                                 row,
@@ -255,9 +279,7 @@ class RuleExecution:
                     events = self.effects._expand_events(row, package, events, command.command_id)
                     self.world._assert_spatial_consistency(command.session_id, package)
                     version += 1
-                    transition = result.rng_transition
                     self.sessions.set_world_version(command.session_id, version)
-                    self.sessions.advance_rule_rng(command.session_id, transition, rng)
                     self.persistence._append_events(
                         command.session_id,
                         version,
@@ -278,12 +300,34 @@ class RuleExecution:
                         "object_obstructed",
                         "position_conflict",
                         "version_conflict",
+                        "mechanism_target_unavailable",
+                        "unsupported_mechanism_target",
+                        "mechanism_state_conflict",
+                        "mechanism_exhausted",
+                        "mechanism_broken",
+                        "mechanism_spent",
+                        "mechanism_unprepared",
+                        "mechanism_blocked",
+                        "mechanism_disarmed",
+                        "mechanism_frequency_limited",
+                        "unsupported_mechanism_effect",
+                        "unsupported_mechanism_effect_lifecycle",
+                        "unsupported_mechanism_effect_delta",
+                        "invalid_mechanism_targets",
+                        "mechanism_rule_rejected",
+                        "mechanism_needs_choice",
                     }:
                         # Malformed rule results/storage failures remain faults: the
                         # outer transaction rolls back without persisting a refusal.
                         raise
                     self._conn.execute("ROLLBACK TO dnd_effects")
-                    status = "conflict" if exc.code == "version_conflict" else "rejected"
+                    status = (
+                        "conflict"
+                        if exc.code == "version_conflict"
+                        else "pending_choice"
+                        if exc.code == "mechanism_needs_choice"
+                        else "rejected"
+                    )
                     error, version = exc.code, row["world_version"]
                 finally:
                     self._conn.execute("RELEASE dnd_effects")

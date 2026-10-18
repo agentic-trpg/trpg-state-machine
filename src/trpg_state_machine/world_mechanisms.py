@@ -1,64 +1,158 @@
-"""One-shot manual mechanisms over reviewed capabilities in the shared scope."""
+"""Bounded mechanism lifecycle and ordered capability orchestration.
 
-from dataclasses import asdict
+Definitions are immutable Package data; WorldFacts owns runtime state. Automatic
+hooks consume admitted mechanical events in the caller's savepoint, never NPC OB.
+"""
+
+import hashlib
+import json
+from dataclasses import asdict, replace
 
 from ._execution import _WorldEffectKind, _WorldEffectOrigin
 from ._operations import ObjectState, SetObjectState
 from .errors import StateMachineError
-from .world_commands import SetLightEnabled
+from .mechanism_effects import MechanismEffectRunner
+from .world_commands import CheckMechanism, SetLightEnabled
 
 
 class MechanismService:
     def __init__(self, handler):
         self.h = handler
+        self._invocation = None
+        self._index_digest = None
+        self._index = {}
+        self.effects = MechanismEffectRunner(handler)
 
     def config(self, package, oid):
         d = self.h.facts.object_definition(package, oid)
         return d.capability("mechanism") if d else None
 
     def qualify_link(self, sid, origin, target, kind, value, package):
-        if type(origin) is not _WorldEffectOrigin or origin.kind is not _WorldEffectKind.MECHANISM:
-            raise StateMachineError("invalid_execution_origin", "No admitted mechanism invocation")
-        c = self.config(package, origin.reference_id)
         if (
-            c is None
-            or self.h.facts.mechanism_status(sid, origin.reference_id) != "armed"
-            or not any(
-                a.target_object_id == target and a.kind == kind and a.value == value
-                for a in c.actions
-            )
+            type(origin) is not _WorldEffectOrigin
+            or origin.kind is not _WorldEffectKind.MECHANISM
+            or self._invocation != (sid, origin, target, kind, value)
         ):
-            raise StateMachineError(
-                "invalid_execution_origin", "Result is outside admitted mechanism graph"
-            )
+            raise StateMachineError("invalid_execution_origin", "No admitted mechanism consequence")
 
-    def _preflight(self, sid, action, package):
+    def _preflight(self, sid, action, package, candidates):
         h = self.h
         obj = h.facts.object(sid, action.target_object_id)
         d = h.facts.object_definition(package, action.target_object_id)
         if obj is None or d is None or h.facts.object_hp(sid, action.target_object_id) == 0:
-            raise StateMachineError(
-                "mechanism_target_unavailable", "A mechanism target is unavailable"
-            )
+            raise StateMachineError("mechanism_target_unavailable", "Mechanism target unavailable")
         if action.kind == "set_open_state":
             if d.capability("openable") is None:
                 raise StateMachineError("unsupported_object_capability", "Target is not openable")
+            location = h.facts.placement(sid, action.target_object_id)
+            if obj["carrier_id"] is not None or obj["container_id"] is not None:
+                raise StateMachineError(
+                    "unsupported_mechanism_target", "Linked opening needs ground pose"
+                )
             h.objects.openable.validate_transition(
                 sid,
                 SetObjectState(
-                    h.facts.placement(sid, action.target_object_id)["scene_id"],
-                    action.target_object_id,
-                    ObjectState(action.value),
+                    location["scene_id"], action.target_object_id, ObjectState(action.value)
                 ),
                 package,
+                candidates=candidates,
             )
+            before = candidates.get(action.target_object_id) or h.objects.spatial.state(
+                sid, action.target_object_id, package
+            )
+            candidates[action.target_object_id] = replace(before, open_state=action.value)
         elif action.kind == "set_light_enabled":
-            if d.capability("light") is None:
+            if (
+                d.capability("light") is None
+                or h.facts.light_state(sid, action.target_object_id) is None
+            ):
                 raise StateMachineError("unsupported_object_capability", "Target is not an emitter")
         else:
             raise StateMachineError("unsupported_operation", "Unknown linked result")
 
-    def validate(self, row, actor, op, package):
+    def preflight(self, sid, actions, package):
+        candidates, lights, changed = {}, {}, False
+        for action in actions:
+            if action.kind == "rule_effect":
+                # Production refusal occurs before any lifecycle/world write.
+                if not self.effects.available():
+                    raise StateMachineError(
+                        "unsupported_mechanism_effect",
+                        "Pinned RE has no mechanism effect capability",
+                    )
+                changed = True
+                continue
+            before = (
+                (
+                    candidates.get(action.target_object_id)
+                    or self.h.objects.spatial.state(sid, action.target_object_id, package)
+                ).open_state
+                if action.kind == "set_open_state"
+                else lights.get(
+                    action.target_object_id,
+                    (self.h.facts.light_state(sid, action.target_object_id) or {}).get("enabled"),
+                )
+            )
+            self._preflight(sid, action, package, candidates)
+            changed |= before != action.value
+            if action.kind == "set_light_enabled":
+                lights[action.target_object_id] = action.value
+        return changed
+
+    def _state(self, sid, oid, config, package):
+        state = self.h.facts.mechanism_state(sid, oid)
+        if state is None:
+            raise StateMachineError("invalid_target", "Mechanism not initialized")
+        if any(self.h.facts.object(sid, component) is None for component in config.components):
+            raise StateMachineError("mechanism_target_unavailable", "Component not initialized")
+        if self.h.facts.object_hp(sid, oid) == 0 or any(
+            self.h.facts.object_hp(sid, component) == 0 for component in config.components
+        ):
+            raise StateMachineError("mechanism_broken", "Destroyed mechanism component")
+        return state
+
+    def _pose(self, sid, oid, config):
+        obj = self.h.facts.object(sid, oid)
+        if config.placement_policy == "ground_prepared" and (
+            obj["scene_id"] is None
+            or obj["cell"] is None
+            or obj["carrier_id"] is not None
+            or obj["container_id"] is not None
+        ):
+            raise StateMachineError("mechanism_unprepared", "Mechanism requires a ground pose")
+        if not self.h.facts.item_accessible(sid, oid, include_self=False):
+            raise StateMachineError("container_inaccessible", "Mechanism is enclosed")
+
+    def _eligible(self, sid, oid, config, actor, package):
+        state = self._state(sid, oid, config, package)
+        if state.status != "armed":
+            code = {
+                "spent": "mechanism_spent",
+                "blocked": "mechanism_blocked",
+                "disarmed": "mechanism_disarmed",
+                "unprepared": "mechanism_unprepared",
+                "broken": "mechanism_broken",
+            }[state.status]
+            raise StateMachineError(code, "Mechanism cannot be activated")
+        if state.remaining_uses == 0:
+            raise StateMachineError("mechanism_exhausted", "No remaining uses")
+        self._pose(sid, oid, config)
+        if config.frequency == "once_per_actor":
+            if actor is None:
+                raise StateMachineError("unsupported_mechanism_source", "Actor identity required")
+            if self.h._conn.execute(
+                "SELECT 1 FROM mechanism_activations "
+                "WHERE session_id=? AND object_id=? AND actor_id=?",
+                (sid, oid, actor),
+            ).fetchone():
+                raise StateMachineError(
+                    "mechanism_frequency_limited", "Actor already activated instance"
+                )
+        if config.reset_policy == "after_seconds":
+            self.h.time.seconds_deadline(sid, config.reset_delay_seconds)
+        return state
+
+    def _manual(self, row, actor, op, package):
         h, sid = self.h, row["session_id"]
         h._world_operation_capability(row, op)
         h._world_actor_ready(sid, actor)
@@ -69,87 +163,521 @@ class MechanismService:
         c = self.config(package, op.object_id)
         if c is None:
             raise StateMachineError("unsupported_object_capability", "Object is not a mechanism")
-        if h.facts.object_hp(sid, op.object_id) == 0:
-            raise StateMachineError("object_destroyed", "Destroyed mechanism cannot be activated")
-        if h.facts.mechanism_status(sid, op.object_id) != "armed":
-            raise StateMachineError("mechanism_spent", "One-shot mechanism is spent")
-        for action in c.actions:
-            self._preflight(sid, action, package)
         return c
 
-    def operate(self, row, actor, op, package, source_command_id):
-        c = self.validate(row, actor, op, package)
+    def validate(self, row, actor, op, package):
+        c = self._manual(row, actor, op, package)
+        self._eligible(row["session_id"], op.object_id, c, actor, package)
+        operation = c.operation(op.operation_id)
+        self.preflight(row["session_id"], operation.actions, package)
+        return c
+
+    @staticmethod
+    def activation_id(oid, source_command_id, source_event_seq, operation_id):
+        raw = json.dumps(
+            [oid, source_command_id, source_event_seq, operation_id], separators=(",", ":")
+        )
+        return "activation." + hashlib.sha256(raw.encode()).hexdigest()
+
+    def _activate(self, row, oid, actor, operation_id, package, command_id, source_seq):
         h, sid = self.h, row["session_id"]
-        if type(source_command_id) is not str or not source_command_id:
-            raise StateMachineError(
-                "invalid_execution_origin", "An admitted source command is required"
-            )
-        key = "mechanism." + op.object_id
+        if type(command_id) is not str or not command_id:
+            raise StateMachineError("invalid_execution_origin", "Admitted source command required")
+        c = self.config(package, oid)
+        activation = self.activation_id(oid, command_id, source_seq, operation_id)
         if h._conn.execute(
-            "SELECT 1 FROM trigger_history WHERE session_id=? AND event_definition_id=?", (sid, key)
+            "SELECT 1 FROM mechanism_activations WHERE session_id=? AND activation_id=?",
+            (sid, activation),
         ).fetchone():
-            raise StateMachineError("mechanism_spent", "Activation already adopted")
-        origin = _WorldEffectOrigin(_WorldEffectKind.MECHANISM, op.object_id)
+            return []
+        state = self._eligible(sid, oid, c, actor, package)
+        operation = c.operation(operation_id)
+        changed = self.preflight(sid, operation.actions, package)
+        if not changed and not operation.consume_on_noop:
+            return []
+        location = h.facts.placement(sid, oid)
+        payload = {
+            "scene_id": location["scene_id"],
+            "object_id": oid,
+            "actor_id": actor,
+            "activation_id": activation,
+            "operation_id": operation_id,
+            "source_event_seq": source_seq,
+            "source_command_id": command_id,
+        }
         events = [
             h._capture_event(
                 sid,
                 package,
                 "mechanism.activated",
-                {**asdict(op), "actor_id": actor, "activation_id": key},
+                payload,
                 phase="world.before_mechanism_results",
                 source_actor_id=actor,
             )
         ]
-        for action in c.actions:
-            self.qualify_link(
-                sid, origin, action.target_object_id, action.kind, action.value, package
+        for index, action in enumerate(operation.actions):
+            origin = _WorldEffectOrigin(
+                _WorldEffectKind.MECHANISM, oid, activation, activation + "." + str(index)
             )
-            self._preflight(sid, action, package)  # Recheck sequential candidate state.
-            location = h.facts.placement(sid, action.target_object_id)
-            if action.kind == "set_light_enabled":
-                events.extend(
-                    h.objects.lights.operate(
-                        row,
-                        None,
-                        SetLightEnabled(
-                            location["scene_id"],
-                            action.target_object_id,
-                            location["cell"],
-                            action.value,
-                        ),
-                        package,
-                        origin=origin,
-                    )
+            if action.kind == "rule_effect":
+                audit = self.effects.apply(
+                    row,
+                    package,
+                    oid,
+                    actor,
+                    activation,
+                    activation + "." + str(index),
+                    source_seq,
+                    command_id,
+                    action,
                 )
-            else:
-                events.extend(
-                    h.objects.openable.operate_open(
-                        row,
-                        None,
-                        SetObjectState(
-                            location["scene_id"], action.target_object_id, ObjectState(action.value)
-                        ),
-                        package,
-                        origin=origin,
+                payload.setdefault("rule_results", []).append(audit)
+                continue
+            self._invocation = (sid, origin, action.target_object_id, action.kind, action.value)
+            try:
+                target = h.facts.placement(sid, action.target_object_id)
+                if action.kind == "set_light_enabled":
+                    events.extend(
+                        h.objects.lights.operate(
+                            row,
+                            None,
+                            SetLightEnabled(
+                                target["scene_id"],
+                                action.target_object_id,
+                                target["cell"],
+                                action.value,
+                            ),
+                            package,
+                            origin=origin,
+                        )
                     )
-                )
-        h.facts.consume_mechanism(sid, op.object_id)
-        h._conn.execute(
-            "INSERT INTO trigger_history VALUES (?,?,?,?,'linked')",
-            (sid, key, source_command_id, row["event_seq"] + 1),
+                else:
+                    events.extend(
+                        h.objects.openable.operate_open(
+                            row,
+                            None,
+                            SetObjectState(
+                                target["scene_id"],
+                                action.target_object_id,
+                                ObjectState(action.value),
+                            ),
+                            package,
+                            origin=origin,
+                        )
+                    )
+            finally:
+                self._invocation = None
+        remaining = state.remaining_uses - 1 if state.remaining_uses is not None else None
+        spent = remaining == 0 or c.reset_policy != "none" or c.schema_version == "mechanism/1"
+        deadline = (
+            h.time.seconds_deadline(sid, c.reset_delay_seconds)
+            if remaining != 0 and c.reset_policy == "after_seconds"
+            else None
         )
+        h.facts.set_mechanism_state(
+            sid,
+            oid,
+            replace(
+                state,
+                status="spent" if spent else "armed",
+                remaining_uses=remaining,
+                activation_count=state.activation_count + 1,
+                reset_at_tick=deadline,
+            ),
+        )
+        h._conn.execute(
+            "INSERT INTO mechanism_activations VALUES (?,?,?,?,?,?,?)",
+            (sid, activation, oid, command_id, source_seq, actor, operation_id),
+        )
+        if c.schema_version == "mechanism/1":
+            h._conn.execute(
+                "INSERT INTO trigger_history VALUES (?,?,?,?,'linked')",
+                (sid, "mechanism." + oid, command_id, row["event_seq"] + 1),
+            )
         events.append(
             h._capture_event(
                 sid,
                 package,
-                "mechanism.spent",
-                {
-                    "scene_id": op.scene_id,
-                    "object_id": op.object_id,
-                    "activation_id": key,
-                },
+                "mechanism.spent" if spent else "mechanism.ready",
+                payload,
                 phase="world.after_mechanism_results",
                 source_actor_id=actor,
             )
         )
+        return events
+
+    def operate(self, row, actor, op, package, source_command_id):
+        self.validate(row, actor, op, package)
+        return self._activate(
+            row,
+            op.object_id,
+            actor,
+            op.operation_id,
+            package,
+            source_command_id,
+            row["event_seq"] + 1,
+        )
+
+    def method_plan(self, row, actor, op, package):
+        c = self._manual(row, actor, op, package)
+        sid = row["session_id"]
+        state = self._state(sid, op.object_id, c, package)
+        method = next((m for m in c.methods if m.method_id == op.method_id), None)
+        if method is None:
+            raise StateMachineError("unsupported_mechanism_method", "Undeclared lifecycle method")
+        if (type(op) is CheckMechanism) != (method.ability is not None):
+            raise StateMachineError(
+                "unsupported_mechanism_method", "Method requires its configured execution path"
+            )
+        allowed = {
+            "disarm": ("armed", "spent", "unprepared", "blocked"),
+            "block": ("armed", "spent", "unprepared"),
+            "unblock": ("blocked",),
+            "prepare": ("unprepared",),
+            "reset": ("spent",),
+        }
+        if state.status not in allowed[method.operation]:
+            raise StateMachineError(
+                "mechanism_state_conflict", "Method not applicable to current state"
+            )
+        if method.operation in ("prepare", "reset"):
+            if state.remaining_uses == 0:
+                raise StateMachineError("mechanism_exhausted", "No remaining uses")
+            if method.operation == "reset" and c.reset_policy != "manual":
+                raise StateMachineError(
+                    "unsupported_mechanism_method", "Manual reset not configured"
+                )
+            self._pose(sid, op.object_id, c)
+        if (method.required_tool is None) != (op.tool_instance_id is None):
+            raise StateMachineError("tool_unavailable", "Explicit tool must match method")
+        if method.required_tool is not None:
+            obj = self.h.facts.object(sid, op.tool_instance_id)
+            location = self.h.facts.placement(sid, op.tool_instance_id) if obj else None
+            data = json.loads(obj["item_json"]) if obj and obj["item_json"] else {}
+            if (
+                not location
+                or location["carrier_id"] != actor
+                or not self.h.facts.item_accessible(sid, op.tool_instance_id)
+                or data.get("item_slug") != method.required_tool
+                or data.get("quantity") != 1
+            ):
+                raise StateMachineError("tool_unavailable", "No matching accessible owned tool")
+        if method.trigger_on_failure is not None:
+            self._eligible(sid, op.object_id, c, actor, package)
+            self.preflight(sid, c.operation(method.trigger_on_failure).actions, package)
+        return method, state
+
+    def service(self, row, actor, op, package, *, succeeded=True, command_id=None):
+        method, state = self.method_plan(row, actor, op, package)
+        if not succeeded:
+            if method.trigger_on_failure:
+                return self._activate(
+                    row,
+                    op.object_id,
+                    actor,
+                    method.trigger_on_failure,
+                    package,
+                    command_id,
+                    row["event_seq"] + 1,
+                )
+            return []
+        if method.operation == "block":
+            after = replace(state, status="blocked", resume_status=state.status)
+        elif method.operation == "unblock":
+            after = replace(state, status=state.resume_status, resume_status=None)
+        else:
+            after = replace(
+                state,
+                status="disarmed" if method.operation == "disarm" else "armed",
+                reset_at_tick=None,
+                resume_status=None,
+            )
+        self.h.facts.set_mechanism_state(row["session_id"], op.object_id, after)
+        return [
+            self.h._capture_event(
+                row["session_id"],
+                package,
+                "mechanism.serviced",
+                {
+                    **asdict(op),
+                    "actor_id": actor,
+                    "operation": method.operation,
+                    "status": after.status,
+                },
+                phase="world.after_mechanism_service",
+                source_actor_id=actor,
+            )
+        ]
+
+    def prepare_check(self, row, actor, op, package):
+        from dnd5e_engine.evaluation_contracts import CheckPayload
+        from pydantic import ValidationError
+
+        method, state = self.method_plan(row, actor, op, package)
+        if method.required_tool is not None:
+            # Generic checks cannot adjudicate tool proficiency; never infer it from possession.
+            raise StateMachineError("unsupported_mechanism_rule", "Tool check needs an RE contract")
+        try:
+            payload = CheckPayload(
+                actor_id=actor,
+                ability=method.ability,
+                skill=method.skill,
+                tool=None,
+                dc=method.dc,
+                target_id=None,
+                context="generic",
+                required_sense="none",
+                social_interaction=False,
+                advantage=(),
+                disadvantage=(),
+                redeem_granted_die=None,
+            )
+        except ValidationError as exc:
+            raise StateMachineError(
+                "unsupported_mechanism_rule", "Check outside RE schema"
+            ) from exc
+        return payload, method, state
+
+    def check_availability(self, row, actor, op, package):
+        plan = self.prepare_check(row, actor, op, package)
+        from dnd5e_engine.evaluation_checks import check_support_failure
+
+        from .commands import TypedCommand
+
+        rules = self.h.objects.openable.rules
+        snapshot = rules._noncombat_snapshot(row, package)
+        rules._verify_dnd_binding(package)
+        if failure := rules._dnd_capability(plan[0], actor, snapshot):
+            raise StateMachineError(failure, "Check outside supported rule facts")
+        request = rules.request(
+            TypedCommand(
+                row["session_id"], "query", actor, "rules.check", plan[0], row["world_version"]
+            ),
+            package,
+            snapshot,
+            rules._rng_context(row),
+        )
+        if failure := check_support_failure(request, rules.loader):
+            raise StateMachineError(failure["error"].code, "Check outside supported rule facts")
+        return plan
+
+    def component_destroyed(self, row, package, component):
+        self._build_index(package)
+        sid, events = row["session_id"], []
+        for oid, _, _ in self._index.get(("destroyed", None, component), ()):
+            state = self.h.facts.mechanism_state(sid, oid)
+            if state is not None and state.status != "broken":
+                self.h.facts.set_mechanism_state(
+                    sid,
+                    oid,
+                    replace(state, status="broken", reset_at_tick=None, resume_status=None),
+                )
+                location = self.h.facts.placement(sid, oid)
+                events.append(
+                    self.h._capture_event(
+                        sid,
+                        package,
+                        "mechanism.broken",
+                        {
+                            "scene_id": location["scene_id"],
+                            "object_id": oid,
+                            "component_id": component,
+                        },
+                        phase="world.after_mechanism_damage",
+                    )
+                )
+        return events
+
+    def _build_index(self, package):
+        if self._index_digest == package.package_digest:
+            return
+        index = {}
+        for definition in package.world_objects:
+            c = definition.capability("mechanism")
+            if c is None:
+                continue
+            for number, t in enumerate(c.triggers):
+                key = (t.kind, t.scene_id, t.target_object_id)
+                index.setdefault(key, []).append((definition.object_id, number, t))
+            for component in (definition.object_id, *c.components):
+                index.setdefault(("destroyed", None, component), []).append(
+                    (definition.object_id, 0, None)
+                )
+        self._index = {
+            key: tuple(sorted(value, key=lambda v: (v[0], v[1]))) for key, value in index.items()
+        }
+        self._index_digest = package.package_digest
+
+    def automatic(self, row, package, event, command_id, source_seq):
+        self._build_index(package)
+        sid, payload, kind = row["session_id"], event.payload, event.event_type
+        if self.h._active_combat(sid):
+            return []  # Combat mechanical hooks/Episode routing require a separate contract.
+        if kind == "object.light_changed" and event.mechanical_phase != "world.after_light_update":
+            return []
+        derived = []
+        if kind == "game.time_advanced":
+            return self._reset_due(row, package)
+        if kind == "item.picked_up" or (
+            kind == "item.container_transferred" and payload.get("phase") == "after"
+        ):
+            oid = payload["instance_id"]
+            c = self.config(package, oid)
+            state = self.h.facts.mechanism_state(sid, oid)
+            if (
+                c
+                and c.placement_policy == "ground_prepared"
+                and (
+                    state.status == "armed"
+                    or state.status == "blocked"
+                    and state.resume_status == "armed"
+                )
+            ):
+                after = (
+                    replace(state, status="unprepared")
+                    if state.status == "armed"
+                    else replace(state, resume_status="unprepared")
+                )
+                self.h.facts.set_mechanism_state(sid, oid, after)
+                derived.append(
+                    self.h._capture_event(
+                        sid,
+                        package,
+                        "mechanism.unprepared",
+                        {
+                            "scene_id": payload["scene_id"],
+                            "object_id": oid,
+                            "source_event_seq": source_seq,
+                        },
+                        phase="world.after_mechanism_stow",
+                    )
+                )
+        if kind == "object.durability_changed" and payload.get("current_hp") == 0:
+            return self.component_destroyed(row, package, payload["object_id"])
+        scene = payload.get("scene_id", payload.get("to_scene_id"))
+        actor = payload.get("actor_id", payload.get("execution", {}).get("actor_id"))
+        if actor is None and payload.get("execution", {}).get("activation_id"):
+            adopted = self.h._conn.execute(
+                "SELECT actor_id FROM mechanism_activations WHERE session_id=? AND activation_id=?",
+                (sid, payload["execution"]["activation_id"]),
+            ).fetchone()
+            actor = adopted[0] if adopted else None
+        if kind in ("actor.stepped", "actor.moved", "scene.entered"):
+            motion = event.mechanical_motion
+            if motion is None:
+                return derived
+            scene, actor = motion.to_scene_id, motion.actor_id
+            candidates = self._index.get(("enter_region", scene, None), ())
+            target_kind = "enter_region"
+        elif kind == "rules.check_rolled":
+            adjudication = payload.get("adjudication", {})
+            admitted = adjudication.get("openable_operation") or adjudication.get(
+                "mechanism_operation"
+            )
+            # Generic checks do not have a mechanically bound object target.
+            if admitted is None:
+                return []
+            actor = adjudication["payload"]["actor_id"]
+            candidates = self._index.get(
+                ("check_result", scene, admitted["payload"]["object_id"]), ()
+            )
+            target_kind = "check_result"
+        else:
+            if kind == "item.container_transferred" and payload.get("phase") != "after":
+                return []
+            target = payload.get("object_id", payload.get("instance_id"))
+            candidates = self._index.get(("object_operation", scene, target), ())
+            target_kind = "object_operation"
+        events, fired = derived, set()
+        for oid, _, trigger in candidates:
+            if oid in fired:
+                continue  # One matching operation per instance and mechanical source event.
+            if target_kind == "enter_region":
+                if motion.to_cell not in trigger.cells or (
+                    motion.from_scene_id == scene and motion.from_cell in trigger.cells
+                ):
+                    continue
+            elif target_kind == "check_result":
+                if payload["engine_event"]["succeeded"] != trigger.succeeded:
+                    continue
+            elif (
+                kind != trigger.event_type
+                or trigger.value is not None
+                and payload.get(
+                    {
+                        "object.state_changed": "state",
+                        "object.light_changed": "enabled",
+                        "door.lock_changed": "locked",
+                        "object.bar_changed": "barred",
+                    }[kind]
+                )
+                != trigger.value
+            ):
+                continue
+            c = self.config(package, oid)
+            state = self.h.facts.mechanism_state(sid, oid)
+            if state is None or state.status != "armed":
+                continue
+            location = self.h.facts.placement(sid, oid)
+            if location["scene_id"] != scene:
+                continue
+            try:
+                self._eligible(sid, oid, c, actor, package)
+            except StateMachineError as exc:
+                if exc.code in (
+                    "mechanism_frequency_limited",
+                    "mechanism_unprepared",
+                    "mechanism_broken",
+                    "container_inaccessible",
+                ):
+                    continue
+                raise
+            events.extend(
+                self._activate(
+                    row, oid, actor, trigger.operation_id, package, command_id, source_seq
+                )
+            )
+            fired.add(oid)
+        return events
+
+    def _reset_due(self, row, package):
+        sid, events = row["session_id"], []
+        tick = self.h.facts.time_state(sid)[1]
+        due = self.h._conn.execute(
+            "SELECT object_id FROM object_mechanisms WHERE session_id=? AND reset_at_tick<=? "
+            "ORDER BY object_id LIMIT 33",
+            (sid, tick),
+        ).fetchall()
+        for (oid,) in due:
+            state = self.h.facts.mechanism_state(sid, oid)
+            c = self.config(package, oid)
+            self._state(sid, oid, c, package)
+            obj = self.h.facts.object(sid, oid)
+            ready = (
+                "unprepared"
+                if c.placement_policy == "ground_prepared"
+                and (obj["carrier_id"] is not None or obj["container_id"] is not None)
+                else "armed"
+            )
+            after = replace(
+                state,
+                reset_at_tick=None,
+                status="blocked" if state.status == "blocked" else ready,
+                resume_status=ready if state.status == "blocked" else None,
+            )
+            self.h.facts.set_mechanism_state(sid, oid, after)
+            location = self.h.facts.placement(sid, oid)
+            events.append(
+                self.h._capture_event(
+                    sid,
+                    package,
+                    "mechanism.reset",
+                    {
+                        "scene_id": location["scene_id"],
+                        "object_id": oid,
+                        "boundary_tick": state.reset_at_tick,
+                    },
+                    phase="world.after_mechanism_reset",
+                )
+            )
         return events

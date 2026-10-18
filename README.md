@@ -1,5 +1,11 @@
 # Agentic TRPG — State Machine Foundation
 
+MechanismService 的 `mechanism/3` 配置和独立 `mechanism-effect/1` 端口支持强类型
+规则效果定义、单体／区域目标筛选、原命令关联及有序事务采用验证。固定 RE /23
+尚无真实机关来源的 `rules.effect`，生产明确返回 unsupported；接受结果仅通过契约
+fixtures 验证。持续状态、零 HP／死亡、完整 Effects 生命周期和战斗采用仍 OPEN。
+详见 [机关效果契约](docs/MECHANISM_EFFECTS_CONTRACT.md)。
+
 Batch 1 实现了一个可运行的本地闭环：**验证原创合成 Adventure Package → 创建隔离 Session → 初始化/重访 Scene → 修改实际状态 → SQLite 持久化 → 新进程恢复**。
 
 StateMachine 是统一 API 与组件装配入口；各领域 Facts / Records 管理所属权威事实，通过共享事务共同提交。Package 是不可变模板；返回的 Snapshot 是独立副本，修改副本不会写入数据库。已接入固定候选 SHA 的真实 D&D 基础攻击及受限胜利/TPK 关闭，同时保留隔离的合成测试路径；没有第二份运行态权威。正常关闭后可以保存并在新进程恢复；活跃战斗跨进程精确续玩仍不支持。
@@ -19,6 +25,20 @@ PC／NPC 进入与离开、PC 访问和声明式布尔 Flags。初始化不记�
 WorldHandler 保留移动合法性与其他世界业务。仅 W-01 的生命周期切片完成，W-01 整体仍未完成。
 接口／调用链与兼容边界见 [生命周期设计](docs/SCENE_LIFECYCLE_SERVICE.md)，
 验收与剩余职责见 [生命周期进度](docs/SCENE_LIFECYCLE_SERVICE_PROGRESS.md)。
+
+## EnvironmentService：Scene 环境事实与有效查询
+
+`sm.environment` 独立管理温度、四向来风／风速、降水及自然雾烟，SQLite Schema 35
+保存 Session 隔离的基础／局部来源和静态防护。受控初始化与批量修改经 TypedCommand、
+明确 `can_manage_environment` 权限、版本／幂等回执及共享事务执行；首次访问前的变化
+不会被模板覆盖，查询不会初始化场景或写库。
+
+有效查询组合静态防护与真实 OSS 几何，区分场景下雨和地面 Cell 实际淋雨，按来向与
+显式高度保留挡风覆盖及空隙。区域逐格返回；公开结果复用访问／可见性授权并隐藏来源。
+Effects 只读贡献、WO 属性及角色实际高度依赖注入就绪，真实法术／WO 动态属性、
+Package 默认加载和 Session 自动接线仍待对应组件接入；其他消费者的规则后果未联调。
+完整模型、来源组合、接口、实例和支持边界见 [EnvironmentService](docs/ENVIRONMENT_SERVICE.md)，
+实际验证见 [实施记录](docs/ENVIRONMENT_SERVICE_PROGRESS.md)。
 
 ## WorldTimeService：Session 固定时间协议
 
@@ -49,7 +69,7 @@ time = sm.world_time.read(result.session_id, package, context=context)
 
 ## World W1–W8：可组合非战斗世界能力
 
-Package `/6` / SQLite Schema 31（当前存储版本 33）增加显式对象定义、内部耐久结果应用、独立卡住/门闩、
+Package `/6` / SQLite Schema 31（当前存储版本 35）增加显式对象定义、内部耐久结果应用、独立卡住/门闩、
 多锁、嵌套容器、受权 GM 多格布置、普通场景光源与一次性手动联动机关。
 普通操作仍通过 `submit_command` / `submit_command_async` 的既有命令、版本与回执入口；
 对象、角色位置、库存投影与事件证据在共享事务中提交。
@@ -81,7 +101,7 @@ Schema33 保留旧行、旧 Package digest 和旧摆放回执指纹；详见
 
 OSS 新增只读挡雨／挡风贡献：显式局部挡雨格、四来向背风 N 格等高延伸、逐来源高度区间，
 与实体占地／移动阻挡分别表达。强类型当前属性输入和 provider 接口就绪；真实 WO／Package
-接入及 Environment 联调尚未完成，测试 provider 不代表生产动态防护已完成。
+接入尚未完成；Environment 已消费真实 OSS 几何接口，测试 provider 不代表生产动态防护已完成。
 总体职责、接口、示例与支持范围见 [ObjectSpatialService 总体说明](docs/OBJECT_SPATIAL_SERVICE.md)，
 本轮验证继续记入上述专项历史文档。
 
@@ -690,3 +710,25 @@ Arcane Lock/Knock and their Effects/TimeBinding lifecycle, real object attacks,
 and new NPC EVA picking/forcing DTOs remain unfinished. Existing guards remain.
 The acceptance checklist, pins, validation and missing dependencies are in
 [Openable progress](docs/OPENABLE_SERVICE_PROGRESS.md).
+
+
+## MechanismService (bounded extension, 2026-10-18)
+
+Package /10 `mechanism/2` adds named repeatable operations, finite/unlimited uses,
+no-op consumption policy, block/disarm/prepare/reset methods, real ordinary RE
+checks and explicit failure activation. Ordered read-only candidates fix MECH-01
+without removing lock/jam/bar/occupancy checks. Actual region entry, object
+operations and adopted object checks feed the existing bounded PackageEffects
+queue; NPC Signals/OB are not trigger authority. Portable instances retain their
+original identity/location and Container/Item paths. Second deadlines use
+WorldTimeService; per-Turn and public combat operations remain unsupported.
+
+Schema33→34 preserves old armed/spent rows and receipts, and adds activation
+adoptions. Schema35 adds Environment storage. Historical ENV34 saves are recognized
+by their actual table structure, retain all environment data and atomically receive
+the missing main34 mechanism upgrade; existing main34 mechanism data is retained.
+Unknown/partial structures are refused without writes. See
+[Environment compatibility](docs/ENVIRONMENT_SERVICE.md).
+Damage/save/condition/Effects and material/tool-proficiency/timed-Activity work
+remain OPEN by their respective owners. See the [exact contract](docs/MECHANISM_SERVICE.md)
+and [progress/validation record](docs/MECHANISM_SERVICE_PROGRESS.md).

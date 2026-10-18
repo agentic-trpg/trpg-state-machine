@@ -123,7 +123,7 @@ class EventCapture:
             evidence["discovery"]["reason"] = phase
         else:
             self._event_perception_evidence(sid, package, signals, evidence)
-        return _StagedEvent(event_type, payload, signals, canonical_json(evidence))
+        return _StagedEvent(event_type, payload, signals, canonical_json(evidence), phase)
 
     def _event_perception_evidence(self, sid, package, signals, evidence):
         """Signal-scoped capture at the calling producer's actual stage."""

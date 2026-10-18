@@ -186,7 +186,7 @@ class OpenableService:
         c = d.capability("openable") if d else None
         return c.jam_policy if c else "prevent_transitions"
 
-    def validate_transition(self, sid, operation, package):
+    def validate_transition(self, sid, operation, package, *, candidates=None):
         obj = self.facts.object(sid, operation.object_id)
         if obj is None:
             raise StateMachineError("invalid_target", "No object at target")
@@ -199,6 +199,9 @@ class OpenableService:
             operation.object_id,
             operation.state.value,
             jam_policy=self.jam_policy(package, operation.object_id),
+            current_state=(candidates or {}).get(operation.object_id).open_state
+            if operation.object_id in (candidates or {})
+            else None,
         )
         if self.h.objects.spatial.config(package, operation.object_id):
             self.h.objects.spatial.check_candidate(
@@ -210,6 +213,7 @@ class OpenableService:
                     open_state=operation.state.value,
                 ),
                 error_code="invalid_spatial_state",
+                candidates=candidates,
             )
 
     def validate_open(

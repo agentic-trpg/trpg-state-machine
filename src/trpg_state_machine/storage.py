@@ -7,7 +7,11 @@ from threading import get_ident
 from time import monotonic, sleep
 
 from .errors import StateMachineError
-from .storage_migrations import migrate_perception_queues
+from .storage_migrations import (
+    migrate_perception_queues,
+    reconcile_schema34,
+    validate_environment_table,
+)
 
 
 def _migration_statements(script: str) -> tuple[str, ...]:
@@ -77,7 +81,7 @@ class SqliteStore:
 
     def _migrate(self):
         scripts = [Path(__file__).with_name("_schema.sql")] + [
-            Path(__file__).with_name(f"_migration_{v}.sql") for v in range(2, 34)
+            Path(__file__).with_name(f"_migration_{v}.sql") for v in range(2, 36)
         ]
         steps = [_migration_statements(path.read_text("utf-8")) for path in scripts]
         # Migration 4 rebuilds a referenced table. Disable FK enforcement only on
@@ -87,7 +91,7 @@ class SqliteStore:
             self._conn.execute("BEGIN IMMEDIATE")
             # Read AFTER acquiring the cross-process SQLite migration write lock.
             version = self._conn.execute("PRAGMA user_version").fetchone()[0]
-            if version not in range(34):
+            if version not in range(36):
                 raise StateMachineError(
                     "unsupported_storage_schema", f"Unsupported storage version: {version}"
                 )
@@ -100,11 +104,15 @@ class SqliteStore:
                 raise StateMachineError(
                     "unsupported_storage_schema", "Unversioned nonempty database"
                 )
-            for target in range(version + 1, 34):
+            validate_environment_table(self._conn, required=version >= 35)
+            if version >= 34:
+                reconcile_schema34(self._conn, version, steps[33])
+            for target in range(version + 1, 36):
                 for statement in steps[target - 1]:
                     self._conn.execute(statement)
                 if self._conn.execute("PRAGMA user_version").fetchone()[0] != target:
                     raise StateMachineError("storage_error", "Non-contiguous schema migration")
+            reconcile_schema34(self._conn, 35, steps[33])
             if version < 5:
                 # The locked source version proves ALL existing events predate
                 # perception, even if a user command used the legacy source sentinel.

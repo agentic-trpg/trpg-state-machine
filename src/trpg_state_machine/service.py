@@ -85,7 +85,16 @@ class StateMachine(
     or player/NPC views. Only an authenticated adapter may supply TrustedContext.
     """
 
-    def __init__(self, database: str | Path, *, evaluator=None, dnd_loader=None) -> None:
+    def __init__(
+        self,
+        database: str | Path,
+        *,
+        evaluator=None,
+        dnd_loader=None,
+        environment_effects_provider=None,
+        object_protection_provider=None,
+        environment_unit_height_provider=None,
+    ) -> None:
         from dnd5e_srd_data import BundledAssetLoader
 
         loader = dnd_loader if dnd_loader is not None else BundledAssetLoader()
@@ -114,6 +123,12 @@ class StateMachine(
         self._objects = self._world.objects
         self.world_time = self._world.time
         self.scene_lifecycle = self._world.scenes
+
+        self.environment = self._world.environment
+        self.environment.command_submitter = self.submit_command
+        self.environment.effects_provider = environment_effects_provider
+        self.environment.unit_height_provider = environment_unit_height_provider
+        self._objects.spatial.protection_provider = object_protection_provider
         self._activities = ActivityHandler(
             self._store,
             self._activity_records,

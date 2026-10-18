@@ -885,7 +885,7 @@ def test_genuine_schema23_upgrade_is_atomic_preserves_all_history_and_adds_no_ca
         assert stored_rows(db) == before
     package = load_adventure_package(document).package
     with StateMachine(db, dnd_loader=item_loader()) as sm:
-        assert sm._conn.execute("PRAGMA user_version").fetchone()[0] == 33
+        assert sm._conn.execute("PRAGMA user_version").fetchone()[0] == 35
         assert_original_rows_equal(before, stored_rows(db))
         assert (
             sm._conn.execute(

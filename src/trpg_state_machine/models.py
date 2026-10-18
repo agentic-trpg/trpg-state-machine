@@ -20,6 +20,7 @@ class TrustedContext:
     can_adjudicate_checks: bool = False
     can_advance_time: bool = False
     can_place_world_objects: bool = False
+    can_manage_environment: bool = False
 
 
 @dataclass(frozen=True, slots=True)

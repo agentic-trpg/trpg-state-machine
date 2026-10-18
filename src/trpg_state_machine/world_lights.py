@@ -5,6 +5,7 @@ from dataclasses import asdict
 from dnd5e_engine.spatial import GridTopology
 from dnd5e_engine.specs import GridScene
 
+from ._execution import _execution_data
 from .errors import StateMachineError
 from .world_commands import SetLightEnabled
 
@@ -156,7 +157,13 @@ class LightService:
             raise StateMachineError("unsupported_light_mode", "Undeclared light mode")
         if old == {"enabled": enabled, "mode": mode}:
             return []
-        payload = {**asdict(op), "actor_id": actor, "enabled": enabled, "mode": mode}
+        payload = {
+            **asdict(op),
+            "actor_id": actor,
+            "enabled": enabled,
+            "mode": mode,
+            **({"execution": _execution_data(None, origin)} if origin else {}),
+        }
         events = [
             h._capture_event(
                 sid,

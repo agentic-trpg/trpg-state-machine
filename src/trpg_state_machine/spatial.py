@@ -26,6 +26,7 @@ from ._operations import (
     TraversePassage,
     UnlockDoor,
 )
+from .environment_commands import ENVIRONMENT_OPERATIONS
 from .errors import StateMachineError
 from .game_time import AdvanceGameTime
 from .models import TrustedContext
@@ -119,6 +120,10 @@ class WorldHandler:
         self.scenes = SceneLifecycleService(
             store, sessions, characters, facts, capture, npc_bootstrap
         )
+
+        from .environment import EnvironmentService
+
+        self.environment = EnvironmentService(self)
         self.capture.lights = self.objects.lights
 
     @property
@@ -1031,6 +1036,8 @@ class WorldHandler:
             raise StateMachineError("unsupported_operation", "Unsupported automatic world effect")
         self._world_operation_capability(row, operation)
         sid = row["session_id"]
+        if type(operation) in ENVIRONMENT_OPERATIONS:
+            return self.environment.operate(row, operation, package)
         if type(operation) in WORLD_CAPABILITY_OPERATIONS:
             return self.objects.operate(
                 row, actor_id, operation, package, source_command_id=source_command_id

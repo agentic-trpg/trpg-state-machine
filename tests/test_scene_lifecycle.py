@@ -1,6 +1,7 @@
 """Scene boundaries through real commands and shared SQLite participants."""
 
 import json
+from dataclasses import replace
 
 import pytest
 from navigation_support import navigation_package, pump, start
@@ -268,3 +269,37 @@ def test_legacy_counts_are_not_recomputed(tmp_path, package, context):
         assert submit(sm, sid, package, context, EnterScene(B), "leave").status == "committed"
         assert submit(sm, sid, package, context, EnterScene(A), "return").status == "committed"
         assert sm.read_session(sid, package, context=context).scenes[A].visited_count == 18
+
+
+@pytest.mark.parametrize("broken", [False, True])
+def test_mechanism_initialization_keeps_main_state_and_lifecycle_idempotency(
+    tmp_path, context, broken
+):
+    from lock_support import DOOR
+    from test_mechanism_service import extended_data
+    from test_world_durability import durability_data
+    from test_world_mechanisms import LEVER
+    from world_support import setup
+
+    data = extended_data(components=[DOOR], max_uses=3)
+    durability = durability_data()["world_objects"][0]["capabilities"][-1]
+    durability["initial_hp"] = 0 if broken else 20
+    data["world_objects"][0]["capabilities"].append(durability)
+    sm, sid, p, db = setup(tmp_path, context, data)
+    with sm:
+        state = sm._world_facts.mechanism_state(sid, LEVER)
+        assert state.status == ("broken" if broken else "armed")
+        assert (state.remaining_uses, state.activation_count) == (3, 0)
+        with sm._transaction(write=True):
+            saved = replace(state, status="disarmed", remaining_uses=2, activation_count=1)
+            sm._world_facts.set_mechanism_state(sid, LEVER, saved)
+            # The owner initialization participant must also preserve an already
+            # changed seven-column row, independently of the scene existence guard.
+            sm._world_facts.initialize_object_capabilities(sid, A, p)
+            assert not sm.scene_lifecycle.ensure_scene(sid, A, p)
+        assert sm._world_facts.mechanism_state(sid, LEVER) == saved
+        rows = stored_rows(db)
+    with StateMachine(db) as restored:
+        restored.resume_session(sid, p, context=context)
+        assert restored._world_facts.mechanism_state(sid, LEVER) == saved
+        assert stored_rows(db) == rows

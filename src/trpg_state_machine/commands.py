@@ -24,6 +24,15 @@ from ._operations import (
     UnlockDoor,
 )
 from .combat import InitializeCombat
+from .environment_commands import (
+    ENVIRONMENT_COMMANDS,
+    ENVIRONMENT_OPERATIONS,
+    BatchEnvironment,
+    EnvironmentMutation,
+    environment_operation_from_data,
+    environment_operation_to_data,
+    validate_environment_operation,
+)
 from .errors import StateMachineError
 from .game_time import AdvanceGameTime, sync_npc_schedules
 from .mechanics import RuleOperation
@@ -40,12 +49,14 @@ from .world_commands import (
     WORLD_CAPABILITY_COMMANDS,
     ActivateMechanism,
     BarObject,
+    CheckMechanism,
     ClearJam,
     ForceOpen,
     LockObject,
     PickLock,
     PutItem,
     RepositionObject,
+    ServiceMechanism,
     SetLightEnabled,
     SwitchLightMode,
     TakeItem,
@@ -78,6 +89,7 @@ OPERATIONS = {
 }
 
 OPERATIONS.update(WORLD_CAPABILITY_COMMANDS)
+OPERATIONS.update(ENVIRONMENT_COMMANDS)
 
 
 @dataclass(frozen=True, slots=True)
@@ -97,10 +109,14 @@ class TypedCommand:
     actor_id: str
     command_type: str
     payload: (
-        PickLock
+        EnvironmentMutation
+        | BatchEnvironment
+        | PickLock
         | ForceOpen
         | ClearJam
         | ActivateMechanism
+        | ServiceMechanism
+        | CheckMechanism
         | SetLightEnabled
         | SwitchLightMode
         | RepositionObject
@@ -202,6 +218,9 @@ def validate_command(command: TypedCommand) -> None:
     operation_type = OPERATIONS.get(command.command_type)
     if operation_type is None or type(command.payload) is not operation_type:
         raise StateMachineError("unsupported_operation", "Unknown command or payload type")
+    if type(command.payload) in ENVIRONMENT_OPERATIONS:
+        validate_environment_operation(command.payload)
+        return
     if type(command.payload) in NAVIGATION_OPERATIONS:
         payload = command.payload
         if (
@@ -284,7 +303,7 @@ def validate_command(command: TypedCommand) -> None:
         elif (
             key == "tool_instance_id"
             and value is None
-            and type(command.payload) in (ForceOpen, ClearJam)
+            and type(command.payload) in (ForceOpen, ClearJam, ServiceMechanism, CheckMechanism)
         ):
             continue
         elif not isinstance(value, str) or not value or len(value) > 256:
@@ -293,11 +312,15 @@ def validate_command(command: TypedCommand) -> None:
 
 def command_fingerprint(command, package, context):
     data = asdict(command)
+    if type(command.payload) in ENVIRONMENT_OPERATIONS:
+        data["payload"] = environment_operation_to_data(command.payload)["payload"]
     if type(command.payload) is RepositionObject:
         # Old receipts used exactly the four original fields.
         for field in ("expected_orientation", "to_orientation"):
             if data["payload"][field] is None:
                 data["payload"].pop(field)
+    if type(command.payload) is ActivateMechanism and command.payload.operation_id == "activate":
+        data["payload"].pop("operation_id")
     if command.check_world_effects is None:
         # Preserve canonical fingerprints of all pre-SM21 stored commands.
         data.pop("check_world_effects")
@@ -339,6 +362,7 @@ class CommandRuntime:
             CombatClosePayload,
             CheckPayload,
             *OPENABLE_CHECK_OPERATIONS,
+            CheckMechanism,
         ):
             import asyncio
 
@@ -423,11 +447,24 @@ class CommandRuntime:
                             package=package,
                         )
                 except StateMachineError as exc:
-                    if exc.code == "storage_error":
+                    if exc.code in {
+                        "storage_error",
+                        "invalid_rule_result",
+                        "rule_evaluation_failed",
+                        "rule_schema_error",
+                        "ruleset_binding_mismatch",
+                    }:
                         raise
                     self._conn.execute("ROLLBACK TO command_effects")
                     version = row["world_version"]
-                    status, error = "rejected", exc.code
+                    status = (
+                        "pending_choice"
+                        if exc.code == "mechanism_needs_choice"
+                        else "conflict"
+                        if exc.code == "version_conflict"
+                        else "rejected"
+                    )
+                    error = exc.code
                 finally:
                     self._conn.execute("RELEASE command_effects")
             end_seq = self._conn.execute(
@@ -477,6 +514,7 @@ def world_command_from_data(data):
     kind = data["command_type"]
     if type(kind) is not str or kind not in (
         *WORLD_CAPABILITY_COMMANDS,
+        *ENVIRONMENT_COMMANDS,
         "world.step_actor",
         "world.advance_time",
         "world.traverse_passage",
@@ -500,7 +538,12 @@ def world_command_from_data(data):
         payload = data["payload"]
         if kind == "set_object_state":
             payload = {**payload, "state": ObjectState(payload["state"])}
-        command = TypedCommand(**{**data, "payload": OPERATIONS[kind](**payload)})
+        operation = (
+            environment_operation_from_data(kind, payload)
+            if kind in ENVIRONMENT_COMMANDS
+            else OPERATIONS[kind](**payload)
+        )
+        command = TypedCommand(**{**data, "payload": operation})
     except (TypeError, ValueError, KeyError) as exc:
         raise StateMachineError("invalid_command", "Unknown or missing payload fields") from exc
     validate_command(command)

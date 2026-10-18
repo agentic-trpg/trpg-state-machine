@@ -5,10 +5,11 @@ the move first; CommandRuntime owns permission, replay, version and rollback.
 Facts retain ownership of all persisted state. No scene is reset on departure.
 """
 
-from dataclasses import asdict
+from dataclasses import asdict, replace
 
 from ._execution import _execution_data
 from .errors import StateMachineError
+from .events import _ActorMotion
 
 
 class SceneLifecycleService:
@@ -110,6 +111,12 @@ class SceneLifecycleService:
                     source_actor_id=actor_id,
                 )
             )
+        events[-1] = replace(
+            events[-1],
+            mechanical_motion=_ActorMotion(
+                actor_id, before.scene_id, before.cell, destination.scene_id, destination.cell
+            ),
+        )
         return events
 
     def set_flag(self, row, package, operation, *, actor_id, effect_origin=None):

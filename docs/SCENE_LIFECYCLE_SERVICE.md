@@ -1,6 +1,9 @@
 # SceneLifecycleService
 
-本地实现切片，基线 `9ce60cb`，分支 `feat/scene-lifecycle-service`。
+本地实现切片，初始基线 `9ce60cb`，分支 `feat/scene-lifecycle-service`。
+2026-10-18 已将 `origin/main@1fec17a28e15bed06739be0a3811de7b2b2da584`
+合入本分支，整合 EnvironmentService、MechanismService／效果契约及 Schema35；
+没有合并回 main。验收结果见进度文档的本次集成记录。
 设计依据为相邻架构仓库当前 MODULE_CONTRACTS §0.3／§0.3a、World Subsystem
 Design §2／§4／§5 及 2026-10-17 v0.4 评审记录；MODULE_CONTRACTS 是最终权威，
 本文件描述 SM 的实际内部接口，不冻结新的跨模块 ABI。
@@ -10,6 +13,9 @@ Design §2／§4／§5 及 2026-10-17 v0.4 评审记录；MODULE_CONTRACTS 是�
 StateMachine.scene_lifecycle 与 WorldHandler.scenes 为同一个 SceneLifecycleService。
 服务显式引用 SqliteStore、SessionAccess、CharacterFacts、WorldFacts、EventCapture、
 NPCBootstrap，不引用 StateMachine，不持有状态缓存或角色位置副本。
+EnvironmentService 仍由 WorldHandler 装配，StateMachine.environment 引用同一实例，
+保留 command_submitter、Effects／角色高度 provider 与 OSS 防护 provider 接线。
+MechanismService 仍在 WorldObjectService 内装配，原能力分发／自动触发和效果采用路径保留。
 
 | 事实／业务 | 唯一写入／协调责任 |
 |---|---|
@@ -54,7 +60,8 @@ resume_session 继续读取已存状态，不调用初始化、不补算访问�
 PC 跨场景每次进入目标递增一次，包括首次进入已预初始化的目标；同场景移动不增。
 NPC 进入不会改 Session PC 场景或访问计数。原命令重放直接返回原回执，不再进入服务。
 
-不新增访问表、初始化历史或统计。Schema／存档格式不变，历史 visited_count 按原值保留，
+不新增访问表、初始化历史或统计。本切片自身不增加 Schema，整合采用 main 的 Schema35；
+保留原 Schema34 机关迁移与 main34／ENV34 分支历史协调逻辑。历史 visited_count 按原值保留，
 即使旧值包含历史误计也不从事件重算。唯一行为修正是今后的 ensure 不再制造 PC 访问，
 删除了旧的“先计一次、预初始化再清零”流程。
 
@@ -62,8 +69,11 @@ NPC 进入不会改 Session PC 场景或访问计数。原命令重放直接返�
 在首次生命周期协调前已存在的对象状态、能力状态和环境／网格值不会被覆盖；
 已初始化实例完全跳过默认装配，保留门锁／开合／耐久／机关、物品／容器关系、NPC
 位置／机械／认知、Flags 和环境修改。各领域仍保存和初始化自己的具体数据。
-本基线的环境事实为原 mechanical_scenes；未提交工作区中的独立 EnvironmentService
-未纳入本交付，未声明其集成验收。
+整合后独立环境事实由 WorldFacts 经 scene_environments 表读写，不依赖延迟创建的 scene_instances；
+EnvironmentService 在首次访问前已写入的事实不会被 ensure_scene、进入、重访或恢复覆盖。
+生命周期不重新初始化环境，也不擅自增加 Package 默认加载／Session 自动环境接线。
+机关初值保留 main 的剩余次数、激活次数、重置期限／恢复状态及组件初始损坏判断；
+已有机关行采用 ON CONFLICT DO NOTHING，后续 ensure 不恢复次数或重置状态。
 
 ## 事件与事务兼容
 
@@ -79,6 +89,11 @@ NPC 进入不会改 Session PC 场景或访问计数。原命令重放直接返�
 扩展 Package 事件和保存 Evidence／Outbox。原活动内 savepoint 与外层 CommandRuntime
 事务负责整体回滚，目标实例／对象／NPC 创建、位置、PC 字段、访问、事件和回执同成同败。
 服务不另建幂等键；无变化遵循原 no-op/world_version 语义。
+
+到达／步进的事务内候选事件继续附带 main 的私有 `_ActorMotion`，由生命周期服务在
+实际移动后生成，供 MechanismService 的区域进入等自动触发读取。该元数据不改变公开
+事件载荷，不增加认知信号或逐动作感知证据。机关后果及原移动／访问仍在原命令事务
+同成同败；同场景 no-op 不创建 motion、不触发机关、不增加访问。
 
 Flags 只表达已声明的普通场景布尔值，不创建门锁、机关、战斗、关系或角色私有知识
 的替代写入口。所有原移动合法性、活动／战斗 guard、公开性及目标验证仍在原消费者。

@@ -82,6 +82,21 @@ class ActivateMechanism:
     scene_id: str
     object_id: str
     expected_cell: str
+    operation_id: str = "activate"
+
+
+@dataclass(frozen=True, slots=True)
+class ServiceMechanism:
+    scene_id: str
+    object_id: str
+    expected_cell: str
+    method_id: str
+    tool_instance_id: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class CheckMechanism(ServiceMechanism):
+    """A configured RE check, evaluated outside the write transaction."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -119,6 +134,8 @@ WORLD_CAPABILITY_COMMANDS = {
     "world.force_open": ForceOpen,
     "world.clear_jam": ClearJam,
     "world.activate_mechanism": ActivateMechanism,
+    "world.service_mechanism": ServiceMechanism,
+    "world.check_mechanism": CheckMechanism,
     "world.set_light_enabled": SetLightEnabled,
     "world.switch_light_mode": SwitchLightMode,
     "world.reposition_object": RepositionObject,
@@ -141,4 +158,6 @@ WORLD_CAPABILITY_OPERATIONS = (
     SetLightEnabled,
     SwitchLightMode,
     ActivateMechanism,
+    ServiceMechanism,
+    CheckMechanism,
 )

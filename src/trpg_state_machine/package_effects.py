@@ -20,12 +20,25 @@ class PackageEffects:
         queue = list(events)
         index = 0
         while index < len(queue):
-            if len(queue) > 32:
+            if (
+                len(queue)
+                + sum(
+                    len(e.payload.get("rule_results", ()))
+                    for e in queue
+                    if e.event_type == "mechanism.activated"
+                )
+                > 32
+            ):
                 raise StateMachineError(
                     "event_cascade_limit", "At most 32 consequences per command"
                 )
             event_type, payload = queue[index].event_type, queue[index].payload
             index += 1
+            queue.extend(
+                self.world.objects.mechanisms.automatic(
+                    row, package, queue[index - 1], command_id, row["event_seq"] + index
+                )
+            )
             scene_id = payload.get("scene_id", payload.get("to_scene_id"))
             for definition in package.events:
                 if definition.trigger_type != event_type or definition.scene_id != scene_id:
