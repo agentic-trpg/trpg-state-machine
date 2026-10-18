@@ -4,6 +4,10 @@
 新增 Package `state-machine-foundation/8`；当前 SQLite Schema **33**。
 本文描述实际实现，World、Openable、Container、WorldTime 历史记录继续保留。
 
+> 上述基线与分支是此前占地专项的历史记录，该专项已合并为 main@97c5af1。
+> 当前总体说明见 [OBJECT_SPATIAL_SERVICE.md](OBJECT_SPATIAL_SERVICE.md)；
+> 本轮挡雨／挡风扩展另记于文末，不将原验证数字作为本轮测试结果。
+
 ## 职责与权威来源
 
 WorldObjectService（WOS）仍是物体查询与操作公共入口。StateMachine 的
@@ -179,3 +183,72 @@ Mechanism、Durability、Light 与导航测试。运行仓库 Ruff check / forma
   贡献也会阻止未接入的 Combat 初始化。
 - 掩护 AC／豁免、攻击优势劣势、玩家物体攻击／修复、力量、推动搬运与旋转动作成本。
 - NPC Evaluation 新命令意图转换；场景、环境与时间服务的后续独立演进。
+
+## 挡雨／挡风扩展（2026-10-18）
+
+本轮分支 `feat/oss-environment-shelter`，基于执行时 fetch 的最新
+`origin/main@97c5af102bd8ca2c397b84bd4d36664983db54a7`；初始工作区干净。
+仓库及上级目录未找到适用 AGENTS.md。读取顶层最新架构／API 契约及本仓库现有
+World / OSS 支持说明，保留上述占地专项的历史身份。本轮提交／推送当前分支，不合并 main。
+
+- 保留既有占地、旋转、候选检查、接触、移动／困难地形／视觉／掩护贡献。
+  占地和防护使用同一个局部旋转变换；旧投影结构不变，新增配套不可变防护接口。
+- 新增强类型 `CurrentProtectionProperties` / `CurrentProtectionProvider` 接口。
+  显式局部挡雨 Cell 独立于实体 footprint；挡风采用显式局部背风面、局部适用风向、
+  有界 N 格和高度区间，变换后按场景边界裁剪。多来源／分离高度段保持，不填补空隙。
+- 支持单物体、场景贡献和显式候选；查询不写库、不产事件、不改变版本／RNG。
+  缺高度不默认零；未配置、明确无贡献、缺失输入和不支持分别报告。
+- 不推测开门、HP=0、视觉、移动或战斗掩护的环境含义。
+  共享门防护缺少支持的双侧几何时明确不支持；携带／容器内对象不自动产生地面防护。
+- 新建总体文档并同步 README；没有改动 Schema、Package Loader、固定 RE 依赖或命令语义。
+
+交付分别为：
+
+| 项目 | 本轮实际状态 |
+|---|---|
+| 几何计算 | 完成所述地面垂直雨、四来向整格等高挡风模型 |
+| 当前属性读取接口 | 强类型只读输入／provider 接口就绪，显式输入和测试 provider 已验证 |
+| 真实 WO／Package 接入 | 未接入；WO-01、PKG-01、SESSION-01 按原职责提供／装配当前属性 |
+| Environment 联调 | 未完成；输出已提供来源和场景高度段，消费者需结合地面／单位高度 |
+
+W-02、MECH-01 保持独立跟踪；未将本轮 OSS／Environment 工作新增为延期待办。
+原 Combat、权限、Package 绑定、事务和 Turn／Round 认知聚合边界保持。
+
+本轮实际验证命令（Windows / pwsh，仓库 cwd）：
+
+```powershell
+# 专项及原空间回归
+.venv/Scripts/python.exe -m pytest -q tests/test_object_protection.py tests/test_object_spatial_service.py tests/test_world_spatial.py --basetemp=.test-tmp/oss-protection-regression
+
+# 全套：四个进程分别将 $ossPartition 设为 0、1、2、3，临时目录独立。
+$ossPartition = 0
+$ossFiles = @(Get-ChildItem tests -Filter 'test_*.py' | Sort-Object Name)
+$ossSubset = for ($ossIndex = 0; $ossIndex -lt $ossFiles.Count; $ossIndex++) {
+    if ($ossIndex % 4 -eq $ossPartition) { $ossFiles[$ossIndex].FullName }
+}
+.venv/Scripts/python.exe -m pytest -q @ossSubset -o faulthandler_timeout=60 --basetemp=.test-tmp/oss-protection-native-$ossPartition
+
+.venv/Scripts/ruff.exe check .
+.venv/Scripts/ruff.exe format --check .
+git diff --check
+.venv/Scripts/python.exe examples/world_station.py
+```
+
+全套 collection 的文件集合与上述分区集合已比对，69 个文件无重复／遗漏，共 1,504 项。
+受限单进程运行在早期异步测试处停滞；已核对进程命令行归属后停止，不计为通过。
+原生单进程运行后为减少耗时改用上述互斥文件分区，未完成的单进程运行也不计为通过。
+全套分区使用原生权限提供 Engine 异步事件循环所需本地 socketpair，未调用外部服务。
+
+最终实际结果（均为本轮执行，不沿用上批数字）：
+
+- 专项及原空间回归：**87 passed**，exit 0；其中本轮防护专项 50 项。
+- 原生全套分区 0／1／2／3：**409 / 394 / 410 / 291 passed**，全部 exit 0，
+  合计 **1,504 passed**；各分区耗时 168.27 / 188.93 / 242.61 / 223.01 秒。
+  对 PowerShell 实际排序后的文件集合再次核对，各分区收集数与通过数一致。
+- `ruff check .`、`ruff format --check .`、`git diff --check` 均通过；
+  README／总体说明／专项记录的本地 Markdown 链接目标检查通过。
+- World 综合示例 exit 0，实际新进程恢复及回执重放通过；最终
+  `scene.workshop` / `1,0` / world version 32 / event seq 49。
+- 实际安装的 Engine / SRD 都为 0.6.0，direct_url 的 commit_id 均为
+  `d596161060555630019163ab301e1d25fd816549`；pyproject.toml 与 uv.lock 无改动。
+- 测试仅有既有 lark `sre_parse` / `sre_constants` 弃用警告。

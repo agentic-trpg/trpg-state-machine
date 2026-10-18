@@ -5,13 +5,28 @@ North is the definition's footprint; x grows east, y grows south. Clockwise
 quarter turns about the anchor map (dx,dy) to (-dy,dx), (-dx,-dy), (dy,-dx).
 """
 
+from collections.abc import Mapping
 from dataclasses import asdict, dataclass, replace
+from typing import TYPE_CHECKING
 
 from dnd5e_engine.spatial import canonical_cell_id
 
 from .errors import StateMachineError
+from .object_protection import (
+    ORIENTATIONS,
+    CurrentProtectionProperties,
+    CurrentProtectionProvider,
+    Direction,
+    ObjectProtectionProjection,
+    SceneProtectionProjection,
+    transform_local_cells,
+)
+from .object_protection import (
+    project_protection as _project_protection,
+)
 
-ORIENTATIONS = ("north", "east", "south", "west")
+if TYPE_CHECKING:
+    from .package import AdventurePackage
 
 
 @dataclass(frozen=True, slots=True)
@@ -35,8 +50,9 @@ class ObjectSpatialProjection:
 
 
 class ObjectSpatialService:
-    def __init__(self, handler):
+    def __init__(self, handler, *, protection_provider: CurrentProtectionProvider | None = None):
         self.h = handler
+        self.protection_provider = protection_provider
 
     def config(self, package, oid):
         d = self.h.facts.object_definition(package, oid)
@@ -96,17 +112,111 @@ class ObjectSpatialService:
         try:
             if type(anchor) is not str or canonical_cell_id(anchor) != anchor:
                 raise ValueError("Noncanonical anchor")
-            x, y = map(int, anchor.split(","))
+            return transform_local_cells(anchor, orientation, c.footprint if c else ((0, 0),))
         except (ValueError, AttributeError) as exc:
             raise StateMachineError("invalid_spatial_state", "Invalid object anchor") from exc
-        offsets = c.footprint if c else ((0, 0),)
-        turns = ORIENTATIONS.index(orientation)
-        result = []
-        for dx, dy in offsets:
-            for _ in range(turns):
-                dx, dy = -dy, dx
-            result.append(f"{x + dx},{y + dy}")
-        return tuple(result)
+
+    def project_protection(
+        self,
+        sid: str,
+        oid: str,
+        package: "AdventurePackage",
+        *,
+        wind_from: Direction,
+        candidate: ObjectSpatialState | None = None,
+        properties: CurrentProtectionProperties | None = None,
+    ) -> ObjectProtectionProjection:
+        """Trusted read-only composition seam; weather and exposure belong elsewhere.
+
+        Explicit current properties take precedence over the optional WO provider.
+        Candidate computation does not admit or commit a placement. Callers own
+        Package binding/authorization and a consistent read transaction, as for
+        project/scene_contributions. No protection is inferred from legacy fields.
+        """
+        if wind_from not in ORIENTATIONS:
+            raise ValueError("wind_from must be a cardinal incoming direction")
+        if candidate is not None and type(candidate) is not ObjectSpatialState:
+            raise ValueError("Expected typed candidate spatial state")
+        if properties is not None and type(properties) is not CurrentProtectionProperties:
+            raise ValueError("Expected typed current protection properties")
+        state = candidate if candidate is not None else self.state(sid, oid, package)
+        obj = self.h.facts.object(sid, oid)
+        reason = None
+        if any(p.door_object_id == oid for p in package.passages):
+            reason = "shared_door_protection_geometry_unsupported"
+        elif obj is not None and (obj["carrier_id"] is not None or obj["container_id"] is not None):
+            reason = "nonground_protection_pose_unsupported"
+        elif state.scene_id is None or state.anchor is None:
+            reason = "ground_protection_pose_required"
+        if reason:
+            return ObjectProtectionProjection(
+                oid,
+                state.scene_id,
+                wind_from,
+                "unsupported",
+                "unsupported",
+                rain_reason=reason,
+                wind_reason=reason,
+            )
+        # Validate canonical pose using the SAME transform/orientation constraints.
+        self.cells(package, oid, state.anchor, state.orientation)
+        if properties is None and self.protection_provider is not None:
+            properties = self.protection_provider.current_protection(
+                sid, oid, package, candidate=state
+            )
+        if properties is None:
+            return ObjectProtectionProjection(oid, state.scene_id, wind_from)
+        if type(properties) is not CurrentProtectionProperties:
+            raise ValueError("Provider must return typed current properties or None")
+        try:
+            grid = self.h._scene_grid(sid, state.scene_id, package)
+        except StateMachineError as exc:
+            if exc.code != "spatial_unconfigured":
+                raise
+            return ObjectProtectionProjection(
+                oid,
+                state.scene_id,
+                wind_from,
+                "unsupported",
+                "unsupported",
+                rain_reason="scene_grid_required",
+                wind_reason="scene_grid_required",
+            )
+        return _project_protection(oid, state, properties, wind_from, grid["width"], grid["height"])
+
+    def scene_protection_contributions(
+        self,
+        sid: str,
+        scene_id: str,
+        package: "AdventurePackage",
+        *,
+        wind_from: Direction,
+        properties: Mapping[str, CurrentProtectionProperties] | None = None,
+    ) -> SceneProtectionProjection:
+        """Immutable per-object outputs, including explicit unsupported shared doors.
+
+        properties is an optional mapping of object_id to typed current inputs;
+        omitted objects use the read-only provider (or stay unconfigured).
+        """
+        if wind_from not in ORIENTATIONS:
+            raise ValueError("wind_from must be a cardinal incoming direction")
+        _, objects = self.h._scene_occupants(sid, scene_id, package)
+        doors = {
+            p.door_object_id
+            for p in package.passages
+            if p.door_object_id and any(e.scene_id == scene_id for e in p.endpoints)
+        }
+        projections = []
+        for oid in sorted({oid for oid, _ in objects} | doors):
+            projection = self.project_protection(
+                sid,
+                oid,
+                package,
+                wind_from=wind_from,
+                properties=properties.get(oid) if properties is not None else None,
+            )
+            projections.append(replace(projection, scene_id=scene_id))
+        return SceneProtectionProjection(scene_id, wind_from, tuple(projections))
 
     def project(self, sid, oid, package, *, candidate=None):
         state = candidate or self.state(sid, oid, package)
