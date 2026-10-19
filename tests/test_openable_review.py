@@ -42,6 +42,9 @@ def test_yaml_lock_nonmapping_returns_structured_error(tmp_path, entry):
 @pytest.mark.parametrize("count", [1, 2])
 def test_yaml_legacy_valid_locks_preserve_digest_and_defaults(tmp_path, count):
     data = multi_data()
+    # This exact /36 source is the historical digest fixture, never a new
+    # Session under /37. Preserve its input identity and both original hashes.
+    data["manifest"]["ruleset_binding"]["evaluator_version"] = "dnd5e-evaluation/36"
     data["world_objects"][0]["capabilities"][1]["locks"] = data["world_objects"][0]["capabilities"][
         1
     ]["locks"][:count]

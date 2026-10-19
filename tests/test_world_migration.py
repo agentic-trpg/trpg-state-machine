@@ -4,18 +4,20 @@ import io
 import json
 import os
 import subprocess
-import sys
 import zipfile
 from pathlib import Path
 
-from lock_support import CRED, DOOR, lock_data, lock_loader
+import pytest
+from lock_support import CRED, DOOR, lock_loader
 from test_migrations import stored_rows
 
-from trpg_state_machine import StateMachine, TrustedContext
+from trpg_state_machine import StateMachine, StateMachineError, TrustedContext
 from trpg_state_machine.package import _validate
 
 
-def test_old_nonempty_save_preserves_facts_keys_receipts_and_adds_no_capabilities(tmp_path):
+def test_old_nonempty_save_preserves_facts_keys_receipts_and_adds_no_capabilities(
+    tmp_path, pre_frozen_python
+):
     root = Path(__file__).resolve().parents[1]
     source = tmp_path / "old"
     archive = subprocess.run(
@@ -31,14 +33,15 @@ def test_old_nonempty_save_preserves_facts_keys_receipts_and_adds_no_capabilitie
         "from lock_support import lock_data,lock_loader; "
         "from spatial_support import create; from trpg_state_machine.package import _validate; "
         "from trpg_state_machine import StateMachine,TrustedContext; import sys,json; "
-        "p=_validate(lock_data()); c=TrustedContext('authenticated:alice','player.alice'); "
+        "data=lock_data(); p=_validate(data); "
+        "c=TrustedContext('authenticated:alice','player.alice'); "
         "s=StateMachine(sys.argv[1],dnd_loader=lock_loader()); sid=create(s,p,c); "
         "v=s._conn.execute('PRAGMA user_version').fetchone()[0]; "
-        "print(json.dumps({'sid':sid,'schema':v})); "
+        "print(json.dumps({'sid':sid,'schema':v,'data':data})); "
         "s.close()"
     )
     old = subprocess.run(
-        [sys.executable, "-c", code, str(db)],
+        [str(pre_frozen_python), "-c", code, str(db)],
         cwd=tmp_path,
         check=True,
         env={**os.environ, "PYTHONPATH": str(source / "src") + os.pathsep + str(root / "tests")},
@@ -51,9 +54,11 @@ def test_old_nonempty_save_preserves_facts_keys_receipts_and_adds_no_capabilitie
     ctx = TrustedContext("authenticated:alice", "player.alice")
     with StateMachine(db, dnd_loader=lock_loader()) as sm:
         sid = record["sid"]
-        p = _validate(lock_data())
+        p = _validate(record["data"])
         sm.upgrade_instance_configs(sid, p, context=ctx)
-        sm.resume_session(sid, p, context=ctx)
+        with pytest.raises(StateMachineError) as error:
+            sm.resume_session(sid, p, context=ctx)
+        assert error.value.code == "ruleset_binding_mismatch"
         after = stored_rows(db)
         for table in before.keys() - {"door_locks", "door_credentials", "objects"}:
             assert after[table] == before[table], table

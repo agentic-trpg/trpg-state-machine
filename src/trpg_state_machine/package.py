@@ -399,7 +399,13 @@ def _validate(data: dict, *, allow_legacy_audit=False) -> AdventurePackage:
     if dnd and (
         not isinstance(binding.data_revision, str)
         or not re.fullmatch(r"sha256:[0-9a-f]{64}", binding.data_revision)
-        or (binding.evaluator_version != "dnd5e-evaluation/36" and not legacy_audit)
+        # /36 source remains readable for pinned saves and instance upgrades.
+        # Execution/restore verifies the unchanged identity against RE /37;
+        # parsing must never silently repin an existing Session.
+        or (
+            binding.evaluator_version not in ("dnd5e-evaluation/36", "dnd5e-evaluation/37")
+            and not legacy_audit
+        )
     ):
         _fail("unsupported_ruleset", "manifest.ruleset_binding", "Invalid pinned D&D binding")
     if not dnd and binding not in (SYNTHETIC_RULESET, SYNTHETIC_EVALUATION_RULESET):

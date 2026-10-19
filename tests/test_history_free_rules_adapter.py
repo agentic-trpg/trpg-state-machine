@@ -27,7 +27,7 @@ from trpg_state_machine.package import _validate
 from trpg_state_machine.rules_migration import migrate_package_16
 
 ROOT = Path(__file__).resolve().parents[1]
-PIN = "d596161060555630019163ab301e1d25fd816549"
+PIN = "a011eba3ea2226e22d8081294ee38d3ec193b325"
 BASELINE = "5ff7a807d5b29cceb4311dcb2fe5b1182ead6bd1"
 
 
@@ -224,7 +224,7 @@ def test_explicit_complete_predecessor_package_migration_and_real_new_session(
     original = deepcopy(old)
     new = migrate_package_16(old, loader=assets, package_version="rf4.migrated")
     assert old == original
-    assert new["manifest"]["ruleset_binding"]["evaluator_version"] == "dnd5e-evaluation/36"
+    assert new["manifest"]["ruleset_binding"]["evaluator_version"] == "dnd5e-evaluation/37"
     assert new["manifest"]["package_version"] != old["manifest"]["package_version"]
     for kind, foundation in new["rule_bindings"].items():
         assert foundation["rng_state"] == old["rule_bindings"][kind]["rng_state"]

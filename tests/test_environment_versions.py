@@ -578,12 +578,11 @@ def test_provider_registration_failure_is_atomic_and_replay_is_a_noop(tmp_path, 
 
 
 def test_schema35_migration_is_atomic_and_preserves_all_original_rows(
-    tmp_path, context, monkeypatch
+    tmp_path, context, monkeypatch, pre_frozen_python
 ):
     import io
     import os
     import subprocess
-    import sys
     import zipfile
     from pathlib import Path
 
@@ -608,10 +607,11 @@ from trpg_state_machine import TrustedContext
 import sys,json
 c=TrustedContext('authenticated:alice','player.alice')
 sm,sid,p,db=setup(Path(sys.argv[1]),c,large_data());seed(sm,sid,p,c)
+(Path(sys.argv[1])/'old-package.json').write_text(json.dumps(large_data()),encoding='utf-8')
 print(json.dumps([sid,sm._conn.execute('PRAGMA user_version').fetchone()[0]]));sm.close()
 """
     result = subprocess.run(
-        [sys.executable, "-c", code, str(tmp_path)],
+        [str(pre_frozen_python), "-c", code, str(tmp_path)],
         cwd=tmp_path,
         check=True,
         capture_output=True,
@@ -642,10 +642,12 @@ print(json.dumps([sid,sm._conn.execute('PRAGMA user_version').fetchone()[0]]));s
     monkeypatch.undo()
     from trpg_state_machine.package import _validate
 
-    p = _validate(large_data())
+    p = _validate(json.loads((tmp_path / "old-package.json").read_text("utf-8")))
     with StateMachine(db, dnd_loader=lock_loader()) as sm:
         sm.upgrade_instance_configs(sid, p, context=context)
-        sm.resume_session(sid, p, context=context)
+        with pytest.raises(StateMachineError) as error:
+            sm.resume_session(sid, p, context=context)
+        assert error.value.code == "ruleset_binding_mismatch"
         assert_original_rows_equal(before, stored_rows(db))
         assert sm.environment.versions.current(sid, A) == (0, 0)
         baseline = project(sm, sid, p)
@@ -661,7 +663,9 @@ print(json.dumps([sid,sm._conn.execute('PRAGMA user_version').fetchone()[0]]));s
         current = project(sm, sid, p)
         assert current != baseline
     with StateMachine(db, dnd_loader=lock_loader()) as restored:
-        restored.resume_session(sid, p, context=context)
+        with pytest.raises(StateMachineError) as error:
+            restored.resume_session(sid, p, context=context)
+        assert error.value.code == "ruleset_binding_mismatch"
         assert restored.environment.versions.current(sid, A) == (1, 0)
         assert project(restored, sid, p) == current
 

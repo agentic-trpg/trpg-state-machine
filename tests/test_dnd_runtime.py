@@ -95,7 +95,7 @@ def test_real_attack_full_delta_rng_and_database_parity(
         before = sm.read_combat_snapshot(sid, package, context=context)
         rng = sm.read_rng_context(sid, package, context=context)
         request = RuleEvaluationRequest(
-            schema_version="engine-evaluation/23",
+            schema_version="engine-evaluation/24",
             session_id=sid,
             command_id=command.command_id,
             operation_kind="combat.intent",

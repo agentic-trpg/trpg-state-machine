@@ -5,7 +5,6 @@ import json
 import os
 import sqlite3
 import subprocess
-import sys
 import zipfile
 from concurrent.futures import ThreadPoolExecutor
 from copy import deepcopy
@@ -33,7 +32,7 @@ ROOT = Path(__file__).resolve().parents[1]
 HISTORY = {"33": "9ce60cb", "main34": "afe6871", "env34": "06c7af8"}
 
 
-def historical_save(tmp_path, lineage):
+def historical_save(tmp_path, lineage, pre_frozen_python):
     """Produce filled saves through actual archived Session/command implementations."""
     source = tmp_path / "old"
     archive = subprocess.run(
@@ -63,11 +62,14 @@ from pathlib import Path
 from dataclasses import replace
 from world_support import setup,submit
 from spatial_support import create
-from lock_support import A,B
+from lock_support import A,B,lock_loader
+from dnd5e_engine.evaluation_ruleset import ruleset_binding
 from test_world_mechanisms import LEVER
 from trpg_state_machine import TrustedContext,ActivateMechanism,AdvanceGameTime
 c=TrustedContext('authenticated:alice','player.alice')
 data=json.loads(Path(sys.argv[2]).read_text('utf-8'))
+data['manifest']['ruleset_binding']=ruleset_binding(lock_loader()).model_dump(mode='json')
+Path(sys.argv[2]).write_text(json.dumps(data),encoding='utf-8')
 sm,sid,p,db=setup(Path(sys.argv[1]),c,data)
 other=create(sm,p,c,'second.session')
 op=(ActivateMechanism(A,LEVER,'0,0','up') if sys.argv[3]=='main34'
@@ -91,7 +93,7 @@ print(json.dumps([sid,other,sm._conn.execute('PRAGMA user_version').fetchone()[0
 sm.close()
 """
     result = subprocess.run(
-        [sys.executable, "-c", code, str(tmp_path), str(package_file), lineage],
+        [str(pre_frozen_python), "-c", code, str(tmp_path), str(package_file), lineage],
         cwd=tmp_path,
         env={
             **os.environ,
@@ -103,7 +105,7 @@ sm.close()
     assert result.returncode == 0, result.stderr
     sid, other, version = json.loads(result.stdout)
     assert version == (33 if lineage == "33" else 34)
-    return tmp_path / "world.db", sid, other, _validate(data)
+    return tmp_path / "world.db", sid, other, _validate(json.loads(package_file.read_text("utf-8")))
 
 
 def snapshot(db):
@@ -127,16 +129,18 @@ def assert_current(sm):
 
 @pytest.mark.parametrize("lineage", HISTORY)
 def test_real_historical_upgrade_preserves_sessions_environment_and_mechanisms(
-    tmp_path, context, lineage
+    tmp_path, context, lineage, pre_frozen_python
 ):
-    db, sid, other, package = historical_save(tmp_path, lineage)
+    db, sid, other, package = historical_save(tmp_path, lineage, pre_frozen_python)
     before = stored_rows(db)
     with StateMachine(db, dnd_loader=lock_loader()) as sm:
         assert_current(sm)
         assert_original_rows_equal(before, stored_rows(db))
         sm.upgrade_instance_configs(sid, package, context=context)
         sm.upgrade_instance_configs(other, package, context=context)
-        sm.resume_session(sid, package, context=context)
+        with pytest.raises(StateMachineError) as error:
+            sm.resume_session(sid, package, context=context)
+        assert error.value.code == "ruleset_binding_mismatch"
         assert sm.world_time.read(sid, package, context=context).game_tick == 3
         assert sm.world_time.read(other, package, context=context).game_tick == 0
         assert (
@@ -188,9 +192,9 @@ def test_real_historical_upgrade_preserves_sessions_environment_and_mechanisms(
     "lineage,step", [("33", 34), ("33", 35), ("main34", 35), ("env34", 34), ("env34", 35)]
 )
 def test_historical_upgrade_failure_rolls_back_every_table_and_version(
-    tmp_path, monkeypatch, lineage, step
+    tmp_path, monkeypatch, lineage, step, pre_frozen_python
 ):
-    db, _, _, _ = historical_save(tmp_path, lineage)
+    db, _, _, _ = historical_save(tmp_path, lineage, pre_frozen_python)
     before = snapshot(db)
     read = Path.read_text
 
@@ -238,8 +242,8 @@ def test_new_database_upgrade_and_failure_are_atomic(tmp_path, monkeypatch):
         assert sm._conn.execute("SELECT * FROM mechanism_activations").fetchall() == []
 
 
-def test_env34_concurrent_openers_migrate_once_under_existing_lock(tmp_path):
-    db, _, _, _ = historical_save(tmp_path, "env34")
+def test_env34_concurrent_openers_migrate_once_under_existing_lock(tmp_path, pre_frozen_python):
+    db, _, _, _ = historical_save(tmp_path, "env34", pre_frozen_python)
     before = stored_rows(db)
     barrier = Barrier(3)
 
@@ -255,8 +259,10 @@ def test_env34_concurrent_openers_migrate_once_under_existing_lock(tmp_path):
 
 
 @pytest.mark.parametrize("damage", ["env_shape", "partial_mechanism", "missing_env35"])
-def test_ambiguous_or_partial_schema_is_rejected_without_writes(tmp_path, damage):
-    db, _, _, _ = historical_save(tmp_path, "env34")
+def test_ambiguous_or_partial_schema_is_rejected_without_writes(
+    tmp_path, damage, pre_frozen_python
+):
+    db, _, _, _ = historical_save(tmp_path, "env34", pre_frozen_python)
     with sqlite3.connect(db) as connection:
         if damage == "env_shape":
             connection.execute("ALTER TABLE scene_environments ADD COLUMN unrecognized TEXT")

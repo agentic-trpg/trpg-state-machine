@@ -4,7 +4,8 @@
 
 Schema39 将已存在的实例配置读取依赖迁移至 WorldFacts.instances；配置与当前事实分离。
 ContainerService 使用一次操作的 ContainmentState；旧存档须显式升级配置，不在恢复 getter 中修复。
-冻结 RE 接入仍因实际工具检定 ABI 缺失而阻塞，精确依赖及 Session 绑定保持原值。
+冻结 RE／Openable 整合已接入 a011eba；Runtime 一次装配并共享默认或自定义固定素材。
+旧 /36 绑定保留，save／resume／新规则执行不匹配时明确拒绝，不静默迁移。
 [当前字段与调用路径、迁移和接口证据](INSTANCE_CONFIGURATION_PROGRESS.md) 优先于下文历史缺口表。
 
 2026-10-19；SM 本地实现说明。职责依据上游 MODULE_CONTRACTS §0.3、§2.4、§4.3、
@@ -87,19 +88,21 @@ SM 读取绑定并显式交给 RE；RE 不读取 SM 数据库。结果仍匹配�
 配置不匹配发生在真实求值、资源支付及权威 RNG 推进前。拒绝和 OCC 冲突不会推进 RNG；
 已提交重试经授权后返回原回执。旧 Package 参数和公开 API 保留。
 
-### 固定素材集实际状态
+### 固定素材集生命周期
 
-`pyproject.toml`／`uv.lock` 仍固定 RE/SRD `d596161060555630019163ab301e1d25fd816549`，
-distribution 0.6.0、evaluator `dnd5e-evaluation/36`。该实际安装接口没有 FrozenRuleset，
-`verify_ruleset` 每次重新计算实际可变 loader 的全部生效素材摘要，无摘要缓存。
+Engine／SRD 同时固定 `a011eba3ea2226e22d8081294ee38d3ec193b325`。StateMachine 装配时，
+默认选择 RE `get_default_ruleset()`；自定义最终组合完成后 `freeze_ruleset(source)`，然后同一
+引用注入 WorldHandler 和 RulesAdapter，供创建、普通／Openable 求值、availability 与校验使用。
+RE 的 binding 已验证并保存在 FrozenRuleset；Session 持久三项绑定只与该绑定比较，不重算摘要。
 
-只读核对上游 `3718f7c3d35424cc7910bcc19673083a357afdb7`：已有
-`freeze_ruleset`／`get_default_ruleset`／`FrozenRuleset`，但上游分支基于 evaluator `/37`，
-与本 pin 分叉，而且不含 SM 当前依赖的 `evaluation_openable.py`。直接换 pin 不是兼容的
-素材接口接入，会引入其他协议变化并失去现有 Openable 入口。因此本轮**未接入快速校验**，
-也没有将已绑定 Session 改为 `/37`。后续需要包含 Openable 的兼容固定候选、相应协议／
-旧 Session 迁移审阅，再按现有 Git SHA 依赖管理方式接入。没有修改 RE 仓库、复制 RE
-实现、按 Session 复制全量素材，或对可变 loader 保存旧摘要绕过检测。
+来源或配置改变时重建 Runtime／显式传入新 FrozenRuleset，不热改正在运行的规则；重启可重新
+冻结一次，再验证已有 pin。RE getter 返回防御性深拷贝，内部固定素材不会随调用方修改。
+不另建 SM 素材缓存或持久复制规则集。详见 [路径、计数与限制](INSTANCE_CONFIGURATION_PROGRESS.md)。
+
+`/36` 完整 Package 仍可用于读取原 pin 和显式 upgrade_instance_configs，但新 RE `/37`
+拒绝 save／resume／新规则求值，不推进 RNG、不改世界或旧绑定。没有活跃存档自动规则迁移；
+继续原部署，或用显式新 Package／新 Session 创建。原 `/4`、`/8` audit-only 及不完整事实限制保持。
+`migrate_package_16` 仅转换可证明完整的源内容为新版本，复用一次冻结，不迁移既有 Session。
 
 ## 实例化、激活与进入
 

@@ -2,13 +2,13 @@
   "manifest": {
     "schema_version": "state-machine-foundation/4",
     "adventure_id": "example.npc_station",
-    "package_version": "gc3.1",
+    "package_version": "gc3.2",
     "title": "Lantern Station",
     "entry_scene_id": "scene.platform",
     "ruleset_binding": {
       "ruleset_id": "dnd-2024-srd-5.2.1",
       "data_revision": "sha256:d67e647f7657f919adac89211ff235ff5f7054e679c99907cdf07b97a8605247",
-      "evaluator_version": "dnd5e-evaluation/36"
+      "evaluator_version": "dnd5e-evaluation/37"
     },
     "player_setup": {
       "player_count": 1,

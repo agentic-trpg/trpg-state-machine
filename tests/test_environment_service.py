@@ -773,7 +773,7 @@ def test_strong_types_limits_and_unknown_input(factory):
 
 
 def test_real_schema33_migration_preserves_all_rows_bindings_and_atomicity(
-    tmp_path, context, monkeypatch
+    tmp_path, context, monkeypatch, pre_frozen_python
 ):
     root = Path(__file__).resolve().parents[1]
     source = tmp_path / "old"
@@ -795,10 +795,11 @@ import sys,json
 c=TrustedContext('authenticated:alice','player.alice')
 sm,sid,p,db=setup(Path(sys.argv[1]),c,large_data())
 r=submit(sm,sid,p,replace(c,can_advance_time=True),AdvanceGameTime(0,3),'old.tick')
+(Path(sys.argv[1])/'old-package.json').write_text(json.dumps(large_data()),encoding='utf-8')
 print(json.dumps([sid,sm._conn.execute('PRAGMA user_version').fetchone()[0]]));sm.close()
 """
     result = subprocess.run(
-        [sys.executable, "-c", code, str(tmp_path)],
+        [str(pre_frozen_python), "-c", code, str(tmp_path)],
         cwd=tmp_path,
         env={
             **os.environ,
@@ -829,10 +830,12 @@ print(json.dumps([sid,sm._conn.execute('PRAGMA user_version').fetchone()[0]]));s
     with sqlite3.connect(db) as conn:
         assert conn.execute("PRAGMA user_version").fetchone()[0] == 33
     monkeypatch.undo()
-    p = _validate(large_data())
+    p = _validate(json.loads((tmp_path / "old-package.json").read_text("utf-8")))
     with StateMachine(db, dnd_loader=lock_loader()) as sm:
         sm.upgrade_instance_configs(sid, p, context=context)
-        sm.resume_session(sid, p, context=context)
+        with pytest.raises(StateMachineError) as error:
+            sm.resume_session(sid, p, context=context)
+        assert error.value.code == "ruleset_binding_mismatch"
         assert_original_rows_equal(before, stored_rows(db))
         assert sm._conn.execute("PRAGMA user_version").fetchone()[0] == 39
         assert sm._conn.execute("SELECT * FROM scene_environments").fetchall() == []

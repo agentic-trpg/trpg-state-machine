@@ -80,3 +80,46 @@ def legacy_python():
     )
     assert result.returncode == 0, result.stderr
     return str(destination / ".venv" / ("Scripts/python.exe" if os.name == "nt" else "bin/python"))
+
+
+@pytest.fixture(scope="session")
+def pre_frozen_python():
+    """Build a genuine /36 save with this branch's committed predecessor."""
+    root = Path(__file__).resolve().parents[1]
+    historical = root / ".test-tmp" / "pre-frozen-ec9c714"
+    if not (historical / "uv.lock").exists():
+        archive = subprocess.run(
+            [
+                "git",
+                "archive",
+                "--format=zip",
+                "ec9c7147c1da6456342857760ee40c88abaa3a5f",
+                "src",
+                "pyproject.toml",
+                "uv.lock",
+            ],
+            cwd=root,
+            check=True,
+            capture_output=True,
+        ).stdout
+        with zipfile.ZipFile(io.BytesIO(archive)) as contents:
+            contents.extractall(historical)
+    synced = subprocess.run(
+        [
+            "uv",
+            "sync",
+            "--locked",
+            "--group",
+            "dev",
+            "--cache-dir",
+            str(root / ".uv-cache"),
+            "--project",
+            str(historical),
+        ],
+        cwd=root,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+    )
+    assert synced.returncode == 0, synced.stderr
+    return historical / ".venv" / ("Scripts/python.exe" if os.name == "nt" else "bin/python")

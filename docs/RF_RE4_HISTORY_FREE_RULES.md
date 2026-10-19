@@ -1,5 +1,14 @@
 # RF-RE4: history-free Rules adapter
 
+2026-10-20 follow-up: Engine/SRD now both pin
+`a011eba3ea2226e22d8081294ee38d3ec193b325`: Evaluation `/24`, Snapshot `/17`,
+evaluator `/37`, Stage Facts `/2`, Openable `/1`, Availability `/13`.
+SM retains one RE FrozenRuleset per selected corpus. See
+[current production paths, counters and old-save policy](INSTANCE_CONFIGURATION_PROGRESS.md).
+Existing `/36` saves keep their binding: audit/instance upgrades remain available,
+while rule execution/save/resume under `/37` explicitly refuses the mismatch.
+No automatic live-save repin or new combat/magic capability is provided.
+
 2026-10-17 follow-up: the current RE pin and bounded Openable additions are in
 [Openable progress](OPENABLE_SERVICE_PROGRESS.md); the RF-RE4 baseline evidence below
 remains historical. Combat/magic Openable gaps remain explicitly unfinished.

@@ -553,7 +553,7 @@ def test_scene_contribution_seam_and_combat_property_guard(tmp_path, context):
 
 
 def test_real_schema32_save_receipt_replay_and_all_old_columns_preserved(
-    tmp_path, context, monkeypatch
+    tmp_path, context, monkeypatch, pre_frozen_python
 ):
     root = Path(__file__).resolve().parents[1]
     source = tmp_path / "old"
@@ -577,10 +577,11 @@ def test_real_schema32_save_receipt_replay_and_all_old_columns_preserved(
         "cmd=command(s,sid,p,c,RepositionObject('scene.platform',OBSTACLE,'2,0','1,0'),'old'); "
         "r=s.submit_command(cmd,p,context=c); d=asdict(cmd); d.pop('check_world_effects'); "
         "v=s._conn.execute('PRAGMA user_version').fetchone()[0]; "
-        "print(json.dumps({'sid':sid,'command':d,'receipt':asdict(r),'schema':v})); s.close()"
+        "print(json.dumps({'sid':sid,'command':d,'receipt':asdict(r),'schema':v,"
+        "'data':spatial_world_data()})); s.close()"
     )
     result = subprocess.run(
-        [sys.executable, "-c", code, str(tmp_path)],
+        [str(pre_frozen_python), "-c", code, str(tmp_path)],
         cwd=tmp_path,
         env={
             **os.environ,
@@ -614,11 +615,13 @@ def test_real_schema32_save_receipt_replay_and_all_old_columns_preserved(
         assert connection.execute("PRAGMA user_version").fetchone()[0] == 32
     monkeypatch.undo()
     gm = replace(context, can_place_world_objects=True)
-    p = _validate(spatial_world_data())
+    p = _validate(old["data"])
     with StateMachine(db, dnd_loader=lock_loader()) as sm:
         sid = old["sid"]
         sm.upgrade_instance_configs(sid, p, context=context)
-        sm.resume_session(sid, p, context=context)
+        with pytest.raises(StateMachineError) as error:
+            sm.resume_session(sid, p, context=context)
+        assert error.value.code == "ruleset_binding_mismatch"
         assert_original_rows_equal(before, stored_rows(db))
         assert sm._conn.execute("PRAGMA user_version").fetchone()[0] == 39
         assert {r[0] for r in sm._conn.execute("SELECT orientation FROM objects")} == {"north"}

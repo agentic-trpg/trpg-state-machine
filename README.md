@@ -1,7 +1,7 @@
 # Agentic TRPG — State Machine Foundation
 
 MechanismService 的 `mechanism/3` 配置和独立 `mechanism-effect/1` 端口支持强类型
-规则效果定义、单体／区域目标筛选、原命令关联及有序事务采用验证。固定 RE /23
+规则效果定义、单体／区域目标筛选、原命令关联及有序事务采用验证。固定 RE /24
 尚无真实机关来源的 `rules.effect`，生产明确返回 unsupported；接受结果仅通过契约
 fixtures 验证。持续状态、零 HP／死亡、完整 Effects 生命周期和战斗采用仍 OPEN。
 详见 [机关效果契约](docs/MECHANISM_EFFECTS_CONTRACT.md)。
@@ -16,7 +16,8 @@ Session Management 已分离为 SessionCreation 创建协调、SessionAccess 授
 不制造 PC 进入事件。对象能力、Scene 配置、NPC senses 和辅助读取现已取持久实例数据；
 旧库须显式调用 upgrade_instance_configs，恢复 getter 不补字段、不重置状态。
 ContainerService 在一次读取／候选状态中共用邻接索引和子树重量，位置变更使旧重量失效。
-RE 冻结素材接入仍有真实工具检定 ABI 阻塞，原精确依赖保留；三项状态与证据见
+RE 冻结素材已按 a011eba 整合提交接入：Runtime 一次选定，初始化／求值／查询／校验共用。
+旧 /36 存档保留审计与显式实例升级，新 RE 不静默重绑；三项状态与计数证据见
 [实例配置／容器／RE 核对记录](docs/INSTANCE_CONFIGURATION_PROGRESS.md)。
 实际调用链、旧 Session 策略和字段缺口见 [Session 管理](docs/SESSION_MANAGEMENT.md)，
 检查与交付见 [进度](docs/SESSION_MANAGEMENT_PROGRESS.md)。
@@ -344,9 +345,10 @@ SQLite 测试。Schema 20 不提供降级迁移，旧运行时不能直接打开
 
 ## 安装与验证
 
-当前固定 Engine/SRD 完整 Git SHA（包含 Openable 支持；通用 RF-RE4 协议保留）
-`d596161060555630019163ab301e1d25fd816549`，Evaluator `/36`、Evaluation `/23`、
-Snapshot `/17`、Availability `/13`，RF-4 引入 SQLite Schema 23（GC-3 升至 24，GC-4 升至 25）。当前 Snapshot/OCC 从受控事实
+当前固定 Engine/SRD 完整 Git SHA（包含 Openable 与冻结素材整合）
+`a011eba3ea2226e22d8081294ee38d3ec193b325`，Evaluator `/37`、Evaluation `/24`、
+Snapshot `/17`、Availability `/13`、Stage Facts `/2`。冻结生命周期与旧 `/36` 存档策略见
+[当前接入记录](docs/INSTANCE_CONFIGURATION_PROGRESS.md)。RF-4 引入 SQLite Schema 23（GC-3 升至 24，GC-4 升至 25）。当前 Snapshot/OCC 从受控事实
 组件读取，不加载完整战斗事件历史；历史事件继续通过授权审计入口读取。
 [RF-RE4 契约、归属、兼容与验证记录](docs/RF_RE4_HISTORY_FREE_RULES.md) 说明了当前边界。
 

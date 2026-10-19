@@ -30,7 +30,7 @@ from trpg_state_machine.package import load_adventure_package
     [None, "CREATE TABLE door_locks", "CREATE TABLE door_credentials", "PRAGMA user_version = 25"],
 )
 def test_genuine_schema24_upgrade_is_atomic_and_does_not_grant_locks(
-    tmp_path, context, monkeypatch, fault
+    tmp_path, context, monkeypatch, fault, pre_frozen_python
 ):
     root = Path(__file__).parents[1]
     archive = subprocess.run(
@@ -47,7 +47,7 @@ def test_genuine_schema24_upgrade_is_atomic_and_does_not_grant_locks(
     old = json.loads(
         subprocess.run(
             [
-                sys.executable,
+                str(pre_frozen_python),
                 str(root / "tests/_lock_legacy_worker.py"),
                 str(source),
                 str(db),
@@ -94,7 +94,9 @@ def test_genuine_schema24_upgrade_is_atomic_and_does_not_grant_locks(
         assert sm._conn.execute("SELECT count(*) FROM door_locks").fetchone()[0] == 0
         assert sm._conn.execute("SELECT count(*) FROM door_credentials").fetchone()[0] == 0
         sm.upgrade_instance_configs(old["sid"], p, context=context)
-        sm.resume_session(old["sid"], p, context=context)
+        with pytest.raises(StateMachineError) as error:
+            sm.resume_session(old["sid"], p, context=context)
+        assert error.value.code == "ruleset_binding_mismatch"
         raw = old["command"]
         del raw["check_world_effects"]
         replay = sm.submit_command(world_command_from_data(raw), p, context=context)

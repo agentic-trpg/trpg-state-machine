@@ -8,6 +8,7 @@ from pathlib import Path
 source, db, document = sys.argv[1:]
 sys.path.insert(0, str(Path(source) / "src"))
 
+from dnd5e_engine.evaluation_ruleset import ruleset_binding  # noqa: E402
 from item_support import DAGGER, A, command, create, item_loader, navigate  # noqa: E402
 
 from trpg_state_machine import (  # noqa: E402
@@ -26,6 +27,9 @@ from trpg_state_machine.npc_results import (  # noqa: E402
 )
 from trpg_state_machine.package import load_adventure_package  # noqa: E402
 
+data = json.loads(Path(document).read_text("utf-8"))
+data["manifest"]["ruleset_binding"] = ruleset_binding(item_loader()).model_dump(mode="json")
+Path(document).write_text(json.dumps(data), encoding="utf-8")
 p = load_adventure_package(document).package
 ctx = TrustedContext("authenticated:alice", "player.alice", ("npc.caretaker", "npc.attendant"))
 with StateMachine(db, dnd_loader=item_loader()) as sm:

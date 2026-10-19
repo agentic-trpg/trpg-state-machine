@@ -1,5 +1,9 @@
 # ContainerService 专项修复
 
+2026-10-20 冻结规则后续：Engine／SRD 同 pin a011eba，容器 require_unbound 的规则素材读取
+共享 WorldHandler 注入的固定对象；实例字段、邻接索引与重量 memo 的权威／生命周期不变。
+回归与当前限制见 [本批记录](INSTANCE_CONFIGURATION_PROGRESS.md)。
+
 ## 2026-10-20 内容物索引、候选关系及重量复用
 
 ContainerService._rows 将一次读取的 objects 装配为 ContainmentState；直接子关系只建一次，

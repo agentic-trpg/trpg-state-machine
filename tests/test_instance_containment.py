@@ -37,20 +37,25 @@ def prohibit_templates(monkeypatch, package):
     monkeypatch.setattr(AdventurePackage, "__getattribute__", read)
 
 
-def test_live_loader_still_detects_changes_before_execution(tmp_path, context, monkeypatch):
+def test_changed_source_requires_new_runtime_and_rejects_old_binding(tmp_path, context):
+    from dnd5e_engine.evaluation_ruleset import ruleset_binding
+
+    source = lock_loader()
     sm, sid, package, db = setup(tmp_path, context, container_data())
     with sm:
         before = stored_state(db)
-        original = sm._rules.loader.get_item
-
-        def changed(slug):
-            item = original(slug)
-            return item.model_copy(update={"name": item.name + " changed"}) if item else None
-
-        monkeypatch.setattr(sm._rules.loader, "get_item", changed)
+        item = source.get_item("dagger")
+        item.name += " changed"
         row = sm._conn.execute("SELECT * FROM sessions WHERE session_id=?", (sid,)).fetchone()
+        sm._rules._verify_dnd_binding(package, row)
+        assert sm._rules.loader.get_item("dagger").name != item.name
+    with StateMachine(db, dnd_loader=source) as changed:
+        assert (
+            ruleset_binding(changed._rules.loader).data_revision
+            != package.ruleset_binding.data_revision
+        )
         with pytest.raises(StateMachineError, match="Evaluator data") as error:
-            sm._rules._verify_dnd_binding(package, row)
+            changed.resume_session(sid, package, context=context)
         assert error.value.code == "ruleset_binding_mismatch"
         assert stored_state(db) == before
 

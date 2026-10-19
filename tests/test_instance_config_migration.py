@@ -4,7 +4,6 @@ import io
 import json
 import os
 import subprocess
-import sys
 import zipfile
 from pathlib import Path
 
@@ -19,7 +18,9 @@ from trpg_state_machine.instance_data import InstanceData
 from trpg_state_machine.package import _validate
 
 
-def test_real_schema38_save_preserves_every_fact_and_requires_explicit_upgrade(tmp_path, context):
+def test_real_schema38_save_preserves_every_fact_and_requires_explicit_upgrade(
+    tmp_path, context, pre_frozen_python
+):
     root = Path(__file__).resolve().parents[1]
     old = tmp_path / "producer"
     source = subprocess.check_output(["git", "archive", "--format=zip", "f826cb8", "src"], cwd=root)
@@ -43,11 +44,12 @@ with s._transaction(write=True):
     obj = s._world_facts.object(sid, CRED)
     s._world_facts.transfer_item(sid, obj, container_id=BOX)
     s._characters.sync_world_inventory(sid)
+(Path(sys.argv[1])/'package.json').write_text(json.dumps(container_data()),encoding='utf-8')
 s.close()
 print(json.dumps({'session_id': sid, 'database': str(db)}))
 """
     result = subprocess.run(
-        [sys.executable, "-c", script, str(destination), str(old / "src")],
+        [str(pre_frozen_python), "-c", script, str(destination), str(old / "src")],
         cwd=root,
         check=True,
         capture_output=True,
@@ -57,7 +59,7 @@ print(json.dumps({'session_id': sid, 'database': str(db)}))
     identities = json.loads(result.stdout)
     db, sid = identities["database"], identities["session_id"]
     before = stored_state(db)
-    package = _validate(container_data())
+    package = _validate(json.loads((destination / "package.json").read_text("utf-8")))
     with StateMachine(db, dnd_loader=lock_loader()) as sm:
         assert sm._conn.execute("PRAGMA user_version").fetchone()[0] == 39
         after_schema = stored_state(db)
@@ -70,7 +72,10 @@ print(json.dumps({'session_id': sid, 'database': str(db)}))
         assert sm._world_facts.object(sid, CRED)["container_id"] == BOX
         after = stored_state(db)
         assert {key: after[key] for key in before} == before
-        saved = sm.save_session(sid, package, context=context)
+        with pytest.raises(StateMachineError) as error:
+            sm.save_session(sid, package, context=context)
+        assert error.value.code == "ruleset_binding_mismatch"
+        saved = sm.read_session(sid, package, context=context)
         assert sm.upgrade_instance_configs(sid, package, context=context) == saved
         assert stored_state(db) == after
 

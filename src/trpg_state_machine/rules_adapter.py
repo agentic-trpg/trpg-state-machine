@@ -208,6 +208,9 @@ def delta_changes(request, result):
 def validate_dnd_result(request, result):
     try:
         result = RuleEvaluationResult.model_validate(copy.deepcopy(result))
+        # RE /24 verifies /2 stage coverage against this exact input. Uncovered
+        # is a valid explicit limitation, never upgraded to sensory Evidence or
+        # complete coverage by SM; existing operation admission remains unchanged.
         result.verify_request(request)
     except (ValidationError, ValueError, TypeError) as exc:
         raise StateMachineError(
@@ -540,7 +543,7 @@ class RulesAdapter:
     def request(self, command, package, snapshot, rng, *, row=None):
         row = row if row is not None else self._pinned_row(command.session_id, package)
         return RuleEvaluationRequest(
-            schema_version="engine-evaluation/23",
+            schema_version="engine-evaluation/24",
             session_id=command.session_id,
             command_id=command.command_id,
             operation_kind=command.command_type,

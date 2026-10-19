@@ -1,4 +1,4 @@
-"""SM-owned mechanism-effect/1 port. This is NOT the pinned RE /23 ABI.
+"""SM-owned mechanism-effect/1 port. This is NOT the pinned RE /24 ABI.
 
 No rules, random draws, effect clocks or synthetic actor identities live here.
 The production port refuses all evaluation until RE implements world sources.
@@ -316,7 +316,7 @@ class UnsupportedMechanismEffects:
             choice=None,
             error=RuleError(
                 code="unsupported_mechanism_effect",
-                reason="Pinned RE /23 has no world-source effect operation",
+                reason="Pinned RE /24 has no world-source effect operation",
             ),
         )
 

@@ -1,8 +1,10 @@
 # OpenableService 范围与验收记录
 
 2026-10-20：操作侧、jam／force／lock policy／DC 改读持久实例配置，状态及凭证继续由原表独占。
-新 RE 冻结候选缺少原工具检定 ABI，兼容实验已撤回，原精确依赖与安全检查保持。
-详见 [实例闭包及外部接口阻塞](INSTANCE_CONFIGURATION_PROGRESS.md)。
+原外部 ABI 阻塞已由 a011eba 整合提交解除，Engine／SRD 同时固定该完整 SHA。
+Openable 外层 /1 使用真实嵌套 Evaluation /24、Snapshot /17、evaluator /37 和 stage facts /2；
+冻结素材与普通求值共用，合法失败 accepted、工具检查及原子提交保持。uncovered 阶段不改写覆盖。
+详见 [实例闭包与冻结素材接入](INSTANCE_CONFIGURATION_PROGRESS.md)；下文旧 pin／数字为历史批次。
 
 **状态：部分交付，未完成原任务的完整四阶段范围。** 阶段 3 的战斗费用、魔法封闭及生命周期未实现；拒绝测试不计为玩法完成。
 

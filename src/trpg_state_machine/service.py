@@ -84,9 +84,12 @@ class StateMachine(
         object_protection_provider=None,
         environment_unit_height_provider=None,
     ) -> None:
-        from dnd5e_srd_data import BundledAssetLoader
+        from dnd5e_engine.evaluation_ruleset import freeze_ruleset, get_default_ruleset
 
-        loader = dnd_loader if dnd_loader is not None else BundledAssetLoader()
+        # Select the final effective corpus once, before opening the store. All
+        # consumers below retain this same RE-owned snapshot. To edit sources,
+        # construct a new runtime (or inject an explicitly rebuilt FrozenRuleset).
+        loader = get_default_ruleset() if dnd_loader is None else freeze_ruleset(dnd_loader)
         self._evaluator = evaluator if evaluator is not None else SyntheticEvaluator()
         self._store = SqliteStore(database)
         self._sessions = SessionAccess(self._store)
