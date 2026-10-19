@@ -1,7 +1,7 @@
 # Session 游戏时间运行与协调
 
-2026-10-19；`feat/session-time-coordination`。采用“统一游戏时间，界面自行显示，
-后台按需推进并结算”。当前存储 Schema37；RE/SRD pin 不变。上游职责依据为
+2026-10-20；`feat/session-time-coordination`。采用“统一游戏时间，界面自行显示，
+后台按需推进并结算”。当前存储 Schema38；RE/SRD pin 不变。上游职责依据为
 MODULE_CONTRACTS §0.3、§8 的唯一事实所有者和共同短事务约束。本文件描述本仓库
 实际接口；不将完整 Effects、休息或 NPC 秒制策略称为已经实现。
 
@@ -64,12 +64,27 @@ dto = sm.read_time_sync(sid, package, context=context)
 `SetTimeRunning` 的 action 为 start、pause、rate、cancel。pause 和 rate 先按旧倍率
 处理固定生效目标，再更新配置并建立新基准；亚 tick 余量也保存。尚有待处理工作时
 不会越过它修改配置；查看 progress，先继续工作再以新 command_id 重提控制。
-cancel 只取消 Runtime 的目标进度，不取消领域自己的到期条件或发放活动完成收益；
-重新查询仍会发现到期工作。业务模块的取消操作仍由该模块负责；尚有当前／过去到期工作时拒绝删除目标，防止跳过已到期结算。
+cancel 的语义由现存目标决定，仍须通过授权、OCC 和幂等检查：
+
+| 目标状态 | cancel 行为 |
+|---|---|
+| 没有目标／已 completed | 回执式无操作；不改运行行、generation、实时基准或余量，不提交当前推算时间。重新安排唤醒仍指向原来的到期瞬间 |
+| realtime、pending（预算耗尽） | 拒绝 `time_advance_pending`；已经流逝的实时结算责任必须继续 |
+| 有明确领域等待 | 拒绝 `time_wait_unresolved`；只能由该领域的获准回复解除或取消 |
+| 可取消的 manual／activity 目标或 interrupted 目标 | 若当前仍有到期工作则拒绝；否则仅删除目标，从实际停点重建基准，不补入跳时／等待耗费的现实时间 |
+| Combat | 保留 Combat 所有权限制，不允许用 cancel 丢弃尚欠 Round 时间 |
+
+cancel 不取消领域的到期条件，不发放活动完成收益。没有显式等待标识的旧 waiting
+端口仍须由其领域／宿主先处理当前到期工作，不能靠 cancel 跳过。
 
 创建保存最终 TimeBinding 和初始暂停元数据；旧 Session 无运行行时读为暂停／未配置。
 恢复读取保存的倍率、mode 和继续目标，从事实查询重建最近边界。进程单调时钟起点
 从不保存，恢复后显式 attach 才建立新基准，默认不补算离线时间。
+恢复的 admission 或 realtime 预算目标仍使用原来的固定目标。提交后若 Driver 的本进程
+投影落后于已提交 tick，Driver 在写事务外将实际计时基准衔接到已提交进度，重排下一
+期限；后续命令和定时推进使用同一修复后的基准。不会重新采样扩大原命令目标。
+正常提交时投影没有落后，就保持原单调起点及亚 tick 精度；不每次提交重置基准。
+回滚候选时间不参与基准修复；停机期间未保存的推算部分不补算。
 `driver.close()` 取消唤醒、释放所有权；`StateMachine.close()` 释放全部 Driver 和 Store。
 释放前未请求按需提交的推算部分不冒充已保存游戏时间；需要精确停点时先提交 pause。
 
@@ -98,11 +113,12 @@ interrupted 则必须停止推进；继续时不补入等待处理耗费的现�
 |---|---|
 | committed_tick | 已提交的唯一权威游戏时间 |
 | estimated_target_tick | 本次响应时实时基准推算的整数目标；暂停、战斗或 suspended 时回到已提交值，未完成目标另列于 pending_target_tick |
-| display_base_tick、display_fraction_numerator / denominator | 响应时展示基准及亚 tick 余量；只供显示 |
+| display_base_tick、display_fraction_numerator / denominator | 响应时展示基准及亚 tick 余量；只供显示。正常 paused／detached 保留已保存余量，停止外推；业务 suspended／combat 只显示已提交整数停点，不外推等待时长 |
 | rate_numerator / denominator | 已明确保存的游戏 tick／现实秒倍率；未配置均为 None |
 | state | running、paused、combat、suspended 或 detached；只有 running 允许客户端继续外推 |
 | generation、world_version | 基准失效代次及当前世界版本；客户端丢弃旧响应，业务命令仍使用世界 OCC |
 | pending_target_tick、progress_status、progress_reason | 最近推进目标及 completed／pending／waiting／interrupted 状态和停止原因；completed 记录仍可保留用于审计 |
+| time_wait | 可选 `TimeWaitReference(wait_id, version)`，仅在领域明确声明的当前等待存在时返回；标识及版本用于回复定位，不是绕过时间同步的权限 |
 
 客户端在接收响应时保存**自己的**单调计时基准，显示
 `display_base + fraction + 本地接收后时长 × rate`。不传输或比较主机单调时钟绝对值，
@@ -113,7 +129,7 @@ interrupted 则必须停止推进；继续时不补入等待处理耗费的现�
 
 `SessionRuntime.time` 是 Runtime 使用的协调组件；领域实现
 `TimeBoundaryConsumer.next_boundary(sid, package)` 和
-`settle_one(row, package, command_id) -> DueResult(events, status, reason)`。
+`settle_one(row, package, command_id) -> DueResult(events, status, reason, wait=None)`。
 每次都读取该领域实际到期条件。协调器不保存第二份期限、规则或时钟。
 现有机关由 SQL min(reset_at_tick) 及索引查询，取消／改期立即反映，没有调度副本。
 
@@ -134,9 +150,62 @@ progress_status，不能将它解释成“已完成活动／已达到终点”�
 由领域保存。测试仅验证该契约，不冒充完整玩家／DM 选择 UI。
 
 需要 RE、玩家选择或外部等待时，领域在本事务内保存自己的可靠继续工作并返回 waiting；
-Runtime 保存边界／目标并结束短事务，外部求值／选择在事务外进行，再经原领域命令
-采用，之后重提原目标。接口禁止在 settle_one 中持有写事务进行外部 I/O。
+Runtime 保存边界／目标并结束短事务。声明具体等待及获准回复的接口见下节。
+接口禁止在 settle_one 中持有写事务进行外部 I/O。
 interrupted 保留实际停点和目标，活动是否继续／取消及收益都由活动模块决定。
+
+## 领域等待回复契约
+
+普通世界操作、活动操作、真实 Check 在未完成的非 Combat 推进期间仍被限制。
+注册的领域边界消费者可以实现内部 `TimeWaitConsumer` 端口，在 `DueResult` 中返回
+`wait=DomainTimeWait(domain_wait_id, version, "waiting")`：
+
+- `read_time_wait(sid, domain_wait_id, package)` 读取该领域保存的等待状态和版本。
+- `authorize_time_wait_command(row, package, command, context, wait)` 只读地判断允许的
+  命令类型、业务主体、选择结构和业务权限；不能信任客户端传来的绕过标志。重放前也
+  重新授权，因此不要在这里要求旧等待仍然 open；当前状态由 Runtime 在重放之后校验。
+- `resolve_time_wait(row, package, command, wait, *, events)` 在既有业务执行／RE 采用后、
+  原 savepoint 内保存领域选择结果，返回 `TimeWaitResolution(outcome, events=())`。
+  参数 events 是本命令已经暂存的真实业务／RE 事件，可用于判断实际检定结果；不得
+  在此执行外部 I/O。具体选择是否合法、下一阶段及收益全部由领域负责。
+
+Runtime 为每次等待生成 Session 绑定的不透明标识，持久化领域名、领域等待标识／版本、
+边界 tick 和原推进 command_id。共同 `TypedCommand.time_wait` 只接受类型化的
+`TimeWaitReference`；JSON 入口仅接受闭合的 `{wait_id, version}`，不接受 bypass／skip
+字段。引用本身不授予任何权限，必须匹配已安装的对应领域端口。Session／Package、Actor
+控制、handoff、领域授权、世界版本和指纹检查仍执行。时间控制及合成规则操作不能作为
+回复；未经领域声明的任意世界命令也不能借用引用。
+
+回复在当前已提交边界执行，不先同步到原目标，也不采样等待期间的现实时间。领域必须
+保存同一等待的新版本及与 outcome 一致的状态，Runtime 才会采用：
+
+| outcome | 领域保存状态 | 后续推进 |
+|---|---|---|
+| waiting | waiting，版本递增 | 仍停在边界；客户端必须使用新的等待版本回复 |
+| continue | resolved | 原 source／target 不变，保存 pending，由原命令重试或显式同目标继续；仍逐边界结算 |
+| interrupt | interrupted | 原目标保留为 interrupted，不能直接继续；须取消原目标后作新的业务决定 |
+| cancel | cancelled | 将待推进目标截到当前边界；继续时仍结算同 tick 的其他到期工作，不发放原终点收益 |
+
+不匹配的持久化结果、存储或事件发布故障会回滚整个回复，含业务状态、RNG、等待、
+推进记录、事件、Outbox 和回执。普通业务拒绝沿用原执行器的拒绝语义；RE 故障／
+未归类领域错误沿用原事务回滚路径。RE 仍走事务外 prepare／evaluate、短事务 adopt，
+采用前重复授权并检查版本。回复的事件和回执与原推进命令分开保存。
+
+对于尚未 ready 的原业务 admission，获准的 waiting／continue 回复仅在其
+`execution_version == 回复前 world_version` 且原 command_id／source／target 匹配时，
+将 execution_version 衔接到此次回复提交后的版本。原指纹、原 expected_world_version、
+目标和余量不变；这条映射只覆盖当前等待关联的原命令，不能吸收其他合法写入。比如
+等待期间允许的纯 GM flag 写入仍令原 admission 真正冲突；回复使用最新版本也不会
+抹掉这个冲突，宿主需取得冲突回执后按当前事实另作决定。
+
+相同 command_id、相同内容的回复重试在重新授权后返回旧回执，不再次解除等待或推进；
+换新 command_id 的旧等待／旧版本回复拒绝。历史等待保留，新的等待使用新标识，
+旧回复不能释放新等待。重启保留这些记录，宿主须重新安装原领域端口；缺失端口明确
+返回 `unsupported_time_wait`。同刻跨领域依赖的宿主选择点仍单独保留，未伪造生产选择 UI。
+
+本次没有合适的生产等待回复消费者；`test_session_time_wait_commands.py` 用持久化
+测试领域适配器通过真实共同命令入口完成上述链路，包含真实固定 RE Check，并非
+现有机关／Combat 已发生死锁的证明，也不代表完整休息或 Effects 系统已经接入。
 
 ## 玩家操作、版本与回执
 
@@ -172,8 +241,10 @@ Availability、地图、对象和保存查询不偷偷推进；纯 GM flag 修�
 | legacy NPC 日程 | 保留已有 world 命令后的 sync_npc_schedules 语义，未改写成秒制调度；秒制 NPC Runtime／OB／Gate 继续 unsupported；Combat 增加世界 tick 不代表这些旧消费者已完成 Combat 接线 |
 | 已有导航 Activity | 保留原一步一步执行与实际中断机制；它没有已确认的时间消耗／收益规则，本轮没有虚构旅行速度或导航完成时长 |
 | 活动跳时端口 | 绝对目标、让出实时权、逐边界停止及重新建立基准已经实现；完整休息／旅行完成收益、周期伤害和外部求值继续器仍须对应业务模块实现 |
+| 领域等待回复端口 | 已有持久化标识、共同命令入口、领域授权／解决和原 admission 版本衔接；生产消费者待接入，端到端验证使用明确标记的测试领域适配器 |
 | Effects／燃料／充能／天气／照明／休息 | 没有生产秒制期限提供方；不将 Calendar／昼夜换算当作照明事实变化；18 秒效果仅为持久化端口测试替身 |
 
-Schema37 只新增运行元数据、推进进度、命令准入表及机关查询索引；不改旧表行／列，
-不回算历史 Session，也不为历史 Session 自动填充运行表。迁移、真实机关、固定 RE、
-可控时钟／调度器和全仓回归共同验证，结果记录于本分支交付说明。
+Schema37 新增运行元数据、推进进度、命令准入表及机关查询索引；Schema38 只新增
+`session_time_waits` 和每 Session 唯一活跃等待索引。不改旧表行／列，不回算历史
+Session，也不自动填充新表。迁移、真实机关、固定 RE、可控时钟／调度器和实际运行的
+回归范围见 [实施记录](SESSION_TIME_COORDINATION_PROGRESS.md)。

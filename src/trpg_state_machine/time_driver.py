@@ -93,6 +93,19 @@ class TimeDriver:
     def target(self, run):
         if self.generation != run["generation"]:
             self.rebase(run)
+        target = self._project(run)
+        scope = self.runtime.store._scope
+        # A durable admission/pending target can predate this process's clock
+        # origin. Rejoin only after commit, never from a write candidate. Ordinary
+        # elapsed-time commits leave the original epoch and fractional time intact.
+        if (scope is None or not scope.write) and target < self.time.world.facts.time_state(
+            self.sid
+        )[1]:
+            self.rebase(run)
+            target = self._project(run)
+        return target
+
+    def _project(self, run):
         elapsed = max(0, self.clock_ns() - self.base_ns)
         if run["mode"] != "running" or run["rate_numerator"] is None:
             return self.base_tick

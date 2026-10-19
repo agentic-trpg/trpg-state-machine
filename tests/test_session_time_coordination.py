@@ -393,15 +393,25 @@ def test_schema36_migration_preserves_every_old_row_and_does_not_create_run_rows
     path = sm._conn.execute("PRAGMA database_list").fetchone()[2]
     sm.close()
     with sqlite3.connect(path) as db:
-        for table in ("session_time_runs", "session_time_progress", "time_command_admissions"):
+        for table in (
+            "session_time_waits",
+            "session_time_runs",
+            "session_time_progress",
+            "time_command_admissions",
+        ):
             db.execute(f"DROP TABLE {table}")
         db.execute("DROP INDEX mechanism_time_boundary")
         db.execute("PRAGMA user_version=36")
     before = stored_rows(path)
     with StateMachine(path) as restored:
-        assert restored._conn.execute("PRAGMA user_version").fetchone()[0] == 37
+        assert restored._conn.execute("PRAGMA user_version").fetchone()[0] == 38
         assert_original_rows_equal(before, stored_rows(path))
-        for table in ("session_time_runs", "session_time_progress", "time_command_admissions"):
+        for table in (
+            "session_time_waits",
+            "session_time_runs",
+            "session_time_progress",
+            "time_command_admissions",
+        ):
             assert restored._conn.execute(f"SELECT * FROM {table}").fetchall() == []
 
 

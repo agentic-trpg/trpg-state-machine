@@ -7,6 +7,7 @@ from typing import Protocol
 from .errors import StateMachineError
 from .game_time import AdvanceGameTime
 from .time_binding import TimeBinding, integer
+from .time_waits import DomainTimeWait, TimeWaitReference, TimeWaits
 
 
 @dataclass(frozen=True, slots=True)
@@ -56,6 +57,7 @@ class DueResult:
     events: tuple = ()
     status: str = "continue"  # waiting / interrupted end this short transaction
     reason: str | None = None
+    wait: DomainTimeWait | None = None
 
 
 class TimeBoundaryConsumer(Protocol):
@@ -87,6 +89,7 @@ class TimeSync:
     progress_status: str | None
     progress_reason: str | None
     schema_version: str = "session-time-sync/1"
+    time_wait: TimeWaitReference | None = None
 
 
 class SessionTime:
@@ -95,6 +98,7 @@ class SessionTime:
         self.store = runtime.store
         self.consumers = {"mechanisms": world.objects.mechanisms}
         self.drivers = {}
+        self.waits = TimeWaits(self)
         # Multiple domain owners at one instant require a reviewed dependency policy.
         self.resolve_simultaneous = None
 
@@ -152,9 +156,17 @@ class SessionTime:
     def _advance(self, row, package, target, command_id, source, budget):
         self.store.require_write()
         sid = row["session_id"]
+        if self.waits.active(sid) is not None:
+            raise StateMachineError(
+                "time_wait_unresolved", "Domain reply must release the current wait"
+            )
         current = self.world.facts.time_state(sid)[1]
         integer(target, "target_tick", minimum=current, code="invalid_operation")
         pending = self.progress(sid)
+        if pending and pending["reason"] == "wait_interrupt":
+            raise StateMachineError(
+                "time_advance_interrupted", "Abandon the interrupted target first"
+            )
         if (
             pending
             and pending["status"] != "completed"
@@ -203,6 +215,12 @@ class SessionTime:
             result = self.consumers[chosen].settle_one(staged_row, package, command_id)
             if result.status not in ("continue", "waiting", "interrupted"):
                 raise StateMachineError("invalid_time_consumer", "Invalid boundary outcome")
+            if result.wait is not None:
+                if result.status != "waiting":
+                    raise StateMachineError(
+                        "invalid_time_wait", "Only waiting outcomes declare a wait"
+                    )
+                self.waits.open(row, package, chosen, result.wait, command_id)
             events.extend(
                 self.effects._expand_events(staged_row, package, list(result.events), command_id)
             )
@@ -267,11 +285,21 @@ class SessionTime:
         remainder = Fraction(self.run(sid)["remainder"])
         if type(self.world.facts.time_state(sid)[0]) is not TimeBinding:
             raise StateMachineError("unsupported_time_protocol", "Realtime requires world-time/1")
-        self.initialize(sid)
         run, driver = self.run(sid), self.drivers.get(sid)
         if self.world._active_combat(sid):
             raise StateMachineError("time_mode_conflict", "Combat owns time")
         if op.action == "cancel":
+            saved = self.progress(sid)
+            if saved is None or saved["status"] == "completed":
+                return []  # Receipt only: elapsed realtime and its epoch are untouched.
+            if self.waits.active(sid) is not None:
+                raise StateMachineError(
+                    "time_wait_unresolved", "Only the waiting domain may release its wait"
+                )
+            if saved["source"] == "realtime" and saved["status"] == "pending":
+                raise StateMachineError(
+                    "time_advance_pending", "Elapsed realtime must finish its bounded settlement"
+                )
             current = self.world.facts.time_state(sid)[1]
             if any(tick <= current for _, tick in self.boundaries(sid, package)):
                 raise StateMachineError(
@@ -281,6 +309,7 @@ class SessionTime:
             self.db.execute("DELETE FROM session_time_progress WHERE session_id=?", (sid,))
             remainder = Fraction(0)
         else:
+            self.initialize(sid)
             saved = self.progress(sid)
             suspended = saved and saved["status"] != "completed"
             if suspended and saved["source"] != "realtime" and op.action != "pause":
@@ -356,7 +385,13 @@ class SessionTime:
                 if run["mode"] == "running"
                 else "paused"
             )
-            target = driver.target(run) if state == "running" else Fraction(tick)
+            target = (
+                driver.target(run)
+                if state == "running"
+                else Fraction(tick) + Fraction(run["remainder"])
+                if state in ("paused", "detached")
+                else Fraction(tick)
+            )
             fraction = target - int(target)
             return TimeSync(
                 tick,
@@ -372,4 +407,5 @@ class SessionTime:
                 pending["target_tick"] if pending else None,
                 pending["status"] if pending else None,
                 pending["reason"] if pending else None,
+                time_wait=self.waits.reference(sid),
             )

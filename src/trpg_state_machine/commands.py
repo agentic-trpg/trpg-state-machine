@@ -42,6 +42,7 @@ from .navigation_models import (
     StartNavigation,
 )
 from .time_coordination import AdvanceSessionTime, SetTimeRunning, validate_time_operation
+from .time_waits import TimeWaitReference, validate_wait_reference
 from .world_commands import (
     OPENABLE_CHECK_OPERATIONS,
     WORLD_CAPABILITY_COMMANDS,
@@ -153,6 +154,7 @@ class TypedCommand:
     expected_world_version: int
     schema_version: str = "sm-command/1"
     check_world_effects: CheckWorldEffects | None = None
+    time_wait: TimeWaitReference | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -182,6 +184,17 @@ def validate_command(command: TypedCommand) -> None:
         raise StateMachineError("invalid_command", "Command identities must be bounded strings")
     if type(command.expected_world_version) is not int or command.expected_world_version < 0:
         raise StateMachineError("invalid_operation", "Expected a nonnegative integer version")
+    if command.time_wait is not None:
+        validate_wait_reference(command.time_wait)
+        if type(command.payload) in (
+            AdvanceGameTime,
+            AdvanceSessionTime,
+            SetTimeRunning,
+            RuleOperation,
+        ):
+            raise StateMachineError(
+                "invalid_time_wait", "This operation cannot be a domain wait reply"
+            )
     effects = command.check_world_effects
     if effects is not None:
         if (
@@ -373,6 +386,7 @@ class CommandRuntime:
         with self._transaction(write=True):
             row = self._session(command.session_id, package, context)
             self._authorize_command(row, command.actor_id, command.payload, context)
+            self._session_runtime.authorize_time_wait_reply(row, package, command, context)
             self._npc_handoff_command_guard(command)
             replay = self._command_replay(command, fingerprint)
             if replay is not None:
@@ -385,6 +399,8 @@ class CommandRuntime:
             else:
                 self._conn.execute("SAVEPOINT command_effects")
                 try:
+                    if command.time_wait is not None:
+                        self._session_runtime.time.waits.validate(row, package, command)
                     if package.portable_items:
                         self._characters.rule_components(
                             command.session_id,
@@ -410,6 +426,9 @@ class CommandRuntime:
                                 source_command_id=command.command_id,
                             )
                         )
+                    events.extend(
+                        self._session_runtime.finish_time_wait_reply(row, package, command, events)
+                    )
                     if type(command.payload) not in (
                         AdvanceGameTime,
                         AdvanceSessionTime,
@@ -438,6 +457,7 @@ class CommandRuntime:
                         "rule_evaluation_failed",
                         "rule_schema_error",
                         "ruleset_binding_mismatch",
+                        "invalid_time_wait_result",
                     }:
                         raise
                     self._conn.execute("ROLLBACK TO command_effects")
@@ -473,7 +493,7 @@ class CommandRuntime:
 
 def world_command_from_data(data):
     """Closed local data adapter. Context/capabilities never come from these fields."""
-    if type(data) is not dict or set(data) != {
+    if type(data) is not dict or set(data) - {"time_wait"} != {
         "session_id",
         "command_id",
         "actor_id",
@@ -517,7 +537,12 @@ def world_command_from_data(data):
             if kind in ENVIRONMENT_COMMANDS
             else OPERATIONS[kind](**payload)
         )
-        command = TypedCommand(**{**data, "payload": operation})
+        ref = data.get("time_wait")
+        if ref is not None:
+            if type(ref) is not dict or set(ref) != {"wait_id", "version"}:
+                raise StateMachineError("invalid_time_wait", "Expected a closed wait reference")
+            ref = TimeWaitReference(**ref)
+        command = TypedCommand(**{**data, "payload": operation, "time_wait": ref})
     except (TypeError, ValueError, KeyError) as exc:
         raise StateMachineError("invalid_command", "Unknown or missing payload fields") from exc
     validate_command(command)

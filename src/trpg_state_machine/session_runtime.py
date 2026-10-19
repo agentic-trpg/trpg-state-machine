@@ -20,6 +20,8 @@ from .world_commands import ActivateMechanism, RepositionObject
 
 def _fingerprint(command, digest, binding, context):
     data = asdict(command)
+    if command.time_wait is None:
+        data.pop("time_wait")  # Preserve every pre-wait command fingerprint.
     if type(command.payload) in ENVIRONMENT_OPERATIONS:
         data["payload"] = environment_operation_to_data(command.payload)["payload"]
     if type(command.payload) is RepositionObject:
@@ -81,6 +83,13 @@ class SessionRuntime:
             for driver in tuple(self.time.drivers.values()):
                 driver.refresh()
 
+    def authorize_time_wait_reply(self, row, package, command, context):
+        if self.time is not None:
+            return self.time.waits.authorize(row, package, command, context)
+
+    def finish_time_wait_reply(self, row, package, command, events=()):
+        return [] if self.time is None else self.time.waits.finish(row, package, command, events)
+
     def coordinate_combat_time(self, row, package, command_id, previous_round, event_offset=0):
         """RE retains Turn rules; only a completed Round advances six world ticks."""
         import json
@@ -113,6 +122,16 @@ class SessionRuntime:
         """
         if self.time is None or package.legacy_audit_only:
             return command
+        if command.time_wait is not None:
+            with self.store.transaction():
+                row = self.access._session(command.session_id, package, context)
+                self.access._authorize_command(row, command.actor_id, command.payload, context)
+                self.access._npc_handoff_command_guard(command)
+                self.authorize_time_wait_reply(row, package, command, context)
+                if self._command_replay(command, fingerprint):
+                    return command
+                self.time.waits.validate(row, package, command)
+            return command  # Domain reply executes at the committed boundary.
         from .time_coordination import SetTimeRunning
 
         control = type(command.payload) is SetTimeRunning and command.payload.action != "cancel"
@@ -225,8 +244,8 @@ class SessionRuntime:
                 "WHERE session_id=? AND command_id=?",
                 (version, int(ready), sid, command.command_id),
             )
+        self.refresh_time_drivers()
         if not ready:
-            self.refresh_time_drivers()
             raise StateMachineError(
                 "time_advance_pending", "Retry this command to continue its target"
             )

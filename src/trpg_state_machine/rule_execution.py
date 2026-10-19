@@ -53,6 +53,7 @@ class RuleExecution:
         with self.store.transaction():
             row = self.sessions._session(command.session_id, package, context)
             self.sessions._authorize_command(row, command.actor_id, command.payload, context)
+            self.runtime.authorize_time_wait_reply(row, package, command, context)
             self.sessions._npc_handoff_command_guard(command)
             if replay := self.runtime._command_replay(command, fingerprint):
                 return replay
@@ -142,6 +143,7 @@ class RuleExecution:
         with self.store.transaction(write=True):
             row = self.sessions._session(command.session_id, package, context)
             self.sessions._authorize_command(row, command.actor_id, command.payload, context)
+            self.runtime.authorize_time_wait_reply(row, package, command, context)
             self.sessions._npc_handoff_command_guard(command)
             if replay := self.runtime._command_replay(command, fingerprint):
                 return replay
@@ -158,6 +160,8 @@ class RuleExecution:
                 status, error = "rejected", capability
             elif noop:
                 try:
+                    if command.time_wait is not None:
+                        self.runtime.time.waits.validate(row, package, command)
                     current_plan = check_service.prepare_check(
                         row, command.actor_id, command.payload, package
                     )
@@ -174,6 +178,8 @@ class RuleExecution:
                 result, changes = validate_dnd_result(request, result)
                 self._conn.execute("SAVEPOINT dnd_effects")
                 try:
+                    if command.time_wait is not None:
+                        self.runtime.time.waits.validate(row, package, command)
                     if domain_check:
                         current_plan = check_service.prepare_check(
                             row, command.actor_id, command.payload, package
@@ -282,6 +288,9 @@ class RuleExecution:
                                     ),
                                 )
                             )
+                    events.extend(
+                        self.runtime.finish_time_wait_reply(row, package, command, events)
+                    )
                     events = self.effects._expand_events(row, package, events, command.command_id)
                     events.extend(
                         self.runtime.coordinate_combat_time(
@@ -334,6 +343,12 @@ class RuleExecution:
                     error, version = exc.code, row["world_version"]
                 finally:
                     self._conn.execute("RELEASE dnd_effects")
+            if noop and status == "committed" and command.time_wait is not None:
+                with self.store.savepoint():
+                    events = self.runtime.finish_time_wait_reply(row, package, command)
+                    events = self.effects._expand_events(row, package, events, command.command_id)
+                    self.world._assert_spatial_consistency(command.session_id, package)
+                    version = self.runtime.publish(command, row, package, events)
             receipt = self.runtime.finish(
                 command, context, fingerprint, row, status, version, error
             )
