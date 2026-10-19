@@ -6,65 +6,110 @@ SceneLifecycle、Grid 或 Terrain 重构。本文描述本仓库实际接口，�
 
 ## 所有权与真实提交路径
 
-### Snapshot 依赖设计（2026-10-19，实施前审计）
+### 版本化 Snapshot（Schema 36）
 
-基线 `origin/main@d0fda62`。现有模型没有环境／防护专用版本，不能用
-`world_version` 或 `environment.changed` 作为完整失效依据。采用不可变完整输入的
-内容身份；每次查询仍在同一 SQLite 读取事务中核对，原始事实不建立可变镜像。
+本批基于 `feat/environment-derived-snapshot@382a4ae`，替换上一批“查询时读取全部输入并
+比较内容”的有效性机制。`scene_environment_versions` 每个 Session／Scene 维护两个
+持久化、非负整数版本：`source_version`（环境来源输入）和 `protection_version`
+（防护计算输入）。没有最终结果版本、独立风向版本或 world_version 替代。
 
-| 依赖／所有者 | 改变操作与当前身份验证 | 影响的结果层／事务处理 |
-|---|---|---|
-| WorldFacts 环境事实 | initialize/base/source add/replace/remove/protection/batch；读取并校验完整 frozen facts，包括范围、高度、优先级、exposure、observable | 最终环境；静态防护直接参与合成，不要求重新投影对象；沿原命令 savepoint／COMMIT，回滚后重新读旧事实 |
-| WO 当前防护提供方 | 开关、损毁、部署或注入输入变化；每次按确切 candidate 读取完整 frozen CurrentProtectionProperties | 防护投影及最终环境；不从 HP、视觉或 footprint 猜属性，提供方仍拥有政策 |
-| OSS 姿态与来源集合 | 放置、移动、旋转、拾取、容器／场景迁移、开关、HP=0；读取当前对象集合、ObjectSpatialState、非地面／共享门资格及当前属性 | 两层；不纳入角色位置、无关物品字段或总 world_version；无关空间物体变化允许保守失效 |
-| Grid 当前场景配置 | 当前 spatial Scene 行或未初始化 Package grid；规范化配置形成身份；包含边界尺寸 | 两层；不复制权威网格，不用 Light 投影作为环境依赖 |
-| Effects 来源提供方 | 创建、移动、字段修改、结束；每次读取完整不可变来源 tuple 和可用状态 | 最终环境；保留 Effects 所有权，无期限镜像；无提供方与显式空 tuple 不混同 |
-| Session／固定 Package／Scene | sid、package digest／版本／ruleset binding、scene_id 隔离；公开入口每次执行原 SessionAccess pin 校验 | 两层；缓存实例还隔离 Store；可信内部投影仍由调用方负责 binding 和权限 |
-| 查询条件 | Cell、height_ft（None 与 0 不同）；高度区间使用各实际计算的点结果 | 最终环境；防护共享原高度段，不生成多层三维地图 |
-| Actor／权限／Light 可见性 | 每次公开查询重新验证控制权限、当前场景、public scope、感官／conditions 与逐格 can_see | 不缓存授权；区域内只准备一次观察者／Grid／Light，整批任一失败就不返回部分结果 |
+| 实际依赖／所有者 | 权威推进入口 | source_version | protection_version |
+|---|---|---:|---:|
+| WorldFacts 基础条件、局部来源的增加／替换／删除、area／priority／exposure／observable | scene_environments 的 INSERT／UPDATE／DELETE 同步触发器；initialize、SetBase、Source 操作和 Batch 最终事实均走该表 | 条件／来源实际改变时推进 | Wind 值、Wind 来源范围／优先级／observable 改变时推进 |
+| 静态降水／风防护 | 同一事实表触发器比较 protection 输入 | 不推进 | 推进 |
+| 地图／空间配置 | mechanical_scenes 的 INSERT／DELETE，以及 grid 或 spatial_enabled 的实际 UPDATE | 不推进 | 推进；非 grid 场景机械字段不触发 |
+| 正式 WO 当前防护 | VersionedProtectionProvider 声明 object_ids；注册对象姿态、位置、开合、carrier／container、durability、openable、light、mechanism 当前组件的同步写触发器 | 不推进 | 相关对象在旧／新 Scene 的输入改变时推进 |
+| WO 额外输入、Effects 创建／移动／修改／结束 | 声明 EnvironmentInputWatch；在所属数据库表的实际写事务中触发 | Effects 的 source／effects_json／wind_source 推进 | 防护 owner 输入推进；effects_json 内的 Wind 投影输入变化或 wind_source 推进 |
+| Actor／容器／祖先的间接依赖 | 提供方明确声明其读取的 actor／对象／容器字段、行及适用 Scene，沿这些行的同步写触发器 | 按来源角色 | 按防护／Wind 角色；没有依赖则普通移动／容器变化不推进 |
+| tick 的启用／结束边界与连续输入 | EnvironmentTimeWatch 在 world_states.game_tick 写入时同步识别 crossed boundary 或 continuous | 仅 Effects 声明的场景／边界／连续输入 | 防护时间输入及标记 wind=True 的 Effects 时间输入 |
+| Session／Package／Scene、Cell／height／区间／披露模式 | 两层缓存键隔离；公开入口每次 SessionAccess pin 和权限校验 | 不靠查询增加版本 | 不靠查询增加版本 |
 
-两层独立有界 LRU：OSS 场景防护投影上限 **32 项**（包含风向）；完整单格环境上限
-**512 项**（包含依赖和 height_ft）。缓存归当前 EnvironmentService／Store 实例，
-不跨数据库共享。事务暂存的每层也采用相同容量上限，发布后按 LRU 淘汰。
-只缓存实际产生的完整结果；屋顶投影覆盖其他格不代表这些格环境相同。
-天气／来源变化不进入 OSS 身份，风向选择相应投影；不在变更后重算全图。
-旧读取事务按自身内容身份保存，不能替换新状态身份；不维护可被旧事务倒退的 latest 指针。
-写事务及无可验证读取作用域绕过共享缓存；只读事务内暂存的结果仅成功 COMMIT 后发布，
-拒绝、异常、回滚、提交失败均丢弃暂存。清空或重启后从事实重建。
+风向选择本身是环境来源计算的一部分，所以相关 Wind 输入改变时同时推进两版，查询不
+通过先读风向来补救版本遗漏。Wind 来源还可能跨 WorldFacts／Effects 同优先级冲突：
+即使 wind_from 不变，风速改变也可能使可选方向变成 unsupported。因此写入端对完整
+Wind 值保守失效；雨强、温度等非 Wind 条件独立变化不会推进防护版本。
 
-外部只读提供方仍必须无写入／I/O，在调用方快照内返回完整 typed immutable 输入。
-输入读取、校验、身份比较及公开授权每次仍需执行；省去的是几何展开与环境合成。
-无法保证该契约的注入方须禁用跨查询复用（`environment_cacheable=False`），
-仍不能用缓存掩盖未知／不支持状态。Light 跨查询 Snapshot、角色交互与认知重构不在本轮。
+命令的 savepoint、OCC、幂等与回执语义保持：批量只写最终候选，净空操作不写事实，
+重放不再执行写入，拒绝／冲突／异常／COMMIT 失败连同版本一起回滚。表级触发器同时覆盖
+当前 WorldFacts、场景初始化、物体组件、Grid 导入及内部 SQL 写入路径，不依赖异步事件。
+环境事实、空间场景及物体的标识字段禁止原地更名；跨 Scene 物体位置仍通过 scene_id 更新，
+相应订阅覆盖原／目标 Scene。迁移与重访不重放来源或重置已经保存的版本。
 
-### 已实现的读取与重建路径
+### 两层缓存与统一读取入口
 
-`_inputs` 每次读取完整环境事实与 Effects；OSS `prepare_scene_protection` 每次读取当前
-来源集合、姿态、资格、属性和规范化 Grid 配置，生成本次查询的不可变输入。输入是身份的
-组成部分，不另建可变对象状态。每个对象仍先读取 provider；只有降水与风均明确配置且
-几何全空的来源才可从 Environment 消费输入中省略。因此拾取明确无贡献的物品不会更换
-身份，未配置／不支持来源不能用同样方式忽略。`scene_protection_contributions(prepared=...)` 使用这份
-输入计算完整场景投影，并共享到后续其他 Cell；不再次调用 provider 形成混合状态。
-区域与高度范围内仍用同一个 inputs／按风向 cache。最终 `_cell` 只在身份／Cell／高度
-未命中时调用 `_compose_cell`；不同高度范围复用的是实际已算出的点，分段边界每次按原
-来源规则构建，未将缺高度当零。
+防护缓存键为 `(Session/Package/Scene/提供方绑定, protection_version, wind_from)`；
+方向只用于区分实际计算请求，在最终命中路径不读取风向。完整结果缓存键为
+`(同一身份, (source_version, protection_version), Cell/height 或高度区间/公开模式)`。
+None 高度与 0 分离。公开与可信内部结果不能互相替代。
 
-缓存以内容相等验证当前身份，没有环境专用版本或散列碰撞假设。保守地把对象开关、
-destroyed 和完整 Grid 配置纳入依赖；HP 数值本身只通过 destroyed 或当前 provider 输出
-影响身份。普通移动、无贡献物品拾取、时间推进、锁细节等不变更这些实际输入时不会失效；
-若提供方消费了它们并返回不同来源／防护，立即更换身份。无版本仍需来源扫描、每物体
-当前属性读取／校验及完整输入比较；当前 Grid JSON 读取／规范化还可能逐对象重复。
-这不是零 SQL／零 provider 调用优化，不宣称生产延迟收益。
+- 命中完整 Cell／区间：仅索引读取两版及提供方绑定，不读来源、物体属性或环境 Grid。
+- 只变来源版：读取必要当前来源，复用同防护版已有的投影，重合成需要的 Cell。
+- 防护版变化：按需读取当前物体／属性／Grid，重新投影并合成；不逐版追算。
+- 同版而 B 格尚无结果：合成 B，复用 A 已产生的场景投影，不把屋顶覆盖等同完整环境相同。
 
-`SqliteStore.derived_read_scope` 仅允许受管理的非写事务；两层未命中结果先进入该
-UnitOfWork 的有界暂存，COMMIT 成功后发布。写 scope、无 scope、provider 显式禁用路径
-均直接计算；查询内仍可复用方向投影。回滚或提交失败清除暂存，不发布候选结果。
-`clear_snapshots()` 清空两层并取消清空前的暂存发布；无事件、无版本、无 RNG 或 SQL 写入。
-重启重新装配提供方后得到同样结果。旧内容项可暂留至淘汰，但新查询必须先验证当前输入，
-不会因为旧项存在就使用它。
+query_cell／query_area／query_height_range／query_unit 与 project_cell／project_height_range
+统一使用此入口。内部 project 自动加入或建立同一读取事务，继续由可信调用方负责权限及
+Package pin。read_facts 是 GM 明确读取权威事实的审计接口，按请求读取事实，不是派生缓存。
+区域可见性每批只准备一次带当前 Light 的 topology，并复用其范围枚举整图；每格仍检查
+can_see，任一失败整批拒绝。公开命中仍重查当前权限、Actor Scene 与可见性；这项授权所需
+的 Grid／Light 准备仍保留，环境校验不额外再准备地图。没有新增 Light 跨查询 Snapshot。
+
+### 正式提供方、时间与第三方限制
+
+正式适配器为 `environment_versions.VersionedEnvironmentEffectsProvider` 和
+`VersionedProtectionProvider`。它们包装现有只读 reader，不保存来源或属性的第二份事实。
+reader 只能读取声明的 SQLite 输入及显式时间依赖，不能依赖可变 Python 内存或外部 I/O。
+稳定 key 标识读取政策；政策或依赖变更必须更换 key／声明并重新登记。
+
+宿主通过 `sm.environment.bind_providers(sid, package, context=有环境管理权限的上下文)`
+原子登记。登记只保存不可变依赖描述摘要、触发器清单，不复制输入；每个登记自身也有
+savepoint，失败不会留下半套触发器。同一登记重试为空操作。Effects 的 watch 必须声明
+source（不产生 Wind）、wind_source（计算 Wind 的其他输入）或 effects_json（typed 来源 JSON，
+自动识别 Wind 子输入）；防护 watch 必须为 protection。额外依赖支持明确行、字段、Scene。
+所有 provider 输入修改仍走所属 owner 的权威事务，其同步触发器直接推进场景两版。
+SQL JSON 分类函数由 SqliteStore 安装；绕开该运行层的写连接若没有函数，会拒绝相关写入，
+不会提交输入却漏过版本。
+
+现有 EnvironmentSource／静态防护没有 tick 期限；普通时间推进不改环境版。定时 reader
+必须声明 EnvironmentTimeWatch(boundaries=(...), scene_ids=(...))；越过启用／结束边界才推进。
+连续变化用 continuous=True，仅推进该提供方声明的 Scene；若生成 Wind，还必须 wind=True。
+动态新增／修改时间计划须在同一 owner 写事务重新登记依赖；不能先改变计划、以后再补版本。
+WO／Effects 法术生产适配没有因这些接口自动接通；这些是可运行的正式版本化接入入口。
+
+旧的／第三方只读 provider、未登记或登记不匹配的适配器，以及显式禁用路径，不进行任何
+跨查询复用。它们仍按原路径读取最新输入、查询内复用，但不会靠逐项比较重新启用缓存。
+正式声明必须完整且真实；这是一项可信宿主契约，不能把未声明的外部可变输入包装成正式
+适配器。恢复时重新提供同政策 reader 即可匹配持久登记；新政策须受控重绑。缺失 reader
+保持原 unconfigured 语义，并禁止误用先前提供方的结果。
+
+当前 OSS 仍只把地面物体投影为防护；携带／容器内物体不会自动随角色成为屋顶。
+拾起地面防护会失效其原 Scene，放回地面会失效目标 Scene；物品已经在携带／容器中时，
+普通携带者移动不改变该地面模型，不无条件增加版本。若提供方的额外来源／属性实际依赖
+角色或容器，必须登记对应字段；本批没有擅自增加一套角色暴露或三维规则。
+
+### 事务、迁移与淘汰
+
+版本与输入共用原数据库事务。写 scope 不读写共享缓存；只读计算先进入 UnitOfWork 的
+有界暂存，COMMIT 后再核对当前版本才发布。回滚产生的 N 版永不发布，因此随后另一种
+输入提交成同一数值 N 也不会命中候选结果。旧 WAL 读取结果只服务本次事务；COMMIT 后
+已过时则不发布，绝不把旧结果改贴新版本。即使核对后又发生并发提交，键仍携带原版本，
+新查询也不能把它视为当前；没有可被旧事务倒退的 latest 指针。
+
+防护／最终缓存容量分别 32／512 项，事务暂存也有同样上限。发布当前版本时删除同身份
+旧版条目，其他 Session／绑定继续受 LRU 上限约束；不建立历史环境库。clear_snapshots
+清空派生值并取消旧暂存的发布，不推进输入版本。重启按保存版本和当前权威输入重建。
+
+Schema 36 在原迁移锁及同一事务中追加版本表与 provider 绑定元数据，给已有实例／环境／
+机械场景补 `(0,0)`；新 Session 为 Package 的全部 Scene 建默认行。历史未实体化的 Scene
+缺行等价于默认 `(0,0)`，第一次相关写入建立持久行，查询不写库。已有表／行／环境 JSON、
+Package digest、tick、RNG、事件、回执不重写。打开时校验新表结构、必需触发器及持久
+provider 触发器清单；未知／部分升级失败关闭，Schema 35／两种 Schema 34 的兼容升级保持。
+
+**本批已解决命中时通过版本检查省掉输入扫描。** 未命中时的事实读取、JSON 解析、网格与
+输入对象构建仍有成本；地图、Package、规则素材等 Runtime 长期复用留待后续批次。
 
 当前环境事实由 WorldFacts 的 `environment` / `set_environment` 读取和受控写入，
-SQLite Schema 35 的 `scene_environments(session_id, scene_id, facts_json)` 为唯一存储。
+当前 SQLite Schema 36（事实表始于 Schema 35）的 `scene_environments(session_id, scene_id, facts_json)` 为唯一存储。
 该表没有对懒初始化 `scene_instances` 的外键，因此可以在首次访问／初始化之前修改
 获准场景。没有每格合成结果表、第二份角色高度、效果状态或天气时钟。
 
@@ -85,19 +130,20 @@ Schema34 保留 main 的机关表升级；Schema35 添加环境表，不修改�
 Package digest、WorldTime 绑定、抽象 tick、事件、RNG 或回执。
 两个历史 Schema34 分支按真实表结构识别，不能仅凭 user_version 判断：
 
-| 打开时的存档 | 原子升级到 Schema35 |
+| 打开时的存档 | 环境／机关历史升级步骤（之后追加 Schema36） |
 |---|---|
 | 新数据库／Schema33 及更早版本 | 顺序执行全部缺失迁移：main34 机关升级，然后 ENV35 |
 | 机关版 Schema34 | 保留完整机关状态／激活记录，只执行 ENV35，环境表初始为空 |
 | ENV 版 Schema34 | 校验现有环境表和旧三列机关表，补执行原样 main34，再执行 ENV35；复用已校验环境表，保留所有环境 JSON |
-| Schema35 | 校验已完成的结构，重启不重复升级或导入默认值 |
+| Schema35 | 校验原环境／机关结构后追加 Schema36，不导入默认天气 |
+| Schema36 | 校验版本表、必需触发器及 provider 清单，不重置版本或重放输入 |
 
 兼容识别校验列、类型、非空／主键、外键以及机关激活表和索引；未知或部分升级的
 结构返回 `unsupported_storage_schema`，不猜测、不清库。ENV35 的幂等建表只复用
 已通过校验的现有环境表。整个兼容修复和顺序迁移共用原有 `BEGIN IMMEDIATE` 写锁、
 事务和最终外键检查；任一步失败均回滚 DDL、数据和 user_version，可修复故障后重试。
 旧 armed／spent 机关仍按 main34 映射次数，已有新版机关状态不会再次映射。
-原 WorldTime 仍是需要时间的消费者的唯一时间输入；本服务当前不使用期限或自动循环。
+原 WorldTime 仍是需要时间的消费者的唯一时间输入；环境事实本身不使用期限或自动循环；已声明提供方时间依赖按上述同步入口处理。
 
 ## 强类型与单位
 
@@ -203,7 +249,8 @@ unsupported 来源仍保留未知完整性，只有明确覆盖才证明有防�
 | `query_area(..., area, package, *, context, height_ft=None)` | 每格独立结果元组；保留差异，整批授权失败就不返回部分区域 |
 | `query_height_range(..., cell, heights, package, *, context)` | 分段结果，保持空隙和局部环境高度边界 |
 | `query_unit(sid, actor_id, package, *, context)` | 通过角色实际位置和 UnitHeightProvider 读实际高度；缺输入为 missing_input |
-| `project_cell(..., height_ft=None)` / `project_height_range(...)` | 可信组件内部组合；调用方负责同一读事务、Package pin、权限和结果披露 |
+| `project_cell(..., height_ft=None)` / `project_height_range(...)` | 可信组件内部组合，自动加入／建立读取事务；调用方负责 Package pin、权限和结果披露 |
+| `bind_providers(sid, package, *, context)` | 受环境管理权限保护，在写事务中登记正式 provider 依赖；默认空 provider 与相同登记为空操作 |
 
 公开查询复用 `_spatial_reader`、`_public_scope`、`_visible_target` 的 Actor 控制、场景
 公共访问及可见性边界，只允许 Actor 当前场景。不会因 GM 可写天气就暴露全 Session。
@@ -226,13 +273,14 @@ query_cell、query_area、query_height_range、query_unit 共用该策略，不�
 `observable=True` 必须由可信配置／Effects 明确证明，非 LLM 自报。
 这些查询不产生感知事实、NPC 记忆或可见性机械收益。
 
-公开查询每次在一个只读事务内读取事实／当前提供方／OSS；不建库表、不初始化场景、
+公开查询每次在一个只读事务内核对两版，未命中才读取事实／当前提供方／OSS；不建库表、不初始化场景、
 不发事件、不推进版本或 RNG。数据库生命周期迁移只发生在 SqliteStore 打开阶段。
 命中最终结果仍执行本次控制权限、Package pin、Actor 当前 Scene、public scope 及可见性。
 `query_area` 的 `_prepare_visible_targets` 一次准备观察者、带 Light 的 base_topology；
 每格 `_visible_target(prepared=...)` 仍执行位置边界与 can_see。任一失败不进入结果合成，
-不返回区域子集。公开披露输入与可信完整输入分别参与内容身份；公开返回总是再执行
-当前场景字段掩蔽及来源去除。新增降水保护来源一并移除；隐藏降水会掩蔽所有种类状态。
+不返回区域子集。公开与可信结果按请求模式隔离；公开命中复用已经掩蔽、去除来源的结果，
+披露输入改变会推进来源版并重新过滤。当前授权仍每次检查。降水保护来源一并移除；
+隐藏降水会掩蔽所有种类状态。
 
 ## 受控命令、空操作和变化信息
 
@@ -340,7 +388,8 @@ local = sm.environment.query_cell(
 | Light／Effects／Runtime／Perception／RE 后果 | 只读查询与变化事件可供接入，尚未完成这些组件的生产联调 |
 
 Effects provider 返回当前有效来源 tuple；空 tuple 明确没有效果，None 表示提供方不可用。
-每次查询重新读取；范围移动／效果结束反映在下次查询，Environment 不保存效果镜像。
+正式路径由登记的 owner 写入同步推进版本，未命中才读取；第三方无版本路径每次读取。
+范围移动／效果结束反映在下次查询，Environment 不保存效果镜像。
 提供方必须只读、无外部 I/O，在调用方 SQLite 快照中读取，Effects 继续拥有施法来源、
 范围、专注、持续时间及生命周期。测试 fixture 的移动／移除只证明该契约和真实服务合成。
 

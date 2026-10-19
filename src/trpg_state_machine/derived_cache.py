@@ -22,7 +22,7 @@ class DerivedCache:
         while len(values) > self.capacity:
             values.popitem(last=False)
 
-    def resolve(self, scope, key, compute):
+    def resolve(self, scope, key, compute, *, validator=None):
         if scope is None:
             return compute()
         token = (self, self._generation)
@@ -32,15 +32,23 @@ class DerivedCache:
             scope.derived_pending[token] = pending
         if key in pending:
             pending.move_to_end(key)
-            return pending[key]
+            return pending[key][0]
         if key in self._values:
             self._values.move_to_end(key)
             return self._values[key]
         value = compute()
-        self._put(pending, key, value)
+        self._put(pending, key, (value, validator))
         return value
 
     def publish(self, generation, pending):
         if generation == self._generation:
-            for key, value in pending.items():
-                self._put(self._values, key, value)
+            checks = {}
+            for key, (value, validator) in pending.items():
+                if validator not in checks:
+                    checks[validator] = validator is None or validator()
+                if checks[validator]:
+                    # Retain current revisions only, never build a history store.
+                    for old in tuple(self._values):
+                        if old[0] == key[0] and old[1] != key[1]:
+                            del self._values[old]
+                    self._put(self._values, key, value)

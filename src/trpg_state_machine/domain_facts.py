@@ -488,6 +488,10 @@ class WorldFacts:
 
     def initialize_world(self, sid, package):
         self.store.require_write()
+        self._conn.executemany(
+            "INSERT OR IGNORE INTO scene_environment_versions(session_id,scene_id) VALUES (?,?)",
+            [(sid, scene.scene_id) for scene in package.scenes],
+        )
         self._conn.execute(
             "INSERT INTO world_states(session_id,flags_json) VALUES (?,?)",
             (sid, canonical_json(dict(package.world_flags))),

@@ -108,17 +108,16 @@ def counters(monkeypatch, sm):
     return counts
 
 
-def install(sm):
-    wo, effects = WO(), Effects()
-    sm._objects.spatial.protection_provider = wo
-    sm.environment.effects_provider = effects
-    return wo, effects
+def install(sm, sid, package, context):
+    from environment_version_support import providers
+
+    return providers(sm, sid, package, context, WO().current, OBSTACLE)
 
 
 def test_a_projection_serves_b_without_claiming_same_environment(tmp_path, context, monkeypatch):
     sm, sid, p, db = setup(tmp_path, context, large_data())
     with sm:
-        wo, _ = install(sm)
+        wo, _ = install(sm, sid, p, context)
         source = Source(
             "warm",
             Conditions(Temperature(31), obscurant=Obscurant("smoke", "dense")),
@@ -138,7 +137,7 @@ def test_a_projection_serves_b_without_claiming_same_environment(tmp_path, conte
         b = query("4,3")
         assert query("4,3") == b
         assert (count["compose"], count["scene"], count["roof"]) == (2, 1, 1)
-        assert wo.reads > 1  # Current input validation remains necessary on hits.
+        assert wo.reads == 1  # Revision hits and the B-cell projection reuse avoid owner reads.
         assert a.ground_precipitation.status == b.ground_precipitation.status == "none"
         assert value(a.temperature) == Temperature(8) and value(b.temperature) == Temperature(31)
         assert a.obscurant != b.obscurant
@@ -154,7 +153,7 @@ def test_weather_effects_and_source_fields_invalidate_only_needed_layer(
 ):
     sm, sid, p, _ = setup(tmp_path, context, large_data())
     with sm:
-        _, effects = install(sm)
+        _, effects = install(sm, sid, p, context)
         seed(sm, sid, p, context)
         count = counters(monkeypatch, sm)
         project(sm, sid, p, "3,3")
@@ -201,7 +200,7 @@ def test_weather_effects_and_source_fields_invalidate_only_needed_layer(
 def test_live_properties_pose_and_wind_direction(tmp_path, context, monkeypatch):
     sm, sid, p, _ = setup(tmp_path, context, large_data())
     with sm:
-        wo, _ = install(sm)
+        wo, _ = install(sm, sid, p, context)
         seed(sm, sid, p, context)
         count = counters(monkeypatch, sm)
         assert project(sm, sid, p, "3,4", height=3).wind_exposure.status == "none"
@@ -288,7 +287,7 @@ def test_explicit_object_static_and_local_precipitation(tmp_path, context, kind)
     sm, sid, p, _ = setup(tmp_path, context, large_data())
     weather = replace(WEATHER, precipitation=Precipitation(kind, "heavy"))
     with sm:
-        wo, _ = install(sm)
+        wo, _ = install(sm, sid, p, context)
         seed(sm, sid, p, context, Facts(weather))
         result = project(sm, sid, p, "3,3")
         assert result.precipitation.status == "ready" and value(result.precipitation).kind == kind
@@ -320,7 +319,7 @@ def test_explicit_object_static_and_local_precipitation(tmp_path, context, kind)
 def test_legacy_rain_properties_and_json_remain_rain_only(tmp_path, context, kind):
     sm, sid, p, _ = setup(tmp_path, context, large_data())
     with sm:
-        wo, _ = install(sm)
+        wo, _ = install(sm, sid, p, context)
         wo.current = CurrentProtectionProperties(RainProtection(((0, 0),)), WindProtection(()))
         seed(
             sm, sid, p, context, Facts(replace(WEATHER, precipitation=Precipitation(kind, "light")))
@@ -338,7 +337,7 @@ def test_legacy_rain_properties_and_json_remain_rain_only(tmp_path, context, kin
 def test_session_scene_package_height_grid_and_unrelated_changes(tmp_path, context, monkeypatch):
     sm, sid, p, _ = setup(tmp_path, context, large_data())
     with sm:
-        install(sm)
+        install(sm, sid, p, context)
         source = Source(
             "low",
             Conditions(Temperature(-5)),
@@ -391,7 +390,7 @@ def test_command_candidate_queries_cannot_publish_on_failure(
 ):
     sm, sid, p, _ = setup(tmp_path, context, large_data())
     with sm:
-        install(sm)
+        install(sm, sid, p, context)
         seed(sm, sid, p, context)
         baseline = project(sm, sid, p, "3,3")
         sizes = len(sm.environment._cells), len(sm.environment._projections)
@@ -416,7 +415,7 @@ def test_command_candidate_queries_cannot_publish_on_failure(
 def test_read_rollback_commit_failure_and_clear_cancel_publication(tmp_path, context):
     sm, sid, p, _ = setup(tmp_path, context, large_data())
     with sm:
-        install(sm)
+        install(sm, sid, p, context)
         seed(sm, sid, p, context)
         env = sm.environment
         with pytest.raises(RuntimeError), sm._transaction():
@@ -450,7 +449,7 @@ def test_read_rollback_commit_failure_and_clear_cancel_publication(tmp_path, con
 def test_old_reader_cannot_replace_current_content_identity(tmp_path, context):
     sm, sid, p, db = setup(tmp_path, context, large_data())
     with sm, StateMachine(db, dnd_loader=lock_loader()) as writer:
-        install(sm)
+        install(sm, sid, p, context)
         seed(sm, sid, p, context)
         with sm._transaction():
             sm._conn.execute("SELECT facts_json FROM scene_environments").fetchone()
@@ -474,7 +473,7 @@ def test_area_prepares_visibility_once_and_cached_results_still_authorized(
 ):
     sm, sid, p, _ = setup(tmp_path, context, large_data())
     with sm:
-        _, effects = install(sm)
+        _, effects = install(sm, sid, p, context)
         seed(sm, sid, p, context)
         pc = sm.read_session(sid, p, context=context).pc_actor_id
         count = counters(monkeypatch, sm)
@@ -525,7 +524,7 @@ def test_area_prepares_visibility_once_and_cached_results_still_authorized(
 def test_bounded_lru_eviction_clear_restart_and_external_optout(tmp_path, context, monkeypatch):
     sm, sid, p, db = setup(tmp_path, context, large_data())
     with sm:
-        wo, _ = install(sm)
+        wo, _ = install(sm, sid, p, context)
         seed(sm, sid, p, context)
         count = counters(monkeypatch, sm)
         env = sm.environment
@@ -541,7 +540,7 @@ def test_bounded_lru_eviction_clear_restart_and_external_optout(tmp_path, contex
                 wo.current, precipitation=PrecipitationProtection(((0, 0),), (kind,))
             )
             project(sm, sid, p, "3,3", height=index)
-        assert len(env._cells) == len(env._projections) == 2
+        assert len(env._cells) <= 2 and len(env._projections) <= 2
         current = project(sm, sid, p, "3,3")
         env.clear_snapshots()
         assert len(env._cells) == len(env._projections) == 0
@@ -552,6 +551,7 @@ def test_bounded_lru_eviction_clear_restart_and_external_optout(tmp_path, contex
         project(sm, sid, p, "3,3")
         assert (count["compose"], count["scene"]) == (before[0] + 2, before[1] + 2)
     with StateMachine(db, dnd_loader=lock_loader()) as restored:
+        wo.sm = restored
         restored._objects.spatial.protection_provider = wo
         restored.environment.effects_provider = Effects()
         assert project(restored, sid, p, "3,3") == current

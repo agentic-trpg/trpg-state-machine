@@ -81,6 +81,60 @@ def validate_environment_table(connection, *, required=False):
     return True
 
 
+def validate_environment_versions(connection, *, required):
+    import json
+
+    versions = _layout(connection, "scene_environment_versions")
+    bindings = _layout(connection, "environment_provider_bindings")
+    if not required:
+        if versions or bindings:
+            _unknown_lineage()
+        return
+    if any(
+        _foreign_keys(connection, table) != {("sessions", "session_id", "session_id")}
+        for table in ("scene_environment_versions", "environment_provider_bindings")
+    ):
+        _unknown_lineage()
+    if versions != (
+        ("session_id", "TEXT", 1, 1),
+        ("scene_id", "TEXT", 1, 2),
+        ("source_version", "INTEGER", 1, 0),
+        ("protection_version", "INTEGER", 1, 0),
+    ) or bindings != (
+        ("session_id", "TEXT", 1, 1),
+        ("scene_id", "TEXT", 1, 2),
+        ("role", "TEXT", 1, 3),
+        ("descriptor", "TEXT", 1, 0),
+        ("manifest_json", "TEXT", 1, 0),
+    ):
+        _unknown_lineage()
+    triggers = dict(connection.execute("SELECT name,sql FROM sqlite_master WHERE type='trigger'"))
+    required_names = {
+        "env_" + kind + "_" + op
+        for kind in ("facts", "grid", "membership")
+        for op in ("insert", "update", "delete")
+    }
+    if not required_names <= triggers.keys():
+        _unknown_lineage()
+    if (
+        not {
+            "env_facts_scope_immutable",
+            "env_grid_scope_immutable",
+            "env_object_identity_immutable",
+        }
+        <= triggers.keys()
+    ):
+        _unknown_lineage()
+    for (manifest,) in connection.execute(
+        "SELECT manifest_json FROM environment_provider_bindings"
+    ):
+        expected = json.loads(manifest)
+        if type(expected) is not dict or any(
+            triggers.get(name) != sql for name, sql in expected.items()
+        ):
+            _unknown_lineage()
+
+
 def reconcile_schema34(connection, version, mechanism_statements):
     """Reconcile the two shipped Schema34 lineages under the migration write lock.
 

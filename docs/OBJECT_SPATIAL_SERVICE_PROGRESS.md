@@ -1,5 +1,15 @@
 # ObjectSpatialService 实施与边界（2026-10-18）
 
+## 环境权威版本管理接入（2026-10-19）
+
+本分支在已推送 `382a4ae` 上继续实现 Schema36：Environment 按场景防护输入版本缓存
+OSS 中间投影，来源／防护两版命中时不扫描对象输入。正式当前属性提供方通过
+VersionedProtectionProvider 登记对象／组件及额外 actor／容器／时间依赖；同步 SQL
+触发器在实际修改事务中推进版本。雨强不使防护版变化，Wind 输入使两版同步变化。
+未登记第三方路径不跨查询复用。几何算法、地面模型、WindBoundary、公开权限与
+未知完整性保持。完整依赖、迁移、回滚／旧事务发布、计数和验证见
+[本批 Environment 记录](ENVIRONMENT_SERVICE_PROGRESS.md)。
+
 ## Environment Snapshot 消费与降水扩展（2026-10-19）
 
 `feat/environment-derived-snapshot` 基于最新 `origin/main@d0fda62`；本轮未合并 main。

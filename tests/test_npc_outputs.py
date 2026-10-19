@@ -122,7 +122,7 @@ def test_complete_manual_result_vertical_slice_and_fresh_process_resume(
     assert resumed.returncode == 0, resumed.stderr
     assert json.loads(resumed.stdout) == executed
     with sqlite3.connect(db) as conn:
-        assert conn.execute("PRAGMA user_version").fetchone()[0] == 35
+        assert conn.execute("PRAGMA user_version").fetchone()[0] == 36
         assert conn.execute("PRAGMA foreign_key_check").fetchall() == []
         assert conn.execute("SELECT COUNT(*) FROM npc_evaluation_receipts").fetchone()[0] == 1
         assert (

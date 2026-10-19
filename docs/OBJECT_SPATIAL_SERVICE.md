@@ -194,7 +194,8 @@ point_sources = projection.wind_at("3,4", 12)
 调用方必须先验证 Session／Package 绑定和访问权限，并在一致的读事务中组合物体姿态、
 当前属性及网格；玩家视图继续走已有 WOS / StateMachine 查询。
 显式 properties 优先于 provider。provider 的 `current_protection(sid, oid, package,
-*, candidate)` 每次读取，不缓存投影；candidate 是完整待计算姿态。
+*, candidate)` 在实际 OSS 投影调用时读取；candidate 是完整待计算姿态。
+OSS 直接接口自身不缓存，Environment 的版本命中会跳过整个 OSS 调用。
 提供方必须只读、无外部 I/O，能返回该候选的明确当前属性；不能支持时返回 None，
 OSS 不为它推测开合／损坏后果。构造依赖的生产装配与恢复由 SESSION-01 对接。
 
@@ -235,12 +236,15 @@ Environment 可以省略已经读取并证明降水／风几何均为空的来�
 同一区域的 Cell 再次读出不同 provider 状态。prepared 与 properties 不能同时覆盖。
 它仍是可信内部组合接口，不改变公开对象目录、Session pin 或授权责任。
 
-Environment 持有容量 32 的场景防护 LRU，按 Session／Package 固定身份／Scene／完整
-OSS 输入／风向复用已算出的全部 Cell 和高度段；OSS 本身不持有可变防护事实或第二个缓存。
-天气和 Effects 不进入这一投影身份。姿态、开关、destroyed、当前属性、对象集合或 Grid
-变化更换身份；旧事务不能把新身份改回旧身份。写事务查询不读写共享 LRU，只读暂存仅在
-成功 COMMIT 后发布。provider 仍每次读取并需只读、无 I/O、完整 typed immutable 输入；
-不满足此契约的注入路径设置 `environment_cacheable=False` 绕过跨查询复用。
+Environment 持有容量 32 的场景防护 LRU；Schema36 版本管理批次改为按 Session／Package
+固定身份／Scene／防护版本／请求风向复用全部 Cell 和高度段。Wind 输入变化在来源写事务
+同步推进来源版和防护版；雨强独立变化不推进防护版。命中完整结果不先读取 Wind，也不扫描
+OSS 当前输入；中间缓存未命中才调用 prepare_scene_protection。正式
+VersionedProtectionProvider 声明物体及额外 owner 输入，登记的同步触发器覆盖实际姿态、
+组件、归属和相关地图写入；actor／容器的额外依赖与 tick 边界必须明确声明。
+OSS 本身不存权威版本、可变防护事实或第二个缓存。旧事务结果提交后已过时则不发布，写
+候选不进入共享 LRU；旧版条目按当前身份剔除并受容量上限约束。无版本／未登记的第三方
+路径一律不跨查询复用，不以内容扫描维持共享缓存。原只读 provider 接口继续可用。
 完整依赖矩阵、最终环境层和故障处理见 [EnvironmentService](ENVIRONMENT_SERVICE.md)。
 
 WindBoundary 的最后实体格语义、k=1..N、旋转风向、距离、边界及 `[lower,upper)` 均保持；

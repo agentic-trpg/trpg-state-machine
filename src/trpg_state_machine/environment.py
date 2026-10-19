@@ -32,10 +32,10 @@ from .environment_models import (
     invalid,
     validate_sources,
 )
+from .environment_versions import EnvironmentVersions
 from .errors import StateMachineError
 from .grid import cell_in_bounds
 from .object_protection import PRECIPITATION_KINDS
-from .package import canonical_json
 
 
 @dataclass(frozen=True, slots=True)
@@ -144,41 +144,62 @@ class EnvironmentService:
         self.unit_height_provider = unit_height_provider
         self._projections = DerivedCache(32)
         self._cells = DerivedCache(512)
+        self.versions = EnvironmentVersions(handler.store)
 
     def clear_snapshots(self):
         """Disposable derived state only; also cancel publication of pending old entries."""
         self._projections.clear()
         self._cells.clear()
 
+    def bind_providers(self, sid, package, *, context):
+        """Trusted host configuration; register owner dependencies atomically, not on reads."""
+        with self.h._transaction(write=True):
+            self.h._session(sid, package, context)
+            if not context.can_manage_environment:
+                raise StateMachineError("unauthorized", "Environment management grant required")
+            for scene in package.scenes:
+                for role, provider in (
+                    ("effects", self.effects_provider),
+                    ("protection", self.h.objects.spatial.protection_provider),
+                ):
+                    if self.versions.descriptor(provider) is not None:
+                        self.versions.bind(sid, scene.scene_id, package, provider, role)
+
     def _query_cache(self, sid, scene, package):
-        spatial = self.h.objects.spatial
-        prepared = spatial.prepare_scene_protection(sid, scene, package)
-        # Providers were still read for every object. Proven empty contributions
-        # cannot affect completeness or geometry, so unrelated item transfers do
-        # not change this consumer's input identity. Unknown sources stay present.
-        prepared = replace(
-            prepared, objects=tuple(p for p in prepared.objects if not p.explicitly_empty())
-        )
-        grid = canonical_json(self.h.grid.reader.scene_grid(sid, scene, package))
-        identity = (
-            sid,
-            package.adventure_id,
-            package.package_version,
-            package.package_digest,
-            package.ruleset_binding,
-            scene,
-            grid,
-            prepared,
-        )
-        cacheable = all(
-            getattr(provider, "environment_cacheable", True) is True
-            for provider in (self.effects_provider, spatial.protection_provider)
+        versions = self.versions.current(sid, scene)
+        cacheable, providers = self.versions.cacheable(
+            sid, scene, self.effects_provider, self.h.objects.spatial.protection_provider
         )
         return {
-            "inputs": prepared,
-            "identity": identity,
+            "identity": (
+                sid,
+                package.adventure_id,
+                package.package_version,
+                package.package_digest,
+                package.ruleset_binding,
+                scene,
+                providers,
+            ),
+            "versions": versions,
             "scope": self.h.store.derived_read_scope if cacheable else None,
+            "valid": lambda: self.versions.current(sid, scene) == versions,
+            "protection_valid": lambda: self.versions.current(sid, scene)[1] == versions[1],
         }
+
+    def _prepared_protection(self, sid, scene, package, cache):
+        if "inputs" not in cache:
+            prepared = self.h.objects.spatial.prepare_scene_protection(sid, scene, package)
+            cache["inputs"] = replace(
+                prepared, objects=tuple(p for p in prepared.objects if not p.explicitly_empty())
+            )
+        return cache["inputs"]
+
+    def _environment_inputs(self, sid, scene, package, cache, public):
+        if "environment" not in cache:
+            cache["environment"] = self._inputs(sid, scene, package)
+        if public:
+            return self._disclosure_inputs(cache["environment"])
+        return cache["environment"], frozenset()
 
     def initialize(self, sid, seeds, package, *, command_id, expected_world_version, context):
         """Real controlled import; same command, grants, OCC and receipts as every write."""
@@ -403,15 +424,20 @@ class EnvironmentService:
     def _protection(self, sid, scene, cell, package, facts, direction, cache):
         # A placeholder cardinal direction selects ONLY rain when actual wind is unknown.
         key = direction or "north"
-        if "inputs" not in cache:
+        if "identity" not in cache:
             cache.update(self._query_cache(sid, scene, package))
         if key not in cache:
             cache[key] = self._projections.resolve(
                 cache["scope"],
-                (cache["identity"], key),
+                (cache["identity"], (cache["versions"][1],), key),
                 lambda: self.h.objects.spatial.scene_protection_contributions(
-                    sid, scene, package, wind_from=key, prepared=cache["inputs"]
+                    sid,
+                    scene,
+                    package,
+                    wind_from=key,
+                    prepared=self._prepared_protection(sid, scene, package, cache),
                 ),
+                validator=cache["protection_valid"],
             )
         oss = cache[key]
         bands = [
@@ -499,13 +525,24 @@ class EnvironmentService:
         # Keep both; selecting one would invent a combination rule.
         return _resolve([(0, c) for c in result])
 
-    def _cell(self, sid, scene, cell, package, height, inputs, cache):
-        if "inputs" not in cache:
+    def _cell(
+        self, sid, scene, cell, package, height, inputs, cache, *, public=False, validated=False
+    ):
+        if "identity" not in cache:
             cache.update(self._query_cache(sid, scene, package))
+
+        def compute():
+            if not validated:
+                self._area(sid, scene, EnvironmentArea((cell,)), package)
+            current, hidden = self._environment_inputs(sid, scene, package, cache, public)
+            result = self._compose_cell(sid, scene, cell, package, height, current, cache)
+            return self._public(result, hidden) if public else result
+
         return self._cells.resolve(
             cache["scope"],
-            (cache["identity"], inputs, cell, height),
-            lambda: self._compose_cell(sid, scene, cell, package, height, inputs, cache),
+            (cache["identity"], cache["versions"], ("cell", public, cell, height)),
+            compute,
+            validator=cache["valid"],
         )
 
     def _compose_cell(self, sid, scene, cell, package, height, inputs, cache):
@@ -544,12 +581,11 @@ class EnvironmentService:
         """INTERNAL trusted composition: caller checks binding/grants and owns read scope."""
         if height_ft is not None:
             finite(height_ft)
-        self._area(sid, scene_id, EnvironmentArea((cell,)), package)
-        return self._cell(
-            sid, scene_id, cell, package, height_ft, self._inputs(sid, scene_id, package), {}
-        )
+        EnvironmentArea((cell,))
+        with self.h.grid.reader.read_scope():
+            return self._cell(sid, scene_id, cell, package, height_ft, None, {})
 
-    def _range(self, sid, scene, cell, package, heights, inputs):
+    def _range(self, sid, scene, cell, package, heights, inputs, cache):
         if type(heights) is not HeightInterval:
             invalid("Expected scene-datum height interval")
         self._area(sid, scene, EnvironmentArea((cell,)), package)
@@ -558,7 +594,6 @@ class EnvironmentService:
         for source in (*facts.sources, *effects):
             if source.area.heights and (not source.area.cells or cell in source.area.cells):
                 points.update((source.area.heights.lower_ft, source.area.heights.upper_ft))
-        cache = {}
         # Wind may change with height. Collect all four directions, retaining every gap.
         for direction in ("north", "east", "south", "west"):
             projection = self._protection(sid, scene, cell, package, facts, direction, cache)
@@ -569,16 +604,51 @@ class EnvironmentService:
             invalid("Height query exceeds 512 boundaries")
         return tuple(
             EnvironmentHeightSegment(
-                HeightInterval(a, b), self._cell(sid, scene, cell, package, a, inputs, cache)
+                HeightInterval(a, b),
+                self._compose_cell(sid, scene, cell, package, a, inputs, cache),
             )
             for a, b in zip(points, points[1:], strict=False)
         )
 
-    def project_height_range(self, sid, scene_id, cell, heights, package):
-        """INTERNAL trusted interval composition; returns covered AND uncovered segments."""
-        return self._range(
-            sid, scene_id, cell, package, heights, self._inputs(sid, scene_id, package)
+    def _cached_range(self, sid, scene, cell, heights, package, *, public=False):
+        if type(heights) is not HeightInterval:
+            invalid("Expected scene-datum height interval")
+        EnvironmentArea((cell,))
+        cache = self._query_cache(sid, scene, package)
+
+        def compute():
+            inputs, hidden = self._environment_inputs(sid, scene, package, cache, public)
+            segments = self._range(sid, scene, cell, package, heights, inputs, cache)
+            if not public:
+                return segments
+            segments = tuple(
+                replace(s, environment=self._public(s.environment, hidden)) for s in segments
+            )
+            merged = []
+            for segment in segments:
+                if merged and replace(merged[-1].environment, height_ft=None) == replace(
+                    segment.environment, height_ft=None
+                ):
+                    previous = merged[-1]
+                    merged[-1] = replace(
+                        previous,
+                        heights=HeightInterval(previous.heights.lower_ft, segment.heights.upper_ft),
+                    )
+                else:
+                    merged.append(segment)
+            return tuple(merged)
+
+        return self._cells.resolve(
+            cache["scope"],
+            (cache["identity"], cache["versions"], ("range", public, cell, heights)),
+            compute,
+            validator=cache["valid"],
         )
+
+    def project_height_range(self, sid, scene_id, cell, heights, package):
+        """INTERNAL trusted interval composition; uses the same revision entry point."""
+        with self.h.grid.reader.read_scope():
+            return self._cached_range(sid, scene_id, cell, heights, package)
 
     @staticmethod
     def _disclosure_inputs(inputs):
@@ -650,16 +720,29 @@ class EnvironmentService:
             position = self.h._spatial_reader(sid, actor_id, package, context)
             if position.scene_id != scene_id:
                 raise StateMachineError("unauthorized", "Only Actor's current Scene is authorized")
-            cells = self._area(sid, scene_id, area, package, query=True)
             visibility = self.h._prepare_visible_targets(sid, actor_id, package)
+            cells = area.cells
+            if not cells:
+                width, height = visibility[2]
+                if width * height > MAX_CELLS:
+                    invalid("Whole Scene query exceeds 256 cells; choose a bounded area")
+                cells = tuple(f"{x},{y}" for x in range(width) for y in range(height))
             for cell in cells:
+                if not cell_in_bounds(visibility[1], cell):
+                    raise StateMachineError("invalid_cell", "Environment area exceeds Scene bounds")
                 self.h._visible_target(sid, actor_id, cell, package, prepared=visibility)
-            inputs, hidden_fields = self._disclosure_inputs(self._inputs(sid, scene_id, package))
-            cache = {}
+            cache = self._query_cache(sid, scene_id, package)
             return tuple(
-                self._public(
-                    self._cell(sid, scene_id, cell, package, height_ft, inputs, cache),
-                    hidden_fields,
+                self._cell(
+                    sid,
+                    scene_id,
+                    cell,
+                    package,
+                    height_ft,
+                    None,
+                    cache,
+                    public=True,
+                    validated=True,
                 )
                 for cell in cells
             )
@@ -684,25 +767,7 @@ class EnvironmentService:
             return self._public_range(sid, scene_id, cell, heights, package)
 
     def _public_range(self, sid, scene, cell, heights, package):
-        inputs, hidden_fields = self._disclosure_inputs(self._inputs(sid, scene, package))
-        segments = tuple(
-            replace(segment, environment=self._public(segment.environment, hidden_fields))
-            for segment in self._range(sid, scene, cell, package, heights, inputs)
-        )
-        # Do not disclose unrelated/hidden OSS geometry via irrelevant boundary endpoints.
-        merged = []
-        for segment in segments:
-            if merged and replace(merged[-1].environment, height_ft=None) == replace(
-                segment.environment, height_ft=None
-            ):
-                previous = merged[-1]
-                merged[-1] = replace(
-                    previous,
-                    heights=HeightInterval(previous.heights.lower_ft, segment.heights.upper_ft),
-                )
-            else:
-                merged.append(segment)
-        return tuple(merged)
+        return self._cached_range(sid, scene, cell, heights, package, public=True)
 
     def query_unit(self, sid, actor_id, package, *, context):
         with self.h._transaction():

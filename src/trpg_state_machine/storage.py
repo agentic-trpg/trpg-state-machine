@@ -11,6 +11,7 @@ from .storage_migrations import (
     migrate_perception_queues,
     reconcile_schema34,
     validate_environment_table,
+    validate_environment_versions,
 )
 
 
@@ -48,7 +49,15 @@ class SqliteStore:
         except sqlite3.Error as exc:
             raise StateMachineError("storage_error", "Cannot open SQLite database") from exc
         self._conn.row_factory = sqlite3.Row
+        from .environment_versions import protection_key, source_key, wind_key
+
         try:
+            for name, function in (
+                ("env_source_key", source_key),
+                ("env_protection_key", protection_key),
+                ("env_wind_key", wind_key),
+            ):
+                self._conn.create_function(name, 1, function, deterministic=True)
             self._conn.execute("PRAGMA foreign_keys = ON")
             self._conn.execute("PRAGMA busy_timeout = 5000")
             self._migrate()
@@ -81,7 +90,7 @@ class SqliteStore:
 
     def _migrate(self):
         scripts = [Path(__file__).with_name("_schema.sql")] + [
-            Path(__file__).with_name(f"_migration_{v}.sql") for v in range(2, 36)
+            Path(__file__).with_name(f"_migration_{v}.sql") for v in range(2, 37)
         ]
         steps = [_migration_statements(path.read_text("utf-8")) for path in scripts]
         # Migration 4 rebuilds a referenced table. Disable FK enforcement only on
@@ -91,7 +100,7 @@ class SqliteStore:
             self._conn.execute("BEGIN IMMEDIATE")
             # Read AFTER acquiring the cross-process SQLite migration write lock.
             version = self._conn.execute("PRAGMA user_version").fetchone()[0]
-            if version not in range(36):
+            if version not in range(37):
                 raise StateMachineError(
                     "unsupported_storage_schema", f"Unsupported storage version: {version}"
                 )
@@ -105,14 +114,16 @@ class SqliteStore:
                     "unsupported_storage_schema", "Unversioned nonempty database"
                 )
             validate_environment_table(self._conn, required=version >= 35)
+            validate_environment_versions(self._conn, required=version >= 36)
             if version >= 34:
                 reconcile_schema34(self._conn, version, steps[33])
-            for target in range(version + 1, 36):
+            for target in range(version + 1, 37):
                 for statement in steps[target - 1]:
                     self._conn.execute(statement)
                 if self._conn.execute("PRAGMA user_version").fetchone()[0] != target:
                     raise StateMachineError("storage_error", "Non-contiguous schema migration")
             reconcile_schema34(self._conn, 35, steps[33])
+            validate_environment_versions(self._conn, required=True)
             if version < 5:
                 # The locked source version proves ALL existing events predate
                 # perception, even if a user command used the legacy source sentinel.
