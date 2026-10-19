@@ -10,7 +10,6 @@ from pydantic import ValidationError
 
 from ._execution import _WorldEffectKind, _WorldEffectOrigin
 from .combat import process_id
-from .commands import CommandReceipt
 from .dnd_checks import world_effects_ready
 from .errors import StateMachineError
 from .rules_adapter import validate_dnd_result
@@ -19,6 +18,7 @@ from .world_commands import OPENABLE_CHECK_OPERATIONS, CheckMechanism, PickLock
 
 class RuleExecution:
     def __init__(self, owner):
+        self.runtime = owner.runtime
         self.store = owner.store
         self.sessions = owner.sessions
         self.rules = owner.rules
@@ -53,7 +53,7 @@ class RuleExecution:
             row = self.sessions._session(command.session_id, package, context)
             self.sessions._authorize_command(row, command.actor_id, command.payload, context)
             self.sessions._npc_handoff_command_guard(command)
-            if replay := self.sessions._command_replay(command, fingerprint):
+            if replay := self.runtime._command_replay(command, fingerprint):
                 return replay
             self.sessions._npc_combat_location_guard(command)
             if row["evaluator_version"] != EVALUATOR_VERSION:
@@ -95,7 +95,7 @@ class RuleExecution:
             request = None
             capability = prepare_error
         else:
-            request = self.rules.request(rule_command, package, snapshot, rng)
+            request = self.rules.request(rule_command, package, snapshot, rng, row=row)
             capability = self.rules._dnd_capability(
                 rule_command.payload, command.actor_id, snapshot
             )
@@ -115,7 +115,7 @@ class RuleExecution:
             capability = "world_precondition_failed"
         result, changes = None, ()
         if snapshot.world_version == command.expected_world_version:
-            self.rules._verify_dnd_binding(package)
+            self.rules._verify_dnd_binding(package, row)
             if capability is None and not noop:
                 try:
                     result = (
@@ -137,18 +137,18 @@ class RuleExecution:
                         "Evaluator failed; original command may be retried",
                     ) from exc
                 result, changes = validate_dnd_result(request, result)
-            self.rules._verify_dnd_binding(package)
+            self.rules._verify_dnd_binding(package, row)
         with self.store.transaction(write=True):
             row = self.sessions._session(command.session_id, package, context)
             self.sessions._authorize_command(row, command.actor_id, command.payload, context)
             self.sessions._npc_handoff_command_guard(command)
-            if replay := self.sessions._command_replay(command, fingerprint):
+            if replay := self.runtime._command_replay(command, fingerprint):
                 return replay
             self.sessions._npc_combat_location_guard(command)
-            version, seq = row["world_version"], row["event_seq"]
+            version = row["world_version"]
             status, error = "committed", None
             if (
-                version != command.expected_world_version
+                self.runtime.version_conflict(row, command)
                 or build_snapshot(row) != snapshot
                 or self.rules._rng_context(row) != rng
             ):
@@ -185,7 +185,7 @@ class RuleExecution:
                     # Failure consequences and automatic hooks both consume the
                     # original rule result's candidate RNG successor. Never
                     # overwrite a mechanism successor with this earlier state.
-                    self.sessions.advance_rule_rng(command.session_id, result.rng_transition, rng)
+                    self.runtime.advance_rule_rng(command.session_id, result.rng_transition, rng)
                     events = [
                         self.capture._capture_event(
                             command.session_id,
@@ -278,15 +278,7 @@ class RuleExecution:
                             )
                     events = self.effects._expand_events(row, package, events, command.command_id)
                     self.world._assert_spatial_consistency(command.session_id, package)
-                    version += 1
-                    self.sessions.set_world_version(command.session_id, version)
-                    self.persistence._append_events(
-                        command.session_id,
-                        version,
-                        events,
-                        source_command_id=command.command_id,
-                        package=package,
-                    )
+                    version = self.runtime.publish(command, row, package, events)
                 except StateMachineError as exc:
                     if exc.code not in {
                         "event_cascade_limit",
@@ -331,17 +323,7 @@ class RuleExecution:
                     error, version = exc.code, row["world_version"]
                 finally:
                     self._conn.execute("RELEASE dnd_effects")
-            end = self._conn.execute(
-                "SELECT event_seq FROM sessions WHERE session_id=?", (command.session_id,)
-            ).fetchone()[0]
-            receipt = CommandReceipt(
-                command.session_id,
-                command.command_id,
-                command.actor_id,
-                status,
-                version,
-                tuple(range(seq + 1, end + 1)),
-                error,
+            receipt = self.runtime.finish(
+                command, context, fingerprint, row, status, version, error
             )
-            self.sessions.record_receipt(command, context, fingerprint, receipt)
         return receipt

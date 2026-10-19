@@ -6,7 +6,6 @@ The production port refuses all evaluation until RE implements world sources.
 
 import copy
 import hashlib
-from dataclasses import asdict
 from typing import Annotated, Literal, Protocol
 
 from dnd5e_engine.evaluation_contracts import ReadVersion, RuleError
@@ -415,7 +414,7 @@ class MechanismEffectRunner:
         self, row, package, oid, actor, activation, consequence, source_seq, command_id, action
     ):
         rules = self.h.objects.openable.rules
-        rules._verify_dnd_binding(package)
+        rules._verify_dnd_binding(package, row)
         snapshot = rules._noncombat_snapshot(row, package)
         config = self.h.objects.mechanisms.config(package, oid)
         definition = next(e for e in config.rule_effects if e.effect_ref == action.effect_ref)
@@ -497,7 +496,7 @@ class MechanismEffectRunner:
                     ).items()
                 ),
             ),
-            ruleset_binding=RulesetBinding(**asdict(package.ruleset_binding)),
+            ruleset_binding=rules.session_binding(row),
             rng_context=rules._rng_context(row),
         )
 
@@ -539,7 +538,7 @@ class MechanismEffectRunner:
         if current != request:
             raise StateMachineError("version_conflict", "Mechanism effect dependencies changed")
         rules._apply_dnd_changes(row, changes)
-        self.h.sessions.advance_rule_rng(
+        self.h.runtime.advance_rule_rng(
             row["session_id"], result.rng_transition, request.rng_context
         )
         # Audit is nested under the activation, never an extra sensory/LLM route.

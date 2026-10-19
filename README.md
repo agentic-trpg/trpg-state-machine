@@ -10,6 +10,13 @@ Batch 1 实现了一个可运行的本地闭环：**验证原创合成 Adventure
 
 StateMachine 是统一 API 与组件装配入口；各领域 Facts / Records 管理所属权威事实，通过共享事务共同提交。Package 是不可变模板；返回的 Snapshot 是独立副本，修改副本不会写入数据库。已接入固定候选 SHA 的真实 D&D 基础攻击及受限胜利/TPK 关闭，同时保留隔离的合成测试路径；没有第二份运行态权威。正常关闭后可以保存并在新进程恢复；活跃战斗跨进程精确续玩仍不支持。
 
+Session Management 已分离为 SessionCreation 创建协调、SessionAccess 授权和 SessionRuntime
+执行元数据／公共提交协调。公开 create_session 等签名及 Schema36 保留；运行时 RE 校验、
+求值和查询以持久化 Session 的三项绑定为准。已授权 NPC 移动也可延迟创建目标场景，
+不制造 PC 进入事件。完整领域能力配置实例化仍未完成，RE 固定素材快速接口尚未兼容接入。
+实际调用链、旧 Session 策略和字段缺口见 [Session 管理](docs/SESSION_MANAGEMENT.md)，
+检查与交付见 [进度](docs/SESSION_MANAGEMENT_PROGRESS.md)。
+
 RF-1 将现有世界交互和战斗编排改为显式组件组合，角色、世界、战斗和 Session
 事实经受控写入口共享同一 SQLite 事务。RF-1 保留了公开 API、Schema 21、GC-1 门与效果来源
 语义及固定 RE/SRD 依赖保持兼容；NPC/感知仍采用受控过渡，完整战斗日志解耦尚未

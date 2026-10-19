@@ -46,10 +46,10 @@ def seed(c, package, context, sid="session.domain", pc="pc.domain"):
     from trpg_state_machine.package import SYNTHETIC_EVALUATION_RULESET
 
     with c.store.transaction(write=True):
-        c.sessions.initialize(sid, package, context, package.pc_templates[0], pc, "rng." + sid)
+        c.world.runtime.initialize(sid, package, context, package.pc_templates[0], pc, "rng." + sid)
         c.facts.initialize_world(sid, package)
         c.world.scenes.initialize_session(sid, pc, package.pc_templates[0], package)
-        c.sessions.initialize_rng(
+        c.world.runtime.initialize_rng(
             sid, "rng." + sid, synthetic=package.ruleset_binding == SYNTHETIC_EVALUATION_RULESET
         )
         row = c.sessions._session(sid, package, context)
@@ -253,15 +253,17 @@ def test_production_writers_and_dependency_direction():
         "world_states": "WorldFacts",
         "mechanical_scenes": "WorldFacts",
         "combats": "CombatRecords",
-        "sessions": "SessionAccess",
-        "rng_states": "SessionAccess",
-        "command_receipts": "SessionAccess",
+        "sessions": "SessionRuntime",
+        "rng_states": "SessionRuntime",
+        "command_receipts": "SessionRuntime",
         "navigation_activities": "ActivityRecords",
     }
     components = {
         "storage.py",
         "domain_facts.py",
         "session_access.py",
+        "session_runtime.py",
+        "session_creation.py",
         "spatial.py",
         "grid.py",
         "scene_lifecycle.py",

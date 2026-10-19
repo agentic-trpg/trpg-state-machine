@@ -103,8 +103,9 @@ def test_binding_errors_do_not_create_session(tmp_path, package_data, context):
         assert sm._conn.execute("SELECT count(*) FROM sessions").fetchone()[0] == 0
         sid = create(sm, package, context)
         initialize(sm, sid, package, context)
-        with pytest.raises(StateMachineError, match="data/configuration"):
+        with pytest.raises(StateMachineError) as exc:
             sm.read_combat_snapshot(sid, bad, context=context)
+        assert exc.value.code == "ruleset_mismatch"
 
 
 def test_initialize_rollback_and_retry(tmp_path, package_data, context):

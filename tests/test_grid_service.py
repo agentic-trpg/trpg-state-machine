@@ -260,11 +260,11 @@ def test_uninitialized_scene_read_is_initial_facts_without_writes(tmp_path, pack
     p = _validate(world_data())
     sid = "session.lazy"
     with c.store.transaction(write=True):
-        c.sessions.initialize(sid, p, context, p.pc_templates[0], "pc.lazy", "rng.lazy")
+        c.world.runtime.initialize(sid, p, context, p.pc_templates[0], "pc.lazy", "rng.lazy")
         c.facts.initialize_world(sid, p)
         c.world.scenes.ensure_scene(sid, A, p)
         c.characters.initialize_pc(sid, "pc.lazy", A, p.pc_templates[0])
-        c.sessions.initialize_rng(sid, "rng.lazy", synthetic=False)
+        c.world.runtime.initialize_rng(sid, "rng.lazy", synthetic=False)
     try:
         before = stored_rows(tmp_path / "lazy.db")
         changes = c.store.connection.total_changes

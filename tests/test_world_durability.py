@@ -36,7 +36,7 @@ def adopt(sm, sid, p, ctx, result, *, fail=False):
             row, p, result, origin=_WorldEffectOrigin(_WorldEffectKind.SYNTHETIC, "fixture.settled")
         )
         if events:
-            sm._sessions.set_world_version(sid, row["world_version"] + 1)
+            sm._session_runtime.set_world_version(sid, row["world_version"] + 1)
             sm._append_events(
                 sid,
                 row["world_version"] + 1,

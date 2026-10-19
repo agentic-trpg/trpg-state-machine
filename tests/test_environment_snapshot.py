@@ -401,7 +401,7 @@ def test_command_candidate_queries_cannot_publish_on_failure(
             assert (len(sm.environment._cells), len(sm.environment._projections)) == sizes
             raise StateMachineError(failure, "injected after uncommitted projection")
 
-        monkeypatch.setattr(sm, "_append_events", fail)
+        monkeypatch.setattr(sm._event_persistence, "_append_events", fail)
         op = SetEnvironmentBase(A, replace(WEATHER, temperature=Temperature(-10)))
         if failure == "storage_error":
             with pytest.raises(StateMachineError):

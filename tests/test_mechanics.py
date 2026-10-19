@@ -292,9 +292,9 @@ def test_evaluator_configuration_error_is_not_a_receipt(
 ):
     database = tmp_path / "state.db"
     evaluator = InspectEvaluator()
-    evaluator.ruleset_binding = binding
     with StateMachine(database, evaluator=evaluator) as sm:
         command = setup_mechanical(sm, mechanical_package, request_for, context)
+        evaluator.ruleset_binding = binding
         before = sm.read_session(command.session_id, mechanical_package, context=context)
         with pytest.raises(StateMachineError) as error:
             sm.submit_command(command, mechanical_package, context=context)

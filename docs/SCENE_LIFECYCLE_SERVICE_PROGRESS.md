@@ -1,5 +1,11 @@
 # W-01 场景生命周期切片进度
 
+2026-10-19 后续：[Session Management 批次](SESSION_MANAGEMENT_PROGRESS.md) 整理了创建／
+授权／Runtime 职责，ensure_scene 加入固定 Package 和必要实例结构核对；抽象 NPC 的
+合法移动现在也能在同一操作事务内延迟创建目标，不要求玩家先进入，不增加 PC 访问。
+以下旧准入和验收记录是历史切片；当前兼容影响及仍未迁移的完整能力配置见
+[Session 设计说明](SESSION_MANAGEMENT.md)。
+
 2026-10-18；基线 `9ce60cb`；仅交付 `feat/scene-lifecycle-service`，不合并 main。
 原工作区有大批与核心文件重叠的未提交修改，本次以已提交 HEAD 在
 `.test-tmp/scene-lifecycle-delivery` 隔离实施，不纳入原修改。

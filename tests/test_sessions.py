@@ -405,7 +405,6 @@ def test_noop_does_not_advance_versions_or_reenter_scene(tmp_path, package, cont
         (SetObjectState("scene.platform", "object.missing", ObjectState.OPEN), "invalid_target"),
         (SetObjectState("scene.platform", "object.platform_gate", "open"), "invalid_operation"),
         (MoveActor("npc.missing", "scene.platform"), "invalid_target"),
-        (MoveActor("npc.caretaker", "scene.workshop"), "invalid_target"),
         (EnterScene("scene.missing"), "unknown_scene"),
     ],
 )

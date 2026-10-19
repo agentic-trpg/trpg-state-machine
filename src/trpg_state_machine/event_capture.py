@@ -11,6 +11,7 @@ from .errors import StateMachineError
 from .events import _StagedEvent
 from .package import Signal, SignalOrigin, SignalScope, SignalStimulus, canonical_json
 from .perception_conditions import discover_signals
+from .session_access import _binding
 
 
 class EventCapture:
@@ -106,7 +107,13 @@ class EventCapture:
             "game_tick": self._conn.execute(
                 "SELECT game_tick FROM world_states WHERE session_id=?", (sid,)
             ).fetchone()[0],
-            "ruleset_binding": asdict(package.ruleset_binding),
+            "ruleset_binding": asdict(
+                _binding(
+                    self._conn.execute(
+                        "SELECT * FROM sessions WHERE session_id=?", (sid,)
+                    ).fetchone()
+                )
+            ),
             "phase": {
                 "status": "unresolved" if unresolved and signals else "captured",
                 "code": phase,

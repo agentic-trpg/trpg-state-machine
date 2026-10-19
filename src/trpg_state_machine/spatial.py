@@ -84,9 +84,17 @@ class WorldHandler:
         npc_bootstrap,
         activities=None,
         loader=None,
+        runtime=None,
     ):
         from .activity_records import ActivityRecords
+        from .event_persistence import EventPersistence
+        from .session_runtime import SessionRuntime
 
+        self.runtime = (
+            runtime
+            if runtime is not None
+            else SessionRuntime(store, sessions, EventPersistence(store))
+        )
         self.store = store
         self.sessions = sessions
         self.characters = characters
@@ -106,7 +114,7 @@ class WorldHandler:
         from .scene_lifecycle import SceneLifecycleService
 
         self.scenes = SceneLifecycleService(
-            store, sessions, characters, facts, capture, npc_bootstrap
+            store, sessions, characters, facts, capture, npc_bootstrap, self.runtime
         )
 
         from .environment import EnvironmentService
@@ -634,14 +642,8 @@ class WorldHandler:
         target = operation.scene_id if type(operation) is EnterScene else operation.to_scene_id
         if position.scene_id == target:
             return position
-        if (
-            type(operation) is MoveActor
-            and package.scene(position.scene_id).grid_json is None
-            and not self._conn.execute(
-                "SELECT 1 FROM scene_instances WHERE session_id=? AND scene_id=?", (sid, target)
-            ).fetchone()
-        ):
-            raise StateMachineError("invalid_target", "Destination scene is not initialized")
+        # Admission is read-only. The admitted move ensures its destination in
+        # the same savepoint before changing position, including NPC-only moves.
         return self._passage_route(sid, actor_id, target, package)
 
     def query_world_action(self, session_id, actor_id, operation, package, *, context):

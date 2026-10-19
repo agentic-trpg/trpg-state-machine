@@ -538,7 +538,7 @@ class OpenableService:
             required_tool=plan[2],
             leverage_applicable=plan[3],
         )
-        rules._verify_dnd_binding(package)
+        rules._verify_dnd_binding(package, row)
         failure = openable_support_failure(spec, loader=rules.loader)
         if failure is not None:
             raise StateMachineError(failure["error"].code, "Operation outside supported rule facts")
