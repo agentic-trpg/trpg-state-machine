@@ -170,3 +170,8 @@ Episode 设计不变，没有新增逐机械 Event 的感知信号或阶段取�
 当前 Schema 36、Package 支持版本、命令协议和 RE／SRD 固定 SHA
 `d596161060555630019163ab301e1d25fd816549` 均不变。
 验证、W-01 进度和跨系统依赖见 [实施记录](GRID_SERVICE_PROGRESS.md)。
+
+
+## 2026-10-20 跨仓库对齐与证据适用范围
+
+本文件带日期批次／分支／Schema／“未发现 AGENTS”属于原时点证据；最新 main 为 Schema39，实例配置与冻结素材生产装配见 [Instance Progress](INSTANCE_CONFIGURATION_PROGRESS.md)，时间协调见 [Time Progress](SESSION_TIME_COORDINATION_PROGRESS.md)。旧缺口表不能覆盖上述已完成切片。当前开发入口为仓库 AGENTS.md；共同规范只维护于顶层 MC §2.3、§6.5–§6.6。全局审查、局部准入、实际 SQL／投影范围及剩余重构详见 [校验范围审查](reviews/RUNTIME_VALIDATION_SCOPE_REVIEW.md)。本次只更新文档，没有运行新增业务／规模测试。

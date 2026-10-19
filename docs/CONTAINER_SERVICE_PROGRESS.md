@@ -141,3 +141,8 @@ $containerFiles = @(
 停在 socket.accept / _fallback_socketpair / _make_self_pipe，尚未执行 RE 求值。
 自动审批后在本机沙箱外重跑，未修改事件循环、生产代码或断言来绕过环境限制。
 护甲类别最终修正前的同范围组合为 467 passed（180.21s）；这不是最后代码的最终 gate。
+
+
+## 2026-10-20 跨仓库对齐与证据适用范围
+
+本文件带日期批次／分支／Schema／“未发现 AGENTS”属于原时点证据；最新 main 为 Schema39，实例配置与冻结素材生产装配见 [Instance Progress](INSTANCE_CONFIGURATION_PROGRESS.md)，时间协调见 [Time Progress](SESSION_TIME_COORDINATION_PROGRESS.md)。旧缺口表不能覆盖上述已完成切片。当前开发入口为仓库 AGENTS.md；共同规范只维护于顶层 MC §2.3、§6.5–§6.6。全局审查、局部准入、实际 SQL／投影范围及剩余重构详见 [校验范围审查](reviews/RUNTIME_VALIDATION_SCOPE_REVIEW.md)。本次只更新文档，没有运行新增业务／规模测试。

@@ -126,7 +126,7 @@ INSERT-if-absent／ON-CONFLICT-DO-NOTHING 规则保留。
 创建、后台 Activity 目标创建、动态 Actor／Item 生成仍需各领域提供真实创建能力。
 静态只读导航模板和既有未实例化门初始态预测仍存在，详见下表。
 
-## 持久化、恢复与具体后续缺口
+## 历史批次：持久化、恢复与当时后续缺口
 
 数据库仍为 Schema36；没有搬表、新迁移、字段改名或历史数据重算。旧命令指纹编码和
 回执序列兼容。旧机械版本、legacy audit、活跃战斗跨进程 `combat_unrestorable` 及
@@ -139,7 +139,7 @@ save／resume 验证 Session／Package pin、必需全局／PC／RNG／当前场
 Store 拒绝打开。正常恢复只读取当前事实，不重新应用模板或初始化访问次数。
 这些是当前支持数据的结构约束，**不代表完整有效配置已持久化**。
 
-| 后续领域批次 | 目前已保存 | 仍依赖 Package 的具体配置／缺口 |
+| 历史后续领域批次 | 当时已保存 | 当时依赖 Package 的配置／缺口（当前更正见文首） |
 |---|---|---|
 | WorldObject / WorldObjectService.view | 对象身份、位置／容器／carrier、朝向、开合状态 | definition_ref、能力声明、名称／可见性、重量和完整有效配置仍从 world_objects／scene objects 组合 |
 | Container | 父子／carrier 关系、实际物品 JSON | 容量、重量规则、容纳限制、contents-access 等由 ContainerService.config 查模板；未持久化完整配置 |
@@ -154,3 +154,8 @@ Store 拒绝打开。正常恢复只读取当前事实，不重新应用模板�
 
 后续应由领域 Schema／创建器保存最终有效配置与初态，并给出版本化记录、实际读取入口和
 显式旧数据迁移；本轮没有添加无调用方的空初始化接口来宣称这些缺口已完成。
+
+
+## 2026-10-20 跨仓库对齐与证据适用范围
+
+本文件带日期批次／分支／Schema／“未发现 AGENTS”属于原时点证据；最新 main 为 Schema39，实例配置与冻结素材生产装配见 [Instance Progress](INSTANCE_CONFIGURATION_PROGRESS.md)，时间协调见 [Time Progress](SESSION_TIME_COORDINATION_PROGRESS.md)。旧缺口表不能覆盖上述已完成切片。当前开发入口为仓库 AGENTS.md；共同规范只维护于顶层 MC §2.3、§6.5–§6.6。全局审查、局部准入、实际 SQL／投影范围及剩余重构详见 [校验范围审查](reviews/RUNTIME_VALIDATION_SCOPE_REVIEW.md)。本次只更新文档，没有运行新增业务／规模测试。
