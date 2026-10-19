@@ -302,7 +302,7 @@ class StateMachine(
                         (sid, s["scene_id"]),
                     )
                 }
-                if package.scene(s["scene_id"]).grid_json is not None
+                if self._world_facts.instances.get(sid, "scene", s["scene_id"])["has_grid"]
                 else None,
             )
         actors = {
@@ -399,6 +399,41 @@ class StateMachine(
     ) -> SessionSnapshot:
         """Resume the persisted noncombat foundation, without replaying templates."""
         return self.save_session(session_id, package, context=context)
+
+    def upgrade_instance_configs(self, session_id, package, *, context):
+        """Explicit source-checked upgrade of pre-39 saves; never changes live facts.
+
+        The caller must supply the exact pinned Package. Missing or unprovable
+        source identities fail atomically. This does not rebind an old evaluator.
+        """
+        with self._transaction(write=True):
+            row = self._session(session_id, package, context)
+            facts = self._world_facts
+            scenes = tuple(
+                r[0]
+                for r in self._conn.execute(
+                    "SELECT scene_id FROM scene_instances WHERE session_id=?", (session_id,)
+                )
+            )
+            known = {o.object_id for s in package.scenes for o in s.objects}
+            if any(
+                r[0] not in known
+                for r in self._conn.execute(
+                    "SELECT object_id FROM objects WHERE session_id=?", (session_id,)
+                )
+            ):
+                raise StateMachineError("incomplete_instance_config", "Cannot prove object source")
+            facts.instances.initialize_world(session_id, package)
+            for scene_id in scenes:
+                facts.instances.initialize_scene(session_id, scene_id, package)
+                facts.instances.finish_scene(session_id, scene_id)
+            self.scene_lifecycle.validate_initialized(row, package)
+            # Validate moved/carried objects as well as original scene members.
+            for obj in self._conn.execute(
+                "SELECT object_id FROM objects WHERE session_id=?", (session_id,)
+            ):
+                facts.object_definition(session_id, obj[0])
+            return self._snapshot(row, package)
 
     def query_world_action(self, session_id, actor_id, operation, package, *, context):
         return self._world.query_world_action(

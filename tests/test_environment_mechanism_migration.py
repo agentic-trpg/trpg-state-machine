@@ -118,7 +118,7 @@ def snapshot(db):
 
 
 def assert_current(sm):
-    assert sm._conn.execute("PRAGMA user_version").fetchone()[0] == 38
+    assert sm._conn.execute("PRAGMA user_version").fetchone()[0] == 39
     assert sm._conn.execute("PRAGMA foreign_key_check").fetchall() == []
     assert sm._conn.execute("PRAGMA integrity_check").fetchone()[0] == "ok"
     assert sm._conn.execute("PRAGMA foreign_keys").fetchone()[0] == 1
@@ -134,6 +134,8 @@ def test_real_historical_upgrade_preserves_sessions_environment_and_mechanisms(
     with StateMachine(db, dnd_loader=lock_loader()) as sm:
         assert_current(sm)
         assert_original_rows_equal(before, stored_rows(db))
+        sm.upgrade_instance_configs(sid, package, context=context)
+        sm.upgrade_instance_configs(other, package, context=context)
         sm.resume_session(sid, package, context=context)
         assert sm.world_time.read(sid, package, context=context).game_tick == 3
         assert sm.world_time.read(other, package, context=context).game_tick == 0
@@ -248,7 +250,7 @@ def test_env34_concurrent_openers_migrate_once_under_existing_lock(tmp_path):
             return sm._conn.execute("PRAGMA user_version").fetchone()[0]
 
     with ThreadPoolExecutor(max_workers=3) as pool:
-        assert list(pool.map(opener, range(3))) == [38, 38, 38]
+        assert list(pool.map(opener, range(3))) == [39, 39, 39]
     assert_original_rows_equal(before, stored_rows(db))
 
 

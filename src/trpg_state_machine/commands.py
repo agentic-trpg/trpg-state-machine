@@ -401,7 +401,7 @@ class CommandRuntime:
                 try:
                     if command.time_wait is not None:
                         self._session_runtime.time.waits.validate(row, package, command)
-                    if package.portable_items:
+                    if self._world_facts.instances.has_portable(command.session_id):
                         self._characters.rule_components(
                             command.session_id,
                             set(self._characters.rule_actors(command.session_id)),
@@ -446,7 +446,7 @@ class CommandRuntime:
                                 "event_cascade_limit", "Bounded schedule cascade exceeded"
                             )
                     if events:
-                        if package.portable_items:
+                        if self._world_facts.instances.has_portable(command.session_id):
                             self._characters.sync_world_inventory(command.session_id)
                         self._assert_spatial_consistency(command.session_id, package)
                         version = self._session_runtime.publish(command, row, package, events)

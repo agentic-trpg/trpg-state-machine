@@ -416,7 +416,7 @@ class MechanismEffectRunner:
         rules = self.h.objects.openable.rules
         rules._verify_dnd_binding(package, row)
         snapshot = rules._noncombat_snapshot(row, package)
-        config = self.h.objects.mechanisms.config(package, oid)
+        config = self.h.objects.mechanisms.config(row["session_id"], oid)
         definition = next(e for e in config.rule_effects if e.effect_ref == action.effect_ref)
         location = self.h.facts.object_position(row["session_id"], oid)
         if location["scene_id"] != snapshot.scene_state.scene_id or location["cell"] is None:
@@ -472,7 +472,9 @@ class MechanismEffectRunner:
             source=MechanismSource(
                 kind="mechanism",
                 object_id=oid,
-                definition_ref=self.h.facts.object_definition(package, oid).definition_ref,
+                definition_ref=self.h.facts.object_definition(
+                    row["session_id"], oid
+                ).definition_ref,
                 scene_id=location["scene_id"],
                 cell=location["cell"],
                 activation_id=activation,

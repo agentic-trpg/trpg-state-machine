@@ -253,7 +253,9 @@ class SessionAccess:
             return
         if type(command.payload) is not CombatIntentPayload or command.payload.target_id is None:
             return
-        definition = next(a for a in package.actors if a.actor_id == command.actor_id)
+        from .domain_facts import WorldFacts
+
+        definition = WorldFacts(self.store).instances.actor(command.session_id, command.actor_id)
         locations = dict(
             self._conn.execute(
                 "SELECT actor_id,current_scene_id FROM actors WHERE session_id=?",

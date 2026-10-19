@@ -219,8 +219,9 @@ def test_upgrade_batch1_preserves_real_database(tmp_path, package, context, requ
             conn.execute(f"INSERT INTO {table}({columns}) SELECT {columns} FROM source.{table}")
     database = legacy
     with StateMachine(database) as sm:
+        sm.upgrade_instance_configs(created.session_id, package, context=context)
         assert sm.resume_session(created.session_id, package, context=context) == before
-        assert sm._conn.execute("PRAGMA user_version").fetchone()[0] == 38
+        assert sm._conn.execute("PRAGMA user_version").fetchone()[0] == 39
         assert sm._conn.execute("SELECT COUNT(*) FROM event_evidence").fetchone()[0] == 0
         assert (
             sm.submit_command(

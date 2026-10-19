@@ -1,5 +1,12 @@
 # Session Management
 
+## 2026-10-20 当前更正
+
+Schema39 将已存在的实例配置读取依赖迁移至 WorldFacts.instances；配置与当前事实分离。
+ContainerService 使用一次操作的 ContainmentState；旧存档须显式升级配置，不在恢复 getter 中修复。
+冻结 RE 接入仍因实际工具检定 ABI 缺失而阻塞，精确依赖及 Session 绑定保持原值。
+[当前字段与调用路径、迁移和接口证据](INSTANCE_CONFIGURATION_PROGRESS.md) 优先于下文历史缺口表。
+
 2026-10-19；SM 本地实现说明。职责依据上游 MODULE_CONTRACTS §0.3、§2.4、§4.3、
 §10；不修改上游规范，不把目标完整实例化宣布为已完成。
 本批次基线 `3fe36e2`，验证与缺口见 [进度](SESSION_MANAGEMENT_PROGRESS.md)。

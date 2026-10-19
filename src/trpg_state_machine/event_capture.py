@@ -96,11 +96,7 @@ class EventCapture:
         self.store.require_write()
         signals = self._event_signals(package, event_type, payload, source_actor_id)
         evidence = {
-            "schema": "event-evidence/6"
-            if any(d.capability("light") for d in package.world_objects)
-            else "event-evidence/5"
-            if any(s.grid_json or any(o.state is None for o in s.objects) for s in package.scenes)
-            else "event-evidence/4",
+            "schema": self.world.instances.get(sid, "session", sid)["evidence_schema"],
             "world_version": None,
             "game_tick": self._conn.execute(
                 "SELECT game_tick FROM world_states WHERE session_id=?", (sid,)
@@ -190,7 +186,11 @@ class EventCapture:
         for scene_id in sorted(scene_ids):
             grid, topology = self._perception_geometry(sid, scene_id)
             uncertainty, light_sources = (), {}
-            if grid is not None and any(d.capability("light") for d in package.world_objects):
+            if (
+                grid is not None
+                and self.world.instances.get(sid, "session", sid)["evidence_schema"]
+                == "event-evidence/6"
+            ):
                 grid, uncertainty, light_sources = self.lights.project(sid, scene_id, package, grid)
                 topology = self.world.maps.for_grid(sid, scene_id, grid).topology
             topologies[scene_id] = topology
@@ -206,7 +206,10 @@ class EventCapture:
                     )
                 ),
             }
-            if any(d.capability("light") for d in package.world_objects):
+            if (
+                self.world.instances.get(sid, "session", sid)["evidence_schema"]
+                == "event-evidence/6"
+            ):
                 evidence["scenes"][scene_id]["light_uncertain_cells"] = list(uncertainty)
                 evidence["scenes"][scene_id]["lighting_sources"] = light_sources
         for actor in [*actors, *evidence["source_actors"]]:
@@ -215,7 +218,7 @@ class EventCapture:
             )
             if evidence["schema"] in ("event-evidence/5", "event-evidence/6"):
                 actor["cell"] = cell
-            definition = next((a for a in package.actors if a.actor_id == actor["actor_id"]), None)
+            definition = self.world.instances.actor(sid, actor["actor_id"])
             actor["senses"] = dict(definition.senses) if definition and definition.senses else None
             stored = self._conn.execute(
                 "SELECT state_json FROM mechanical_actors WHERE session_id=? AND actor_id=?",

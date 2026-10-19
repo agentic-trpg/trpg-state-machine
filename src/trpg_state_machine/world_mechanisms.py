@@ -19,12 +19,11 @@ class MechanismService:
     def __init__(self, handler):
         self.h = handler
         self._invocation = None
-        self._index_digest = None
         self._index = {}
         self.effects = MechanismEffectRunner(handler)
 
-    def config(self, package, oid):
-        d = self.h.facts.object_definition(package, oid)
+    def config(self, sid, oid):
+        d = self.h.facts.object_definition(sid, oid)
         return d.capability("mechanism") if d else None
 
     def qualify_link(self, sid, origin, target, kind, value, package):
@@ -38,7 +37,7 @@ class MechanismService:
     def _preflight(self, sid, action, package, candidates):
         h = self.h
         obj = h.facts.object(sid, action.target_object_id)
-        d = h.facts.object_definition(package, action.target_object_id)
+        d = h.facts.object_definition(sid, action.target_object_id)
         if obj is None or d is None or h.facts.object_hp(sid, action.target_object_id) == 0:
             raise StateMachineError("mechanism_target_unavailable", "Mechanism target unavailable")
         if action.kind == "set_open_state":
@@ -160,7 +159,7 @@ class MechanismService:
         if (position.scene_id, position.cell) != (op.scene_id, op.expected_cell):
             raise StateMachineError("position_conflict", "Actor position changed")
         h.objects.containers.reachable(sid, actor, op.object_id, package)
-        c = self.config(package, op.object_id)
+        c = self.config(row["session_id"], op.object_id)
         if c is None:
             raise StateMachineError("unsupported_object_capability", "Object is not a mechanism")
         return c
@@ -183,7 +182,7 @@ class MechanismService:
         h, sid = self.h, row["session_id"]
         if type(command_id) is not str or not command_id:
             raise StateMachineError("invalid_execution_origin", "Admitted source command required")
-        c = self.config(package, oid)
+        c = self.config(row["session_id"], oid)
         activation = self.activation_id(oid, command_id, source_seq, operation_id)
         if h._conn.execute(
             "SELECT 1 FROM mechanism_activations WHERE session_id=? AND activation_id=?",
@@ -462,7 +461,7 @@ class MechanismService:
         return plan
 
     def component_destroyed(self, row, package, component):
-        self._build_index(package)
+        self._build_index(row["session_id"])
         sid, events = row["session_id"], []
         for oid, _, _ in self._index.get(("destroyed", None, component), ()):
             state = self.h.facts.mechanism_state(sid, oid)
@@ -488,11 +487,9 @@ class MechanismService:
                 )
         return events
 
-    def _build_index(self, package):
-        if self._index_digest == package.package_digest:
-            return
+    def _build_index(self, sid):
         index = {}
-        for definition in package.world_objects:
+        for definition in self.h.facts.instances.objects(sid):
             c = definition.capability("mechanism")
             if c is None:
                 continue
@@ -506,10 +503,9 @@ class MechanismService:
         self._index = {
             key: tuple(sorted(value, key=lambda v: (v[0], v[1]))) for key, value in index.items()
         }
-        self._index_digest = package.package_digest
 
     def automatic(self, row, package, event, command_id, source_seq):
-        self._build_index(package)
+        self._build_index(row["session_id"])
         sid, payload, kind = row["session_id"], event.payload, event.event_type
         if self.h._active_combat(sid):
             return []  # Combat mechanical hooks/Episode routing require a separate contract.
@@ -522,7 +518,7 @@ class MechanismService:
             kind == "item.container_transferred" and payload.get("phase") == "after"
         ):
             oid = payload["instance_id"]
-            c = self.config(package, oid)
+            c = self.config(row["session_id"], oid)
             state = self.h.facts.mechanism_state(sid, oid)
             if (
                 c
@@ -614,7 +610,7 @@ class MechanismService:
                 != trigger.value
             ):
                 continue
-            c = self.config(package, oid)
+            c = self.config(row["session_id"], oid)
             state = self.h.facts.mechanism_state(sid, oid)
             if state is None or state.status != "armed":
                 continue
@@ -661,7 +657,7 @@ class MechanismService:
         ).fetchall()
         for (oid,) in due:
             state = self.h.facts.mechanism_state(sid, oid)
-            c = self.config(package, oid)
+            c = self.config(row["session_id"], oid)
             self._state(sid, oid, c, package)
             obj = self.h.facts.object(sid, oid)
             ready = (

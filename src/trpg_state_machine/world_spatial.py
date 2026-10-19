@@ -85,13 +85,19 @@ class ObjectSpatialService:
         self.h = handler
         self.protection_provider = protection_provider
 
-    def config(self, package, oid):
-        d = self.h.facts.object_definition(package, oid)
+    def config(self, sid, oid):
+        d = self.h.facts.object_definition(sid, oid)
         return d.capability("spatial") if d else None
 
-    @staticmethod
-    def _legacy(package, oid):
-        return next(o for s in package.scenes for o in s.objects if o.object_id == oid)
+    def _legacy(self, sid, oid):
+        if self.h.facts.object(sid, oid) is not None:
+            return self.h.facts.instances.legacy_object(sid, oid)
+        return next(
+            o
+            for scene in self.h.facts.instances.scenes(sid)
+            for o in scene.objects
+            if o.object_id == oid
+        )
 
     def state(self, sid, oid, package):
         obj = self.h.facts.object(sid, oid)
@@ -103,28 +109,29 @@ class ObjectSpatialService:
                 obj["state"],
                 self.h.facts.object_hp(sid, oid) == 0,
             )
-        # Unvisited scenes have configured initial facts, never fallback over a live row.
-        initial = self._legacy(package, oid)
-        d = self.h.facts.object_definition(package, oid)
-        durability = d.capability("durability") if d else None
-        scene = next(s.scene_id for s in package.scenes if initial in s.objects)
-        return ObjectSpatialState(
-            scene,
-            initial.initial_cell,
-            initial.initial_orientation,
-            initial.state,
-            bool(durability and durability.initial_hp == 0),
-        )
+        for scene in self.h.facts.instances.scenes(sid):
+            initial = next((o for o in scene.pending_objects if o.object_id == oid), None)
+            if initial is not None:
+                d = self.h.facts.object_definition(sid, oid)
+                durability = d.capability("durability") if d else None
+                return ObjectSpatialState(
+                    scene.scene_id,
+                    initial.initial_cell,
+                    initial.initial_orientation,
+                    initial.state,
+                    bool(durability and durability.initial_hp == 0),
+                )
+        raise StateMachineError("invalid_target", "Object instance has not been created")
 
     def blocks(self, sid, oid, package, *, candidate=None):
-        c = self.config(package, oid)
+        c = self.config(sid, oid)
         if c is None:
             return None
         state = candidate or self.state(sid, oid, package)
-        return getattr(c, self._property_state(package, oid, state) + "_blocks_movement")
+        return getattr(c, self._property_state(sid, oid, state) + "_blocks_movement")
 
-    def _property_state(self, package, oid, state):
-        d = self.h.facts.object_definition(package, oid)
+    def _property_state(self, sid, oid, state):
+        d = self.h.facts.object_definition(sid, oid)
         durability = d.capability("durability") if d else None
         if (
             state.destroyed
@@ -134,8 +141,13 @@ class ObjectSpatialService:
             return "destroyed"
         return "open" if state.open_state == "open" else "closed"
 
-    def cells(self, package, oid, anchor, orientation="north"):
-        c = self.config(package, oid)
+    def cells(self, package, oid, anchor, orientation="north", *, sid=None):
+        # Compatibility for explicitly static geometry callers. Runtime supplies sid.
+        if sid is None:
+            d = self.h.facts.template_object_definition(package, oid)
+            c = d.capability("spatial") if d else None
+        else:
+            c = self.config(sid, oid)
         if orientation not in (c.allowed_orientations if c else ("north",)):
             raise StateMachineError("invalid_spatial_state", "Object orientation is not allowed")
         if anchor is None:
@@ -179,7 +191,10 @@ class ObjectSpatialService:
         state = candidate if candidate is not None else self.state(sid, oid, package)
         obj = self.h.facts.object(sid, oid)
         reason = None
-        if any(p.door_object_id == oid for p in package.passages):
+        if any(
+            p.door_object_id == oid
+            for p in self.h.facts.instances.get(sid, "session", sid)["passages"]
+        ):
             reason = "shared_door_protection_geometry_unsupported"
         elif obj is not None and (obj["carrier_id"] is not None or obj["container_id"] is not None):
             reason = "nonground_protection_pose_unsupported"
@@ -188,7 +203,7 @@ class ObjectSpatialService:
         if reason:
             return ObjectProtectionInput(oid, state, None, reason)
         # Validate canonical pose using the SAME transform/orientation constraints.
-        self.cells(package, oid, state.anchor, state.orientation)
+        self.cells(package, oid, state.anchor, state.orientation, sid=sid)
         if properties is None and self.protection_provider is not None:
             properties = self.protection_provider.current_protection(
                 sid, oid, package, candidate=state
@@ -232,7 +247,7 @@ class ObjectSpatialService:
         _, objects = self.h.grid.reader.scene_occupants(sid, scene_id, package)
         doors = {
             p.door_object_id
-            for p in package.passages
+            for p in self.h.facts.instances.get(sid, "session", sid)["passages"]
             if p.door_object_id and any(e.scene_id == scene_id for e in p.endpoints)
         }
         return SceneProtectionInputs(
@@ -285,13 +300,13 @@ class ObjectSpatialService:
 
     def project(self, sid, oid, package, *, candidate=None):
         state = candidate or self.state(sid, oid, package)
-        cells = self.cells(package, oid, state.anchor, state.orientation)
-        c = self.config(package, oid)
+        cells = self.cells(package, oid, state.anchor, state.orientation, sid=sid)
+        c = self.config(sid, oid)
         if c is None:
             return ObjectSpatialProjection(
-                cells, cells if self._legacy(package, oid).blocks_passage else ()
+                cells, cells if self._legacy(sid, oid).blocks_passage else ()
             )
-        props = getattr(c, self._property_state(package, oid, state) + "_properties")
+        props = getattr(c, self._property_state(sid, oid, state) + "_properties")
         return ObjectSpatialProjection(
             cells,
             cells if self.blocks(sid, oid, package, candidate=state) else (),
@@ -301,7 +316,7 @@ class ObjectSpatialService:
         )
 
     def target_cells(self, sid, scene_id, oid, package):
-        ports = self.h._door_ports(scene_id, oid, package)
+        ports = self.h._door_ports(scene_id, oid, package, sid=sid)
         if ports:
             return tuple(dict.fromkeys(e.threshold_cell for _, e in ports))
         state = self.state(sid, oid, package)
@@ -344,10 +359,14 @@ class ObjectSpatialService:
 
     def movement_cells(self, sid, scene_id, package, *, exclude_object=None):
         cells = set()
-        doors = {p.door_object_id for p in package.passages if p.door_object_id}
+        doors = {
+            p.door_object_id
+            for p in self.h.facts.instances.get(sid, "session", sid)["passages"]
+            if p.door_object_id
+        }
         _, objects = self.h.grid.reader.scene_occupants(sid, scene_id, package)
         for oid, _ in objects:
-            if oid != exclude_object and oid not in doors and self.config(package, oid):
+            if oid != exclude_object and oid not in doors and self.config(sid, oid):
                 cells.update(self.project(sid, oid, package).movement_blocking_cells)
         return cells
 
@@ -360,7 +379,7 @@ class ObjectSpatialService:
         _, objects = self.h.grid.reader.scene_occupants(sid, scene_id, package)
         local_doors = {
             p.door_object_id
-            for p in package.passages
+            for p in self.h.facts.instances.get(sid, "session", sid)["passages"]
             if p.door_object_id and any(e.scene_id == scene_id for e in p.endpoints)
         }
         result = {}
@@ -373,7 +392,7 @@ class ObjectSpatialService:
                     cells
                     if self.blocks(sid, oid, package)
                     or (
-                        self.config(package, oid) is None
+                        self.config(sid, oid) is None
                         and self.state(sid, oid, package).open_state == "closed"
                     )
                     else (),
@@ -400,10 +419,14 @@ class ObjectSpatialService:
         actors, objects = h.grid.reader.scene_occupants(sid, scene_id, package)
         actor_cells = {cell for _, cell in actors if cell is not None}
         blocking = set()
-        doors = {p.door_object_id for p in package.passages if p.door_object_id}
+        doors = {
+            p.door_object_id
+            for p in self.h.facts.instances.get(sid, "session", sid)["passages"]
+            if p.door_object_id
+        }
         reserved = {
             cell
-            for p in package.passages
+            for p in self.h.facts.instances.get(sid, "session", sid)["passages"]
             for e in p.endpoints
             if e.scene_id == scene_id
             for cell in (e.threshold_cell, e.standing_cell)
@@ -414,7 +437,7 @@ class ObjectSpatialService:
             cells = set(projection.occupied_cells)
             if oid in doors:
                 continue  # Shared doors use endpoint/threshold checks in Openable/WorldHandler.
-            if self.config(package, oid):
+            if self.config(sid, oid):
                 if not cells:
                     raise StateMachineError(error_code, "Ground footprint needs an anchor")
                 if any(
@@ -470,7 +493,7 @@ class ObjectSpatialService:
         h._world_actor_ready(sid, actor)
         position = h._public_scope(sid, actor, package)
         obj = h.facts.object(sid, op.object_id)
-        c = self.config(package, op.object_id)
+        c = self.config(row["session_id"], op.object_id)
         if c is None or c.mobility_policy != "gm_placement":
             raise StateMachineError("unsupported_object_capability", "No GM placement policy")
         if obj is None or obj["scene_id"] != op.scene_id or position.scene_id != op.scene_id:
@@ -489,7 +512,12 @@ class ObjectSpatialService:
         orientation = op.to_orientation or before.orientation
         if orientation not in c.allowed_orientations:
             raise StateMachineError("unsupported_object_orientation", "Orientation is not allowed")
-        if any(p.door_object_id == op.object_id for p in package.passages):
+        if any(
+            p.door_object_id == op.object_id
+            for p in self.h.facts.instances.get(row["session_id"], "session", row["session_id"])[
+                "passages"
+            ]
+        ):
             raise StateMachineError(
                 "unsupported_object_capability", "Shared passage objects are fixed"
             )
@@ -522,7 +550,7 @@ class ObjectSpatialService:
         ]
 
     def audit(self, sid, package):
-        for scene in package.scenes:
+        for scene in self.h.facts.instances.scenes(sid):
             if (
                 scene.grid_json is not None
                 and self.h._spatial_scene(sid, scene.scene_id) is not None

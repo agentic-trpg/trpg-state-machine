@@ -269,6 +269,7 @@ def test_legacy_command_fingerprint_unchanged(tmp_path, package_data, context):
         command = check_command(sm, sid, package, gm)
         old = asdict(command)
         old.pop("check_world_effects")
+        old.pop("time_wait")  # The frozen legacy shape predates optional waits.
         old["payload"] = command.payload.model_dump(mode="json")
         raw = dict(
             command=old,

@@ -60,6 +60,7 @@ def test_real_old_history_is_audited_not_guessed(tmp_path, package_data, context
         assert [tuple(r) for r in rows] == [(None, "legacy_unavailable")] * 2
         assert sm._conn.execute("PRAGMA foreign_key_check").fetchall() == []
         for sid in sessions:
+            sm.upgrade_instance_configs(sid, package, context=context)
             sm.resume_session(sid, package, context=context)
     with StateMachine(db) as restarted:
         assert (
@@ -102,7 +103,7 @@ def test_schema8_failure_rolls_back_all_migration_steps(tmp_path, package_data, 
     with sqlite3.connect(db) as conn:
         assert conn.execute("PRAGMA user_version").fetchone()[0] == 7
     with StateMachine(db) as sm:
-        assert sm._conn.execute("PRAGMA user_version").fetchone()[0] == 38
+        assert sm._conn.execute("PRAGMA user_version").fetchone()[0] == 39
         assert sm._conn.execute("PRAGMA foreign_key_check").fetchall() == []
 
 

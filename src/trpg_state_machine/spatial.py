@@ -184,11 +184,11 @@ class WorldHandler:
 
     def _public_scope(self, sid, actor_id, package):
         position = self._actor_position(sid, actor_id)
-        if not package.scene(position.scene_id).public_interactions:
+        if not self.facts.instances.scene(sid, position.scene_id).public_interactions:
             raise StateMachineError(
                 "unsupported_interaction_scope", "Public spatial scope is required"
             )
-        definition = next((a for a in package.actors if a.actor_id == actor_id), None)
+        definition = self.facts.instances.actor(sid, actor_id)
         if definition and (definition.senses is None or not dict(definition.senses)["visual"]):
             raise StateMachineError(
                 "unsupported_target_visibility", "Target authorization is unproven"
@@ -255,12 +255,15 @@ class WorldHandler:
         except StateMachineError as exc:
             raise StateMachineError("invalid_target", "No authorized local object") from exc
         self.facts.require_ordinary_object(sid, operation.object_id)
-        if self.objects.spatial.config(package, operation.object_id):
+        if self.objects.spatial.config(sid, operation.object_id):
             raise StateMachineError(
                 "unsupported_object_capability", "Use authorized placement policy"
             )
         definition = next(
-            o for s in package.scenes for o in s.objects if o.object_id == operation.object_id
+            o
+            for s in self.facts.instances.scenes(sid)
+            for o in s.objects
+            if o.object_id == operation.object_id
         )
         if not definition.movable:
             raise StateMachineError("unsupported_object_capability", "Object cannot be adjusted")
@@ -269,7 +272,7 @@ class WorldHandler:
         self._visible_target(sid, actor_id, operation.to_cell, package)
         handled_thresholds = {
             (p.passage_id, e.threshold_cell)
-            for p in package.passages
+            for p in self.facts.instances.get(sid, "session", sid)["passages"]
             for e in p.endpoints
             if e.scene_id == position.scene_id
             and e.standing_cell == position.cell
@@ -335,9 +338,7 @@ class WorldHandler:
                 raise StateMachineError("invalid_target", "No authorized carried item")
             target = operation.to_cell
             self._visible_target(sid, actor_id, target, package)
-        if item["item_json"] is None or operation.instance_id not in {
-            i.instance_id for i in package.portable_items
-        }:
+        if not self.facts.instances.is_portable(sid, operation.instance_id):
             raise StateMachineError(
                 "unsupported_object_capability", "No approved portable capability"
             )
@@ -472,10 +473,10 @@ class WorldHandler:
             )
             return CarriedItemsView(actor_id, version, visible)
 
-    def _door_ports(self, scene_id, object_id, package):
+    def _door_ports(self, scene_id, object_id, package, *, sid):
         return tuple(
             (p, e)
-            for p in package.passages
+            for p in self.facts.instances.get(sid, "session", sid)["passages"]
             if p.door_object_id == object_id
             for e in p.endpoints
             if e.scene_id == scene_id
@@ -486,8 +487,8 @@ class WorldHandler:
         position = self._actor_position(sid, actor_id)
         if operation.scene_id != position.scene_id:
             raise StateMachineError("invalid_target", "Interaction must be in the actor's scene")
-        definition = self.facts.object_definition(package, operation.object_id)
-        fine = package.scene(position.scene_id).grid_json is not None
+        definition = self.facts.object_definition(sid, operation.object_id)
+        fine = self.facts.instances.scene(sid, position.scene_id).grid_json is not None
         if fine:
             self._world_actor_ready(sid, actor_id, navigation_scope=navigation_scope)
             self._public_scope(sid, actor_id, package)
@@ -501,7 +502,7 @@ class WorldHandler:
         if full["container_id"] is not None or full["carrier_id"] is not None:
             self.objects.containers.reachable(sid, actor_id, operation.object_id, package)
             return obj, None
-        ports = self._door_ports(position.scene_id, operation.object_id, package)
+        ports = self._door_ports(position.scene_id, operation.object_id, package, sid=sid)
         if ports:
             base = self.grid.base_topology(sid, position.scene_id, package)
             visible = [(p, e) for p, e in ports if base.can_see(position.cell, e.threshold_cell)]
@@ -541,7 +542,7 @@ class WorldHandler:
 
     def _validate_door_occupancy(self, sid, operation, package):
         if operation.state.value == "closed":
-            for passage in package.passages:
+            for passage in self.facts.instances.get(sid, "session", sid)["passages"]:
                 if passage.door_object_id == operation.object_id:
                     for endpoint in passage.endpoints:
                         actors, _ = self.grid.reader.scene_occupants(
@@ -554,16 +555,16 @@ class WorldHandler:
 
     def _passage_route(self, sid, actor_id, to_scene_id, package, passage_id=None):
         position = self._actor_position(sid, actor_id)
-        source = package.scene(position.scene_id)
+        source = self.facts.instances.scene(sid, position.scene_id)
         # Retain the abstract API's unknown-scene rejection.
         if source.grid_json is None:
-            package.scene(to_scene_id)
+            self.facts.instances.scene(sid, to_scene_id)
         if to_scene_id not in source.exits:
             raise StateMachineError(
                 "invalid_target" if source.grid_json is not None else "scene_unreachable",
                 "No authorized directed exit",
             )
-        target = package.scene(to_scene_id)
+        target = self.facts.instances.scene(sid, to_scene_id)
         if source.grid_json is None and target.grid_json is None:
             return SpatialPosition(target.scene_id, None)
         if source.grid_json is None or target.grid_json is None:
@@ -574,7 +575,11 @@ class WorldHandler:
         pid = dict(source.exit_passages).get(to_scene_id)
         if not pid or passage_id is not None and passage_id != pid:
             raise StateMachineError("scene_unreachable", "No authorized spatial passage")
-        passage = next(p for p in package.passages if p.passage_id == pid)
+        passage = next(
+            p
+            for p in self.facts.instances.get(sid, "session", sid)["passages"]
+            if p.passage_id == pid
+        )
         a = next(e for e in passage.endpoints if e.scene_id == source.scene_id)
         b = next(e for e in passage.endpoints if e.scene_id == target.scene_id)
         try:
@@ -606,7 +611,7 @@ class WorldHandler:
         self._world_actor_ready(sid, actor_id, navigation_scope=navigation_scope)
         position = self._actor_position(sid, actor_id)
         # Establish caller capability before looking up any target reference.
-        if package.scene(position.scene_id).grid_json is not None:
+        if self.facts.instances.scene(row["session_id"], position.scene_id).grid_json is not None:
             self._public_scope(sid, actor_id, package)
         if type(operation) is StepActor:
             return self._validate_step(sid, actor_id, operation, package)
@@ -623,7 +628,14 @@ class WorldHandler:
             return position
         if type(operation) is TraversePassage:
             passage = next(
-                (p for p in package.passages if p.passage_id == operation.passage_id), None
+                (
+                    p
+                    for p in self.facts.instances.get(
+                        row["session_id"], "session", row["session_id"]
+                    )["passages"]
+                    if p.passage_id == operation.passage_id
+                ),
+                None,
             )
             if passage is None or position.scene_id not in {e.scene_id for e in passage.endpoints}:
                 raise StateMachineError("invalid_target", "No authorized passage")
@@ -710,7 +722,10 @@ class WorldHandler:
             ):
                 if topology.can_see(position.cell, obj[1]):
                     definition = next(
-                        o for s in package.scenes for o in s.objects if o.object_id == obj[0]
+                        o
+                        for s in self.facts.instances.scenes(session_id)
+                        for o in s.objects
+                        if o.object_id == obj[0]
                     )
                     blocking = self.objects.spatial.blocks(session_id, obj[0], package)
                     objects.append(
@@ -723,8 +738,10 @@ class WorldHandler:
                     )
             exits = tuple(
                 (target, pid, e.standing_cell, e.threshold_cell)
-                for target, pid in package.scene(position.scene_id).exit_passages
-                for p in package.passages
+                for target, pid in self.facts.instances.scene(
+                    session_id, position.scene_id
+                ).exit_passages
+                for p in self.facts.instances.get(session_id, "session", session_id)["passages"]
                 if p.passage_id == pid
                 for e in p.endpoints
                 if e.scene_id == position.scene_id
@@ -742,7 +759,7 @@ class WorldHandler:
                     e.threshold_cell,
                     self.objects.openable.lock_status(session_id, p.door_object_id, package),
                 )
-                for p in package.passages
+                for p in self.facts.instances.get(session_id, "session", session_id)["passages"]
                 if p.door_object_id
                 for e in p.endpoints
                 if e.scene_id == position.scene_id
@@ -824,7 +841,7 @@ class WorldHandler:
                 "unsupported_combat_dynamic_obstacles",
                 "Object spatial properties need RE integration",
             )
-        definitions = {o.object_id: o for s in package.scenes for o in s.objects}
+        definitions = {o.object_id: o for s in self.facts.instances.scenes(sid) for o in s.objects}
         objects = self._conn.execute(
             "SELECT object_id FROM objects WHERE session_id=? AND scene_id=?", (sid, scene_id)
         ).fetchall()
@@ -833,7 +850,7 @@ class WorldHandler:
                 "unsupported_combat_dynamic_obstacles",
                 "Movement-only objects cannot be represented by the pinned combat evaluator",
             )
-        for passage in package.passages:
+        for passage in self.facts.instances.get(sid, "session", sid)["passages"]:
             if scene_id not in {e.scene_id for e in passage.endpoints}:
                 continue
             if passage.door_object_id and self._door_closed(sid, passage, package):
@@ -858,7 +875,7 @@ class WorldHandler:
         return (
             next(
                 o.state
-                for s in package.scenes
+                for s in self.facts.instances.scenes(sid)
                 for o in s.objects
                 if o.object_id == passage.door_object_id
             )
@@ -887,8 +904,8 @@ class WorldHandler:
 
     def _assert_spatial_consistency(self, sid, package):
         self.objects.spatial.audit(sid, package)
-        definitions = {o.object_id: o for s in package.scenes for o in s.objects}
-        for scene in package.scenes:
+        definitions = {o.object_id: o for s in self.facts.instances.scenes(sid) for o in s.objects}
+        for scene in self.facts.instances.scenes(sid):
             if scene.grid_json is None:
                 continue
             if self._spatial_scene(sid, scene.scene_id) is None:
@@ -911,7 +928,7 @@ class WorldHandler:
                 if not cell_in_bounds(topology, obj[1]):
                     raise StateMachineError("invalid_spatial_state", "Invalid object location")
                 if (
-                    self.objects.spatial.config(package, obj[0]) is None
+                    self.objects.spatial.config(sid, obj[0]) is None
                     and definitions[obj[0]].blocks_passage
                     and obj[1] in cells
                 ):

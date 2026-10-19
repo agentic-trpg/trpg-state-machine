@@ -1,5 +1,9 @@
 # ObjectSpatialService 实施与边界（2026-10-18）
 
+2026-10-20：运行几何／政策和环境依赖身份已改取 Session 实例配置；当前位置和朝向仍由 objects 独占。
+未实例化场景的预测取保存的 Session 计划，完成创建后清除；不写读查询。
+详见 [实例配置与验证](INSTANCE_CONFIGURATION_PROGRESS.md)。
+
 ## 环境权威版本管理接入（2026-10-19）
 
 本分支在已推送 `382a4ae` 上继续实现 Schema36：Environment 按场景防护输入版本缓存

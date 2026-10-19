@@ -78,8 +78,9 @@ def test_original_receipt_and_historical_move_are_not_backfilled_after_upgrade(t
     original = stored_rows(database)
     with StateMachine(database) as sm:
         sid = old["sid"]
+        sm.upgrade_instance_configs(sid, p, context=context)
         sm.resume_session(sid, p, context=context)
-        assert sm._conn.execute("PRAGMA user_version").fetchone()[0] == 38
+        assert sm._conn.execute("PRAGMA user_version").fetchone()[0] == 39
         from test_migrations import assert_original_rows_equal
 
         upgraded = stored_rows(database)

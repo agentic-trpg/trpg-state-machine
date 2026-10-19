@@ -240,7 +240,13 @@ class EnvironmentVersions:
             if any((role == "protection") != (w.kind == "protection") for w in provider.watches):
                 raise ValueError("Dependency impact does not match its provider role")
             if role == "protection":
-                known = {o.object_id for s in package.scenes for o in s.objects}
+                from .domain_facts import WorldFacts
+
+                known = {
+                    oid
+                    for s in WorldFacts(self.store).instances.scenes(sid)
+                    for oid in s.object_ids
+                }
                 if not set(provider.object_ids) <= known:
                     raise ValueError("Protection dependency is outside the pinned Package")
         descriptor = self.descriptor(provider)

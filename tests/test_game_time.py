@@ -478,13 +478,14 @@ def test_actual_schema14_concurrent_upgrade_preserves_all_prior_authority(tmp_pa
             return sm._conn.execute("PRAGMA user_version").fetchone()[0]
 
     with ThreadPoolExecutor(max_workers=3) as pool:
-        assert list(pool.map(upgrade, range(3))) == [38] * 3
+        assert list(pool.map(upgrade, range(3))) == [39] * 3
     assert_preserved(db, original)
     from trpg_state_machine import load_adventure_package
 
     package = load_adventure_package(SOURCE).package
     context = replace(context, can_advance_time=True)
     with StateMachine(db) as sm:
+        sm.upgrade_instance_configs(sid, package, context=context)
         assert sm.resume_session(sid, package, context=context).world.game_tick == 0
         npc = grant(sm, sid, package, context)
         assert npc_view(sm, sid, package, npc).memories[-1].text == "Old committed memory."
@@ -516,7 +517,7 @@ def test_interrupted_schema15_migration_is_atomic_and_retryable(tmp_path, monkey
         assert conn.execute("PRAGMA user_version").fetchone()[0] == 14
     monkeypatch.undo()
     with StateMachine(db) as sm:
-        assert sm._conn.execute("PRAGMA user_version").fetchone()[0] == 38
+        assert sm._conn.execute("PRAGMA user_version").fetchone()[0] == 39
 
 
 def test_overlapping_schedule_fails_closed_without_partial_clock(

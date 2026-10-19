@@ -1,5 +1,9 @@
 # OpenableService 范围与验收记录
 
+2026-10-20：操作侧、jam／force／lock policy／DC 改读持久实例配置，状态及凭证继续由原表独占。
+新 RE 冻结候选缺少原工具检定 ABI，兼容实验已撤回，原精确依赖与安全检查保持。
+详见 [实例闭包及外部接口阻塞](INSTANCE_CONFIGURATION_PROGRESS.md)。
+
 **状态：部分交付，未完成原任务的完整四阶段范围。** 阶段 3 的战斗费用、魔法封闭及生命周期未实现；拒绝测试不计为玩法完成。
 
 基线：SM `a8e7a6293b800a15256fa81971f43b1ee0d60553`；分支 `feat/world-openable-service`。

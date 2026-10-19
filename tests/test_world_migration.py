@@ -52,6 +52,7 @@ def test_old_nonempty_save_preserves_facts_keys_receipts_and_adds_no_capabilitie
     with StateMachine(db, dnd_loader=lock_loader()) as sm:
         sid = record["sid"]
         p = _validate(lock_data())
+        sm.upgrade_instance_configs(sid, p, context=ctx)
         sm.resume_session(sid, p, context=ctx)
         after = stored_rows(db)
         for table in before.keys() - {"door_locks", "door_credentials", "objects"}:

@@ -476,8 +476,17 @@ class WorldFacts:
         ).fetchone()
 
     @staticmethod
-    def object_definition(package, oid):
+    def template_object_definition(package, oid):
         return next((d for d in package.world_objects if d.object_id == oid), None)
+
+    @property
+    def instances(self):
+        from .instance_data import InstanceData
+
+        return InstanceData(self)
+
+    def object_definition(self, sid, oid):
+        return self.instances.object_definition(sid, oid)
 
     def __init__(self, store):
         self.store = store
@@ -488,6 +497,7 @@ class WorldFacts:
 
     def initialize_world(self, sid, package):
         self.store.require_write()
+        self.instances.initialize_world(sid, package)
         self._conn.executemany(
             "INSERT OR IGNORE INTO scene_environment_versions(session_id,scene_id) VALUES (?,?)",
             [(sid, scene.scene_id) for scene in package.scenes],
@@ -523,6 +533,7 @@ class WorldFacts:
                 for ob in scene.objects
             ],
         )
+        self.instances.initialize_scene(sid, scene_id, package)
         return True
 
     def initialize_object_capabilities(self, sid, scene_id, package):
@@ -532,7 +543,10 @@ class WorldFacts:
             if obj is None or obj["scene_id"] != scene_id:
                 continue
             if c := d.capability("mechanism"):
-                components = (d, *(self.object_definition(package, oid) for oid in c.components))
+                components = (
+                    d,
+                    *(self.template_object_definition(package, oid) for oid in c.components),
+                )
                 broken = any(
                     definition.capability("durability")
                     and definition.capability("durability").initial_hp == 0

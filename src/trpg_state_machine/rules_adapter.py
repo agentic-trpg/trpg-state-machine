@@ -450,14 +450,18 @@ class RulesAdapter:
                     "invalid_spatial_state", "Encounter roster must cover present actors"
                 )
             data["snapshot"]["scene_state"] = spatial
-        if package.noncombat_foundation_json is None:
+        if not self.facts.instances.get(row["session_id"], "session", row["session_id"])[
+            "has_noncombat"
+        ]:
             data["snapshot"]["character_states"] = [
                 self.characters.initial_rule_actor(row["session_id"], actor).model_dump(mode="json")
                 for actor in CombatSnapshot.model_validate_json(
                     canonical_json(data["snapshot"])
                 ).character_states
             ]
-        if package.noncombat_foundation_json is not None:
+        if self.facts.instances.get(row["session_id"], "session", row["session_id"])[
+            "has_noncombat"
+        ]:
             actors = self.characters.rule_actors(row["session_id"])
             try:
                 roster = data["snapshot"]["combat_state"]["initiative_ids"]
