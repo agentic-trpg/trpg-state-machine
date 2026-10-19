@@ -7,7 +7,7 @@ from typing import Literal, Protocol
 from dnd5e_engine.spatial import canonical_cell_id
 
 from .errors import StateMachineError
-from .object_protection import ORIENTATIONS, Direction
+from .object_protection import ORIENTATIONS, Direction, validate_precipitation_kinds
 
 MAX_CELLS = 256
 MAX_SOURCES = 64
@@ -184,13 +184,41 @@ class StaticWindProtection:
 
 
 @dataclass(frozen=True, slots=True)
+class StaticPrecipitationProtection:
+    cells: tuple[str, ...]
+    kinds: tuple[str, ...]
+
+    def __post_init__(self):
+        area = EnvironmentArea(self.cells)
+        object.__setattr__(self, "cells", area.cells)
+        try:
+            validate_precipitation_kinds(self.kinds)
+        except ValueError as exc:
+            invalid(str(exc))
+        object.__setattr__(self, "kinds", tuple(sorted(self.kinds)))
+
+
+@dataclass(frozen=True, slots=True)
 class SceneEnvironmentProtection:
     """None is unconfigured; empty tuple is explicitly no static contribution."""
 
     rain_cells: tuple[str, ...] | None = None
     wind: tuple[StaticWindProtection, ...] | None = None
+    precipitation: tuple[StaticPrecipitationProtection, ...] | None = None
 
     def __post_init__(self):
+        if self.precipitation is not None:
+            if (
+                type(self.precipitation) is not tuple
+                or len(self.precipitation) > MAX_CELLS
+                or any(type(p) is not StaticPrecipitationProtection for p in self.precipitation)
+            ):
+                invalid("Expected at most 256 typed static precipitation contributions")
+            object.__setattr__(
+                self,
+                "precipitation",
+                tuple(sorted(set(self.precipitation), key=lambda p: (p.cells, p.kinds))),
+            )
         if self.rain_cells is not None:
             EnvironmentArea(self.rain_cells)
             object.__setattr__(self, "rain_cells", tuple(sorted(self.rain_cells)))

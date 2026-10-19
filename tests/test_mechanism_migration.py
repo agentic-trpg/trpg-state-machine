@@ -32,6 +32,15 @@ def test_schema33_armed_spent_preserved_migration_failure_atomic_and_retry(
         assert receipt.status == "committed"
     # Restore precisely the historical table contract using its bundled migration.
     with sqlite3.connect(db) as conn:
+        # Current setup includes additive ENV35/36 storage and triggers. Remove
+        # those additions before claiming this fixture is a Schema33 database.
+        for (name,) in conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='trigger' AND name GLOB 'env_*'"
+        ).fetchall():
+            conn.execute('DROP TRIGGER "' + name.replace('"', '""') + '"')
+        conn.execute("DROP TABLE environment_provider_bindings")
+        conn.execute("DROP TABLE scene_environment_versions")
+        conn.execute("DROP TABLE scene_environments")
         rows = conn.execute("SELECT session_id,object_id,status FROM object_mechanisms").fetchall()
         conn.execute("DROP TABLE mechanism_activations")
         conn.execute("DROP TABLE object_mechanisms")

@@ -17,6 +17,7 @@ if TYPE_CHECKING:
 Direction = Literal["north", "east", "south", "west"]
 ProtectionStatus = Literal["ready", "none", "unconfigured", "missing_input", "unsupported"]
 ORIENTATIONS = ("north", "east", "south", "west")
+PRECIPITATION_KINDS = ("rain", "snow", "sleet", "hail")
 DOWNWIND = {"north": (0, 1), "east": (-1, 0), "south": (0, -1), "west": (1, 0)}
 MAX_LOCAL_CELLS = 64
 MAX_LOCAL_OFFSET = 32
@@ -64,6 +65,28 @@ class RainProtection:
             raise ValueError("Rain protection needs at most 64 immutable local cells")
         for cell in self.local_cells:
             _offset(cell)
+
+
+@dataclass(frozen=True, slots=True)
+class PrecipitationProtection:
+    """Explicit kinds sharing one vertical ground coverage geometry."""
+
+    local_cells: tuple[tuple[int, int], ...]
+    kinds: tuple[str, ...]
+
+    def __post_init__(self):
+        RainProtection(self.local_cells)
+        validate_precipitation_kinds(self.kinds)
+
+
+def validate_precipitation_kinds(kinds):
+    if (
+        type(kinds) is not tuple
+        or not 1 <= len(kinds) <= 4
+        or any(k not in PRECIPITATION_KINDS for k in kinds)
+        or len(set(kinds)) != len(kinds)
+    ):
+        raise ValueError("Expected 1..4 distinct explicit precipitation kinds")
 
 
 @dataclass(frozen=True, slots=True)
@@ -128,6 +151,7 @@ class CurrentProtectionProperties:
     rain: RainProtection | None = None
     wind: WindProtection | None = None
     base_height_ft: float | None = None
+    precipitation: PrecipitationProtection | None = None
 
     def __post_init__(self):
         if self.rain is not None and type(self.rain) is not RainProtection:
@@ -135,6 +159,11 @@ class CurrentProtectionProperties:
         if self.wind is not None and type(self.wind) is not WindProtection:
             raise ValueError("Expected typed wind properties")
         _height(self.base_height_ft)
+        if (
+            self.precipitation is not None
+            and type(self.precipitation) is not PrecipitationProtection
+        ):
+            raise ValueError("Expected typed precipitation protection")
 
 
 class CurrentProtectionProvider(Protocol):
@@ -161,6 +190,13 @@ class RainContribution:
 
 
 @dataclass(frozen=True, slots=True)
+class PrecipitationContribution:
+    object_id: str
+    cell: str
+    kind: str
+
+
+@dataclass(frozen=True, slots=True)
 class WindContribution:
     object_id: str
     cell: str
@@ -179,6 +215,18 @@ class ObjectProtectionProjection:
     wind_cells: tuple[WindContribution, ...] = ()
     rain_reason: str | None = None
     wind_reason: str | None = None
+    precipitation_cells: tuple[PrecipitationContribution, ...] = ()
+    precipitation_statuses: tuple[tuple[str, str], ...] = ()
+
+    def precipitation_status(self, kind):
+        if kind == "rain":
+            return self.rain_status
+        # Legacy configured rain properties declare only rain coverage. Missing
+        # provider / unsupported pose must still remain explicitly uncertain.
+        return dict(self.precipitation_statuses).get(
+            kind,
+            self.rain_status if self.rain_status in ("unconfigured", "unsupported") else "none",
+        )
 
     def wind_at(self, cell: str, height_ft: float) -> tuple[WindContribution, ...]:
         """Point geometry only: [lower, upper), not a unit exposure decision."""
@@ -215,18 +263,19 @@ def project_protection(oid, state, properties, wind_from, width, height):
         x, y = map(int, cell.split(","))
         return 0 <= x < width and 0 <= y < height
 
-    if properties.rain is not None:
-        rain = tuple(
-            RainContribution(oid, c)
-            for c in sorted(
-                set(
-                    transform_local_cells(
-                        state.anchor, state.orientation, properties.rain.local_cells
-                    )
-                )
-            )
-            if in_bounds(c)
-        )
+    precipitation = set()
+    for config, kinds in (
+        (properties.rain, ("rain",)),
+        (
+            properties.precipitation,
+            properties.precipitation.kinds if properties.precipitation else (),
+        ),
+    ):
+        if config is not None:
+            cells = transform_local_cells(state.anchor, state.orientation, config.local_cells)
+            precipitation.update((c, k) for c in cells if in_bounds(c) for k in kinds)
+    if properties.rain is not None or properties.precipitation is not None:
+        rain = tuple(RainContribution(oid, c) for c, k in sorted(precipitation) if k == "rain")
         rain_status = "ready" if rain else "none"
     if properties.wind is not None:
         turns = ORIENTATIONS.index(state.orientation)
@@ -270,4 +319,13 @@ def project_protection(oid, state, properties, wind_from, width, height):
         rain,
         wind,
         wind_reason=wind_reason,
+        precipitation_cells=tuple(
+            PrecipitationContribution(oid, c, k) for c, k in sorted(precipitation)
+        ),
+        precipitation_statuses=tuple(
+            (k, "ready" if any(kind == k for _, kind in precipitation) else "none")
+            for k in PRECIPITATION_KINDS
+        )
+        if properties.rain is not None or properties.precipitation is not None
+        else (),
     )

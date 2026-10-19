@@ -297,7 +297,7 @@ class GridService:
         return GridTopology(GridScene(**json.loads(raw)))
 
     @_read
-    def base_topology(self, sid, scene_id, package=None):
+    def base_topology(self, sid, scene_id, package=None, *, with_extent=False):
         """Legacy static/Light authorized-visibility input; not the combined current view."""
         scene = self.h.facts.spatial_scene(sid, scene_id)
         if scene is None or scene.get("grid") is None:
@@ -305,7 +305,8 @@ class GridService:
         grid = scene["grid"]
         if package is not None:
             grid, _, _ = self.h.objects.lights.project(sid, scene_id, package, grid)
-        return GridTopology(GridScene(**grid))
+        topology = GridTopology(GridScene(**grid))
+        return (topology, (grid["width"], grid["height"])) if with_extent else topology
 
     @_read
     def read_scene(self, sid, scene_id, package):

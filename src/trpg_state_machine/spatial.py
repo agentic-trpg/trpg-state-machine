@@ -196,9 +196,17 @@ class WorldHandler:
             )
         return position
 
-    def _visible_target(self, sid, actor_id, cell, package):
+    def _prepare_visible_targets(self, sid, actor_id, package):
         position = self._public_scope(sid, actor_id, package)
-        topology = self.grid.base_topology(sid, position.scene_id, package)
+        topology, extent = self.grid.base_topology(
+            sid, position.scene_id, package, with_extent=True
+        )
+        return position, topology, extent
+
+    def _visible_target(self, sid, actor_id, cell, package, *, prepared=None):
+        position, topology = (
+            self._prepare_visible_targets(sid, actor_id, package) if prepared is None else prepared
+        )[:2]
         if not cell_in_bounds(topology, cell) or not cell_in_bounds(topology, position.cell):
             raise StateMachineError(
                 "invalid_spatial_state", "Position is missing or outside its map"

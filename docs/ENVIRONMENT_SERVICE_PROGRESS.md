@@ -1,5 +1,189 @@
 # EnvironmentService 实施记录
 
+## 环境缓存权威版本管理（2026-10-19，Schema 36）
+
+基线为本分支已推送的 `382a4aeb17698a27c0966cd2a72821c039f0ecbb`；当前分支仍为
+`feat/environment-derived-snapshot`，开始时工作区干净。复查仓库及适用祖先，没有 AGENTS.md
+或 check-fast 配置，采用实际 pytest、Ruff check／format、diff 检查。不合并 main。
+以下是本批当前机制；下一节“派生 Snapshot 与显式降水保护”是上一批的历史记录。
+
+审计实际 Environment 模型／组合／公开披露、WorldFacts 写入、OSS 当前属性／资格、Grid
+当前配置、WorldTime.set_tick、角色与物品位置／容器、开关／Durability／Mechanism 采用、
+CommandRuntime savepoint／OCC／重放、SQLite migration 与 provider seam。基础来源没有 tick
+期限；当前 Effects 环境来源及 WO 当前属性是注入接口，不能把 PackageEffects 或角色
+EffectState 直接当作已经接通的环境提供方。
+
+本批实现：
+
+- Schema36 的 `scene_environment_versions` 只存两个权威输入版本：source_version、
+  protection_version；不新增最终缓存版／风向版，不用 world_version。迁移已知场景补零，
+  新 Session 为 Package 全部 Scene 建零值；历史未实体化 Scene 缺行按默认零读取，写时建立。
+- 环境事实、静态防护和 Grid 的同步表触发器覆盖受控命令、导入、初始化及内部 SQL。
+  环境来源变化推进来源版；静态防护、Grid 推进防护版。Wind 输入（包括跨提供方同优先级
+  冲突所需的完整值）、范围、priority、observable 改变时两版都推进。只改雨强不改防护版。
+- 新正式适配器 VersionedEnvironmentEffectsProvider／VersionedProtectionProvider 声明
+  SQLite owner 的完整行／字段依赖；bind_providers 在可信写事务登记同步触发器及清单，
+  不复制 owner 输入。对象姿态／地面归属／当前组件依赖自动登记；额外 actor／容器／属性
+  依赖须明示。跨 Scene 物体写入覆盖原／目标 Scene。reader 仍拥有属性政策与生命周期。
+- Effects JSON 来源变化自动比较 Wind 子输入；计算 Wind 的其他 owner 输入标 wind_source。
+  明确边界／连续变化通过 EnvironmentTimeWatch 接入同一个权威 tick 写入，不轮询或按所有
+  tick 无条件失效所有场景。环境不新增天气时钟／期限镜像。
+- 无版本第三方、未登记／不匹配或显式禁用的路径禁止跨查询复用；没有退回逐项比较来
+  继续启用共享缓存。正式登记路径确实通过版本命中，未把全部正式输入都归入例外。
+- 两层仍为 32 项防护中间结果＋512 项按需完整结果（Cell 或显式高度区间）。缓存先查两版
+  和绑定，命中不读来源／物体／风向／环境 Grid；雨强变化只重合成，不扫描防护。
+- 公开、内部 project、区域、区间、unit 走统一版本入口。内部 project 自动加入／建立读取
+  事务；公开入口继续重查授权和可见性。区域复用同次授权 topology 的范围，环境校验不再
+  重复准备地图；授权所需当前 Light／Grid 仍按原语义每批准备一次。
+- 写事务候选隔离；只读暂存仅成功 COMMIT 后校验当前版本再发布。旧 WAL 结果过时不发布，
+  不改贴新版本；回滚版 N 不进入共享缓存，随后另一输入提交为 N 也不会误命中。
+  发布当前版时剔除同身份旧版，其他 Session／绑定仍受容量限制。清空／重启不改权威版本。
+- 迁移及依赖登记均原子，登记自身还用 savepoint；同登记重试为空操作。持久触发器清单在
+  重开时校验，丢失／部分注册拒绝打开。原环境、事件、回执、Package pin、RNG、tick 和
+  历史 Schema33／两类 Schema34／Schema35 存档事实不重写。既有测试只更新当前 Schema
+  期望；真实历史版本断言及数据保持断言保留。
+- 默认空提供方未发生政策变化时，登记也保持完全空操作；正式提供方开合／损毁依赖和
+  回滚通过真实命令及受控 HP 采用 seam 验证，不能以第三方不缓存替代正式路径。
+
+确定性计数（`test_version_hit_rain_and_wind_call_counts`，正式 SQLite owner fixture）：
+
+| 路径 | 来源扫描 | 防护物体／属性准备 | OSS 投影 | 环境合成 |
+|---|---:|---:|---:|---:|
+| A、A、B、B 累计 | 2 | 1 | 1 | 2 |
+| 已有 Cell 命中 | 0 | 0 | 0 | 0 |
+| 仅雨强变化后查询 A | 1 | 0 | 0 | 1 |
+| Wind 输入变化后查询 | 1 | 1 | 1 | 1 |
+
+命中同时断言无环境 Grid 准备；将来源／物体／环境地图读取直接替换为抛错函数，
+公开／内部点、内部／公开高度区间、整场景区域命中仍成功。权限错误继续拒绝。
+新增专项还覆盖多版跳跃、批量／重放／拒绝／冲突、同数值回滚版、COMMIT 故障、旧读取、
+Effects 时间边界与连续输入、跨 owner 风速冲突、真实携带／容器／落地、actor 依赖、
+跨 Scene、静态防护／Grid、迁移故障／恢复、登记失败、触发器丢失与容量清理。
+
+新增专项 `tests/test_environment_versions.py`：**25 passed**，9.83 秒，exit 0。
+环境／披露／Snapshot／OSS／Grid 中途综合 focused 为 172 passed；另有历史环境／机关
+迁移 13 passed（86.73 秒）、旧机关迁移 2 passed，均 exit 0。最终完整收集为 1,747 项，
+79 个文件按 20／20／20／19 分区。早期全套发现的失败均来自旧迁移测试结构期望：
+Schema33 夹具保留了 ENV35／36 新增表，已先移除后再构造真实目标结构；历史恢复测试的
+新增表清单补上两张元数据表，并新增版本默认零与绑定表为空的断言。没有弱化原数据、
+故障回滚、完整性、回执重放断言。修正后的前轮四区 484／440／397／424 全通过；
+其后默认空提供方空操作修正与两项新增专项通过。最终冻结代码／测试后完整复验：
+四区分别 **486 passed（314.65 秒）、440 passed（192.57 秒）、397 passed（214.73 秒）、
+424 passed（280.62 秒）**，合计 **1,747 passed**，四个进程均正常通过。复验期间只修改
+文档，完成后对照启动前 SHA256 清单确认全部源码、SQL 和测试没有变化。
+
+实际命令（仓库 cwd，最终四个进程分别设 `$versionPart = 0,1,2,3`）：
+
+```powershell
+.venv/Scripts/python.exe -m pytest -q tests/test_environment_versions.py --basetemp=.test-tmp/env-version-final-25 -o faulthandler_timeout=60
+
+$versionFiles = @(Get-ChildItem tests -Filter 'test_*.py' | Sort-Object Name)
+$versionSubset = for ($versionIndex = 0; $versionIndex -lt $versionFiles.Count; $versionIndex++) {
+    if ($versionIndex % 4 -eq $versionPart) { $versionFiles[$versionIndex].FullName }
+}
+.venv/Scripts/python.exe -m pytest -q @versionSubset -o faulthandler_timeout=60 --basetemp=.test-tmp/env-version-delivery-$versionPart
+
+.venv/Scripts/ruff.exe check .
+.venv/Scripts/ruff.exe format --check .
+git diff --check
+```
+
+Ruff check／format（257 files）、diff、五份文档本地链接与 code fence 检查通过。
+全套使用原生本地 socket 权限执行 Engine 异步测试，没有调用外部服务。
+固定 Engine／SRD 与 pyproject／uv.lock 不变；只有既有 lark 弃用警告。
+
+剩余成本和边界：命中保留两个索引读取（两版、提供方绑定）及公开授权／Light 准备；
+冷结果仍读取／解析来源、物体属性和 Grid。完整 Wind、相关对象组件及 Grid 使用保守
+失效，可能重算未实际改变的几何。正式 reader 依赖声明是可信 owner 契约，不能读取未声明
+的可变内存／I/O；生产 WO／Effects 法术适配仍是原有接线边界。携带／容器对象按现有 OSS
+不自动生成地面防护；仅其额外来源依赖明确读取这些状态时登记并失效。
+**命中通过版本检查省掉输入扫描已在本批解决；未命中输入构建的 Runtime 长期复用留后续。**
+
+## Environment 派生 Snapshot 与显式降水保护（2026-10-19）
+
+本轮分支 `feat/environment-derived-snapshot`，基线为本轮 fetch 验证的最新
+`origin/main@d0fda62eba8f975232f47abe64be95660a791110`，初始 HEAD 与 main 相同、工作区干净。
+仓库、适用祖先及子目录没有 AGENTS.md，没有 check-fast 脚本／配置；使用实际 pytest、
+Ruff check／format、diff 检查。只交付本分支，不合并 main，不修改固定依赖或 Schema。
+
+先审计 Environment 模型／命令、WorldFacts JSON、CommandRuntime savepoint 与提交、
+OSS 当前状态／属性与投影、GridReader 当前配置／来源、Effects／UnitHeight provider、
+SessionAccess pin 与公开披露、WorldHandler 可见性及 Light 的真实准备路径；
+再在 [服务说明](https://github.com/agentic-trpg/trpg-state-machine/blob/382a4aeb17698a27c0966cd2a72821c039f0ecbb/docs/ENVIRONMENT_SERVICE.md#snapshot-依赖设计2026-10-19实施前审计)
+形成依赖矩阵，随后实施。顶层 MODULE_CONTRACTS／World 设计保持所有权约束；
+其中早期 NOT IMPLEMENTED 表述不是本仓库实际代码现状或本轮完成证据。
+
+本轮实现已完成：
+
+- 两层独立有界 LRU：32 项 OSS 场景／风向防护，512 项已完成 Cell／height 结果。
+  只缓存实际算出的结果，不展开整张环境地图，不把屋顶覆盖等同完整环境相同。
+- 当前不可变输入验证，Session／Package／Scene／Grid／姿态／当前属性／来源与必要
+  参数隔离；不依赖 TTL、变化通知或 world_version。天气与 Effects 不使不变 OSS
+  几何重算；普通移动、明确无贡献物品拾取、时间与无关锁字段输入不变可继续命中。
+- OSS 输入准备与计算分离，provider 每次读取；多方向／区域使用同一次读取结果。
+  外部路径可 `environment_cacheable=False` 绕过跨查询复用。
+- 只读事务有界暂存，成功 COMMIT 后发布；写事务／无管理 scope 绕过共享缓存。
+  失败、回滚、提交失败、旧读取事务及 clear 期间的暂存不会污染新查询。
+- 显式 rain/snow/sleet/hail 的对象与静态防护，共用位置／旋转／裁剪算法。
+  旧 RainProtection／rain_cells 仍只声明 rain；新可选字段缺省不改变旧命令指纹，
+  无新增持久表／迁移。保留 local／outdoor、未知完整性和大气条件／地面暴露区别。
+- WindBoundary 自身格排除、旋转来向、距离、边界与高度空隙保持。
+- 区域查询一次观察者／Grid／Light 准备，每格继续授权可见性判断，任何失败整批拒绝。
+  缓存命中仍检查当前授权与披露，隐藏来源不变成 ID／状态／高度分段侧漏。
+
+确定性调用次数证据（`tests/test_environment_snapshot.py`，实际执行断言）：
+
+| 路径 | 合成次数 | 场景 OSS／屋顶投影次数 | 其他证据 |
+|---|---:|---:|---|
+| A、A、B、B，屋顶一次覆盖 16 格 | 2 | 1／1 | 两格温度／雾烟不同；最终仅缓存这 2 格；4 次公开查询仍各自准备并验证可见性 |
+| 同格天气雨强改变后再查 | 累计 2 | 仍 1／1 | 环境即刻更新，几何复用 |
+| 5 格区域查询，再查同区域 | 累计 5 | 共享按风向投影 | 每批 visibility／Light 准备各 1 次，逐目标检查各 5 次 |
+| 禁用跨查询复用后，同格再查两次 | 增加 2 | 场景投影增加 2 | 不使用不确定外部路径的缓存 |
+
+30 项新增测试还覆盖来源增加／删除／替换及范围、priority、exposure、observable，
+Effects 移动／修改／结束／不可用，当前防护、真实移动旋转／开关、内部 HP 采用与回滚，
+四类降水显式子集和旧 JSON，Session／Scene／Package／高度／Grid，故障／提交失败、
+旧 WAL 读取、公开授权与 Dark 光照、隐藏范围、有界淘汰、清空与重启一致性。
+最终环境／披露／OSS／Snapshot focused checks 为 **130 passed**（41.72 秒），
+包括 30 项新增专项，exit 0。全套原生四区为 **432／399／446／444 passed**，
+合计 **1,721**，全部 exit 0，耗时 208.69／175.00／246.24／213.39 秒。
+全套覆盖无关物品拾取优化后的实现；随后保留重构前“共享门也先验证显式属性类型”的
+兼容校验，并新增 1 项回归，最终 130 项 focused 全部再验证。当前 collection 为 1,722；
+不将后加的 1 项计入此前全套数字。78 个测试文件按 20／20／19／19 分区，无重复或遗漏。
+
+实际命令（cwd 为本仓库，Python／Ruff 为本地 `.venv/Scripts`，basetemp 各自独立）：
+
+```powershell
+.venv/Scripts/python.exe -m pytest -q tests/test_environment_snapshot.py tests/test_environment_service.py tests/test_environment_review_regressions.py tests/test_object_protection.py --basetemp=.test-tmp/env-snapshot-delivery-focused -o faulthandler_timeout=60
+
+# 四进程分别使用 $snapshotPart = 0、1、2、3；完整文件集合已核对。
+$snapshotFiles = @(Get-ChildItem tests -Filter 'test_*.py' | Sort-Object Name)
+$snapshotSubset = for ($snapshotIndex = 0; $snapshotIndex -lt $snapshotFiles.Count; $snapshotIndex++) {
+    if ($snapshotIndex % 4 -eq $snapshotPart) { $snapshotFiles[$snapshotIndex].FullName }
+}
+.venv/Scripts/python.exe -m pytest -q @snapshotSubset -o faulthandler_timeout=60 --basetemp=.test-tmp/env-snapshot-final-$snapshotPart
+
+.venv/Scripts/ruff.exe check .
+.venv/Scripts/ruff.exe format --check .
+git diff --check
+```
+
+Ruff check／format（254 files）及 diff 检查通过；四份文档本地链接与 fenced code
+完整性检查通过。全套使用原生本地 socket 权限执行 Engine 异步测试，无外部服务调用。
+只有既有 lark 的 sre_parse／sre_constants 弃用警告。实际安装 Engine／SRD 均为 0.6.0，
+direct_url commit_id 均为 `d596161060555630019163ab301e1d25fd816549`，与固定依赖相同，
+pyproject.toml／uv.lock／存储迁移无改动。
+
+已知限制：当前无专用依赖版本，命中仍需读取／校验来源、对象与 provider，比较成本随
+输入大小增长，Grid JSON 读取／规范化当前还可能逐对象重复；保守 Scene 级身份可能使
+无实际几何变化的开关／Grid 变化失效。
+缓存容量按项数限制，单项仍受现有来源／几何预算约束，未宣称生产内存或延迟指标。
+WO／Effects／Package 生产适配及角色实际高度仍是既有外部接入边界。
+不实现积雪、融雪、结冰、冰雹伤害、三维地图、角色交互或认知重构；
+Environment Snapshot 本轮完成，Light 跨查询 Snapshot 保留后续 Light 重构范围。
+
+以下是此前批次的历史记录，保留其各自基线、范围及验证结论。
+
 日期：2026-10-18。仓库：`agentic-trpg/trpg-state-machine`。
 分支：`feat/scene-environment-service`，基线为 fetch 后确认的最新
 `origin/main@9ce60cbe4fdbf91dce6ffef811969482369fb08a`，工作区开始时干净。

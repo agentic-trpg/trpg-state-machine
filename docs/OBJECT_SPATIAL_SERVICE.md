@@ -194,7 +194,8 @@ point_sources = projection.wind_at("3,4", 12)
 调用方必须先验证 Session／Package 绑定和访问权限，并在一致的读事务中组合物体姿态、
 当前属性及网格；玩家视图继续走已有 WOS / StateMachine 查询。
 显式 properties 优先于 provider。provider 的 `current_protection(sid, oid, package,
-*, candidate)` 每次读取，不缓存投影；candidate 是完整待计算姿态。
+*, candidate)` 在实际 OSS 投影调用时读取；candidate 是完整待计算姿态。
+OSS 直接接口自身不缓存，Environment 的版本命中会跳过整个 OSS 调用。
 提供方必须只读、无外部 I/O，能返回该候选的明确当前属性；不能支持时返回 None，
 OSS 不为它推测开合／损坏后果。构造依赖的生产装配与恢复由 SESSION-01 对接。
 
@@ -216,6 +217,40 @@ OSS／Environment 延期待办。W-02 与 MECH-01 保持独立跟踪，不因本
 摆放动作成本仍按既有边界处理，不能由对象侧贡献宣称完成。
 
 ## 本轮验证
+
+### Environment Snapshot／显式降水保护接入（2026-10-19）
+
+当前实现新增 `PrecipitationProtection(local_cells, kinds)` 和
+`CurrentProtectionProperties.precipitation`，kinds 必须显式选择 rain/snow/sleet/hail。
+旧 `RainProtection` 及其几何只声明 rain；没有把旧屋顶默认扩展为所有降水。
+新几何使用同一个 `transform_local_cells`、权威锚点、朝向和场景裁剪，产生
+`PrecipitationContribution(object_id,cell,kind)`；旧 rain_cells 是 rain 类型的兼容投影。
+`precipitation_status(kind)` 保留 ready/none/unconfigured/unsupported 的完整性区别，
+不能根据空 cells 推断没有保护。纯当前属性未配置时不补默认材质策略。
+
+OSS 新增 `prepare_scene_protection`，读取当前对象集合（含共享门）、确切姿态、地面资格、
+provider 的完整不可变当前属性与 Grid 配置；`SceneProtectionInputs` 仅是本次读取输入。
+Environment 可以省略已经读取并证明降水／风几何均为空的来源；未配置或不支持来源保留，
+防止未知完整性被解释为明确无保护。
+`scene_protection_contributions(...,prepared=...)` 使用这份同事务输入，避免不同风向或
+同一区域的 Cell 再次读出不同 provider 状态。prepared 与 properties 不能同时覆盖。
+它仍是可信内部组合接口，不改变公开对象目录、Session pin 或授权责任。
+
+Environment 持有容量 32 的场景防护 LRU；Schema36 版本管理批次改为按 Session／Package
+固定身份／Scene／防护版本／请求风向复用全部 Cell 和高度段。Wind 输入变化在来源写事务
+同步推进来源版和防护版；雨强独立变化不推进防护版。命中完整结果不先读取 Wind，也不扫描
+OSS 当前输入；中间缓存未命中才调用 prepare_scene_protection。正式
+VersionedProtectionProvider 声明物体及额外 owner 输入，登记的同步触发器覆盖实际姿态、
+组件、归属和相关地图写入；actor／容器的额外依赖与 tick 边界必须明确声明。
+OSS 本身不存权威版本、可变防护事实或第二个缓存。旧事务结果提交后已过时则不发布，写
+候选不进入共享 LRU；旧版条目按当前身份剔除并受容量上限约束。无版本／未登记的第三方
+路径一律不跨查询复用，不以内容扫描维持共享缓存。原只读 provider 接口继续可用。
+完整依赖矩阵、最终环境层和故障处理见 [EnvironmentService](ENVIRONMENT_SERVICE.md)。
+
+WindBoundary 的最后实体格语义、k=1..N、旋转风向、距离、边界及 `[lower,upper)` 均保持；
+墙所在 Cell 不获得自身背风贡献，但可以接受其他显式保护。二维 Grid 不新增多层高度表；
+共享高度段供原有显式高度／单位参数判断，不代表所有角色得到相同最终影响。
+未实现积雪、融雪、结冰、冰雹伤害、WO／Effects 的新生产适配器或 Light 跨查询 Snapshot。
 
 测试位于 `tests/test_object_protection.py`，使用真实 Session 事实与公开移动／开门／
 携带／容器命令，并在只读查询前后对比全部数据库表、版本／事件／回执及 total_changes。

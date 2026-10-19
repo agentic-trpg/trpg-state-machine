@@ -5,6 +5,7 @@ from dataclasses import asdict, dataclass, replace
 from dnd5e_engine.spatial import GridTopology
 from dnd5e_engine.specs import GridScene
 
+from .derived_cache import DerivedCache
 from .environment_commands import (
     AddEnvironmentSource,
     BatchEnvironment,
@@ -31,8 +32,10 @@ from .environment_models import (
     invalid,
     validate_sources,
 )
+from .environment_versions import EnvironmentVersions
 from .errors import StateMachineError
 from .grid import cell_in_bounds
+from .object_protection import PRECIPITATION_KINDS
 
 
 @dataclass(frozen=True, slots=True)
@@ -61,6 +64,14 @@ class CellProtection:
     rain_sources: tuple[str, ...]
     wind_status: str
     wind_bands: tuple[ProtectionBand, ...]
+    precipitation: tuple[tuple[str, str, tuple[str, ...]], ...] = ()
+
+    def for_precipitation(self, kind):
+        if kind == "rain":
+            return self.rain_status, self.rain_sources
+        return next(
+            ((status, refs) for k, status, refs in self.precipitation if k == kind), ("unknown", ())
+        )
 
 
 @dataclass(frozen=True, slots=True)
@@ -131,6 +142,64 @@ class EnvironmentService:
         self.command_submitter = command_submitter
         self.effects_provider = effects_provider
         self.unit_height_provider = unit_height_provider
+        self._projections = DerivedCache(32)
+        self._cells = DerivedCache(512)
+        self.versions = EnvironmentVersions(handler.store)
+
+    def clear_snapshots(self):
+        """Disposable derived state only; also cancel publication of pending old entries."""
+        self._projections.clear()
+        self._cells.clear()
+
+    def bind_providers(self, sid, package, *, context):
+        """Trusted host configuration; register owner dependencies atomically, not on reads."""
+        with self.h._transaction(write=True):
+            self.h._session(sid, package, context)
+            if not context.can_manage_environment:
+                raise StateMachineError("unauthorized", "Environment management grant required")
+            for scene in package.scenes:
+                for role, provider in (
+                    ("effects", self.effects_provider),
+                    ("protection", self.h.objects.spatial.protection_provider),
+                ):
+                    if self.versions.descriptor(provider) is not None:
+                        self.versions.bind(sid, scene.scene_id, package, provider, role)
+
+    def _query_cache(self, sid, scene, package):
+        versions = self.versions.current(sid, scene)
+        cacheable, providers = self.versions.cacheable(
+            sid, scene, self.effects_provider, self.h.objects.spatial.protection_provider
+        )
+        return {
+            "identity": (
+                sid,
+                package.adventure_id,
+                package.package_version,
+                package.package_digest,
+                package.ruleset_binding,
+                scene,
+                providers,
+            ),
+            "versions": versions,
+            "scope": self.h.store.derived_read_scope if cacheable else None,
+            "valid": lambda: self.versions.current(sid, scene) == versions,
+            "protection_valid": lambda: self.versions.current(sid, scene)[1] == versions[1],
+        }
+
+    def _prepared_protection(self, sid, scene, package, cache):
+        if "inputs" not in cache:
+            prepared = self.h.objects.spatial.prepare_scene_protection(sid, scene, package)
+            cache["inputs"] = replace(
+                prepared, objects=tuple(p for p in prepared.objects if not p.explicitly_empty())
+            )
+        return cache["inputs"]
+
+    def _environment_inputs(self, sid, scene, package, cache, public):
+        if "environment" not in cache:
+            cache["environment"] = self._inputs(sid, scene, package)
+        if public:
+            return self._disclosure_inputs(cache["environment"])
+        return cache["environment"], frozenset()
 
     def initialize(self, sid, seeds, package, *, command_id, expected_world_version, context):
         """Real controlled import; same command, grants, OCC and receipts as every write."""
@@ -182,6 +251,8 @@ class EnvironmentService:
             self._area(sid, scene, source.area, package)
         if facts.protection.rain_cells:
             self._area(sid, scene, EnvironmentArea(facts.protection.rain_cells), package)
+        for protection in facts.protection.precipitation or ():
+            self._area(sid, scene, EnvironmentArea(protection.cells), package)
         for wind in facts.protection.wind or ():
             self._area(sid, scene, EnvironmentArea((wind.cell,)), package)
 
@@ -353,17 +424,22 @@ class EnvironmentService:
     def _protection(self, sid, scene, cell, package, facts, direction, cache):
         # A placeholder cardinal direction selects ONLY rain when actual wind is unknown.
         key = direction or "north"
+        if "identity" not in cache:
+            cache.update(self._query_cache(sid, scene, package))
         if key not in cache:
-            cache[key] = self.h.objects.spatial.scene_protection_contributions(
-                sid, scene, package, wind_from=key
+            cache[key] = self._projections.resolve(
+                cache["scope"],
+                (cache["identity"], (cache["versions"][1],), key),
+                lambda: self.h.objects.spatial.scene_protection_contributions(
+                    sid,
+                    scene,
+                    package,
+                    wind_from=key,
+                    prepared=self._prepared_protection(sid, scene, package, cache),
+                ),
+                validator=cache["protection_valid"],
             )
         oss = cache[key]
-        rain = ["static"] if cell in (facts.protection.rain_cells or ()) else []
-        rain += [
-            "object:" + o.object_id
-            for o in oss.objects
-            if any(c.cell == cell for c in o.rain_cells)
-        ]
         bands = [
             ProtectionBand("static", w.heights)
             for w in facts.protection.wind or ()
@@ -386,31 +462,61 @@ class EnvironmentService:
                 return "unknown"
             return "none"
 
-        rain_status = (
-            "protected"
-            if rain
-            else completeness(facts.protection.rain_cells, (o.rain_status for o in oss.objects))
-        )
+        precipitation = []
+        for kind in PRECIPITATION_KINDS:
+            refs = (
+                ["static"]
+                if (
+                    kind == "rain"
+                    and cell in (facts.protection.rain_cells or ())
+                    or any(
+                        cell in p.cells and kind in p.kinds
+                        for p in facts.protection.precipitation or ()
+                    )
+                )
+                else []
+            )
+            refs += [
+                "object:" + o.object_id
+                for o in oss.objects
+                if (
+                    any(c.cell == cell for c in o.rain_cells)
+                    if kind == "rain"
+                    else any(c.cell == cell and c.kind == kind for c in o.precipitation_cells)
+                )
+            ]
+            static = facts.protection.precipitation
+            if static is None:
+                static = facts.protection.rain_cells
+            status = (
+                "protected"
+                if refs
+                else completeness(static, (o.precipitation_status(kind) for o in oss.objects))
+            )
+            precipitation.append((kind, status, tuple(sorted(set(refs)))))
+        _, rain_status, rain = precipitation[0]
         wind_status = (
             completeness(facts.protection.wind, (o.wind_status for o in oss.objects))
             if direction is not None
             else "missing_input"
         )
-        return CellProtection(rain_status, tuple(sorted(set(rain))), wind_status, tuple(bands))
+        return CellProtection(rain_status, rain, wind_status, tuple(bands), tuple(precipitation))
 
     @staticmethod
-    def _exposure(condition, protection_status, covered, *, wind=False):
+    def _exposure(condition, protection_status, covered, *, wind=False, protection=None):
         if condition.status not in ("ready", "none"):
             return condition
         result, uncertain = [], False
         for contribution in condition.contributions:
             value = contribution.value
             applicable = contribution.exposure == "outdoor" and _value_status(value) == "ready"
-            # OSS rain is strictly liquid vertical rain, never automatic snow/hail shelter.
-            applicable = applicable and (wind or value.kind == "rain")
-            if applicable and covered:
+            status, is_covered = protection_status, covered
+            if not wind and protection is not None:
+                status, refs = protection.for_precipitation(value.kind)
+                is_covered = bool(refs)
+            if applicable and is_covered:
                 value = Wind(0) if wind else Precipitation("none", "none")
-            elif applicable and protection_status != "none":
+            elif applicable and status != "none":
                 uncertain = True
             result.append(replace(contribution, value=value))
         if uncertain:
@@ -419,7 +525,27 @@ class EnvironmentService:
         # Keep both; selecting one would invent a combination rule.
         return _resolve([(0, c) for c in result])
 
-    def _cell(self, sid, scene, cell, package, height, inputs, cache):
+    def _cell(
+        self, sid, scene, cell, package, height, inputs, cache, *, public=False, validated=False
+    ):
+        if "identity" not in cache:
+            cache.update(self._query_cache(sid, scene, package))
+
+        def compute():
+            if not validated:
+                self._area(sid, scene, EnvironmentArea((cell,)), package)
+            current, hidden = self._environment_inputs(sid, scene, package, cache, public)
+            result = self._compose_cell(sid, scene, cell, package, height, current, cache)
+            return self._public(result, hidden) if public else result
+
+        return self._cells.resolve(
+            cache["scope"],
+            (cache["identity"], cache["versions"], ("cell", public, cell, height)),
+            compute,
+            validator=cache["valid"],
+        )
+
+    def _compose_cell(self, sid, scene, cell, package, height, inputs, cache):
         facts, effects, effects_status = inputs
         conditions = self._conditions(facts, effects, cell, height)
         wind = conditions["wind"]
@@ -436,7 +562,10 @@ class EnvironmentService:
             height,
             **conditions,
             ground_precipitation=self._exposure(
-                ground_conditions, protection.rain_status, bool(protection.rain_sources)
+                ground_conditions,
+                protection.rain_status,
+                bool(protection.rain_sources),
+                protection=protection,
             ),
             wind_exposure=self._exposure(
                 wind,
@@ -452,12 +581,11 @@ class EnvironmentService:
         """INTERNAL trusted composition: caller checks binding/grants and owns read scope."""
         if height_ft is not None:
             finite(height_ft)
-        self._area(sid, scene_id, EnvironmentArea((cell,)), package)
-        return self._cell(
-            sid, scene_id, cell, package, height_ft, self._inputs(sid, scene_id, package), {}
-        )
+        EnvironmentArea((cell,))
+        with self.h.grid.reader.read_scope():
+            return self._cell(sid, scene_id, cell, package, height_ft, None, {})
 
-    def _range(self, sid, scene, cell, package, heights, inputs):
+    def _range(self, sid, scene, cell, package, heights, inputs, cache):
         if type(heights) is not HeightInterval:
             invalid("Expected scene-datum height interval")
         self._area(sid, scene, EnvironmentArea((cell,)), package)
@@ -466,7 +594,6 @@ class EnvironmentService:
         for source in (*facts.sources, *effects):
             if source.area.heights and (not source.area.cells or cell in source.area.cells):
                 points.update((source.area.heights.lower_ft, source.area.heights.upper_ft))
-        cache = {}
         # Wind may change with height. Collect all four directions, retaining every gap.
         for direction in ("north", "east", "south", "west"):
             projection = self._protection(sid, scene, cell, package, facts, direction, cache)
@@ -477,16 +604,51 @@ class EnvironmentService:
             invalid("Height query exceeds 512 boundaries")
         return tuple(
             EnvironmentHeightSegment(
-                HeightInterval(a, b), self._cell(sid, scene, cell, package, a, inputs, cache)
+                HeightInterval(a, b),
+                self._compose_cell(sid, scene, cell, package, a, inputs, cache),
             )
             for a, b in zip(points, points[1:], strict=False)
         )
 
-    def project_height_range(self, sid, scene_id, cell, heights, package):
-        """INTERNAL trusted interval composition; returns covered AND uncovered segments."""
-        return self._range(
-            sid, scene_id, cell, package, heights, self._inputs(sid, scene_id, package)
+    def _cached_range(self, sid, scene, cell, heights, package, *, public=False):
+        if type(heights) is not HeightInterval:
+            invalid("Expected scene-datum height interval")
+        EnvironmentArea((cell,))
+        cache = self._query_cache(sid, scene, package)
+
+        def compute():
+            inputs, hidden = self._environment_inputs(sid, scene, package, cache, public)
+            segments = self._range(sid, scene, cell, package, heights, inputs, cache)
+            if not public:
+                return segments
+            segments = tuple(
+                replace(s, environment=self._public(s.environment, hidden)) for s in segments
+            )
+            merged = []
+            for segment in segments:
+                if merged and replace(merged[-1].environment, height_ft=None) == replace(
+                    segment.environment, height_ft=None
+                ):
+                    previous = merged[-1]
+                    merged[-1] = replace(
+                        previous,
+                        heights=HeightInterval(previous.heights.lower_ft, segment.heights.upper_ft),
+                    )
+                else:
+                    merged.append(segment)
+            return tuple(merged)
+
+        return self._cells.resolve(
+            cache["scope"],
+            (cache["identity"], cache["versions"], ("range", public, cell, heights)),
+            compute,
+            validator=cache["valid"],
         )
+
+    def project_height_range(self, sid, scene_id, cell, heights, package):
+        """INTERNAL trusted interval composition; uses the same revision entry point."""
+        with self.h.grid.reader.read_scope():
+            return self._cached_range(sid, scene_id, cell, heights, package)
 
     @staticmethod
     def _disclosure_inputs(inputs):
@@ -538,6 +700,10 @@ class EnvironmentService:
                 result.protection,
                 rain_sources=(),
                 wind_bands=(),
+                precipitation=tuple(
+                    (k, "unknown" if "precipitation" in masked else status, ())
+                    for k, status, _ in result.protection.precipitation
+                ),
                 rain_status="unknown"
                 if "precipitation" in masked
                 else result.protection.rain_status,
@@ -554,15 +720,29 @@ class EnvironmentService:
             position = self.h._spatial_reader(sid, actor_id, package, context)
             if position.scene_id != scene_id:
                 raise StateMachineError("unauthorized", "Only Actor's current Scene is authorized")
-            cells = self._area(sid, scene_id, area, package, query=True)
+            visibility = self.h._prepare_visible_targets(sid, actor_id, package)
+            cells = area.cells
+            if not cells:
+                width, height = visibility[2]
+                if width * height > MAX_CELLS:
+                    invalid("Whole Scene query exceeds 256 cells; choose a bounded area")
+                cells = tuple(f"{x},{y}" for x in range(width) for y in range(height))
             for cell in cells:
-                self.h._visible_target(sid, actor_id, cell, package)
-            inputs, hidden_fields = self._disclosure_inputs(self._inputs(sid, scene_id, package))
-            cache = {}
+                if not cell_in_bounds(visibility[1], cell):
+                    raise StateMachineError("invalid_cell", "Environment area exceeds Scene bounds")
+                self.h._visible_target(sid, actor_id, cell, package, prepared=visibility)
+            cache = self._query_cache(sid, scene_id, package)
             return tuple(
-                self._public(
-                    self._cell(sid, scene_id, cell, package, height_ft, inputs, cache),
-                    hidden_fields,
+                self._cell(
+                    sid,
+                    scene_id,
+                    cell,
+                    package,
+                    height_ft,
+                    None,
+                    cache,
+                    public=True,
+                    validated=True,
                 )
                 for cell in cells
             )
@@ -587,25 +767,7 @@ class EnvironmentService:
             return self._public_range(sid, scene_id, cell, heights, package)
 
     def _public_range(self, sid, scene, cell, heights, package):
-        inputs, hidden_fields = self._disclosure_inputs(self._inputs(sid, scene, package))
-        segments = tuple(
-            replace(segment, environment=self._public(segment.environment, hidden_fields))
-            for segment in self._range(sid, scene, cell, package, heights, inputs)
-        )
-        # Do not disclose unrelated/hidden OSS geometry via irrelevant boundary endpoints.
-        merged = []
-        for segment in segments:
-            if merged and replace(merged[-1].environment, height_ft=None) == replace(
-                segment.environment, height_ft=None
-            ):
-                previous = merged[-1]
-                merged[-1] = replace(
-                    previous,
-                    heights=HeightInterval(previous.heights.lower_ft, segment.heights.upper_ft),
-                )
-            else:
-                merged.append(segment)
-        return tuple(merged)
+        return self._cached_range(sid, scene, cell, heights, package, public=True)
 
     def query_unit(self, sid, actor_id, package, *, context):
         with self.h._transaction():
