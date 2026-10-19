@@ -14,6 +14,7 @@ from .package import (
     canonical_json,
 )
 from .perception import _evidence_v4
+from .session_access import _binding
 
 
 def _enqueue_perception_proof(connection, read_event, sid, seq, binding):
@@ -112,9 +113,10 @@ class EventPersistence:
         self.store.require_write()
         # Evidence has already been frozen at the producer stage. This method
         # assigns durable identities and writes; it never samples world state.
-        seq = self._conn.execute(
-            "SELECT event_seq FROM sessions WHERE session_id = ?", (session_id,)
-        ).fetchone()[0]
+        session = self._conn.execute(
+            "SELECT * FROM sessions WHERE session_id = ?", (session_id,)
+        ).fetchone()
+        seq = session["event_seq"]
         for event in events:
             if type(event) is not _StagedEvent:
                 raise StateMachineError(
@@ -145,7 +147,7 @@ class EventPersistence:
                 "INSERT INTO event_outbox(session_id,event_seq,consumer) VALUES (?, ?, ?)",
                 [(session_id, seq, "delivery"), (session_id, seq, "perception")],
             )
-            self._enqueue_perception(session_id, seq, package.ruleset_binding)
+            self._enqueue_perception(session_id, seq, _binding(session))
         self._conn.execute(
             "UPDATE sessions SET event_seq = ? WHERE session_id = ?", (seq, session_id)
         )

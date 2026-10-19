@@ -24,19 +24,11 @@ from trpg_state_machine import (
 
 
 def test_preinitialize_and_npc_crossing_do_not_record_pc_visits(tmp_path, package, context):
-    # Abstract NPC movement still requires prior initialization. This extraction
-    # must preserve that admission rule while removing its accidental PC visit.
+    # Authorized NPC movement may ensure a destination without any PC entering it.
     with StateMachine(tmp_path / "npc.db") as sm:
         sid = create(sm, package, context)
         before = sm.read_session(sid, package, context=context)
-        denied = submit(
-            sm, sid, package, context, MoveActor("npc.caretaker", B), "denied", "npc.caretaker"
-        )
-        assert denied.error_code == "invalid_target"
-        with sm._transaction(write=True):
-            sm._initialize_scene(sid, B, package)
-        initialized = sm.read_session(sid, package, context=context)
-        assert initialized.scenes[B].visited_count == 0
+        assert B not in before.scenes
         cmd = command(
             sm, sid, package, context, MoveActor("npc.caretaker", B), "npc.cross", "npc.caretaker"
         )
@@ -47,7 +39,7 @@ def test_preinitialize_and_npc_crossing_do_not_record_pc_visits(tmp_path, packag
         assert after.actors[before.pc_actor_id] == before.actors[before.pc_actor_id]
         assert after.scenes[B].visited_count == 0
         assert after.scenes[A].visited_count == 1
-        events = sm.read_events(sid, package, context=context, after_seq=initialized.event_seq)
+        events = sm.read_events(sid, package, context=context, after_seq=before.event_seq)
         assert [(e.event_type, e.payload) for e in events] == [
             ("actor.departed", {"scene_id": A, "actor_id": "npc.caretaker", "from_cell": None}),
             ("actor.moved", {"actor_id": "npc.caretaker", "to_scene_id": B}),
@@ -197,7 +189,7 @@ def test_preexisting_environment_and_capability_facts_survive_initialization(tmp
     sid = "session.partial"
     try:
         with c.store.transaction(write=True):
-            c.sessions.initialize(
+            c.world.runtime.initialize(
                 sid, package, context, package.pc_templates[0], "pc.partial", "rng.partial"
             )
             c.facts.initialize_world(sid, package)
@@ -223,7 +215,7 @@ def test_preexisting_environment_and_capability_facts_survive_initialization(tmp
             row = c.store.connection.execute("SELECT state_json FROM mechanical_scenes").fetchone()
             assert json.loads(row[0])["grid"]["default_lighting"] == "dark"
             c.world.scenes.initialize_session(sid, "pc.partial", package.pc_templates[0], package)
-            c.sessions.initialize_rng(sid, "rng.partial", synthetic=False)
+            c.world.runtime.initialize_rng(sid, "rng.partial", synthetic=False)
         saved = stored_rows(tmp_path / "partial.db")
         with c.store.transaction(write=True):
             assert not c.world.scenes.ensure_scene(sid, A, package)
@@ -299,7 +291,9 @@ def test_mechanism_initialization_keeps_main_state_and_lifecycle_idempotency(
             assert not sm.scene_lifecycle.ensure_scene(sid, A, p)
         assert sm._world_facts.mechanism_state(sid, LEVER) == saved
         rows = stored_rows(db)
-    with StateMachine(db) as restored:
+    from lock_support import lock_loader
+
+    with StateMachine(db, dnd_loader=lock_loader()) as restored:
         restored.resume_session(sid, p, context=context)
         assert restored._world_facts.mechanism_state(sid, LEVER) == saved
         assert stored_rows(db) == rows

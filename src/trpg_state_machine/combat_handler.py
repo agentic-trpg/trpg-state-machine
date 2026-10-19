@@ -13,7 +13,7 @@ from .combat import (
     process_id,
     validate_noncombat_foundation,
 )
-from .commands import command_fingerprint, validate_command
+from .commands import validate_command
 from .errors import StateMachineError
 from .package import canonical_json
 
@@ -34,6 +34,7 @@ class CombatHandler:
         effects,
         persistence,
     ):
+        self.runtime = world.runtime
         self.store = store
         self.sessions = sessions
         self.characters = characters
@@ -62,8 +63,8 @@ class CombatHandler:
         for actor in snapshot.character_states:
             self.characters.initialize_rule_actor(row, actor, xp=initial["xp"][actor.entity_id])
         self.characters.initialize_rule_components(row["session_id"], snapshot)
-        self.sessions.set_mechanical_schema(row["session_id"], "engine-snapshot/17")
-        self.sessions.select_rule_rng(row["session_id"], canonical_json(initial["rng_state"]))
+        self.runtime.set_mechanical_schema(row["session_id"], "engine-snapshot/17")
+        self.runtime.select_rule_rng(row["session_id"], canonical_json(initial["rng_state"]))
 
     def _initialize_combat(self, row, package, prepared):
         self.store.require_write()
@@ -114,6 +115,7 @@ class CombatHandler:
             self.characters.initialize_rule_actor(row, actor, encounter=True)
         if package.noncombat_foundation_json is None and spatial is None:
             self.facts.initialize_rule_scene(sid, snapshot.scene_state)
+            self.runtime.prepare_scene_maps(sid, (snapshot.scene_state.scene_id,), self.facts.maps)
         if package.noncombat_foundation_json is None:
             self.characters.initialize_rule_components(sid, snapshot)
         elif self.characters.rule_components(
@@ -125,9 +127,9 @@ class CombatHandler:
             raise StateMachineError(
                 "version_conflict", "Component facts changed during preparation"
             )
-        self.sessions.set_mechanical_schema(row["session_id"], snapshot.snapshot_schema_version)
+        self.runtime.set_mechanical_schema(row["session_id"], snapshot.snapshot_schema_version)
         self.records.initialize(sid, snapshot, spatial=spatial is not None, process_id=process_id())
-        self.sessions.select_rule_rng(sid, rng.model_dump_json(), reset_position=True)
+        self.runtime.select_rule_rng(sid, rng.model_dump_json(), reset_position=True)
         return [
             self.capture._capture_event(
                 sid,
@@ -139,25 +141,25 @@ class CombatHandler:
         ]
 
     def read_noncombat_snapshot(self, session_id, package, *, context):
-        self.rules._verify_dnd_binding(package)
         with self.store.transaction():
-            return self.rules._noncombat_snapshot(
-                self.sessions._session(session_id, package, context), package
-            )
+            row = self.sessions._session(session_id, package, context)
+            self.rules._verify_dnd_binding(package, row)
+            return self.rules._noncombat_snapshot(row, package)
 
     def read_combat_snapshot(self, session_id, package, *, context):
         """Trusted audit/read boundary; this does not authorize cross-process continuation."""
-        if not package.legacy_audit_only:
-            self.rules._verify_dnd_binding(package)
         with self.store.transaction():
             row = self.sessions._session(session_id, package, context)
+            if not package.legacy_audit_only:
+                self.rules._verify_dnd_binding(package, row)
             return self.rules._combat_snapshot(row)
 
     def read_rng_context(self, session_id, package, *, context):
-        if not package.legacy_audit_only:
-            self.rules._verify_dnd_binding(package)
         with self.store.transaction():
-            return self.rules._rng_context(self.sessions._session(session_id, package, context))
+            row = self.sessions._session(session_id, package, context)
+            if not package.legacy_audit_only:
+                self.rules._verify_dnd_binding(package, row)
+            return self.runtime.rng_context(row)
 
     async def submit_command_async(self, command, package, *, context):
         """Async entry for the same TypedCommand and persistent receipt protocol."""
@@ -179,10 +181,9 @@ class CombatHandler:
                 "unsupported_operation", "Expected an admitted real Engine command"
             )
         with self.store.transaction():
-            self.sessions._session(command.session_id, package, context)
-        return await self._submit_dnd(
-            command, package, context, command_fingerprint(command, package, context)
-        )
+            row = self.sessions._session(command.session_id, package, context)
+            fingerprint = self.runtime.fingerprint(command, row, context)
+        return await self._submit_dnd(command, package, context, fingerprint)
 
     async def _submit_dnd(self, command, package, context, fingerprint):
         from .rule_execution import RuleExecution
@@ -200,5 +201,5 @@ class CombatHandler:
                 "SELECT process_id FROM combats WHERE session_id=?", (session_id,)
             ).fetchone()[0]
         return self.rules.query_availability(
-            session_id, actor_id, payload, package, snapshot, owner
+            session_id, actor_id, payload, package, snapshot, owner, row=row
         )

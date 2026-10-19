@@ -1,8 +1,7 @@
-"""Session identity, grants and commit metadata shared by domain callers."""
+"""Session access, Actor control and trusted special grants."""
 
 import json
 import sqlite3
-from dataclasses import asdict
 
 from dnd5e_engine.evaluation_contracts import CheckPayload, CombatClosePayload, CombatIntentPayload
 
@@ -18,14 +17,13 @@ from ._operations import (
     TraversePassage,
     UnlockDoor,
 )
-from .commands import receipt_from_json
 from .environment_commands import ENVIRONMENT_OPERATIONS
 from .errors import StateMachineError
 from .game_time import AdvanceGameTime
 from .models import TrustedContext
 from .navigation_models import NAVIGATION_OPERATIONS
 from .npc_outputs import _handoff_command
-from .package import AdventurePackage, RulesetBinding, canonical_json
+from .package import AdventurePackage, RulesetBinding
 from .perception import NPCContext
 from .world_commands import WORLD_CAPABILITY_OPERATIONS, RepositionObject
 
@@ -166,18 +164,6 @@ class SessionAccess:
                     "This world operation has no represented mechanical Delta during combat",
                 )
 
-    def _command_replay(self, command, fingerprint):
-        stored = self._conn.execute(
-            "SELECT fingerprint, receipt_json FROM command_receipts "
-            "WHERE session_id = ? AND command_id = ?",
-            (command.session_id, command.command_id),
-        ).fetchone()
-        if stored is None:
-            return None
-        if stored["fingerprint"] != fingerprint:
-            raise StateMachineError("idempotency_conflict", "Command key has different content")
-        return receipt_from_json(stored["receipt_json"])
-
     def _npc_authorized(self, session_id, package, context):
         if (
             type(context) is not NPCContext
@@ -210,103 +196,6 @@ class SessionAccess:
             raise StateMachineError(
                 "unsupported_time_consumer", "NPC OB/Gate second policies are not configured"
             )
-
-    def move_pc_scene(self, sid, scene_id):
-        self.store.require_write()
-        self._conn.execute(
-            "UPDATE sessions SET current_scene_id=? WHERE session_id=?", (scene_id, sid)
-        )
-
-    def set_mechanical_schema(self, sid, version):
-        self.store.require_write()
-        self._conn.execute(
-            "UPDATE sessions SET mechanical_schema_version=? WHERE session_id=?", (version, sid)
-        )
-
-    def initialize(self, sid, package, context, pc, pc_actor_id, rng_ref):
-        self.store.require_write()
-        self._conn.execute(
-            "INSERT INTO sessions VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,0,0,NULL)",
-            (
-                sid,
-                package.adventure_id,
-                package.package_version,
-                package.package_digest,
-                package.ruleset_binding.ruleset_id,
-                package.ruleset_binding.data_revision,
-                package.ruleset_binding.evaluator_version,
-                context.principal_id,
-                context.player_id,
-                pc.pc_template_id,
-                pc_actor_id,
-                package.entry_scene_id,
-                rng_ref,
-            ),
-        )
-
-    def initialize_rng(self, sid, rng_ref, *, synthetic):
-        self.store.require_write()
-        self._conn.execute(
-            "INSERT INTO rng_states(session_id,state_id,algorithm,encoding,position) "
-            "VALUES (?,?,'unselected','foundation-placeholder/1',0)",
-            (sid, rng_ref),
-        )
-        if synthetic:
-            self._conn.execute(
-                "UPDATE rng_states SET algorithm='synthetic-sha256-counter/1', "
-                "encoding='synthetic-counter-json/1',state_json=? WHERE session_id=?",
-                (canonical_json({"counter": 0}), sid),
-            )
-
-    def select_rule_rng(self, sid, state_json, *, reset_position=False):
-        self.store.require_write()
-        if reset_position:
-            self._conn.execute(
-                "UPDATE rng_states SET algorithm='stdlib-mt19937',encoding='stdlib-mt19937/1',"
-                "position=0,state_json=? WHERE session_id=? AND algorithm='unselected'",
-                (state_json, sid),
-            )
-        else:
-            self._conn.execute(
-                "UPDATE rng_states SET algorithm='stdlib-mt19937',encoding='stdlib-mt19937/1',"
-                "state_json=? WHERE session_id=? AND algorithm='unselected'",
-                (state_json, sid),
-            )
-
-    def set_world_version(self, sid, version):
-        self.store.require_write()
-        self._conn.execute("UPDATE sessions SET world_version=? WHERE session_id=?", (version, sid))
-
-    def advance_rule_rng(self, sid, transition, rng):
-        self.store.require_write()
-        self._conn.execute(
-            "UPDATE rng_states SET state_json=?,rng_version=? WHERE session_id=?",
-            (
-                transition.next_state.model_dump_json(),
-                rng.version + int(transition.state_changed),
-                sid,
-            ),
-        )
-
-    def advance_synthetic_rng(self, sid, rng):
-        self.store.require_write()
-        self._conn.execute(
-            "UPDATE rng_states SET position=?,rng_version=?,state_json=? WHERE session_id=?",
-            (rng.position, rng.rng_version, rng.state_json, sid),
-        )
-
-    def record_receipt(self, command, context, fingerprint, receipt):
-        self.store.require_write()
-        self._conn.execute(
-            "INSERT INTO command_receipts VALUES (?,?,?,?,?)",
-            (
-                command.session_id,
-                command.command_id,
-                context.principal_id,
-                fingerprint,
-                canonical_json(asdict(receipt)),
-            ),
-        )
 
     def _npc_handoff_command_guard(self, command):
         """Recheck persisted origin under the existing command's world write lock."""

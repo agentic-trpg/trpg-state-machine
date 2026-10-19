@@ -4,7 +4,6 @@ from copy import deepcopy
 
 from ._execution import _WorldEffectKind, _WorldEffectOrigin
 from ._operations import SetSceneFlag
-from .commands import CommandReceipt
 from .errors import StateMachineError
 from .mechanics import (
     HPChange,
@@ -135,8 +134,8 @@ class MechanicalRuntime:
             command.command_id,
             command.actor_id,
             snapshot.world_version,
-            package.ruleset_binding,
-            package.package_digest,
+            snapshot.ruleset_binding,
+            snapshot.package_digest,
             command.payload,
             detached,
             snapshot.rng,
@@ -150,9 +149,9 @@ class MechanicalRuntime:
         )
         if (
             snapshot.world_version == command.expected_world_version
-            and package.ruleset_binding == SYNTHETIC_EVALUATION_RULESET
+            and snapshot.ruleset_binding == SYNTHETIC_EVALUATION_RULESET
         ):
-            if getattr(self._evaluator, "ruleset_binding", None) != package.ruleset_binding:
+            if getattr(self._evaluator, "ruleset_binding", None) != snapshot.ruleset_binding:
                 raise StateMachineError(
                     "ruleset_binding_mismatch", "Configured Evaluator does not match the Session"
                 )
@@ -176,15 +175,15 @@ class MechanicalRuntime:
                 return replay
             current = self._snapshot(row, package)
             status, error = "committed", None
-            version, seq = row["world_version"], row["event_seq"]
+            version = row["world_version"]
             if (
-                version != command.expected_world_version
+                self._session_runtime.version_conflict(row, command)
                 or version != snapshot.world_version
                 or snapshot_digest(snapshot_of(current)) != request.read_set_digest
                 or current.rng != request.rng
             ):
                 status, error = "conflict", "version_conflict"
-            elif unsupported_choice and package.ruleset_binding == SYNTHETIC_EVALUATION_RULESET:
+            elif unsupported_choice and snapshot.ruleset_binding == SYNTHETIC_EVALUATION_RULESET:
                 status, error = "rejected", "pending_choice_unsupported"
             elif result is None:
                 status, error = "rejected", "unsupported_ruleset"
@@ -217,17 +216,10 @@ class MechanicalRuntime:
                         raise StateMachineError(
                             "unsupported_delta", "An actual mechanical change is required"
                         )
-                    version += 1
-                    self._sessions.set_world_version(command.session_id, version)
-                    rng = result.rng_transition.after
-                    self._sessions.advance_synthetic_rng(command.session_id, rng)
-                    self._append_events(
-                        command.session_id,
-                        version,
-                        events,
-                        source_command_id=command.command_id,
-                        package=package,
+                    self._session_runtime.advance_synthetic_rng(
+                        command.session_id, result.rng_transition
                     )
+                    version = self._session_runtime.publish(command, row, package, events)
                 except StateMachineError as exc:
                     # Only this deterministic domain limit is a durable rejection.
                     # Invalid results/configuration/storage failures remain retryable errors.
@@ -238,19 +230,9 @@ class MechanicalRuntime:
                     status, error = "rejected", exc.code
                 finally:
                     self._conn.execute("RELEASE mechanical_effects")
-            end = self._conn.execute(
-                "SELECT event_seq FROM sessions WHERE session_id=?", (command.session_id,)
-            ).fetchone()[0]
-            receipt = CommandReceipt(
-                command.session_id,
-                command.command_id,
-                command.actor_id,
-                status,
-                version,
-                tuple(range(seq + 1, end + 1)),
-                error,
+            receipt = self._session_runtime.finish(
+                command, context, fingerprint, row, status, version, error
             )
-            self._sessions.record_receipt(command, context, fingerprint, receipt)
         return receipt
 
     def _validate_delta(self, request, delta):

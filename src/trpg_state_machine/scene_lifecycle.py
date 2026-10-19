@@ -13,7 +13,15 @@ from .events import _ActorMotion
 
 
 class SceneLifecycleService:
-    def __init__(self, store, sessions, characters, facts, capture, npc_bootstrap):
+    def __init__(self, store, sessions, characters, facts, capture, npc_bootstrap, runtime=None):
+        from .event_persistence import EventPersistence
+        from .session_runtime import SessionRuntime
+
+        self.runtime = (
+            runtime
+            if runtime is not None
+            else SessionRuntime(store, sessions, EventPersistence(store))
+        )
         self.store = store
         self.sessions = sessions
         self.characters = characters
@@ -22,9 +30,21 @@ class SceneLifecycleService:
         self.npc_bootstrap = npc_bootstrap
 
     def ensure_scene(self, sid, scene_id, package):
-        """Install first-instance defaults once, without recording a PC visit."""
+        """Internal admitted-write participant; never activates or records entry.
+
+        Callers authorize the operation before this method. Only fresh instances
+        use the pinned Package; existing instances are validated, never repaired.
+        """
         self.store.require_write()
+        row = self.store.connection.execute(
+            "SELECT * FROM sessions WHERE session_id=?", (sid,)
+        ).fetchone()
+        if row is None:
+            raise StateMachineError("session_not_found", "Unknown session")
+        self.sessions._check_package_pin(row, package)
         if not self.facts.initialize_scene(sid, scene_id, package):
+            self._validate_scene(sid, scene_id, package)
+            self.runtime.prepare_scene_maps(sid, (scene_id,), self.facts.maps)
             return False
         self.facts.initialize_object_capabilities(sid, scene_id, package)
         for actor in package.actors:
@@ -33,7 +53,58 @@ class SceneLifecycleService:
             ):
                 self.npc_bootstrap.initialize(sid, actor)
         self.facts.initialize_mechanical_scene(sid, scene_id, package)
+        self.runtime.prepare_scene_maps(sid, (scene_id,), self.facts.maps)
         return True
+
+    def _validate_scene(self, sid, scene_id, package):
+        """Bounded structural check of currently persisted instance records."""
+        conn = self.store.connection
+        for obj in package.scene(scene_id).objects:
+            if self.facts.object(sid, obj.object_id) is None:
+                raise StateMachineError(
+                    "incomplete_session", "Instantiated scene is missing an object"
+                )
+            definition = self.facts.object_definition(package, obj.object_id)
+            if definition is not None:
+                for capability, reader in (
+                    ("openable", self.facts.openable_state),
+                    ("light", self.facts.light_state),
+                    ("mechanism", self.facts.mechanism_state),
+                    ("durability", self.facts.object_hp),
+                ):
+                    if (
+                        definition.capability(capability) is not None
+                        and reader(sid, obj.object_id) is None
+                    ):
+                        raise StateMachineError(
+                            "incomplete_session", "Instantiated object is missing capability state"
+                        )
+        for actor in package.actors:
+            if (
+                actor.initial_scene_id == scene_id
+                and conn.execute(
+                    "SELECT 1 FROM actors WHERE session_id=? AND actor_id=?", (sid, actor.actor_id)
+                ).fetchone()
+                is None
+            ):
+                raise StateMachineError(
+                    "incomplete_session", "Instantiated scene is missing an Actor"
+                )
+        if (
+            package.scene(scene_id).grid_json is not None
+            and conn.execute(
+                "SELECT 1 FROM mechanical_scenes WHERE session_id=? AND scene_id=?", (sid, scene_id)
+            ).fetchone()
+            is None
+        ):
+            raise StateMachineError("incomplete_session", "Instantiated scene is missing its grid")
+
+    def validate_initialized(self, row, package):
+        """Read only: uninstantiated scenes stay absent; no template replay."""
+        for scene in self.store.connection.execute(
+            "SELECT scene_id FROM scene_instances WHERE session_id=?", (row["session_id"],)
+        ):
+            self._validate_scene(row["session_id"], scene[0], package)
 
     def initialize_session(self, sid, pc_actor_id, pc, package):
         """Fresh-session participant; creation replay is handled by the caller."""
@@ -43,7 +114,7 @@ class SceneLifecycleService:
             if scene.grid_json is not None and scene.scene_id != package.entry_scene_id:
                 self.ensure_scene(sid, scene.scene_id, package)
         self.characters.initialize_pc(sid, pc_actor_id, package.entry_scene_id, pc)
-        self.sessions.move_pc_scene(sid, package.entry_scene_id)
+        self.runtime.move_pc_scene(sid, package.entry_scene_id)
         self.facts.visit(sid, package.entry_scene_id)
 
     def move_admitted(self, row, package, actor_id, destination):
@@ -78,7 +149,7 @@ class SceneLifecycleService:
         self.ensure_scene(sid, destination.scene_id, package)
         self.characters.move(sid, actor_id, destination)
         if is_pc:
-            self.sessions.move_pc_scene(sid, destination.scene_id)
+            self.runtime.move_pc_scene(sid, destination.scene_id)
             if crossing:
                 self.facts.visit(sid, destination.scene_id)
         if is_pc and crossing:

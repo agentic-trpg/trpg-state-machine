@@ -446,7 +446,7 @@ class MechanismService:
 
         rules = self.h.objects.openable.rules
         snapshot = rules._noncombat_snapshot(row, package)
-        rules._verify_dnd_binding(package)
+        rules._verify_dnd_binding(package, row)
         if failure := rules._dnd_capability(plan[0], actor, snapshot):
             raise StateMachineError(failure, "Check outside supported rule facts")
         request = rules.request(

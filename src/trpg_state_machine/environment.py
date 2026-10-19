@@ -2,9 +2,6 @@
 
 from dataclasses import asdict, dataclass, replace
 
-from dnd5e_engine.spatial import GridTopology
-from dnd5e_engine.specs import GridScene
-
 from .derived_cache import DerivedCache
 from .environment_commands import (
     AddEnvironmentSource,
@@ -233,8 +230,7 @@ class EnvironmentService:
         if scene_id not in {s.scene_id for s in package.scenes}:
             raise StateMachineError("invalid_target", "Unknown environment Scene")
         if area.cells:
-            raw = self.h.grid.reader.scene_grid(sid, scene_id, package)
-            topology = GridTopology(GridScene(**raw))
+            topology = self.h.grid.reader.prepared_scene(sid, scene_id, package).topology
             if any(not cell_in_bounds(topology, c) for c in area.cells):
                 raise StateMachineError("invalid_cell", "Environment area exceeds Scene bounds")
             return area.cells

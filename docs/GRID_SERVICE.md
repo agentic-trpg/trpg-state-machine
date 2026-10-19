@@ -23,7 +23,86 @@ Speed 或剩余额度，探索耗时由 Activity／探索／时间流程负责�
 WorldHandler 组合 `grid`。它的 `reader` 是只依赖 Store／WorldFacts 的底层只读组件；
 ObjectSpatial 和 Light 只调用这个读取层，不能回调 `read_scene`、`base_topology` 或
 `exploration_topology`。Grid 的上层组合再消费 OSS 贡献和既有 Light 投影，不形成递归。
-没有派生缓存、持久化格表或数据库迁移。
+GridMaps 保存有界的只读地图运行表示，SQLite 仍是权威配置；没有持久化格表或数据库迁移。
+
+### 地图表示与生命周期（2026-10-19）
+
+`WorldFacts.maps` 引用当前 Store 唯一的 GridMaps，GridReader 和地图消费者共享它。
+`mechanical_scenes.state_json` 继续保存 Session 的有效配置，spatial_enabled 保留精细
+空间资格。PreparedScene／PreparedGrid 保存递归只读数据、grid_json 和基础拓扑。
+WorldFacts.spatial_scene／mechanical_scene、GridReader.scene_grid 继续返回独立字典／
+列表副本。GridView 原五个 dataclass 字段、asdict、grid_json 和构造参数保持兼容；
+运行表示不进入序列化数据，旧 View 不被后续变化原地修改。
+
+SessionCreation 经 SceneLifecycleService 在地图写入后调用 SessionRuntime.prepare_scene_maps；
+延迟实例化和已有场景投入运行走同一入口。CombatHandler 补建原先允许的机械场景后
+也准备地图。save／resume 在同一授权读取事务校验事实并准备当前场景，其他场景首次
+读取时按需准备。准备不创建权威 Scene、不计访问、不产生进入事件、不启用 NPC 模拟。
+原场景提前创建范围保持。
+
+每次 live lookup 先 SELECT 当前事务可见的 state_json／spatial_enabled，再以原始编码
+查询池，不为了取得身份先解析地图。记录键包含 Store 隔离、Session、Scene、live 来源和
+完整编码内容，不依赖 world_version、loader 地址或仅 scene_id。当前生产地图写入口仍是
+WorldFacts.initialize_rule_scene／initialize_mechanical_scene 的 INSERT，没有新增地图
+编辑命令。有效配置变化后，下一次读取按实际内容准备对应表示。
+
+本事务候选、savepoint／整个事务回滚、另一连接提交和旧 WAL 读取事务，各自选择其可见
+内容。池中没有“当前地图”指针或提交状态：回滚候选可以留在有界池中，但数据库不再
+返回其内容时就不能选作当前事实；失败创建的 Session 不能从池中复活。已有实例缺地图
+仍拒绝，不能通过 Package 默认修复。未实例化场景的受控静态读取走独立 template 来源。
+
+记录池和几何池各最多 64 项、各最多 8 MiB 编码键预算；LRU 淘汰，超预算单项仅临时
+使用。该预算不是 Python 堆内存精确值，解析数据和拓扑数量也受项数限制。
+SessionRuntime.release_scene_maps 可释放指定 Session 的引用，Store.close 清空两池。
+调用方持有的旧 View 独立保存快照，淘汰／关闭不破坏它，释放 View 后可回收。
+不按请求无限累积完整地图，不向 SQLite 序列化 Python 拓扑。
+
+ReadOnlyTopology 继承固定 RE GridTopology 原算法，只将集合变为 frozenset／只读映射、
+墙段变为不可变四坐标记录，并禁止属性／字典修改。没有复制距离、移动、掩护或视线算法。
+该只读适配核对了当前固定 RE 的 backing fields，升级 RE 时应重新审阅其内部可变字段。
+GridScene 校验默认值仍不能代替完整 MechanicalGrid 感官证据校验。
+
+角色和 OSS 贡献仍在每个读取范围重新取值。Light／探索组合先取当前动态输入，再用完整
+投影网格内容复用拓扑；灯光／阻挡改变即选另一表示。开合、朝向、门槛、占格和掩护仍按
+原通道消费，不把探索移动阻挡混入机械／视觉基础地图。View 的动态 can_step 和独立对象
+掩护可建立临时组合拓扑，不把它们当成基础拓扑。历史感知证据的几何构建保留历史输入，
+不拿当前 Session 地图替换事件时地图。
+
+导航授权后改用 prepared_package_topology，在 template 命名空间复用静态 Package 地图，
+不读远端当前秘密或覆盖 live 配置。旧静态 package_topology 保留脱离 Store 的单次构建
+兼容路径；实际 Activity 规划已经使用 Store 级准备接口。
+
+### 三个查询算法与调用计数
+
+固定 RE 当前只支持矩形方格、Chebyshev 八向距离，没有额外斜向距离选项。
+函数保留原 y 从小到大、再 x 从小到大的顺序和几何含义，不增加通行或视觉过滤。
+
+- cells_within_range：先校验范围和中心，将 ft 换算为候选半径，裁剪至地图边界，仅枚举
+  候选矩形，再调用 RE within_range 精确筛选。浮点按精确整数比计算半径，先按地图
+  跨度限幅，合法极大有限值不会产生无穷大或边界转换溢出。
+- entities_within_range：校验同样参数后，按原 occupants 顺序直接判断实际占格，任一
+  占格命中即返回实体一次；支持多格物体和空场景，不调用范围扫描或 occupied。
+- neighbors：直接生成边界内周围最多八格，用 RE within_range 筛选，不扫描全图。
+
+行为和计数测试用旧式全图枚举对照。100×100、5 ft 地图中心 5 ft 查询：范围精确检查
+由 10,000 次降为 9 次；邻格由 10,000 次降为最多 8 次。三个实体、实际五个占格的
+示例，实体查询由 10,000 次范围扫描再求交集变为 3 次占格判断，多格首次命中即短路。
+创建已准备地图后，两次公共 read_scene 和反复属性／坐标／距离／范围、基础 Light 与
+环境校验，新增地图 json.loads 和基础拓扑构建均为 0 次。冷配置解析一次、构建一次，
+LRU 淘汰后可重建。这些计数不代表全部 JSON、完整 Light 投影、RE Snapshot 校验或
+历史证据几何都变为常数工作。
+
+以下另外实际载入基线 a25c35e 的 GridView，对同一 100×100 地图、中心 5 ft 和上述
+三实体夹具逐项计数；新实现已经准备好表示。计数依次为 json.loads／拓扑构建／
+within_range，不是耗时比较，冷启动准备开销单独发生一次。
+
+| 单次调用 | a25c35e | 本轮已准备表示 |
+|---|---|---|
+| width + height + cell_size_ft | 3 / 0 / 0 | 0 / 0 / 0 |
+| distance_ft | 3 / 3 / 0 | 0 / 0 / 0 |
+| cells_within_range | 103 / 2 / 10,000 | 0 / 0 / 9 |
+| entities_within_range | 112 / 11 / 10,000 | 0 / 0 / 3 |
+| neighbors | 105 / 3 / 10,000 | 0 / 0 / 8 |
 
 | SM 本地接口 | 语义与范围 |
 |---|---|
@@ -88,6 +167,6 @@ geometry_clear = view.can_step("1,1", "2,1")
 机械 Snapshot。Effects 仍归所属组件，未增加未经确认的贡献协议。Turn Episode／Round
 Episode 设计不变，没有新增逐机械 Event 的感知信号或阶段取证要求。
 
-当前 Schema 35、Package 支持版本、命令协议和 RE／SRD 固定 SHA
+当前 Schema 36、Package 支持版本、命令协议和 RE／SRD 固定 SHA
 `d596161060555630019163ab301e1d25fd816549` 均不变。
 验证、W-01 进度和跨系统依赖见 [实施记录](GRID_SERVICE_PROGRESS.md)。

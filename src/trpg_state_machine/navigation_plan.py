@@ -25,13 +25,18 @@ def granted_layout(row, actor, package):
     return scenes, passages
 
 
-def plan_navigation(row, actor, position, operation, package):
+def plan_navigation(row, actor, position, operation, package, *, grid=None):
     scenes, passage_ids = granted_layout(row, actor, package)
     if position.scene_id not in scenes or operation.target_scene_id not in scenes:
         raise StateMachineError(
             "navigation_knowledge_unavailable", "Target is outside approved knowledge"
         )
-    topologies = {sid: GridService.package_topology(package, sid) for sid in sorted(scenes)}
+    topologies = {
+        sid: GridService.package_topology(package, sid)
+        if grid is None
+        else grid.prepared_package_topology(row["session_id"], package, sid)
+        for sid in sorted(scenes)
+    }
     target = (operation.target_scene_id, operation.target_cell)
     start = (position.scene_id, position.cell)
     if not cell_in_bounds(topologies[target[0]], target[1]) or not topologies[

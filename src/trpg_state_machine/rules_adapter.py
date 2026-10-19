@@ -20,11 +20,9 @@ from dnd5e_engine.evaluation_contracts import (
     RuleEvaluationResult,
 )
 from dnd5e_engine.evaluation_preflight import template_support_failure
-from dnd5e_engine.evaluation_rng import RNGContext, RNGState
+from dnd5e_engine.evaluation_rng import RNGState
 from dnd5e_engine.evaluation_ruleset import RulesetBinding, RulesetBindingError, verify_ruleset
-from dnd5e_engine.evaluation_state import CombatSnapshot, NonCombatSnapshot
-from dnd5e_engine.spatial import GridTopology
-from dnd5e_engine.specs import GridScene
+from dnd5e_engine.evaluation_state import CharacterStateV2, CombatSnapshot, NonCombatSnapshot
 from pydantic import ValidationError
 
 from .combat import DND_RULESET, _remap, process_id, validate_foundation
@@ -32,6 +30,7 @@ from .dnd_checks import check_changes
 from .dnd_closure import closure_changes
 from .errors import StateMachineError
 from .package import canonical_json
+from .session_access import _binding
 
 
 def _invalid(message):
@@ -255,15 +254,34 @@ class RulesAdapter:
     def _conn(self):
         return self.store.connection
 
-    def _verify_dnd_binding(self, package):
+    def session_binding(self, row):
+        """Translate SM's durable identity to the pinned RE contract."""
+        return RulesetBinding(**asdict(_binding(row)))
+
+    def _pinned_row(self, session_id, package):
+        row = self._conn.execute(
+            "SELECT * FROM sessions WHERE session_id=?", (session_id,)
+        ).fetchone()
+        if row is None:
+            raise StateMachineError("session_not_found", "Unknown session")
+        self.world.sessions._check_package_pin(row, package)
+        return row
+
+    def _verify_dnd_binding(self, package, row=None):
         if package.legacy_audit_only:
             raise StateMachineError(
                 "legacy_rules_audit_only", "Old mechanical facts require explicit migration"
             )
-        if package.ruleset_binding.ruleset_id != DND_RULESET:
+        # Only creation has no Session yet. Every live path supplies its row.
+        binding = (
+            RulesetBinding(**asdict(package.ruleset_binding))
+            if row is None
+            else self.session_binding(row)
+        )
+        if binding.ruleset_id != DND_RULESET:
             raise StateMachineError("unsupported_ruleset", "Expected a D&D evaluation package")
         try:
-            verify_ruleset(RulesetBinding(**asdict(package.ruleset_binding)), self.loader)
+            verify_ruleset(binding, self.loader)
         except RulesetBindingError as exc:
             raise StateMachineError(
                 "ruleset_binding_mismatch", "Evaluator data/configuration differ"
@@ -287,11 +305,7 @@ class RulesAdapter:
                 (sid, row["current_scene_id"]),
             )
         ]
-        scene = self._conn.execute(
-            "SELECT state_json FROM mechanical_scenes WHERE session_id=? AND scene_id=?",
-            (sid, row["current_scene_id"]),
-        ).fetchone()
-        scene_data = json.loads(scene[0]) if scene else None
+        scene_data = self.facts.mechanical_scene(sid, row["current_scene_id"])
         if scene_data is not None and package is not None:
             projected, unknown, _ = self.world.objects.lights.project(
                 sid, scene_data["scene_id"], package, scene_data["grid"]
@@ -321,6 +335,29 @@ class RulesAdapter:
                 "invalid_mechanical_state", "Current scene lacks complete mechanical facts"
             ) from exc
 
+    def validate_saved_mechanics(self, row):
+        """Validate stored stocks without requiring every scene NPC to support RE.
+
+        Resuming exploration is allowed in scenes containing ordinary NPCs with
+        no mechanical profile. A later rule request still requires a complete
+        local snapshot; recovery must not create those missing profiles.
+        """
+        if row["mechanical_schema_version"] != "engine-snapshot/17":
+            raise StateMachineError(
+                "unsupported_mechanical_version", "Old mechanical facts need migration"
+            )
+        actors = self.characters.rule_actors(row["session_id"])
+        if row["pc_actor_id"] not in actors:
+            raise StateMachineError("incomplete_session", "Mechanical PC facts are missing")
+        try:
+            for actor in actors.values():
+                CharacterStateV2.model_validate_json(canonical_json(actor))
+        except (ValidationError, ValueError, TypeError) as exc:
+            raise StateMachineError(
+                "invalid_mechanical_state", "Stored Actor facts are invalid"
+            ) from exc
+        self.characters.rule_components(row["session_id"], set(actors))
+
     def _combat_snapshot(self, row):
         sid = row["session_id"]
         if row["mechanical_schema_version"] != "engine-snapshot/17":
@@ -332,13 +369,10 @@ class RulesAdapter:
             raise StateMachineError("combat_not_initialized", "Session has no mechanical encounter")
         state = json.loads(combat["state_json"])
         actors = self.characters.rule_actors(sid)
-        scene = self._conn.execute(
-            "SELECT state_json FROM mechanical_scenes WHERE session_id=? AND scene_id=?",
-            (sid, combat["scene_id"]),
-        ).fetchone()
+        scene = self.facts.mechanical_scene(sid, combat["scene_id"])
         if not state["ended"]:
             state["actor_zone"] = self._current_cells(
-                sid, combat["scene_id"], state["initiative_ids"], json.loads(scene[0])["grid"]
+                sid, combat["scene_id"], state["initiative_ids"], scene["grid"]
             )
         try:
             return CombatSnapshot.model_validate_json(
@@ -350,7 +384,7 @@ class RulesAdapter:
                         "world_version": row["world_version"],
                         "character_states": [actors[a] for a in state["initiative_ids"]],
                         **self.characters.rule_components(sid, set(state["initiative_ids"])),
-                        "scene_state": json.loads(scene[0]),
+                        "scene_state": scene,
                         "combat_state": state,
                     }
                 )
@@ -363,7 +397,7 @@ class RulesAdapter:
     def _current_cells(self, sid, scene_id, roster, grid):
         from .grid import cell_in_bounds
 
-        topology = GridTopology(GridScene.model_validate(grid))
+        topology = self.world.grid.reader.topology_for_grid(sid, scene_id, grid)
         positions = {}
         for actor_id in roster:
             position = self.characters.position(sid, actor_id)
@@ -381,22 +415,10 @@ class RulesAdapter:
         return positions
 
     def _rng_context(self, row):
-        rng = self._conn.execute(
-            "SELECT * FROM rng_states WHERE session_id=?", (row["session_id"],)
-        ).fetchone()
-        if rng["algorithm"] != "stdlib-mt19937" or rng["encoding"] != "stdlib-mt19937/1":
-            raise StateMachineError("invalid_rng_state", "Expected pinned Engine RNG encoding")
-        try:
-            return RNGContext(
-                stream_id=rng["state_id"],
-                version=rng["rng_version"],
-                state=RNGState.model_validate_json(rng["state_json"]),
-            )
-        except (ValidationError, ValueError) as exc:
-            raise StateMachineError("invalid_rng_state", "Invalid stored RNG state") from exc
+        return self.world.runtime.rng_context(row)
 
     def _prepare_combat(self, row, package):
-        self._verify_dnd_binding(package)
+        self._verify_dnd_binding(package, row)
         if package.combat_foundation_json is None:
             raise StateMachineError("unsupported_operation", "Package has no reviewed encounter")
         data = json.loads(package.combat_foundation_json)
@@ -443,11 +465,9 @@ class RulesAdapter:
                 data["snapshot"].update(
                     self.characters.rule_components(row["session_id"], set(roster))
                 )
-                scene = self._conn.execute(
-                    "SELECT state_json FROM mechanical_scenes WHERE session_id=? AND scene_id=?",
-                    (row["session_id"], row["current_scene_id"]),
-                ).fetchone()
-                data["snapshot"]["scene_state"] = json.loads(scene[0])
+                data["snapshot"]["scene_state"] = self.facts.mechanical_scene(
+                    row["session_id"], row["current_scene_id"]
+                )
             except (KeyError, TypeError) as exc:
                 raise StateMachineError(
                     "invalid_mechanical_state", "Encounter dependencies are missing"
@@ -504,14 +524,8 @@ class RulesAdapter:
                         "SELECT scene_id,state_json FROM combats WHERE session_id=?", (sid,)
                     ).fetchone()
                     roster = json.loads(combat["state_json"])["initiative_ids"]
-                    scene = self._conn.execute(
-                        "SELECT state_json FROM mechanical_scenes "
-                        "WHERE session_id=? AND scene_id=?",
-                        (sid, combat["scene_id"]),
-                    ).fetchone()
-                    cells = self._current_cells(
-                        sid, combat["scene_id"], roster, json.loads(scene[0])["grid"]
-                    )
+                    scene = self.facts.mechanical_scene(sid, combat["scene_id"])
+                    cells = self._current_cells(sid, combat["scene_id"], roster, scene["grid"])
                     self.records.freeze_positions(sid, cells)
                 self.records.update_rule_state(sid, field, value)
             elif component == "ledger":
@@ -519,7 +533,8 @@ class RulesAdapter:
             else:
                 _invalid("Unknown internal component edit")
 
-    def request(self, command, package, snapshot, rng):
+    def request(self, command, package, snapshot, rng, *, row=None):
+        row = row if row is not None else self._pinned_row(command.session_id, package)
         return RuleEvaluationRequest(
             schema_version="engine-evaluation/23",
             session_id=command.session_id,
@@ -528,12 +543,15 @@ class RulesAdapter:
             actor_id=command.actor_id,
             payload=copy.deepcopy(command.payload),
             state_snapshot=snapshot,
-            ruleset_binding=RulesetBinding(**asdict(package.ruleset_binding)),
+            ruleset_binding=self.session_binding(row),
             rng_context=rng,
         )
 
-    def query_availability(self, session_id, actor_id, payload, package, snapshot, owner):
-        self._verify_dnd_binding(package)
+    def query_availability(
+        self, session_id, actor_id, payload, package, snapshot, owner, *, row=None
+    ):
+        row = row if row is not None else self._pinned_row(session_id, package)
+        self._verify_dnd_binding(package, row)
         try:
             request = ActionAvailabilityRequest(
                 schema_version="engine-availability/13",
@@ -542,7 +560,7 @@ class RulesAdapter:
                 actor_id=actor_id,
                 payload=copy.deepcopy(payload),
                 state_snapshot=snapshot,
-                ruleset_binding=RulesetBinding(**asdict(package.ruleset_binding)),
+                ruleset_binding=self.session_binding(row),
             )
             capability = self._dnd_capability(payload, actor_id, snapshot)
             if owner != process_id() and not snapshot.combat_state.ended:
@@ -568,6 +586,19 @@ class RulesAdapter:
             raise StateMachineError("rule_schema_error", "Invalid availability schema") from exc
         except Exception as exc:
             raise StateMachineError("rule_query_failed", "Availability query failed") from exc
+        try:
+            result = ActionAvailabilityResult.model_validate(copy.deepcopy(result))
+            if (
+                result.session_id != request.session_id
+                or result.actor_id != request.actor_id
+                or result.operation_kind != request.operation_kind
+                or result.schema_version != request.schema_version
+                or result.snapshot_world_version != snapshot.world_version
+                or result.ruleset_binding != request.ruleset_binding
+            ):
+                raise ValueError("Availability response differs from request")
+        except (ValidationError, ValueError, TypeError) as exc:
+            raise StateMachineError("invalid_rule_result", "Invalid availability result") from exc
         # Free-text Engine preflight errors may mention hidden mechanical inputs.
         # Expose a bounded code and a generic status description to the authorized actor.
         return result.model_copy(

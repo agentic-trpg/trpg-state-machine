@@ -1045,12 +1045,22 @@ class WorldFacts:
             )
 
     def spatial_scene(self, sid, scene_id):
-        scene = self._conn.execute(
-            "SELECT state_json FROM mechanical_scenes "
-            "WHERE session_id=? AND scene_id=? AND spatial_enabled=1",
-            (sid, scene_id),
-        ).fetchone()
-        return json.loads(scene[0]) if scene else None
+        scene = self.maps.scene(sid, scene_id, spatial_only=True)
+        return scene.copy_data() if scene else None
+
+    @property
+    def maps(self):
+        # Grid owns the representation; Store owns its bounded lifetime. All
+        # Facts/Reader instances on this connection use the same disposable pool.
+        from .grid_maps import GridMaps
+
+        if self.store._grid_maps is None:
+            self.store._grid_maps = GridMaps(self.store)
+        return self.store._grid_maps
+
+    def mechanical_scene(self, sid, scene_id):
+        scene = self.maps.scene(sid, scene_id)
+        return scene.copy_data() if scene else None
 
 
 class CombatRecords:

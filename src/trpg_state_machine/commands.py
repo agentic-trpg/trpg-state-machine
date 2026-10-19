@@ -1,6 +1,5 @@
 """Versioned local command boundary; authentication belongs to the caller adapter."""
 
-import hashlib
 import json
 import re
 from copy import deepcopy
@@ -30,7 +29,6 @@ from .environment_commands import (
     BatchEnvironment,
     EnvironmentMutation,
     environment_operation_from_data,
-    environment_operation_to_data,
     validate_environment_operation,
 )
 from .errors import StateMachineError
@@ -43,7 +41,6 @@ from .navigation_models import (
     ResumeNavigation,
     StartNavigation,
 )
-from .package import canonical_json
 from .world_commands import (
     OPENABLE_CHECK_OPERATIONS,
     WORLD_CAPABILITY_COMMANDS,
@@ -311,32 +308,10 @@ def validate_command(command: TypedCommand) -> None:
 
 
 def command_fingerprint(command, package, context):
-    data = asdict(command)
-    if type(command.payload) in ENVIRONMENT_OPERATIONS:
-        data["payload"] = environment_operation_to_data(command.payload)["payload"]
-    if type(command.payload) is RepositionObject:
-        # Old receipts used exactly the four original fields.
-        for field in ("expected_orientation", "to_orientation"):
-            if data["payload"][field] is None:
-                data["payload"].pop(field)
-    if type(command.payload) is ActivateMechanism and command.payload.operation_id == "activate":
-        data["payload"].pop("operation_id")
-    if command.check_world_effects is None:
-        # Preserve canonical fingerprints of all pre-SM21 stored commands.
-        data.pop("check_world_effects")
-    if type(command.payload) in (CombatIntentPayload, CombatClosePayload, CheckPayload):
-        data["payload"] = command.payload.model_dump(mode="json")
-    return hashlib.sha256(
-        canonical_json(
-            {
-                "command": data,
-                "principal": context.principal_id,
-                "player": context.player_id,
-                "package": package.package_digest,
-                "binding": asdict(package.ruleset_binding),
-            }
-        ).encode()
-    ).hexdigest()
+    """Compatibility helper; live execution fingerprints the admitted Session pin."""
+    from .session_runtime import _fingerprint
+
+    return _fingerprint(command, package.package_digest, package.ruleset_binding, context)
 
 
 class CommandRuntime:
@@ -347,16 +322,18 @@ class CommandRuntime:
         return self._sessions._world_operation_capability(row, payload)
 
     def _command_replay(self, command, fingerprint):
-        return self._sessions._command_replay(command, fingerprint)
+        return self._session_runtime._command_replay(command, fingerprint)
 
     def submit_command(self, command: TypedCommand, package, *, context) -> CommandReceipt:
         validate_command(command)
-        self.read_session(command.session_id, package, context=context)
+        with self._transaction():
+            admitted = self._session(command.session_id, package, context)
+            self._snapshot(admitted, package)
+            fingerprint = self._session_runtime.fingerprint(command, admitted, context)
         if package.legacy_audit_only:
             raise StateMachineError(
                 "legacy_rules_audit_only", "Old package permits audit reads only"
             )
-        fingerprint = command_fingerprint(command, package, context)
         if type(command.payload) in (
             CombatIntentPayload,
             CombatClosePayload,
@@ -389,10 +366,9 @@ class CommandRuntime:
             if replay is not None:
                 return replay
             version = row["world_version"]
-            seq = row["event_seq"]
             error = None
             status = "committed"
-            if version != command.expected_world_version:
+            if self._session_runtime.version_conflict(row, command):
                 status, error = "conflict", "version_conflict"
             else:
                 self._conn.execute("SAVEPOINT command_effects")
@@ -437,15 +413,7 @@ class CommandRuntime:
                         if package.portable_items:
                             self._characters.sync_world_inventory(command.session_id)
                         self._assert_spatial_consistency(command.session_id, package)
-                        version += 1
-                        self._sessions.set_world_version(command.session_id, version)
-                        self._append_events(
-                            command.session_id,
-                            version,
-                            events,
-                            source_command_id=command.command_id,
-                            package=package,
-                        )
+                        version = self._session_runtime.publish(command, row, package, events)
                 except StateMachineError as exc:
                     if exc.code in {
                         "storage_error",
@@ -467,31 +435,17 @@ class CommandRuntime:
                     error = exc.code
                 finally:
                     self._conn.execute("RELEASE command_effects")
-            end_seq = self._conn.execute(
-                "SELECT event_seq FROM sessions WHERE session_id = ?", (command.session_id,)
-            ).fetchone()[0]
-            receipt = CommandReceipt(
-                command.session_id,
-                command.command_id,
-                command.actor_id,
-                status,
-                version,
-                tuple(range(seq + 1, end_seq + 1)),
-                error,
+            receipt = self._session_runtime.finish(
+                command, context, fingerprint, row, status, version, error
             )
-            self._sessions.record_receipt(command, context, fingerprint, receipt)
         return receipt
 
     def get_command_receipt(self, session_id, command_id, package, *, context):
         with self._transaction():
             row = self._session(session_id, package, context)
-            stored = self._conn.execute(
-                "SELECT receipt_json FROM command_receipts WHERE session_id=? AND command_id=?",
-                (session_id, command_id),
-            ).fetchone()
-            if stored is None:
+            receipt = self._session_runtime.receipt(session_id, command_id)
+            if receipt is None:
                 return None
-            receipt = receipt_from_json(stored[0])
             if receipt.actor_id != row["pc_actor_id"] and (
                 receipt.actor_id not in context.controlled_npc_ids
             ):

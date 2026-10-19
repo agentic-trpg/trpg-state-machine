@@ -80,7 +80,12 @@ class ActivityHandler:
             self._ready(row, actor_id, package)
             controller = self._controller(row, actor_id)
             plan = plan_navigation(
-                row, actor_id, self.characters.position(sid, actor_id), operation, package
+                row,
+                actor_id,
+                self.characters.position(sid, actor_id),
+                operation,
+                package,
+                grid=self.world.grid,
             )
             record = self.records.create(sid, actor_id, operation, plan, command_id, controller)
             return [self._event(record, package, NavigationResult("started"))]

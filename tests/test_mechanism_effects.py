@@ -604,7 +604,7 @@ def test_conflicting_candidate_is_not_adopted(tmp_path, context):
     with sm:
 
         def mutate(req, result):
-            sm._sessions.set_world_version(sid, req.state_snapshot.world_version + 1)
+            sm._session_runtime.set_world_version(sid, req.state_snapshot.world_version + 1)
             return result
 
         install(sm, FixturePort(mutate=mutate))

@@ -1,5 +1,11 @@
 # SceneLifecycleService
 
+2026-10-19 Session Management 后续：SessionCreation 组织首次创建，SessionRuntime 管理
+PC 场景字段与公共执行元数据；ensure_scene 增加固定 Package 和已支持实例结构检查。
+已授权抽象 NPC MoveActor 现在可在原事务中确保目标，无需玩家先进入。
+具体兼容影响、恢复拒绝策略和未完成的领域配置持久化见
+[Session Management](SESSION_MANAGEMENT.md)；本文件的历史验收范围保留。
+
 本地实现切片，初始基线 `9ce60cb`，分支 `feat/scene-lifecycle-service`。
 2026-10-18 已将 `origin/main@1fec17a28e15bed06739be0a3811de7b2b2da584`
 合入本分支，整合 EnvironmentService、MechanismService／效果契约及 Schema35；
@@ -11,7 +17,7 @@ Design §2／§4／§5 及 2026-10-17 v0.4 评审记录；MODULE_CONTRACTS 是�
 ## 所有权与装配
 
 StateMachine.scene_lifecycle 与 WorldHandler.scenes 为同一个 SceneLifecycleService。
-服务显式引用 SqliteStore、SessionAccess、CharacterFacts、WorldFacts、EventCapture、
+服务显式引用 SqliteStore、SessionAccess、SessionRuntime、CharacterFacts、WorldFacts、EventCapture、
 NPCBootstrap，不引用 StateMachine，不持有状态缓存或角色位置副本。
 EnvironmentService 仍由 WorldHandler 装配，StateMachine.environment 引用同一实例，
 保留 command_submitter、Effects／角色高度 provider 与 OSS 防护 provider 接线。
@@ -21,11 +27,12 @@ MechanismService 仍在 WorldObjectService 内装配，原能力分发／自动�
 |---|---|
 | Scene 实例、Flags、visited_count、对象／机械场景事实 | WorldFacts |
 | Actor 唯一 scene／cell，初始角色身份 | CharacterFacts |
-| PC 当前场景字段、权限、固定绑定与提交元数据 | SessionAccess |
+| 权限、固定 Package 核对 | SessionAccess |
+| PC 当前场景字段、固定绑定写入与提交元数据 | SessionRuntime |
 | NPC 初始认知与运行数据 | 原有 NPCBootstrap；仅角色首次创建时调用 |
 | 初始化／进入离开／PC 访问／Flags 的业务协调 | SceneLifecycleService |
 | 移动准入、通路／占用／门锁、命令分发、其他世界业务 | WorldHandler 与原领域服务 |
-| 权限、版本、命令重放／回执、事务、事件扩展及持久化 | 原 CommandRuntime／共享提交路径 |
+| 权限／领域执行／公共发布和回执／事务／事件扩展与持久化 | SessionAccess／CommandRuntime／SessionRuntime／SqliteStore／PackageEffects 与 EventPersistence |
 
 ## 实际内部入口与调用链
 
@@ -34,7 +41,8 @@ MechanismService 仍在 WorldObjectService 内装配，原能力分发／自动�
 
 * `ensure_scene(sid, scene_id, package)`：WorldFacts.initialize_scene 首次写入场景
   默认 Flags 和对象；随后委托原对象能力、角色／NPCBootstrap、机械场景初始化。
-  返回是否首次创建。已存在实例直接复用，不补造旧存档缺失组件，不套用 Package 初值。
+  返回是否首次创建。先核对 Session 固定 Package；已存在实例复用并检查已支持的必要行，
+  缺失则 incomplete_session，不补造旧存档缺失组件，不套用 Package 初值。
 * `initialize_session(sid, pc_actor_id, pc, package)`：在既有创建事务中确保入口及原有
   预初始化范围内的空间场景，委托 CharacterFacts.initialize_pc，同步 Session PC 场景，
   记录一次入口访问。它仅用于首次创建；重复创建由原 creation_commands 回放处理。

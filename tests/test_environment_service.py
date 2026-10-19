@@ -279,7 +279,7 @@ def test_batch_prevalidation_rollback_and_net_noop(tmp_path, context, monkeypatc
         def fail(*args, **kwargs):
             raise StateMachineError("storage_error", "Injected event persistence failure")
 
-        monkeypatch.setattr(sm, "_append_events", fail)
+        monkeypatch.setattr(sm._event_persistence, "_append_events", fail)
         with pytest.raises(StateMachineError):
             submit(sm, sid, p, ctx, good, "storage.failure")
         assert stored_rows(db) == snapshot  # facts, version, receipt, evidence, outbox, RNG

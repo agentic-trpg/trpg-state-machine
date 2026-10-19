@@ -1,7 +1,6 @@
 """One SQLite authority, short transactions, detached reads, no runtime cache."""
 
 import json
-from dataclasses import asdict, replace
 from pathlib import Path
 from uuid import uuid4
 
@@ -12,7 +11,6 @@ from ._operations import (
 from .activity_handler import ActivityHandler
 from .activity_records import ActivityRecords
 from .availability import AvailabilityRuntime
-from .combat import DND_RULESET
 from .combat_handler import CombatHandler
 from .commands import OPERATIONS, CommandRuntime, TypedCommand
 from .domain_facts import CharacterFacts, CombatRecords, WorldFacts
@@ -43,26 +41,17 @@ from .npc_state import NPCRuntime
 from .object_durability import ObjectDurabilityService
 from .observation_lifecycle import ObservationLifecycleRuntime
 from .package import (
-    SYNTHETIC_EVALUATION_RULESET,
     AdventurePackage,
-    RulesetBinding,
-    _creation_fingerprint,
-    canonical_json,
 )
 from .package_effects import PackageEffects
 from .perception import PerceptionRuntime
 from .perception_queue import PerceptionQueueRuntime
 from .rules_adapter import RulesAdapter
-from .session_access import SessionAccess, _binding, _trusted
+from .session_access import SessionAccess, _binding
+from .session_creation import SessionCreation
+from .session_runtime import SessionRuntime
 from .spatial import WorldHandler
 from .storage import SqliteStore
-from .time_binding import TimeBinding
-
-
-def _result(raw: str) -> CreationResult:
-    data = json.loads(raw)
-    data["ruleset_binding"] = RulesetBinding(**data["ruleset_binding"])
-    return CreationResult(**data)
 
 
 class StateMachine(
@@ -108,6 +97,7 @@ class StateMachine(
         self._activity_records = ActivityRecords(self._store)
         self._event_capture = EventCapture(self._store, self._characters, self._world_facts)
         self._event_persistence = EventPersistence(self._store)
+        self._session_runtime = SessionRuntime(self._store, self._sessions, self._event_persistence)
         self._world = WorldHandler(
             self._store,
             self._sessions,
@@ -118,6 +108,7 @@ class StateMachine(
             self._npc_bootstrap,
             self._activity_records,
             loader=loader,
+            runtime=self._session_runtime,
         )
         self._durability = ObjectDurabilityService(self._world)
         self._objects = self._world.objects
@@ -159,6 +150,19 @@ class StateMachine(
             self._event_persistence,
         )
 
+        self._creation = SessionCreation(
+            self._store,
+            self._session_runtime,
+            self._world,
+            self._characters,
+            self._rules,
+            self._combat,
+            self._event_capture,
+            self._package_effects,
+            self._event_persistence,
+            self._evaluator,
+        )
+
     @property
     def _conn(self):
         """Transitional connection for NPC/perception runtimes, owned by the store."""
@@ -190,197 +194,11 @@ class StateMachine(
     def _check_package_pin(self, row, package):
         return self._sessions._check_package_pin(row, package)
 
-    def _replay(self, context: TrustedContext, command_id: str, fingerprint: str):
-        row = self._conn.execute(
-            "SELECT fingerprint, result_json FROM creation_commands "
-            "WHERE principal_id = ? AND command_id = ?",
-            (context.principal_id, command_id),
-        ).fetchone()
-        if row is None:
-            return None
-        if row["fingerprint"] != fingerprint:
-            raise StateMachineError(
-                "idempotency_conflict", "Command key was already used for different content"
-            )
-        return _result(row["result_json"])
-
     def create_session(
         self, request: CreateSessionRequest, package: AdventurePackage, *, context: TrustedContext
     ) -> CreationResult:
-        """Create once per trusted (principal_id, command_id), atomically.
-
-        Prepare/validate/fingerprint outside the write transaction, then recheck the
-        durable key inside BEGIN IMMEDIATE to handle concurrent/restarted callers.
-        """
-        _trusted(context)
-        if not isinstance(request, CreateSessionRequest) or not isinstance(
-            package, AdventurePackage
-        ):
-            raise StateMachineError(
-                "invalid_request", "Expected typed creation request and approved package"
-            )
-        if any(
-            not isinstance(v, str) or not v.strip() or len(v) > 256
-            for v in (
-                request.command_id,
-                request.adventure_id,
-                request.package_version,
-                request.package_digest,
-            )
-        ):
-            raise StateMachineError(
-                "invalid_request", "Request IDs and versions must be nonblank strings"
-            )
-        if (
-            not isinstance(request.players, tuple)
-            or len(request.players) != 1
-            or (not isinstance(request.players[0], PlayerSelection))
-        ):
-            raise StateMachineError(
-                "invalid_player_setup", "Exactly one typed player selection is required"
-            )
-        player = request.players[0]
-        if any(
-            not isinstance(v, str) or not v.strip() or len(v) > 256
-            for v in (player.player_id, player.pc_template_id)
-        ):
-            raise StateMachineError(
-                "invalid_player_setup", "Player/template IDs must be nonblank strings"
-            )
-        if player.player_id != context.player_id:
-            raise StateMachineError(
-                "unauthorized", "Trusted context does not control the requested player"
-            )
-        selected_time = (
-            request.time_binding if request.time_binding is not None else package.time_binding
-        )
-        if selected_time is not None and type(selected_time) is not TimeBinding:
-            raise StateMachineError("invalid_time_binding", "Expected typed TimeBinding")
-        request_data = {
-            "adventure_id": request.adventure_id,
-            "package_version": request.package_version,
-            "package_digest": request.package_digest,
-            "players": [asdict(player)],
-        }
-        if selected_time is not None:
-            request_data["time_binding"] = asdict(selected_time)
-        fingerprint = _creation_fingerprint(request_data, package.ruleset_binding)
-        with self._transaction():
-            replay = self._replay(context, request.command_id, fingerprint)
-        if (request.adventure_id, request.package_version) != (
-            package.adventure_id,
-            package.package_version,
-        ):
-            raise StateMachineError(
-                "package_identity_mismatch", "Request does not identify the approved package"
-            )
-        if request.package_digest != package.package_digest:
-            raise StateMachineError(
-                "package_digest_mismatch", "Request digest does not match approved content"
-            )
-        if replay is not None:
-            return replay
-        if selected_time is not None and any(a.npc_state is not None for a in package.actors):
-            raise StateMachineError(
-                "unsupported_time_consumer",
-                "Configured NPC Runtime/OB/Gate require legacy time until reviewed second policies",
-            )
-        if package.ruleset_binding.ruleset_id == DND_RULESET:
-            self._verify_dnd_binding(package)
-        pc = next(
-            (p for p in package.pc_templates if p.pc_template_id == player.pc_template_id), None
-        )
-        if pc is None:
-            raise StateMachineError(
-                "unknown_pc_template", "Selected PC template is not in the package"
-            )
-        session_id = "session." + uuid4().hex
-        pc_actor_id = "pc." + uuid4().hex
-        rng_ref = "rng." + uuid4().hex
-        result = CreationResult(
-            session_id,
-            package.adventure_id,
-            package.package_version,
-            package.package_digest,
-            package.ruleset_binding,
-            0,
-            2,
-        )
-        result_json = canonical_json(asdict(result))
-        with self._transaction(write=True):
-            if replay := self._replay(context, request.command_id, fingerprint):
-                return replay
-            self._sessions.initialize(session_id, package, context, pc, pc_actor_id, rng_ref)
-            self._world_facts.initialize_world(session_id, package)
-            self.world_time.initialize(session_id, selected_time)
-            self.scene_lifecycle.initialize_session(session_id, pc_actor_id, pc, package)
-            if package.combat_foundation_json is not None:
-                initial = json.loads(package.combat_foundation_json)["snapshot"]
-                from .combat import _remap
-
-                cells = _remap(
-                    initial["combat_state"]["actor_zone"], pc.pc_template_id, pc_actor_id
-                )
-                fresh = self._conn.execute(
-                    "SELECT * FROM sessions WHERE session_id=?", (session_id,)
-                ).fetchone()
-                self._characters.initialize_rule_positions(
-                    fresh, cells, initial["scene_state"]["scene_id"]
-                )
-            self._sessions.initialize_rng(
-                session_id,
-                rng_ref,
-                synthetic=package.ruleset_binding == SYNTHETIC_EVALUATION_RULESET,
-            )
-            initial_row = self._conn.execute(
-                "SELECT * FROM sessions WHERE session_id=?", (session_id,)
-            ).fetchone()
-            if package.noncombat_foundation_json is not None:
-                self._initialize_noncombat(initial_row, package)
-            self._world_facts.initialize_items(initial_row, package, self._rules.loader)
-            self._world_facts.initialize_locks(initial_row, package)
-            if package.portable_items:
-                self._characters.rule_components(
-                    session_id, set(self._characters.rule_actors(session_id))
-                )
-            self._assert_spatial_consistency(session_id, package)
-            initial_events = self._expand_events(
-                initial_row,
-                package,
-                [
-                    self._capture_event(
-                        session_id,
-                        package,
-                        "session.created",
-                        {},
-                        phase="session.after_initialization",
-                    ),
-                    self._capture_event(
-                        session_id,
-                        package,
-                        "scene.entered",
-                        {"scene_id": package.entry_scene_id},
-                        phase="session.after_initialization",
-                        source_actor_id=pc_actor_id,
-                    ),
-                ],
-                request.command_id,
-            )
-            self._append_events(
-                session_id, 0, initial_events, source_command_id=request.command_id, package=package
-            )
-            result = replace(
-                result,
-                event_seq=self._conn.execute(
-                    "SELECT event_seq FROM sessions WHERE session_id=?", (session_id,)
-                ).fetchone()[0],
-            )
-            result_json = canonical_json(asdict(result))
-            self._conn.execute(
-                "INSERT INTO creation_commands VALUES (?, ?, ?, ?, ?)",
-                (context.principal_id, request.command_id, fingerprint, session_id, result_json),
-            )
-        return result
+        """Compatible entry for the atomic Session Creation coordinator."""
+        return self._creation.create(request, package, context=context)
 
     def _initialize_scene(self, session_id: str, scene_id: str, package: AdventurePackage) -> None:
         return self.scene_lifecycle.ensure_scene(session_id, scene_id, package)
@@ -486,6 +304,18 @@ class StateMachine(
             (sid, row["pc_actor_id"]),
         ).fetchone()
         rng = self._conn.execute("SELECT * FROM rng_states WHERE session_id = ?", (sid,)).fetchone()
+        if (
+            world is None
+            or pc is None
+            or rng is None
+            or row["pc_actor_id"] not in actors
+            or row["current_scene_id"] not in scenes
+            or actors[row["pc_actor_id"]].current_scene_id != row["current_scene_id"]
+            or rng["state_id"] != row["rng_ref"]
+        ):
+            raise StateMachineError(
+                "incomplete_session", "Required persisted Session facts are missing"
+            )
         return SessionSnapshot(
             sid,
             row["adventure_id"],
@@ -540,7 +370,17 @@ class StateMachine(
         with self._transaction():
             row = self._session(session_id, package, context)
             self._require_noncombat_save(row)
-            return self._snapshot(row, package)
+            self.scene_lifecycle.validate_initialized(row, package)
+            if row["ruleset_id"] == "dnd-2024-srd-5.2.1" and not package.legacy_audit_only:
+                self._rules._verify_dnd_binding(package, row)
+                if row["mechanical_schema_version"] is not None:
+                    self._rules.validate_saved_mechanics(row)
+                    self._session_runtime.rng_context(row)
+            snapshot = self._snapshot(row, package)
+            self._session_runtime.prepare_scene_maps(
+                session_id, (row["current_scene_id"],), self._world_facts.maps
+            )
+            return snapshot
 
     def resume_session(
         self, session_id: str, package: AdventurePackage, *, context: TrustedContext

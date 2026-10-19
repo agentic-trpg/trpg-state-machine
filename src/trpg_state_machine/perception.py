@@ -336,10 +336,17 @@ class PerceptionRuntime:
         Judgment receives only one observer/event's undecidable Signals and evidence,
         outside the write transaction. Immutable event-time evidence remains authority.
         """
+        from .session_access import _binding
+
         if type(event_seq) is not int or event_seq <= 0:
             raise StateMachineError("invalid_event", "Expected a positive event sequence")
         with self._transaction(write=True):
             self._projection_authorized(session_id, package, context, npc)
+            binding = _binding(
+                self._conn.execute(
+                    "SELECT * FROM sessions WHERE session_id=?", (session_id,)
+                ).fetchone()
+            )
             work = self._conn.execute(
                 "SELECT done FROM event_outbox WHERE session_id=? "
                 "AND event_seq=? AND consumer='perception'",
@@ -388,7 +395,7 @@ class PerceptionRuntime:
         # Historical incomplete projections lack mechanical evidence. Never
         # consult current state or reuse unsafe legacy partial positive answers.
         # Already completed historical OB/receipts remain immutable audit data.
-        if not _evidence_v4(evidence, event, package.ruleset_binding):
+        if not _evidence_v4(evidence, event, binding):
             if (
                 isinstance(evidence, dict)
                 and evidence.get("schema")
@@ -667,12 +674,9 @@ class PerceptionRuntime:
 
     def _scene_perception_clear(self, sid, scene):
         """No mechanical visibility calculation: unsupported environments stay unknown."""
-        stored = self._conn.execute(
-            "SELECT state_json FROM mechanical_scenes WHERE session_id=? AND scene_id=?",
-            (sid, scene),
-        ).fetchone()
+        stored = self._world_facts.mechanical_scene(sid, scene)
         if stored:
-            grid = json.loads(stored[0])["grid"]
+            grid = stored["grid"]
             if grid["default_lighting"] != "bright" or any(
                 grid[key]
                 for key in (

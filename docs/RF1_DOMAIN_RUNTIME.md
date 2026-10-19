@@ -1,5 +1,12 @@
 # RF-1: domain runtime and shared commit
 
+2026-10-19 Session follow-up: creation is now coordinated by SessionCreation;
+SessionAccess retains identity/grants/pin checks, and SessionRuntime owns execution
+metadata plus common version/event publication and receipt completion. Runtime
+RE identities come from persisted Session rows. Current ownership and remaining
+domain configuration gaps are in [Session Management](SESSION_MANAGEMENT.md).
+The RF-1 baseline/schema/check evidence below is historical.
+
 2026-10-18 follow-up: SceneLifecycleService now owns the existing scene
 initialization/entry/departure/PC-visit/flag coordination previously in WorldHandler.
 The historical RF-1 baseline and verification below remain historical. Current
@@ -21,8 +28,8 @@ cross-module contract. Baseline: `802599a`, including GC-1 fix `9e9eac8`.
 | mechanical_actors rules metadata | CombatRuntime initialization; DndRuntime actor delta | CharacterFacts | same rule settlement |
 | scene_instances, objects, mechanical_scenes | service/CombatRuntime initialization; spatial placement; service switch/flag | WorldFacts | world operation + evidence + receipt |
 | combats lifecycle, ledgers, terminal geometry | CombatRuntime initialization/read; DndRuntime delta | CombatRecords / CombatHandler | same rule settlement |
-| sessions ownership, pin, current PC scene, versions | service initialization/auth; spatial PC movement; command/rule settlement | SessionAccess | shared outer transaction |
-| RNG and command receipts | service initialization; command/synthetic/Dnd settlement | session settlement, shared store | same outcome, never separate commit |
+| sessions ownership, pin, current PC scene, versions | SessionCreation initialization; SessionAccess auth; spatial PC movement; command/rule settlement | SessionRuntime writes; SessionAccess authorizes | shared outer transaction |
+| RNG and command receipts | SessionCreation; command/synthetic/Dnd settlement | SessionRuntime, shared store | same outcome, never separate commit |
 | frozen evidence, events, Outbox, NPC queue | EventRuntime capture/expand; service append; PerceptionQueueRuntime | stage capture / event persistence | capture at business stage; persist atomically |
 | NPC tasks, cognition, modes, schedules, projections | NPC and perception runtimes | transitional existing runtimes | separate existing operation lifecycles |
 
