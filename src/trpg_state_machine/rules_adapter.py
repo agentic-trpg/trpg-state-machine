@@ -23,8 +23,6 @@ from dnd5e_engine.evaluation_preflight import template_support_failure
 from dnd5e_engine.evaluation_rng import RNGState
 from dnd5e_engine.evaluation_ruleset import RulesetBinding, RulesetBindingError, verify_ruleset
 from dnd5e_engine.evaluation_state import CharacterStateV2, CombatSnapshot, NonCombatSnapshot
-from dnd5e_engine.spatial import GridTopology
-from dnd5e_engine.specs import GridScene
 from pydantic import ValidationError
 
 from .combat import DND_RULESET, _remap, process_id, validate_foundation
@@ -307,11 +305,7 @@ class RulesAdapter:
                 (sid, row["current_scene_id"]),
             )
         ]
-        scene = self._conn.execute(
-            "SELECT state_json FROM mechanical_scenes WHERE session_id=? AND scene_id=?",
-            (sid, row["current_scene_id"]),
-        ).fetchone()
-        scene_data = json.loads(scene[0]) if scene else None
+        scene_data = self.facts.mechanical_scene(sid, row["current_scene_id"])
         if scene_data is not None and package is not None:
             projected, unknown, _ = self.world.objects.lights.project(
                 sid, scene_data["scene_id"], package, scene_data["grid"]
@@ -375,13 +369,10 @@ class RulesAdapter:
             raise StateMachineError("combat_not_initialized", "Session has no mechanical encounter")
         state = json.loads(combat["state_json"])
         actors = self.characters.rule_actors(sid)
-        scene = self._conn.execute(
-            "SELECT state_json FROM mechanical_scenes WHERE session_id=? AND scene_id=?",
-            (sid, combat["scene_id"]),
-        ).fetchone()
+        scene = self.facts.mechanical_scene(sid, combat["scene_id"])
         if not state["ended"]:
             state["actor_zone"] = self._current_cells(
-                sid, combat["scene_id"], state["initiative_ids"], json.loads(scene[0])["grid"]
+                sid, combat["scene_id"], state["initiative_ids"], scene["grid"]
             )
         try:
             return CombatSnapshot.model_validate_json(
@@ -393,7 +384,7 @@ class RulesAdapter:
                         "world_version": row["world_version"],
                         "character_states": [actors[a] for a in state["initiative_ids"]],
                         **self.characters.rule_components(sid, set(state["initiative_ids"])),
-                        "scene_state": json.loads(scene[0]),
+                        "scene_state": scene,
                         "combat_state": state,
                     }
                 )
@@ -406,7 +397,7 @@ class RulesAdapter:
     def _current_cells(self, sid, scene_id, roster, grid):
         from .grid import cell_in_bounds
 
-        topology = GridTopology(GridScene.model_validate(grid))
+        topology = self.world.grid.reader.topology_for_grid(sid, scene_id, grid)
         positions = {}
         for actor_id in roster:
             position = self.characters.position(sid, actor_id)
@@ -474,11 +465,9 @@ class RulesAdapter:
                 data["snapshot"].update(
                     self.characters.rule_components(row["session_id"], set(roster))
                 )
-                scene = self._conn.execute(
-                    "SELECT state_json FROM mechanical_scenes WHERE session_id=? AND scene_id=?",
-                    (row["session_id"], row["current_scene_id"]),
-                ).fetchone()
-                data["snapshot"]["scene_state"] = json.loads(scene[0])
+                data["snapshot"]["scene_state"] = self.facts.mechanical_scene(
+                    row["session_id"], row["current_scene_id"]
+                )
             except (KeyError, TypeError) as exc:
                 raise StateMachineError(
                     "invalid_mechanical_state", "Encounter dependencies are missing"
@@ -535,14 +524,8 @@ class RulesAdapter:
                         "SELECT scene_id,state_json FROM combats WHERE session_id=?", (sid,)
                     ).fetchone()
                     roster = json.loads(combat["state_json"])["initiative_ids"]
-                    scene = self._conn.execute(
-                        "SELECT state_json FROM mechanical_scenes "
-                        "WHERE session_id=? AND scene_id=?",
-                        (sid, combat["scene_id"]),
-                    ).fetchone()
-                    cells = self._current_cells(
-                        sid, combat["scene_id"], roster, json.loads(scene[0])["grid"]
-                    )
+                    scene = self.facts.mechanical_scene(sid, combat["scene_id"])
+                    cells = self._current_cells(sid, combat["scene_id"], roster, scene["grid"])
                     self.records.freeze_positions(sid, cells)
                 self.records.update_rule_state(sid, field, value)
             elif component == "ledger":

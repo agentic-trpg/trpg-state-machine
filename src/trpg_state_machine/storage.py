@@ -44,6 +44,7 @@ class SqliteStore:
         self._closed = False
         self._thread = get_ident()
         self._scope = None
+        self._grid_maps = None
         try:
             self._conn = sqlite3.connect(str(database), isolation_level=None, timeout=5.0)
         except sqlite3.Error as exc:
@@ -179,6 +180,8 @@ class SqliteStore:
         if self._scope is not None:
             raise StateMachineError("invalid_transaction", "Cannot close an active transaction")
         self._conn.close()
+        if self._grid_maps is not None:
+            self._grid_maps.clear()
         self._closed = True
 
     def savepoint(self):

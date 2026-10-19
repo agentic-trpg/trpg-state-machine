@@ -2,9 +2,6 @@
 
 from dataclasses import asdict
 
-from dnd5e_engine.spatial import GridTopology
-from dnd5e_engine.specs import GridScene
-
 from ._execution import _execution_data
 from .errors import StateMachineError
 from .world_commands import SetLightEnabled
@@ -62,7 +59,7 @@ class LightService:
     def project(self, sid, scene, package, raw):
         """Return a derived grid plus explicit uncertainty and source-stage evidence."""
         grid = {**raw, "lighting": dict(raw["lighting"])}
-        topology = GridTopology(GridScene(**raw))
+        topology = self.h.grid.reader.topology_for_grid(sid, scene, raw)
         sources = self.sources(sid, scene, package)
         if not sources:
             return grid, (), {}
@@ -77,8 +74,8 @@ class LightService:
                 candidates.update(
                     e.threshold_cell for e in passage.endpoints if e.scene_id == scene
                 )
-        uncertain_geometry = GridTopology(
-            GridScene(**{**raw, "blocked_cells": sorted(set(raw["blocked_cells"]) | candidates)})
+        uncertain_geometry = self.h.grid.reader.topology_for_grid(
+            sid, scene, {**raw, "blocked_cells": sorted(set(raw["blocked_cells"]) | candidates)}
         )
         uncertain, evidence = [], {}
         for y in range(raw["height"]):
@@ -195,7 +192,7 @@ class LightService:
             position = h._spatial_reader(sid, actor, package, context)
             h._public_scope(sid, actor, package)
             raw = h._spatial_scene(sid, position.scene_id)["grid"]
-            topology = GridTopology(GridScene(**raw))
+            topology = h.grid.reader.topology_for_grid(sid, position.scene_id, raw)
             try:
                 visible_cell = topology.has_line_of_sight(position.cell, cell)
             except (ValueError, TypeError) as exc:

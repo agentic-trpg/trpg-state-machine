@@ -376,7 +376,11 @@ class StateMachine(
                 if row["mechanical_schema_version"] is not None:
                     self._rules.validate_saved_mechanics(row)
                     self._session_runtime.rng_context(row)
-            return self._snapshot(row, package)
+            snapshot = self._snapshot(row, package)
+            self._session_runtime.prepare_scene_maps(
+                session_id, (row["current_scene_id"],), self._world_facts.maps
+            )
+            return snapshot
 
     def resume_session(
         self, session_id: str, package: AdventurePackage, *, context: TrustedContext

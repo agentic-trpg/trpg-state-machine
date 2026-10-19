@@ -7,7 +7,7 @@ static geometry, vision and cover, and must not be supplied as a combat Grid.
 
 import json
 from contextlib import contextmanager
-from dataclasses import dataclass
+from dataclasses import InitVar, dataclass
 from functools import wraps
 from math import isfinite
 
@@ -15,7 +15,7 @@ from dnd5e_engine.spatial import GridTopology, canonical_cell_id
 from dnd5e_engine.specs import GridScene
 
 from .errors import StateMachineError
-from .package import canonical_json
+from .grid_maps import PreparedGrid, ReadOnlyTopology
 from .world_spatial import ObjectSpatialProjection
 
 
@@ -47,28 +47,40 @@ class GridOccupant:
     cells: tuple[str, ...]
 
 
+class _GridSnapshot:
+    # Keep prepared implementation data out of dataclass fields/asdict/wire data.
+    __slots__ = ("_map",)
+
+
 @dataclass(frozen=True, slots=True)
-class GridView:
+class GridView(_GridSnapshot):
     scene_id: str
     world_version: int
     grid_json: str
     occupants: tuple[GridOccupant, ...]
     objects: tuple[tuple[str, ObjectSpatialProjection], ...]
+    _prepared: InitVar[PreparedGrid | None] = None
+
+    def __post_init__(self, _prepared):
+        prepared = _prepared
+        if prepared is None or prepared.grid_json != self.grid_json:
+            prepared = PreparedGrid.build(json.loads(self.grid_json))
+        object.__setattr__(self, "_map", prepared)
 
     @property
     def width(self):
-        return json.loads(self.grid_json)["width"]
+        return self._map.data["width"]
 
     @property
     def height(self):
-        return json.loads(self.grid_json)["height"]
+        return self._map.data["height"]
 
     @property
     def cell_size_ft(self):
-        return json.loads(self.grid_json)["cell_size_ft"]
+        return self._map.topology.cell_size_ft
 
     def _base(self):
-        return GridTopology(GridScene(**json.loads(self.grid_json)))
+        return self._map.topology
 
     def normalize_cell(self, cell):
         try:
@@ -101,28 +113,58 @@ class GridView:
         return self.distance_ft(a, b) == self.cell_size_ft
 
     def cells_within_range(self, origin, range_ft):
-        if type(range_ft) not in (int, float) or not isfinite(range_ft) or range_ft < 0:
-            raise StateMachineError("invalid_query", "Expected finite nonnegative range")
-        origin = self.normalize_cell(origin)
+        origin = self._range_origin(origin, range_ft)
         topology = self._base()
+        x0, y0 = map(int, origin.split(","))
+        # The pinned square grid uses Chebyshev distance. Clamp before division
+        # or conversion, including huge finite floats and arbitrary Python ints.
+        extent = max(self.width, self.height)
+        if range_ft >= extent * self.cell_size_ft:
+            radius = extent
+        elif type(range_ft) is float:
+            numerator, denominator = range_ft.as_integer_ratio()
+            radius = numerator // (denominator * self.cell_size_ft)
+        else:
+            radius = range_ft // self.cell_size_ft
         return tuple(
             f"{x},{y}"
-            for y in range(self.height)
-            for x in range(self.width)
+            for y in range(max(0, y0 - radius), min(self.height, y0 + radius + 1))
+            for x in range(max(0, x0 - radius), min(self.width, x0 + radius + 1))
             if topology.within_range(origin, f"{x},{y}", range_ft)
         )
 
+    def _range_origin(self, origin, range_ft):
+        if (
+            type(range_ft) not in (int, float)
+            or (type(range_ft) is float and not isfinite(range_ft))
+            or range_ft < 0
+        ):
+            raise StateMachineError("invalid_query", "Expected finite nonnegative range")
+        return self.normalize_cell(origin)
+
     def entities_within_range(self, origin, range_ft):
-        return self.occupied(self.cells_within_range(origin, range_ft))
+        origin = self._range_origin(origin, range_ft)
+        topology = self._base()
+        return tuple(
+            occupant
+            for occupant in self.occupants
+            if any(topology.within_range(origin, cell, range_ft) for cell in occupant.cells)
+        )
 
     def neighbors(self, cell):
         cell = self.normalize_cell(cell)
-        return tuple(c for c in self.cells_within_range(cell, self.cell_size_ft) if c != cell)
+        x0, y0 = map(int, cell.split(","))
+        return tuple(
+            f"{x},{y}"
+            for y in range(max(0, y0 - 1), min(self.height, y0 + 2))
+            for x in range(max(0, x0 - 1), min(self.width, x0 + 2))
+            if (x, y) != (x0, y0) and self._base().within_range(cell, f"{x},{y}", self.cell_size_ft)
+        )
 
     def movement_blocking_cells(self):
         return tuple(
             sorted(
-                set(json.loads(self.grid_json)["blocked_cells"])
+                set(self._map.data["blocked_cells"])
                 | {c for _, p in self.objects for c in p.movement_blocking_cells}
             )
         )
@@ -130,7 +172,7 @@ class GridView:
     def difficult_terrain_cells(self):
         return tuple(
             sorted(
-                set(json.loads(self.grid_json)["difficult_terrain_cells"])
+                set(self._map.data["difficult_terrain_cells"])
                 | {c for _, p in self.objects for c in p.difficult_terrain_cells}
             )
         )
@@ -138,9 +180,13 @@ class GridView:
     def can_step(self, a, b):
         """Basic passage geometry, without creature-passage rules or movement payment."""
         a, b = self.normalize_cell(a), self.normalize_cell(b)
-        raw = json.loads(self.grid_json)
+        raw = self._map.copy_data()
         raw["blocked_cells"] = list(self.movement_blocking_cells())
-        topology = GridTopology(GridScene(**raw))
+        topology = (
+            self._base()
+            if set(raw["blocked_cells"]) == set(self._map.data["blocked_cells"])
+            else ReadOnlyTopology(GridScene(**raw))
+        )
         return topology.is_valid_cell(a) and topology.edge_distance(a, b) is not None
 
     def has_line_of_sight(self, a, b):
@@ -157,7 +203,7 @@ class GridView:
         base = self._base()
         if not base.has_line_of_sight(a, b):
             return "total"
-        raw = json.loads(self.grid_json)
+        raw = self._map.copy_data()
         occupied = (
             tuple(c for o in self.occupants if o.kind == "actor" for c in o.cells)
             if creature_cover
@@ -203,6 +249,7 @@ class GridReader:
     def __init__(self, store, facts):
         self.store = store
         self.facts = facts
+        self.maps = facts.maps
 
     @contextmanager
     def read_scope(self):
@@ -213,21 +260,28 @@ class GridReader:
                 yield
 
     @_read
-    def scene_grid(self, sid, scene_id, package):
-        stored = self.facts.spatial_scene(sid, scene_id)
+    def prepared_scene(self, sid, scene_id, package):
+        stored = self.maps.scene(sid, scene_id, spatial_only=True)
         if stored is not None:
-            raw = stored.get("grid")
+            prepared = stored.grid
         else:
             initialized = self.store.connection.execute(
                 "SELECT 1 FROM scene_instances WHERE session_id=? AND scene_id=?", (sid, scene_id)
             ).fetchone()
             # Missing live grid is not permission to reset facts from a template.
             raw = None if initialized else package.scene(scene_id).grid_json
-            if raw is not None:
-                raw = json.loads(raw)
-        if raw is None:
+            prepared = None if raw is None else self.maps.template(sid, scene_id, raw)
+        if prepared is None:
             raise StateMachineError("spatial_unconfigured", "Fine spatial data is unavailable")
-        return raw
+        return prepared
+
+    @_read
+    def scene_grid(self, sid, scene_id, package):
+        return self.prepared_scene(sid, scene_id, package).copy_data()
+
+    def topology_for_grid(self, sid, scene_id, raw):
+        """Exact detached projection, including every supplied lighting/geometry input."""
+        return self.maps.for_grid(sid, scene_id, raw).topology
 
     @_read
     def scene_occupants(self, sid, scene_id, package):
@@ -278,7 +332,8 @@ class GridService:
     """Trusted World composition. Callers retain Session/Package authorization.
 
     Every multi-read operation owns one read transaction or joins the caller's
-    active scope. No cache, initialization, write or event; never commits a caller's scope.
+    active scope. Only immutable, content-identified maps are retained; no Scene
+    initialization, write or event, and never commits a caller's scope.
     """
 
     def __init__(self, handler):
@@ -296,16 +351,25 @@ class GridService:
             raise StateMachineError("spatial_unconfigured", "Scene has no grid")
         return GridTopology(GridScene(**json.loads(raw)))
 
+    def prepared_package_topology(self, sid, package, scene_id):
+        """Authorized Navigation's static map, separate from live Session facts."""
+        raw = package.scene(scene_id).grid_json
+        if raw is None:
+            raise StateMachineError("spatial_unconfigured", "Scene has no grid")
+        return self.reader.maps.template(sid, scene_id, raw).topology
+
     @_read
     def base_topology(self, sid, scene_id, package=None, *, with_extent=False):
         """Legacy static/Light authorized-visibility input; not the combined current view."""
-        scene = self.h.facts.spatial_scene(sid, scene_id)
-        if scene is None or scene.get("grid") is None:
+        scene = self.reader.maps.scene(sid, scene_id, spatial_only=True)
+        if scene is None or scene.grid is None:
             raise StateMachineError("spatial_unconfigured", "Scene has no fine spatial capability")
-        grid = scene["grid"]
+        prepared = scene.grid
+        grid = prepared.copy_data()
+        topology = prepared.topology
         if package is not None:
             grid, _, _ = self.h.objects.lights.project(sid, scene_id, package, grid)
-        topology = GridTopology(GridScene(**grid))
+            topology = self.reader.topology_for_grid(sid, scene_id, grid)
         return (topology, (grid["width"], grid["height"])) if with_extent else topology
 
     @_read
@@ -315,8 +379,8 @@ class GridService:
         ).fetchone()
         if row is None:
             raise StateMachineError("invalid_target", "Unknown Session")
-        raw = self.reader.scene_grid(sid, scene_id, package)
-        base = GridTopology(GridScene(**raw))
+        prepared = self.reader.prepared_scene(sid, scene_id, package)
+        base = prepared.topology
         actors, _ = self.reader.scene_occupants(sid, scene_id, package)
         objects = tuple(
             sorted(self.h.objects.spatial.scene_contributions(sid, scene_id, package).items())
@@ -328,7 +392,7 @@ class GridService:
             raise StateMachineError(
                 "invalid_spatial_state", "Entity placement is missing or out of bounds"
             )
-        return GridView(scene_id, row[0], canonical_json(raw), occupants, objects)
+        return GridView(scene_id, row[0], prepared.grid_json, occupants, objects, prepared)
 
     @_read
     def exploration_topology(
@@ -346,10 +410,11 @@ class GridService:
         Creatures block exploration here by existing policy, not because they are
         walls. RE/Combat retains creature passage rules and all movement budgets.
         """
-        raw = self.reader.scene_grid(sid, scene_id, package)
+        prepared = self.reader.prepared_scene(sid, scene_id, package)
+        raw = prepared.copy_data()
         actors, _ = self.reader.scene_occupants(sid, scene_id, package)
         projections = self.h.objects.spatial.scene_contributions(sid, scene_id, package)
-        base = GridTopology(GridScene(**raw))
+        base = prepared.topology
         if any(not cell_in_bounds(base, cell) for _, cell in actors) or any(
             not p.occupied_cells or any(not cell_in_bounds(base, cell) for cell in p.occupied_cells)
             for p in projections.values()
@@ -372,4 +437,4 @@ class GridService:
                     if e.scene_id == scene_id
                     and (passage.passage_id, e.threshold_cell) not in handled_thresholds
                 )
-        return GridTopology(GridScene(**{**raw, "blocked_cells": sorted(cells)}))
+        return self.reader.topology_for_grid(sid, scene_id, {**raw, "blocked_cells": sorted(cells)})

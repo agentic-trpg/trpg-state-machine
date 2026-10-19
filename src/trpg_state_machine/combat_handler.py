@@ -115,6 +115,7 @@ class CombatHandler:
             self.characters.initialize_rule_actor(row, actor, encounter=True)
         if package.noncombat_foundation_json is None and spatial is None:
             self.facts.initialize_rule_scene(sid, snapshot.scene_state)
+            self.runtime.prepare_scene_maps(sid, (snapshot.scene_state.scene_id,), self.facts.maps)
         if package.noncombat_foundation_json is None:
             self.characters.initialize_rule_components(sid, snapshot)
         elif self.characters.rule_components(

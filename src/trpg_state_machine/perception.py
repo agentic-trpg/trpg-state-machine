@@ -674,12 +674,9 @@ class PerceptionRuntime:
 
     def _scene_perception_clear(self, sid, scene):
         """No mechanical visibility calculation: unsupported environments stay unknown."""
-        stored = self._conn.execute(
-            "SELECT state_json FROM mechanical_scenes WHERE session_id=? AND scene_id=?",
-            (sid, scene),
-        ).fetchone()
+        stored = self._world_facts.mechanical_scene(sid, scene)
         if stored:
-            grid = json.loads(stored[0])["grid"]
+            grid = stored["grid"]
             if grid["default_lighting"] != "bright" or any(
                 grid[key]
                 for key in (

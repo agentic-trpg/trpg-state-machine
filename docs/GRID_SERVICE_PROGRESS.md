@@ -1,5 +1,73 @@
 # W-01 GridService 切片进度
 
+## 地图运行表示与查询优化（2026-10-19）
+
+在 `feat/session-management-refactor@a25c35e` 上继续，开始时工作区干净，没有重建分支、
+切换 main 或修改其他进行中工作。仓库及适用祖先仍无 AGENTS.md。
+本次影响创建／恢复、事务可见性以及所有地图消费者，选择 Focused + Integration，
+不依据历史全量记录宣称本次全量通过。
+
+- SessionCreation 原流程经 SceneLifecycle／SessionRuntime，在领域地图保存后准备运行
+  表示；延迟场景、原机械场景补建、恢复当前场景均接线，Store 关闭／Session 释放清理。
+- GridMaps 每次先读当前事务的实际 state_json，按完整内容和 Store／Session／Scene／
+  live 或 template 来源复用；不新增数据库版本字段，不依赖世界版本或 loader 地址。
+  两个 LRU 各 64 项及 8 MiB 编码键预算，超预算单项不驻留；候选没有“当前已提交”指针。
+- GridView 原字段／grid_json／asdict 和几何语义保留，复用只读解析数据与基础拓扑。
+  嵌套集合、墙段和拓扑属性不能修改；旧 View 在更新、回滚和释放后保持原快照。
+- 范围查询裁剪候选区域后精确筛选；实体直接检查实际占格；邻格最多生成八个候选。
+  120 组参数与旧式全图枚举对照，覆盖不同尺寸／尺度、中心／边界、小数和极大有限范围。
+- 公共路径计数：100×100／5 ft 地图中心 5 ft，范围 10,000 → 9 次，邻格
+  10,000 → 最多 8 次；五个实际占格的三实体示例只需 3 次判断，不调用范围扫描。
+  地图准备后，两次公共 read_scene 加 View 查询及基础 Light／环境消费，额外地图
+  json.loads／基础拓扑构建均为 0。不是全部业务 JSON 或规则／Light 工作为零。
+- 已盘点地图实际写入口：WorldFacts 两个初始化方法的 INSERT；无生产地图编辑命令。
+  SQL 配置候选／回滚测试验证未来受控更新后按可见内容重建，不新增无调用方编辑接口。
+- 迁移 WorldFacts、GridReader、Light、Environment 区域校验、Navigation 实际规划、
+  RulesAdapter 和实时 EventCapture 的重复读取／基础构建路径；历史证据仍消费历史地图。
+
+当前 Schema36 和 RE／SRD pin 保持。Package 静态兼容 helper 仍可脱离 Store 单次构建，
+实际导航使用独立 template 运行表示；缺 live 地图仍拒绝，不回填 Package 默认。
+WorldObject 全能力配置、角色／物品完整实例化、RE 固定素材接口和独立动态视觉仍未解决。
+具体范围、释放和预算说明见 [GridService](GRID_SERVICE.md)。
+
+### 本轮检查
+
+新增 maps／算法 Focused 首轮：174 passed／1 failed；失败为测试在降低池容量后错误地
+要求另一尚未发生淘汰的分区立即缩容，修正为清空后验证，未改变生产淘汰策略。
+随后 `test_grid_maps.py test_grid_service.py test_session_management.py test_sessions.py
+test_scene_lifecycle.py test_domain_runtime.py`：248 passed（32.49s），退出码 0。
+最终检查结果：
+
+| 分组 | 实际结果 | 日志 |
+|---|---|---|
+| Focused 六文件（地图、Grid、Session 管理／创建、Scene、领域装配） | 248 passed，35.42s，exit 0 | maps-focused-verified.log |
+| Integration 22 文件 | 470 passed，181.46s，exit 0 | maps-integration.log |
+| 最终 GridView 构造／asdict 兼容保护后，Focused 加空间／导航／Light 复核 | 302 passed，50.67s，exit 0 | maps-final-compat.log |
+
+三组合计覆盖 **718 个不同用例**，后组重叠不重复计数；新增地图测试 **135 项**（含
+120 组算法对照），只有两条既有 Lark 弃用警告。所有测试使用原固定依赖，Windows
+真实异步集成沿用限制外执行，日志在 `.test-tmp/maps-*.log`，未运行无关全量。
+
+Integration 文件：test_spatial_world、test_object_spatial_service、test_navigation_activities、
+test_navigation_boundaries、test_navigation_faults、test_navigation_migration、test_world_lights、
+test_environment_service、test_environment_review_regressions、test_environment_snapshot、
+test_environment_versions、test_combat_foundation、test_dnd_runtime、test_combat_closure、
+test_real_checks、test_history_free_rules_adapter、test_cross_phase、test_rf4_position_evidence、
+test_event_local_evidence、test_perception_conditions、test_world_example、test_integration，
+均为 tests/ 下 .py 文件。命令使用 `.venv/Scripts/python.exe -m pytest -q` 加对应文件，
+独立 basetemp 和 faulthandler_timeout=60。
+
+实际载入 a25c35e 源码计数与当前准备后的 View 对比：范围 JSON／拓扑／候选次数
+103／2／10000 → 0／0／9；实体 112／11／10000 → 0／0／3；邻格
+105／3／10000 → 0／0／8。完整条件和属性／距离计数见设计说明，原始记录为
+`.test-tmp/maps-call-counts.json`。这不等于没有 SQL 读取或没有动态投影成本。
+
+Ruff check src tests、Ruff format --check src tests（185 文件）、git diff --check 和
+本轮文档链接／代码围栏检查通过；最终 diff 按生产路径、测试和文档审阅。
+pyproject.toml、uv.lock、SQL Schema／迁移不变；新增 Store 内存字段不改变数据库结构。
+
+下文为原 GridService 提取批次的历史记录，非本轮测试／Schema 状态。
+
 2026-10-18；分支 `feat/world-grid-service`，基线
 `0554add35c5dbe3c5405fe9a31e2ce3aad81c7c7`。执行时 fetch 确认 origin/main 与 HEAD
 相同，初始工作区干净；本批不合并 main，不修改 RE 或顶层架构仓库。

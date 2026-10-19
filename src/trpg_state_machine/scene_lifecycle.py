@@ -44,6 +44,7 @@ class SceneLifecycleService:
         self.sessions._check_package_pin(row, package)
         if not self.facts.initialize_scene(sid, scene_id, package):
             self._validate_scene(sid, scene_id, package)
+            self.runtime.prepare_scene_maps(sid, (scene_id,), self.facts.maps)
             return False
         self.facts.initialize_object_capabilities(sid, scene_id, package)
         for actor in package.actors:
@@ -52,6 +53,7 @@ class SceneLifecycleService:
             ):
                 self.npc_bootstrap.initialize(sid, actor)
         self.facts.initialize_mechanical_scene(sid, scene_id, package)
+        self.runtime.prepare_scene_maps(sid, (scene_id,), self.facts.maps)
         return True
 
     def _validate_scene(self, sid, scene_id, package):

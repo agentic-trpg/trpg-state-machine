@@ -4,8 +4,6 @@ import json
 from dataclasses import asdict, replace
 
 from dnd5e_engine.evaluation_state import MechanicalGrid
-from dnd5e_engine.spatial import GridTopology
-from dnd5e_engine.specs import GridScene
 
 from .errors import StateMachineError
 from .events import _StagedEvent
@@ -194,7 +192,7 @@ class EventCapture:
             uncertainty, light_sources = (), {}
             if grid is not None and any(d.capability("light") for d in package.world_objects):
                 grid, uncertainty, light_sources = self.lights.project(sid, scene_id, package, grid)
-                topology = GridTopology(GridScene(**grid))
+                topology = self.world.maps.for_grid(sid, scene_id, grid).topology
             topologies[scene_id] = topology
             evidence["scenes"][scene_id] = {
                 "grid": grid,
@@ -244,20 +242,17 @@ class EventCapture:
 
     def _perception_geometry(self, sid, scene_id):
         """Full current mechanical geometry, independent of movement admission."""
-        stored = self._conn.execute(
-            "SELECT state_json FROM mechanical_scenes WHERE session_id=? AND scene_id=?",
-            (sid, scene_id),
-        ).fetchone()
-        if stored is None:
-            return None, None
         try:
-            scene = json.loads(stored[0])
+            stored = self.world.maps.scene(sid, scene_id)
+            if stored is None:
+                return None, None
+            scene = stored.copy_data()
             if scene["scene_id"] != scene_id:
                 return None, None
             # MechanicalGrid requires every sensory field. GridScene defaults
             # must not promote a movement-only projection into sensory evidence.
             grid = MechanicalGrid.model_validate_json(canonical_json(scene["grid"]))
-            topology = GridTopology(GridScene(**grid.model_dump()))
+            topology = stored.grid.topology
             return grid.model_dump(mode="json"), topology
         except (KeyError, TypeError, ValueError):
             return None, None

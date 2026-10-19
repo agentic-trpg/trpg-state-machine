@@ -4,6 +4,16 @@
 §10；不修改上游规范，不把目标完整实例化宣布为已完成。
 本批次基线 `3fe36e2`，验证与缺口见 [进度](SESSION_MANAGEMENT_PROGRESS.md)。
 
+2026-10-19 地图后续（基线 a25c35e）：SessionRuntime 通过 GridMaps 领域接口组织地图
+运行表示的准备和释放；SceneLifecycle 初始化后准备，原 CombatHandler 机械场景补建后
+准备，save／resume 在授权读取事务内准备当前场景。其他场景可首次读取时准备。
+WorldFacts 保存权威 JSON，Grid 负责只读解析表示、基础拓扑与具体查询算法；同一 Store
+有界复用，每次先确认事务可见的实际编码，不靠 world_version 判断配置。
+回滚／旧读取事务／另一连接更新按各自可见内容选择；准备不产生进入事件或 NPC 模拟。
+释放仅丢弃可重建表示，Store.close 清理，旧 View 保留原快照。详见
+[Grid 生命周期与算法](GRID_SERVICE.md#地图表示与生命周期2026-10-19)。
+本轮未扩展 WorldObject／Character／Item 持久化，也未接入 RE 固定素材接口。
+
 ## 三部分职责与现有执行路径
 
 | 逻辑责任 | 实际组件和调用路径 |

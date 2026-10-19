@@ -1,5 +1,23 @@
 # Session Management 重构进度
 
+## 地图运行表示后续批次（2026-10-19）
+
+在当前 `feat/session-management-refactor@a25c35e` 的干净工作区继续，未切 main。
+创建协调仍经原 SceneLifecycle 初始化领域地图，新增 SessionRuntime.prepare_scene_maps
+协调 Grid 准备；原机械场景补建、延迟实例化和 save／resume 当前场景也准备。释放只移除
+可重建内存引用，Store.close 清池，保留调用方持有的旧 View。
+
+SQLite state_json 仍为有效地图权威。GridMaps 内容键先读取事务可见编码，覆盖候选、
+回滚、相同世界版本、旧读取事务和连接隔离；Scene 预初始化范围、绑定、授权、幂等、
+RNG、事件／Outbox／回执语义不变，无新 Schema 或 RE 依赖变更。
+查询算法、调用次数与本轮验证见 [Grid progress](GRID_SERVICE_PROGRESS.md)。
+本轮验证覆盖 718 个不同用例：Focused 248、Integration 470；最终构造／序列化兼容复核
+302 passed（与上述重叠，不另加合计），均 exit 0。Schema36 和固定 RE／SRD 依赖不变。
+本轮仅完成地图运行表示和 Grid 算法；下文列出的 WorldObject／Character／Item、
+复杂创建依赖与固定素材接口缺口继续保留。
+
+下文为 a25c35e 的原 Session 重构实施和验证记录，915 项属于该历史批次。
+
 2026-10-19；工作区 `D:\Projects\agentic-trpg\trpg-state-machine`；
 分支 `feat/session-management-refactor`，干净基线 `3fe36e2`。
 仅修改 SM，不修改 RE／架构仓库、不合并 main。

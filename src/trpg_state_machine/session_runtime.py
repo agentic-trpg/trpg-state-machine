@@ -60,6 +60,15 @@ class SessionRuntime:
     def fingerprint(self, command, row, context):
         return _fingerprint(command, row["package_digest"], _binding(row), context)
 
+    def prepare_scene_maps(self, sid, scene_ids, maps):
+        """Lifecycle coordination only; Grid reads and builds the actual maps."""
+        for scene_id in scene_ids:
+            maps.scene(sid, scene_id)
+
+    def release_scene_maps(self, sid, maps):
+        """Dispose rebuildable representations without deleting authoritative facts."""
+        maps.release(sid)
+
     def receipt(self, sid, command_id):
         from .commands import receipt_from_json
 
