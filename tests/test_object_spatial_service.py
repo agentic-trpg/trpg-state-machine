@@ -189,7 +189,7 @@ def test_rigid_object_cross_wall_reproducer_candidate_and_audit_use_same_rule(tm
     gm = replace(context, can_place_world_objects=True)
     with sm:
         spatial = sm._objects.spatial
-        base = sm._world._base_topology(sid, A)
+        base = sm._world.grid.base_topology(sid, A)
         assert base.is_valid_cell("1,1") and base.is_valid_cell("2,1")
         assert base.edge_distance("1,1", "2,1") is None  # Old per-cell test admits this.
         candidate = replace(spatial.state(sid, OBSTACLE, p), anchor="1,1")
@@ -218,7 +218,7 @@ def test_partial_geometry_visible_and_list_agrees_with_single_query(tmp_path, co
     sm, sid, p, _ = setup(tmp_path, context, data)
     with sm:
         actor = sm.read_session(sid, p, context=context).pc_actor_id
-        base = sm._world._base_topology(sid, A, p)
+        base = sm._world.grid.base_topology(sid, A, p)
         assert not base.can_see("0,0", "2,0")
         assert base.can_see("0,0", "2,1")
         view = sm.get_object(sid, actor, OBSTACLE, p, context=context)

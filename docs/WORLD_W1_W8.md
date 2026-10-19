@@ -506,3 +506,19 @@ repeatable/lifecycle/automatic extension and its OPEN dependencies are documente
 in [MechanismService contract](MECHANISM_SERVICE.md) and
 [progress](MECHANISM_SERVICE_PROGRESS.md). W-02, SA-01 and other component work
 are not closed. No main merge is implied.
+
+## GridService follow-up — 2026-10-18
+
+The historical W1–W8 implementation/API record above retains its original scope.
+On `feat/world-grid-service`, based on `main@0554add`, SM now extracts grid reads,
+current-space composition and geometry queries from WorldHandler while preserving
+the existing exploration, interaction and authorized navigation paths. Character
+and WorldObject keep their respective position authority. Occupancy, movement,
+difficult terrain, vision and cover remain distinct; no exploration combat budget
+or time payment is added. See [GridService](GRID_SERVICE.md) and
+[progress/validation](GRID_SERVICE_PROGRESS.md).
+
+This is only a W-01 slice. RE/Combat dynamic-space consumption, Character multi-cell
+space and future Activity/Effect adapters remain OPEN in their existing module
+records. No future-contract integration test is reported as passed, and no main
+merge is implied.

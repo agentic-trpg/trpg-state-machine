@@ -39,6 +39,20 @@ and occupancy rules. Old Package digests and placement receipt fingerprints rema
 | Missing mechanical Actor/Scene facts | Fail closed; additional scene templates initialize lazily, but do not synthesize missing NPC character mechanics. |
 | Full effects/Reaction/Continuation/Saving Throws/spells | Explicitly out of scope. Host, EVA, Memory/Belief, full perception propagation and a production adventure remain separate MVP work. |
 
+## GridService 后的空间跨系统待办
+
+2026-10-18：GridService 完成 SM 当前读取／组合／基础几何切片，不能将此结果作为
+RE／Combat／Character／Effects 的完整集成证据。当前固定依赖未变。
+
+| 既有开放范围 | 当前限制与依赖 | 后续接入／触发条件／验收 |
+|---|---|---|
+| 角色 Size／多格空间与经过角色的规则 | Character 只有唯一锚点，Grid 当前只报告这一格；物体多格支持不能证明角色多格。需要 Character／RE 共同确定完整占格与规则输入 | 契约确定且实际依赖可运行后，改 Character 当前空间读取、Grid 角色组合、RulesAdapter 与 Combat；真实大体型／旋转或朝向适用范围、边界／墙／通路／角色穿越／掩护验证占用和机械规则一致，失败回滚不留下位置副本 |
+| 战斗世界空间／动态障碍／费用 | 现有 Combat guard 保留；探索专用拓扑不是机械 Grid，不支持的贡献继续拒绝 | RE 稳定且能独立表达移动、视觉、掩护及困难地形后，改 RulesAdapter／CombatHandler 的输入与采用；真实移动／费用／反应／开门状态变化及 OCC／幂等／回滚验证，不能引入探索回合额度 |
+| 新 Activity／Effect 契约的真实跨系统验证 | RE 重构尚未完成；没有新占位协议，未执行未来契约端到端 | 新契约发布并固定依赖后按 [Navigation 依赖](GC2_NAVIGATION_ACTIVITIES.md#gridservice-后的-activityeffect-依赖) 和 [OSS 集成](OBJECT_SPATIAL_SERVICE_PROGRESS.md#gridservice-消费与后续接入2026-10-18) 接入真实来源／生命周期／规则采用并完成所列验收，现有可运行集成不能被整体跳过 |
+
+W-01 仅部分推进，SA-01 及上述跨系统工作仍 OPEN。没有改动 Turn Episode／Round
+Episode、NPC 认知模型或增加逐机械 Event 的感知／阶段证据要求。
+
 ## Storage compatibility
 
 Schema 9 adds `characters.xp` and `sessions.mechanical_schema_version` under the

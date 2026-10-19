@@ -227,3 +227,23 @@ item/equipment acquisition, sound propagation, combat obstacles, automatic time
 costs, full Activity/Goal policy or a production Host/model loop. Active-combat
 cross-process continuation remains unsupported. RE/SRD stay pinned at 0.6.0 /
 `602dcb8d448e670049427bbb751d6ed226005298`; no dependency upgrade is included.
+
+## GridService 后的 Activity／Effect 依赖
+
+2026-10-18 的 GridService 提取保留本页历史验证及当时依赖身份；当前实际固定 RE／SRD
+仍以 pyproject.toml／uv.lock 为准。规划现在在授权检查后复用 Grid 的静态 Package 输入；
+执行继续经 WorldHandler 检查当前空间。远端角色、物体和门状态不进入授权地图规划。
+Grid 不推进活动、不规划路线、不结算探索的战斗移动额度，也不替 Activity 计算耗时。
+
+既有“自动时间成本／完整 Activity／Effects”缺口继续 OPEN：依赖 RE Activity／Effect
+新契约实际发布并固定版本，尤其需要明确活动适用规则、效果范围／来源／生命周期及
+共享结果采用责任。当前不新增未经确认的 DTO 或 mock 通路，不以 Grid 本地通过推定
+新契约已打通。
+
+触发后修改 ActivityHandler／NavigationDriver 的时间与步骤编排、Grid 的有效空间输入、
+RulesAdapter 及所属 Effects 消费；角色位置仍由 Character 写入，时间由既有时间路径
+推进。验收应使用真实 RE：活动开始／逐步执行／被效果改变的路线阻塞／显式恢复／取消／
+效果到期与正常存档恢复，验证时间、唯一位置、版本冲突、幂等及故障整体回滚；规划过程
+不泄露未知地图或隐藏实体。距离、路线长度、探索耗时与战斗费用应各自断言。
+
+本批未执行依赖未来契约的端到端测试；现有真实导航、门操作、命令／恢复集成继续执行。

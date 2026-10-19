@@ -32,7 +32,7 @@ from .environment_models import (
     validate_sources,
 )
 from .errors import StateMachineError
-from .spatial import cell_in_bounds
+from .grid import cell_in_bounds
 
 
 @dataclass(frozen=True, slots=True)
@@ -164,13 +164,13 @@ class EnvironmentService:
         if scene_id not in {s.scene_id for s in package.scenes}:
             raise StateMachineError("invalid_target", "Unknown environment Scene")
         if area.cells:
-            raw = self.h._scene_grid(sid, scene_id, package)
+            raw = self.h.grid.reader.scene_grid(sid, scene_id, package)
             topology = GridTopology(GridScene(**raw))
             if any(not cell_in_bounds(topology, c) for c in area.cells):
                 raise StateMachineError("invalid_cell", "Environment area exceeds Scene bounds")
             return area.cells
         if query:
-            raw = self.h._scene_grid(sid, scene_id, package)
+            raw = self.h.grid.reader.scene_grid(sid, scene_id, package)
             if raw["width"] * raw["height"] > MAX_CELLS:
                 invalid("Whole Scene query exceeds 256 cells; choose a bounded area")
             return tuple(f"{x},{y}" for x in range(raw["width"]) for y in range(raw["height"]))

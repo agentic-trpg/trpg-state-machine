@@ -263,6 +263,7 @@ def test_production_writers_and_dependency_direction():
         "domain_facts.py",
         "session_access.py",
         "spatial.py",
+        "grid.py",
         "scene_lifecycle.py",
         "combat_handler.py",
         "rules_adapter.py",

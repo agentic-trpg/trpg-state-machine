@@ -274,3 +274,19 @@ repeatable/lifecycle/automatic extension and its OPEN dependencies are documente
 in [MechanismService contract](MECHANISM_SERVICE.md) and
 [progress](MECHANISM_SERVICE_PROGRESS.md). W-02, SA-01 and other component work
 are not closed. No main merge is implied.
+
+## GridService 消费与后续接入（2026-10-18）
+
+`feat/world-grid-service` 在 main@0554add 上消费现有 OSS 的占地、移动阻挡、困难地形、
+视觉与掩护贡献，未重算物体 footprint／朝向。对象／Light 仅依赖 Grid 底层只读输入，
+不会回调组合查询。当前空间组合、通行几何和来源分离已在 SM 本地完成；对象属性到正式
+机械后果仍 OPEN。准确范围见 [GridService](GRID_SERVICE.md)。
+
+| 既有未完成项 | 依赖／当前限制 | 后续修改位置、触发条件与验收 |
+|---|---|---|
+| 综合动态 LoS | 固定 RE 无独立动态视觉阻挡输入；Grid 发现贡献时返回 unsupported_grid_vision，原静态／Light 支持范围不扩大 | RE 公布稳定通道契约并固定版本后，改 Grid 几何组合及 Light／授权视觉消费者；用真实门开合、非阻挡遮挡物、移动专用障碍和回滚证明视线、掩护、移动各自正确且隐藏实体不泄露 |
+| 困难地形与掩护机械消费 | Grid 可读真实贡献及几何掩护，但未结算费用、AC 或豁免；探索不引入战斗额度 | 稳定 RE／Combat 空间契约后，改 RulesAdapter 输入、Combat guard 与所属领域采用路径；真实战斗验证费用／AC／豁免及 OCC／幂等／整体回滚，不能用 Grid 查询或 mock 替代 |
+| Effect 空间贡献 | Effects 当前来源／生命周期契约尚未完成；Grid 没有新增占位协议，也不复制效果范围／期限 | Effects／RE 新契约固定后，按所属模块接入 Grid 组合、RulesAdapter 和 Light；真实效果创建、移动／锚定、到期及失败回滚后查询与机械输入一致，无第二份权威 |
+
+这些是已有 OSS 集成缺口的细化，不关闭 W-02 或 SA-01；未执行的新契约端到端测试
+没有通过记录。现有可运行集成继续回归。

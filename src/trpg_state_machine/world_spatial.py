@@ -169,7 +169,7 @@ class ObjectSpatialService:
         if type(properties) is not CurrentProtectionProperties:
             raise ValueError("Provider must return typed current properties or None")
         try:
-            grid = self.h._scene_grid(sid, state.scene_id, package)
+            grid = self.h.grid.reader.scene_grid(sid, state.scene_id, package)
         except StateMachineError as exc:
             if exc.code != "spatial_unconfigured":
                 raise
@@ -200,7 +200,7 @@ class ObjectSpatialService:
         """
         if wind_from not in ORIENTATIONS:
             raise ValueError("wind_from must be a cardinal incoming direction")
-        _, objects = self.h._scene_occupants(sid, scene_id, package)
+        _, objects = self.h.grid.reader.scene_occupants(sid, scene_id, package)
         doors = {
             p.door_object_id
             for p in package.passages
@@ -244,7 +244,7 @@ class ObjectSpatialService:
 
     def visible_cells(self, sid, actor, oid, package):
         position = self.h._public_scope(sid, actor, package)
-        base = self.h._base_topology(sid, position.scene_id, package)
+        base = self.h.grid.base_topology(sid, position.scene_id, package)
         return tuple(
             cell
             for cell in self.target_cells(sid, position.scene_id, oid, package)
@@ -265,7 +265,7 @@ class ObjectSpatialService:
             visible = tuple(dict.fromkeys((*visible, position.cell)))
         if not visible:
             raise StateMachineError("invalid_target", "No authorized local object")
-        movement = self.h._movement_topology(
+        movement = self.h.grid.exploration_topology(
             sid, position.scene_id, package, exclude_actor=actor, exclude_object=oid
         )
         reachable = [
@@ -280,7 +280,7 @@ class ObjectSpatialService:
     def movement_cells(self, sid, scene_id, package, *, exclude_object=None):
         cells = set()
         doors = {p.door_object_id for p in package.passages if p.door_object_id}
-        _, objects = self.h._scene_occupants(sid, scene_id, package)
+        _, objects = self.h.grid.reader.scene_occupants(sid, scene_id, package)
         for oid, _ in objects:
             if oid != exclude_object and oid not in doors and self.config(package, oid):
                 cells.update(self.project(sid, oid, package).movement_blocking_cells)
@@ -292,7 +292,7 @@ class ObjectSpatialService:
         This is not an actor-authorized catalogue or a merged terrain system.
         Shared doors contribute at this scene's endpoints, not their stored anchor.
         """
-        _, objects = self.h._scene_occupants(sid, scene_id, package)
+        _, objects = self.h.grid.reader.scene_occupants(sid, scene_id, package)
         local_doors = {
             p.door_object_id
             for p in package.passages
@@ -330,9 +330,9 @@ class ObjectSpatialService:
         conflict with actors/other blockers; nonblocking overlap stays supported.
         """
         h = self.h
-        base = h._base_topology(sid, scene_id)
-        walls = h._scene_grid(sid, scene_id, package)["wall_segments"]
-        actors, objects = h._scene_occupants(sid, scene_id, package)
+        base = h.grid.base_topology(sid, scene_id)
+        walls = h.grid.reader.scene_grid(sid, scene_id, package)["wall_segments"]
+        actors, objects = h.grid.reader.scene_occupants(sid, scene_id, package)
         actor_cells = {cell for _, cell in actors if cell is not None}
         blocking = set()
         doors = {p.door_object_id for p in package.passages if p.door_object_id}

@@ -257,7 +257,7 @@ class EventCapture:
 
     def _current_evidence_cell(self, sid, actor, topology):
         """Sample the actual position owner at this producer stage, never combat history."""
-        from .spatial import cell_in_bounds
+        from .grid import cell_in_bounds
 
         position = self.characters.position(sid, actor["actor_id"])
         if position.scene_id != actor["current_scene_id"]:
