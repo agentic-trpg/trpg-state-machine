@@ -41,6 +41,8 @@ from .navigation_models import (
     ResumeNavigation,
     StartNavigation,
 )
+from .time_coordination import AdvanceSessionTime, SetTimeRunning, validate_time_operation
+from .time_waits import TimeWaitReference, validate_wait_reference
 from .world_commands import (
     OPENABLE_CHECK_OPERATIONS,
     WORLD_CAPABILITY_COMMANDS,
@@ -74,6 +76,8 @@ OPERATIONS = {
     "world.traverse_passage": TraversePassage,
     "world.place_object": PlaceObject,
     "world.advance_time": AdvanceGameTime,
+    "session.advance_time": AdvanceSessionTime,
+    "session.set_time_running": SetTimeRunning,
     "rules.check": CheckPayload,
     "combat.close": CombatClosePayload,
     "combat.intent": CombatIntentPayload,
@@ -136,6 +140,8 @@ class TypedCommand:
         | CombatClosePayload
         | CheckPayload
         | AdvanceGameTime
+        | AdvanceSessionTime
+        | SetTimeRunning
         | StartNavigation
         | AdvanceNavigation
         | ResumeNavigation
@@ -148,6 +154,7 @@ class TypedCommand:
     expected_world_version: int
     schema_version: str = "sm-command/1"
     check_world_effects: CheckWorldEffects | None = None
+    time_wait: TimeWaitReference | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -177,6 +184,17 @@ def validate_command(command: TypedCommand) -> None:
         raise StateMachineError("invalid_command", "Command identities must be bounded strings")
     if type(command.expected_world_version) is not int or command.expected_world_version < 0:
         raise StateMachineError("invalid_operation", "Expected a nonnegative integer version")
+    if command.time_wait is not None:
+        validate_wait_reference(command.time_wait)
+        if type(command.payload) in (
+            AdvanceGameTime,
+            AdvanceSessionTime,
+            SetTimeRunning,
+            RuleOperation,
+        ):
+            raise StateMachineError(
+                "invalid_time_wait", "This operation cannot be a domain wait reply"
+            )
     effects = command.check_world_effects
     if effects is not None:
         if (
@@ -251,6 +269,9 @@ def validate_command(command: TypedCommand) -> None:
     }.get(type(command.payload))
     if local_version and command.payload.schema_version != local_version:
         raise StateMachineError("invalid_operation", "Unsupported local spatial operation version")
+    if type(command.payload) in (AdvanceSessionTime, SetTimeRunning):
+        validate_time_operation(command.payload)
+        return
     if type(command.payload) is AdvanceGameTime:
         if any(
             type(v) is not int or not 0 <= v <= 2147483647 for v in asdict(command.payload).values()
@@ -328,6 +349,7 @@ class CommandRuntime:
         validate_command(command)
         with self._transaction():
             admitted = self._session(command.session_id, package, context)
+            self._session_runtime.guard_time_owner(command.session_id)
             self._snapshot(admitted, package)
             fingerprint = self._session_runtime.fingerprint(command, admitted, context)
         if package.legacy_audit_only:
@@ -350,6 +372,9 @@ class CommandRuntime:
             raise StateMachineError("async_context_required", "Use await submit_command_async")
         if type(command.payload) is RuleOperation:
             return self._submit_mechanical(command, package, context, fingerprint)
+        command = self._session_runtime.prepare_timed_command(
+            command, package, context, fingerprint
+        )
         prepared = None
         if type(command.payload) is InitializeCombat:
             with self._transaction():
@@ -361,6 +386,7 @@ class CommandRuntime:
         with self._transaction(write=True):
             row = self._session(command.session_id, package, context)
             self._authorize_command(row, command.actor_id, command.payload, context)
+            self._session_runtime.authorize_time_wait_reply(row, package, command, context)
             self._npc_handoff_command_guard(command)
             replay = self._command_replay(command, fingerprint)
             if replay is not None:
@@ -373,6 +399,8 @@ class CommandRuntime:
             else:
                 self._conn.execute("SAVEPOINT command_effects")
                 try:
+                    if command.time_wait is not None:
+                        self._session_runtime.time.waits.validate(row, package, command)
                     if package.portable_items:
                         self._characters.rule_components(
                             command.session_id,
@@ -398,7 +426,15 @@ class CommandRuntime:
                                 source_command_id=command.command_id,
                             )
                         )
-                    events = self._expand_events(row, package, events, command.command_id)
+                    events.extend(
+                        self._session_runtime.finish_time_wait_reply(row, package, command, events)
+                    )
+                    if type(command.payload) not in (
+                        AdvanceGameTime,
+                        AdvanceSessionTime,
+                        SetTimeRunning,
+                    ):
+                        events = self._expand_events(row, package, events, command.command_id)
                     if type(command.payload) is not InitializeCombat:
                         events.extend(
                             sync_npc_schedules(
@@ -421,6 +457,7 @@ class CommandRuntime:
                         "rule_evaluation_failed",
                         "rule_schema_error",
                         "ruleset_binding_mismatch",
+                        "invalid_time_wait_result",
                     }:
                         raise
                     self._conn.execute("ROLLBACK TO command_effects")
@@ -438,6 +475,7 @@ class CommandRuntime:
             receipt = self._session_runtime.finish(
                 command, context, fingerprint, row, status, version, error
             )
+        self._session_runtime.refresh_time_drivers()
         return receipt
 
     def get_command_receipt(self, session_id, command_id, package, *, context):
@@ -455,7 +493,7 @@ class CommandRuntime:
 
 def world_command_from_data(data):
     """Closed local data adapter. Context/capabilities never come from these fields."""
-    if type(data) is not dict or set(data) != {
+    if type(data) is not dict or set(data) - {"time_wait"} != {
         "session_id",
         "command_id",
         "actor_id",
@@ -471,6 +509,8 @@ def world_command_from_data(data):
         *ENVIRONMENT_COMMANDS,
         "world.step_actor",
         "world.advance_time",
+        "session.advance_time",
+        "session.set_time_running",
         "world.traverse_passage",
         "world.place_object",
         "world.unlock_door",
@@ -497,7 +537,12 @@ def world_command_from_data(data):
             if kind in ENVIRONMENT_COMMANDS
             else OPERATIONS[kind](**payload)
         )
-        command = TypedCommand(**{**data, "payload": operation})
+        ref = data.get("time_wait")
+        if ref is not None:
+            if type(ref) is not dict or set(ref) != {"wait_id", "version"}:
+                raise StateMachineError("invalid_time_wait", "Expected a closed wait reference")
+            ref = TimeWaitReference(**ref)
+        command = TypedCommand(**{**data, "payload": operation, "time_wait": ref})
     except (TypeError, ValueError, KeyError) as exc:
         raise StateMachineError("invalid_command", "Unknown or missing payload fields") from exc
     validate_command(command)

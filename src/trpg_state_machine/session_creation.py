@@ -173,6 +173,7 @@ class SessionCreation:
             self.runtime.initialize(session_id, package, context, pc, pc_actor_id, rng_ref)
             self.world.facts.initialize_world(session_id, package)
             self.world.time.initialize(session_id, selected_time)
+            self.runtime.time.initialize(session_id)
             self.world.scenes.initialize_session(session_id, pc_actor_id, pc, package)
             if package.combat_foundation_json is not None:
                 initial = json.loads(package.combat_foundation_json)["snapshot"]

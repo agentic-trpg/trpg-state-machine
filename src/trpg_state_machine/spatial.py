@@ -942,7 +942,6 @@ class WorldHandler:
         if automatic and type(operation) not in (SetSceneFlag, SetObjectState):
             raise StateMachineError("unsupported_operation", "Unsupported automatic world effect")
         self._world_operation_capability(row, operation)
-        sid = row["session_id"]
         if type(operation) in ENVIRONMENT_OPERATIONS:
             return self.environment.operate(row, operation, package)
         if type(operation) in WORLD_CAPABILITY_OPERATIONS:
@@ -951,11 +950,19 @@ class WorldHandler:
             )
         if type(operation) in (UnlockDoor, LockDoor):
             return self.objects.openable.operate_lock(row, actor_id, operation, package)
-        if type(operation) is AdvanceGameTime:
-            return [
-                self._capture_event(sid, package, kind, payload, phase="clock.after_advance")
-                for kind, payload in self.time.advance(row, operation)
-            ]
+        from .time_coordination import AdvanceSessionTime, SetTimeRunning
+
+        if (
+            type(operation) in (AdvanceGameTime, AdvanceSessionTime, SetTimeRunning)
+            and self.runtime.time is None
+        ):
+            raise StateMachineError(
+                "time_coordinator_unavailable", "Time writes require Runtime boundary wiring"
+            )
+        if type(operation) is SetTimeRunning:
+            return self.runtime.time.control(row, operation, package, source_command_id)
+        if type(operation) in (AdvanceGameTime, AdvanceSessionTime):
+            return self.runtime.time.advance(row, operation, package, source_command_id)
         if isinstance(
             operation,
             (EnterScene, MoveActor, StepActor, TraversePassage, PlaceObject, PickupItem, DropItem),

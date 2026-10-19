@@ -168,6 +168,16 @@ class StateMachine(
         """Transitional connection for NPC/perception runtimes, owned by the store."""
         return self._store.connection
 
+    def read_time_sync(self, session_id, package, *, context):
+        return self._session_runtime.time.sync(session_id, package, context=context)
+
+    def attach_time_driver(self, session_id, package, *, context, **options):
+        from .time_driver import TimeDriver
+
+        return TimeDriver(
+            self._session_runtime, session_id, package, context, self.submit_command, **options
+        )
+
     def read_navigation_activity(self, session_id, actor_id, activity_id, package, *, context):
         return self._activities.read(session_id, actor_id, activity_id, package, context=context)
 
@@ -180,6 +190,8 @@ class StateMachine(
 
     def close(self) -> None:
         if not self._store._closed:
+            for driver in tuple(self._session_runtime.time.drivers.values()):
+                driver.close()
             self._store.close()
 
     def _ensure_open(self) -> None:

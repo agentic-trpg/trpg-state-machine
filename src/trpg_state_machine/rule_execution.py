@@ -32,6 +32,7 @@ class RuleExecution:
         return self.store.connection
 
     async def submit(self, command, package, context, fingerprint):
+        command = self.runtime.prepare_timed_command(command, package, context, fingerprint)
         object_check = type(command.payload) in OPENABLE_CHECK_OPERATIONS
         mechanism_check = type(command.payload) is CheckMechanism
         domain_check = object_check or mechanism_check
@@ -52,6 +53,7 @@ class RuleExecution:
         with self.store.transaction():
             row = self.sessions._session(command.session_id, package, context)
             self.sessions._authorize_command(row, command.actor_id, command.payload, context)
+            self.runtime.authorize_time_wait_reply(row, package, command, context)
             self.sessions._npc_handoff_command_guard(command)
             if replay := self.runtime._command_replay(command, fingerprint):
                 return replay
@@ -141,6 +143,7 @@ class RuleExecution:
         with self.store.transaction(write=True):
             row = self.sessions._session(command.session_id, package, context)
             self.sessions._authorize_command(row, command.actor_id, command.payload, context)
+            self.runtime.authorize_time_wait_reply(row, package, command, context)
             self.sessions._npc_handoff_command_guard(command)
             if replay := self.runtime._command_replay(command, fingerprint):
                 return replay
@@ -157,6 +160,8 @@ class RuleExecution:
                 status, error = "rejected", capability
             elif noop:
                 try:
+                    if command.time_wait is not None:
+                        self.runtime.time.waits.validate(row, package, command)
                     current_plan = check_service.prepare_check(
                         row, command.actor_id, command.payload, package
                     )
@@ -173,6 +178,8 @@ class RuleExecution:
                 result, changes = validate_dnd_result(request, result)
                 self._conn.execute("SAVEPOINT dnd_effects")
                 try:
+                    if command.time_wait is not None:
+                        self.runtime.time.waits.validate(row, package, command)
                     if domain_check:
                         current_plan = check_service.prepare_check(
                             row, command.actor_id, command.payload, package
@@ -181,6 +188,11 @@ class RuleExecution:
                             raise StateMachineError(
                                 "version_conflict", "Object check dependencies changed"
                             )
+                    previous_round = (
+                        snapshot.combat_state.round_number
+                        if hasattr(snapshot, "combat_state")
+                        else None
+                    )
                     self.rules._apply_dnd_changes(row, changes)
                     # Failure consequences and automatic hooks both consume the
                     # original rule result's candidate RNG successor. Never
@@ -276,7 +288,15 @@ class RuleExecution:
                                     ),
                                 )
                             )
+                    events.extend(
+                        self.runtime.finish_time_wait_reply(row, package, command, events)
+                    )
                     events = self.effects._expand_events(row, package, events, command.command_id)
+                    events.extend(
+                        self.runtime.coordinate_combat_time(
+                            row, package, command.command_id, previous_round, len(events)
+                        )
+                    )
                     self.world._assert_spatial_consistency(command.session_id, package)
                     version = self.runtime.publish(command, row, package, events)
                 except StateMachineError as exc:
@@ -323,7 +343,14 @@ class RuleExecution:
                     error, version = exc.code, row["world_version"]
                 finally:
                     self._conn.execute("RELEASE dnd_effects")
+            if noop and status == "committed" and command.time_wait is not None:
+                with self.store.savepoint():
+                    events = self.runtime.finish_time_wait_reply(row, package, command)
+                    events = self.effects._expand_events(row, package, events, command.command_id)
+                    self.world._assert_spatial_consistency(command.session_id, package)
+                    version = self.runtime.publish(command, row, package, events)
             receipt = self.runtime.finish(
                 command, context, fingerprint, row, status, version, error
             )
+        self.runtime.refresh_time_drivers()
         return receipt

@@ -493,7 +493,7 @@ with StateMachine(sys.argv[1]) as sm:
     replay_context = replace(ctx, controlled_npc_ids=())
     for _ in range(2):
         with StateMachine(db) as sm:
-            assert sm._conn.execute("PRAGMA user_version").fetchone()[0] == 36
+            assert sm._conn.execute("PRAGMA user_version").fetchone()[0] == 38
             assert sm.world_time.read(sid, package, context=ctx).binding == LegacyTimeBinding()
             assert sm.submit_command(replay, package, context=replay_context).status == "committed"
             assert sm.read_session(sid, package, context=ctx).world.game_tick == 10

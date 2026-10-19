@@ -1,5 +1,9 @@
 # WorldTimeService 实施与兼容记录
 
+2026-10-19 后续：时间协调、显式倍率 Driver、真实 Round 接线及 Schema37 已在当前
+`feat/session-time-coordination` 实现；详见 [时间协调](SESSION_TIME_COORDINATION.md)。
+下文保留 2026-10-18 批次的历史验证范围，默认实时倍率现为未确定。
+
 日期：2026-10-18。分支：`feat/world-time-service`。基线：最新远端 main
 `7aa9ad11c2aea0f659e22f3c70cfa5efb8ecaaec`，开始时工作区干净；保留其已合并的
 Openable / Container 修复，不合并 main。仓库及适用祖先目录未发现 AGENTS.md；
@@ -100,7 +104,7 @@ elapsed／remaining／reached；无秒尺度的 duration 字段为 None，换算
 | 后续依赖 | 本轮状态 |
 |---|---|
 | TIME-01 设置与完整初始化策略 | 仅完成固定绑定和最小 Package／Session 接线 |
-| TimeDriver | 未实现现实时间采样、倍率、暂停／恢复；目标默认现实 1 秒 = 游戏 6 秒，与 tick 单位分离 |
+| TimeDriver | 未实现现实时间采样、倍率、暂停／恢复；当时倍率尚未实现；后续已取消 1:6 默认设定，默认倍率仍未确定 |
 | Combat 时间接入 | 未实现；整个 Round 约 6 游戏秒，每个 Turn 不各加 6 秒 |
 | Activity / Effects / RE | 未实现旅行、休息、仪式、期限／到期效果／周期伤害／豁免 |
 | 物品与环境 | 未实现燃料、熄灭、充能、天气、实际光照变化 |
