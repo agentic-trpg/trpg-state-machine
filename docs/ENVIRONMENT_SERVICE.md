@@ -6,6 +6,63 @@ SceneLifecycle、Grid 或 Terrain 重构。本文描述本仓库实际接口，�
 
 ## 所有权与真实提交路径
 
+### Snapshot 依赖设计（2026-10-19，实施前审计）
+
+基线 `origin/main@d0fda62`。现有模型没有环境／防护专用版本，不能用
+`world_version` 或 `environment.changed` 作为完整失效依据。采用不可变完整输入的
+内容身份；每次查询仍在同一 SQLite 读取事务中核对，原始事实不建立可变镜像。
+
+| 依赖／所有者 | 改变操作与当前身份验证 | 影响的结果层／事务处理 |
+|---|---|---|
+| WorldFacts 环境事实 | initialize/base/source add/replace/remove/protection/batch；读取并校验完整 frozen facts，包括范围、高度、优先级、exposure、observable | 最终环境；静态防护直接参与合成，不要求重新投影对象；沿原命令 savepoint／COMMIT，回滚后重新读旧事实 |
+| WO 当前防护提供方 | 开关、损毁、部署或注入输入变化；每次按确切 candidate 读取完整 frozen CurrentProtectionProperties | 防护投影及最终环境；不从 HP、视觉或 footprint 猜属性，提供方仍拥有政策 |
+| OSS 姿态与来源集合 | 放置、移动、旋转、拾取、容器／场景迁移、开关、HP=0；读取当前对象集合、ObjectSpatialState、非地面／共享门资格及当前属性 | 两层；不纳入角色位置、无关物品字段或总 world_version；无关空间物体变化允许保守失效 |
+| Grid 当前场景配置 | 当前 spatial Scene 行或未初始化 Package grid；规范化配置形成身份；包含边界尺寸 | 两层；不复制权威网格，不用 Light 投影作为环境依赖 |
+| Effects 来源提供方 | 创建、移动、字段修改、结束；每次读取完整不可变来源 tuple 和可用状态 | 最终环境；保留 Effects 所有权，无期限镜像；无提供方与显式空 tuple 不混同 |
+| Session／固定 Package／Scene | sid、package digest／版本／ruleset binding、scene_id 隔离；公开入口每次执行原 SessionAccess pin 校验 | 两层；缓存实例还隔离 Store；可信内部投影仍由调用方负责 binding 和权限 |
+| 查询条件 | Cell、height_ft（None 与 0 不同）；高度区间使用各实际计算的点结果 | 最终环境；防护共享原高度段，不生成多层三维地图 |
+| Actor／权限／Light 可见性 | 每次公开查询重新验证控制权限、当前场景、public scope、感官／conditions 与逐格 can_see | 不缓存授权；区域内只准备一次观察者／Grid／Light，整批任一失败就不返回部分结果 |
+
+两层独立有界 LRU：OSS 场景防护投影上限 **32 项**（包含风向）；完整单格环境上限
+**512 项**（包含依赖和 height_ft）。缓存归当前 EnvironmentService／Store 实例，
+不跨数据库共享。事务暂存的每层也采用相同容量上限，发布后按 LRU 淘汰。
+只缓存实际产生的完整结果；屋顶投影覆盖其他格不代表这些格环境相同。
+天气／来源变化不进入 OSS 身份，风向选择相应投影；不在变更后重算全图。
+旧读取事务按自身内容身份保存，不能替换新状态身份；不维护可被旧事务倒退的 latest 指针。
+写事务及无可验证读取作用域绕过共享缓存；只读事务内暂存的结果仅成功 COMMIT 后发布，
+拒绝、异常、回滚、提交失败均丢弃暂存。清空或重启后从事实重建。
+
+外部只读提供方仍必须无写入／I/O，在调用方快照内返回完整 typed immutable 输入。
+输入读取、校验、身份比较及公开授权每次仍需执行；省去的是几何展开与环境合成。
+无法保证该契约的注入方须禁用跨查询复用（`environment_cacheable=False`），
+仍不能用缓存掩盖未知／不支持状态。Light 跨查询 Snapshot、角色交互与认知重构不在本轮。
+
+### 已实现的读取与重建路径
+
+`_inputs` 每次读取完整环境事实与 Effects；OSS `prepare_scene_protection` 每次读取当前
+来源集合、姿态、资格、属性和规范化 Grid 配置，生成本次查询的不可变输入。输入是身份的
+组成部分，不另建可变对象状态。每个对象仍先读取 provider；只有降水与风均明确配置且
+几何全空的来源才可从 Environment 消费输入中省略。因此拾取明确无贡献的物品不会更换
+身份，未配置／不支持来源不能用同样方式忽略。`scene_protection_contributions(prepared=...)` 使用这份
+输入计算完整场景投影，并共享到后续其他 Cell；不再次调用 provider 形成混合状态。
+区域与高度范围内仍用同一个 inputs／按风向 cache。最终 `_cell` 只在身份／Cell／高度
+未命中时调用 `_compose_cell`；不同高度范围复用的是实际已算出的点，分段边界每次按原
+来源规则构建，未将缺高度当零。
+
+缓存以内容相等验证当前身份，没有环境专用版本或散列碰撞假设。保守地把对象开关、
+destroyed 和完整 Grid 配置纳入依赖；HP 数值本身只通过 destroyed 或当前 provider 输出
+影响身份。普通移动、无贡献物品拾取、时间推进、锁细节等不变更这些实际输入时不会失效；
+若提供方消费了它们并返回不同来源／防护，立即更换身份。无版本仍需来源扫描、每物体
+当前属性读取／校验及完整输入比较；当前 Grid JSON 读取／规范化还可能逐对象重复。
+这不是零 SQL／零 provider 调用优化，不宣称生产延迟收益。
+
+`SqliteStore.derived_read_scope` 仅允许受管理的非写事务；两层未命中结果先进入该
+UnitOfWork 的有界暂存，COMMIT 成功后发布。写 scope、无 scope、provider 显式禁用路径
+均直接计算；查询内仍可复用方向投影。回滚或提交失败清除暂存，不发布候选结果。
+`clear_snapshots()` 清空两层并取消清空前的暂存发布；无事件、无版本、无 RNG 或 SQL 写入。
+重启重新装配提供方后得到同样结果。旧内容项可暂留至淘汰，但新查询必须先验证当前输入，
+不会因为旧项存在就使用它。
+
 当前环境事实由 WorldFacts 的 `environment` / `set_environment` 读取和受控写入，
 SQLite Schema 35 的 `scene_environments(session_id, scene_id, facts_json)` 为唯一存储。
 该表没有对懒初始化 `scene_instances` 的外键，因此可以在首次访问／初始化之前修改
@@ -93,9 +150,17 @@ exposure=`local`、observable=False；Effects 提供方同样必须明确声明�
 ## 静态防护、OSS 与有效暴露
 
 静态防护由受控初始化或 `SetEnvironmentProtection` 显式保存：
-`SceneEnvironmentProtection(rain_cells=..., wind=...)`。None 表示未配置，空 tuple 表示
+`SceneEnvironmentProtection(rain_cells=..., wind=..., precipitation=...)`。None 表示未配置，空 tuple 表示
 明确没有该类静态贡献。`StaticWindProtection(cell, wind_from, heights)` 不从墙体或
 视觉阻挡猜测；每个方向与高度段分别保存。
+
+新增 `StaticPrecipitationProtection(cells, kinds)`：`kinds` 是 rain/snow/sleet/hail 中
+1–4 个不重复的显式类型。`precipitation` 是最多 256 项的不可变元组，每项至多 256 格；
+仅限列出的类型，非所列类型不产生贡献。旧 `rain_cells` 继续只贡献 rain，旧 JSON
+缺少新字段时按 None 读取，不自动升级。设置新字段仍沿用原强类型初始化／防护命令、
+授权、批量原子性及 SQLite facts_json，没有 Schema／Package 格式变更。
+默认新字段为 None 时规范命令编码省略它，保留已有单项与带标签批量的回执指纹；
+显式空 tuple 与非空配置进入指纹。历史无标签批量的拒绝政策保持。
 
 动态物体防护实际调用现有 OSS `scene_protection_contributions`，其内部使用
 `project_protection`；读取当前对象姿态和 `CurrentProtectionProvider`，不复制物体几何。
@@ -104,10 +169,19 @@ exposure=`local`、observable=False；Effects 提供方同样必须明确声明�
 缺输入或不支持时，暴露为 unknown，不能据空投影证明毫无防护。
 共享门等 OSS 原有不支持边界保持；不会从其 footprint 造防护。
 
-`precipitation` 表示当地大气条件，`ground_precipitation` 单独表示地面 Cell 的垂直雨暴露。
-已知雨在屋檐下仍是 atmospheric rain，地面实际雨暴露可为 none。
-这个挡雨模型仅作用于 `kind=rain` 的室外来源，不将降雪／冰雹／斜雨／飞行高度推断为
-已遮蔽。显式 height_ft 用于风和有高度的环境来源；ground_precipitation 始终是地面模型，
+`precipitation` 表示当地大气条件，`ground_precipitation` 单独表示地面 Cell 的垂直降水暴露。
+屋檐下仍可有 atmospheric rain/snow/sleet/hail，地面对应暴露可为 none。
+旧 `RainProtection(local_cells)` 只贡献 rain；新增 WO 当前属性
+`precipitation=PrecipitationProtection(local_cells, kinds)` 明确声明类型，多个类型共用同一
+锚点／朝向／裁剪算法。OSS 返回 `precipitation_cells` 和每类独立完整性状态，rain 旧字段
+继续包含旧 rain 与新声明 rain 的并集。Environment `CellProtection.precipitation` 是
+`(kind,status,source_refs)` 元组，可通过 `for_precipitation(kind)` 查询；旧 rain_status／
+rain_sources 接口保留。已配置旧 rain 输入不证明支持其他类型；缺 provider、缺属性及
+unsupported 来源仍保留未知完整性，只有明确覆盖才证明有防护。
+
+只有 `exposure=outdoor` 的来源接受对应种类的保护，local 直接生成的降水仍有效；同优先级
+来源产生不同有效暴露时仍为 unsupported。不推断斜向降水或飞行高度遮挡。
+显式 height_ft 用于风和有高度的环境来源；ground_precipitation 始终是地面模型，
 不是指定高度上的雨线判断。有垂直范围的降水源缺少明确地面标高时保持未知。
 
 `wind` 保留实际来向和速度，`wind_exposure` 用该来向的 Cell 防护区间检查指定高度。
@@ -115,7 +189,7 @@ exposure=`local`、observable=False；Effects 提供方同样必须明确声明�
 不对“半身挡风”规定机械收益。风未知时不选择一个假定方向判挡风；仅为独立雨投影
 使用 OSS 必需的占位方向，绝不作为实际风事实。
 
-`exposure=outdoor` 才接受室外雨／风防护。`local` 来源直接在当地形成，保留有效条件，
+`exposure=outdoor` 才接受室外降水／风防护。`local` 来源直接在当地形成，保留有效条件，
 屋顶下的法术雨／局部风不会被屋顶自动抹掉。若同级同值来源由于不同防护策略产生
 不同有效值，暴露结果 unsupported，保留内部候选，不强行合并。
 
@@ -154,6 +228,11 @@ query_cell、query_area、query_height_range、query_unit 共用该策略，不�
 
 公开查询每次在一个只读事务内读取事实／当前提供方／OSS；不建库表、不初始化场景、
 不发事件、不推进版本或 RNG。数据库生命周期迁移只发生在 SqliteStore 打开阶段。
+命中最终结果仍执行本次控制权限、Package pin、Actor 当前 Scene、public scope 及可见性。
+`query_area` 的 `_prepare_visible_targets` 一次准备观察者、带 Light 的 base_topology；
+每格 `_visible_target(prepared=...)` 仍执行位置边界与 can_see。任一失败不进入结果合成，
+不返回区域子集。公开披露输入与可信完整输入分别参与内容身份；公开返回总是再执行
+当前场景字段掩蔽及来源去除。新增降水保护来源一并移除；隐藏降水会掩蔽所有种类状态。
 
 ## 受控命令、空操作和变化信息
 

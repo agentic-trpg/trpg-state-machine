@@ -156,6 +156,13 @@ class SqliteStore:
         if self._scope is None or not self._scope.write or not self._scope.active:
             raise StateMachineError("invalid_transaction", "An active write scope is required")
 
+    @property
+    def derived_read_scope(self):
+        """Unmanaged SQL scopes and write candidates cannot use committed caches."""
+        self.ensure_open()
+        scope = self._scope
+        return scope if scope is not None and scope.active and not scope.write else None
+
     def close(self):
         self.ensure_open()
         if self._scope is not None:
@@ -179,10 +186,13 @@ class SqliteStore:
             try:
                 yield scope
                 self._conn.commit()
+                for (cache, generation), pending in scope.derived_pending.items():
+                    cache.publish(generation, pending)
             except BaseException:
                 self._conn.rollback()
                 raise
             finally:
+                scope.derived_pending.clear()
                 scope.active = False
                 self._scope = None
         except sqlite3.Error as exc:
@@ -197,6 +207,7 @@ class UnitOfWork:
         self._store = store
         self.write = write
         self.active = True
+        self.derived_pending = {}
 
     def _connection(self):
         self._store.ensure_open()

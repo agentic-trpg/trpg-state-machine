@@ -11,6 +11,7 @@ from .environment_models import (
     EnvironmentSource,
     HeightInterval,
     SceneEnvironmentProtection,
+    StaticPrecipitationProtection,
     StaticWindProtection,
     identity,
     invalid,
@@ -118,6 +119,19 @@ def environment_operation_to_data(op):
         if type(op) is BatchEnvironment
         else asdict(op)
     )
+
+    # Adding an optional shelter field must preserve historical command receipts.
+    def legacy_protection(value):
+        if type(value) is dict:
+            if "rain_cells" in value and "wind" in value and value.get("precipitation") is None:
+                value.pop("precipitation", None)
+            for child in value.values():
+                legacy_protection(child)
+        elif type(value) in (list, tuple):
+            for child in value:
+                legacy_protection(child)
+
+    legacy_protection(payload)
     return {"command_type": kind, "payload": payload}
 
 
@@ -176,6 +190,18 @@ def protection_from_data(raw):
         raw,
         {
             "rain_cells": lambda v: _tuple(v, lambda c: c, 256),
+            "precipitation": lambda v: _tuple(
+                v,
+                lambda p: _decode(
+                    StaticPrecipitationProtection,
+                    p,
+                    {
+                        "cells": lambda c: _tuple(c, lambda cell: cell, 256),
+                        "kinds": lambda k: _tuple(k, lambda kind: kind, 4),
+                    },
+                ),
+                256,
+            ),
             "wind": lambda v: _tuple(
                 v,
                 lambda w: _decode(

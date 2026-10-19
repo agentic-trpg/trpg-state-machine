@@ -5,6 +5,7 @@ from dataclasses import asdict, dataclass, replace
 from dnd5e_engine.spatial import GridTopology
 from dnd5e_engine.specs import GridScene
 
+from .derived_cache import DerivedCache
 from .environment_commands import (
     AddEnvironmentSource,
     BatchEnvironment,
@@ -33,6 +34,8 @@ from .environment_models import (
 )
 from .errors import StateMachineError
 from .grid import cell_in_bounds
+from .object_protection import PRECIPITATION_KINDS
+from .package import canonical_json
 
 
 @dataclass(frozen=True, slots=True)
@@ -61,6 +64,14 @@ class CellProtection:
     rain_sources: tuple[str, ...]
     wind_status: str
     wind_bands: tuple[ProtectionBand, ...]
+    precipitation: tuple[tuple[str, str, tuple[str, ...]], ...] = ()
+
+    def for_precipitation(self, kind):
+        if kind == "rain":
+            return self.rain_status, self.rain_sources
+        return next(
+            ((status, refs) for k, status, refs in self.precipitation if k == kind), ("unknown", ())
+        )
 
 
 @dataclass(frozen=True, slots=True)
@@ -131,6 +142,43 @@ class EnvironmentService:
         self.command_submitter = command_submitter
         self.effects_provider = effects_provider
         self.unit_height_provider = unit_height_provider
+        self._projections = DerivedCache(32)
+        self._cells = DerivedCache(512)
+
+    def clear_snapshots(self):
+        """Disposable derived state only; also cancel publication of pending old entries."""
+        self._projections.clear()
+        self._cells.clear()
+
+    def _query_cache(self, sid, scene, package):
+        spatial = self.h.objects.spatial
+        prepared = spatial.prepare_scene_protection(sid, scene, package)
+        # Providers were still read for every object. Proven empty contributions
+        # cannot affect completeness or geometry, so unrelated item transfers do
+        # not change this consumer's input identity. Unknown sources stay present.
+        prepared = replace(
+            prepared, objects=tuple(p for p in prepared.objects if not p.explicitly_empty())
+        )
+        grid = canonical_json(self.h.grid.reader.scene_grid(sid, scene, package))
+        identity = (
+            sid,
+            package.adventure_id,
+            package.package_version,
+            package.package_digest,
+            package.ruleset_binding,
+            scene,
+            grid,
+            prepared,
+        )
+        cacheable = all(
+            getattr(provider, "environment_cacheable", True) is True
+            for provider in (self.effects_provider, spatial.protection_provider)
+        )
+        return {
+            "inputs": prepared,
+            "identity": identity,
+            "scope": self.h.store.derived_read_scope if cacheable else None,
+        }
 
     def initialize(self, sid, seeds, package, *, command_id, expected_world_version, context):
         """Real controlled import; same command, grants, OCC and receipts as every write."""
@@ -182,6 +230,8 @@ class EnvironmentService:
             self._area(sid, scene, source.area, package)
         if facts.protection.rain_cells:
             self._area(sid, scene, EnvironmentArea(facts.protection.rain_cells), package)
+        for protection in facts.protection.precipitation or ():
+            self._area(sid, scene, EnvironmentArea(protection.cells), package)
         for wind in facts.protection.wind or ():
             self._area(sid, scene, EnvironmentArea((wind.cell,)), package)
 
@@ -353,17 +403,17 @@ class EnvironmentService:
     def _protection(self, sid, scene, cell, package, facts, direction, cache):
         # A placeholder cardinal direction selects ONLY rain when actual wind is unknown.
         key = direction or "north"
+        if "inputs" not in cache:
+            cache.update(self._query_cache(sid, scene, package))
         if key not in cache:
-            cache[key] = self.h.objects.spatial.scene_protection_contributions(
-                sid, scene, package, wind_from=key
+            cache[key] = self._projections.resolve(
+                cache["scope"],
+                (cache["identity"], key),
+                lambda: self.h.objects.spatial.scene_protection_contributions(
+                    sid, scene, package, wind_from=key, prepared=cache["inputs"]
+                ),
             )
         oss = cache[key]
-        rain = ["static"] if cell in (facts.protection.rain_cells or ()) else []
-        rain += [
-            "object:" + o.object_id
-            for o in oss.objects
-            if any(c.cell == cell for c in o.rain_cells)
-        ]
         bands = [
             ProtectionBand("static", w.heights)
             for w in facts.protection.wind or ()
@@ -386,31 +436,61 @@ class EnvironmentService:
                 return "unknown"
             return "none"
 
-        rain_status = (
-            "protected"
-            if rain
-            else completeness(facts.protection.rain_cells, (o.rain_status for o in oss.objects))
-        )
+        precipitation = []
+        for kind in PRECIPITATION_KINDS:
+            refs = (
+                ["static"]
+                if (
+                    kind == "rain"
+                    and cell in (facts.protection.rain_cells or ())
+                    or any(
+                        cell in p.cells and kind in p.kinds
+                        for p in facts.protection.precipitation or ()
+                    )
+                )
+                else []
+            )
+            refs += [
+                "object:" + o.object_id
+                for o in oss.objects
+                if (
+                    any(c.cell == cell for c in o.rain_cells)
+                    if kind == "rain"
+                    else any(c.cell == cell and c.kind == kind for c in o.precipitation_cells)
+                )
+            ]
+            static = facts.protection.precipitation
+            if static is None:
+                static = facts.protection.rain_cells
+            status = (
+                "protected"
+                if refs
+                else completeness(static, (o.precipitation_status(kind) for o in oss.objects))
+            )
+            precipitation.append((kind, status, tuple(sorted(set(refs)))))
+        _, rain_status, rain = precipitation[0]
         wind_status = (
             completeness(facts.protection.wind, (o.wind_status for o in oss.objects))
             if direction is not None
             else "missing_input"
         )
-        return CellProtection(rain_status, tuple(sorted(set(rain))), wind_status, tuple(bands))
+        return CellProtection(rain_status, rain, wind_status, tuple(bands), tuple(precipitation))
 
     @staticmethod
-    def _exposure(condition, protection_status, covered, *, wind=False):
+    def _exposure(condition, protection_status, covered, *, wind=False, protection=None):
         if condition.status not in ("ready", "none"):
             return condition
         result, uncertain = [], False
         for contribution in condition.contributions:
             value = contribution.value
             applicable = contribution.exposure == "outdoor" and _value_status(value) == "ready"
-            # OSS rain is strictly liquid vertical rain, never automatic snow/hail shelter.
-            applicable = applicable and (wind or value.kind == "rain")
-            if applicable and covered:
+            status, is_covered = protection_status, covered
+            if not wind and protection is not None:
+                status, refs = protection.for_precipitation(value.kind)
+                is_covered = bool(refs)
+            if applicable and is_covered:
                 value = Wind(0) if wind else Precipitation("none", "none")
-            elif applicable and protection_status != "none":
+            elif applicable and status != "none":
                 uncertain = True
             result.append(replace(contribution, value=value))
         if uncertain:
@@ -420,6 +500,15 @@ class EnvironmentService:
         return _resolve([(0, c) for c in result])
 
     def _cell(self, sid, scene, cell, package, height, inputs, cache):
+        if "inputs" not in cache:
+            cache.update(self._query_cache(sid, scene, package))
+        return self._cells.resolve(
+            cache["scope"],
+            (cache["identity"], inputs, cell, height),
+            lambda: self._compose_cell(sid, scene, cell, package, height, inputs, cache),
+        )
+
+    def _compose_cell(self, sid, scene, cell, package, height, inputs, cache):
         facts, effects, effects_status = inputs
         conditions = self._conditions(facts, effects, cell, height)
         wind = conditions["wind"]
@@ -436,7 +525,10 @@ class EnvironmentService:
             height,
             **conditions,
             ground_precipitation=self._exposure(
-                ground_conditions, protection.rain_status, bool(protection.rain_sources)
+                ground_conditions,
+                protection.rain_status,
+                bool(protection.rain_sources),
+                protection=protection,
             ),
             wind_exposure=self._exposure(
                 wind,
@@ -538,6 +630,10 @@ class EnvironmentService:
                 result.protection,
                 rain_sources=(),
                 wind_bands=(),
+                precipitation=tuple(
+                    (k, "unknown" if "precipitation" in masked else status, ())
+                    for k, status, _ in result.protection.precipitation
+                ),
                 rain_status="unknown"
                 if "precipitation" in masked
                 else result.protection.rain_status,
@@ -555,8 +651,9 @@ class EnvironmentService:
             if position.scene_id != scene_id:
                 raise StateMachineError("unauthorized", "Only Actor's current Scene is authorized")
             cells = self._area(sid, scene_id, area, package, query=True)
+            visibility = self.h._prepare_visible_targets(sid, actor_id, package)
             for cell in cells:
-                self.h._visible_target(sid, actor_id, cell, package)
+                self.h._visible_target(sid, actor_id, cell, package, prepared=visibility)
             inputs, hidden_fields = self._disclosure_inputs(self._inputs(sid, scene_id, package))
             cache = {}
             return tuple(

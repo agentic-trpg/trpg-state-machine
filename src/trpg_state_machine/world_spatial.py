@@ -24,6 +24,7 @@ from .object_protection import (
 from .object_protection import (
     project_protection as _project_protection,
 )
+from .package import canonical_json
 
 if TYPE_CHECKING:
     from .package import AdventurePackage
@@ -47,6 +48,36 @@ class ObjectSpatialProjection:
     difficult_terrain_cells: tuple[str, ...] = ()
     vision_occlusion_cells: tuple[str, ...] = ()
     cover_cells: tuple[tuple[str, str], ...] = ()
+
+
+@dataclass(frozen=True, slots=True)
+class ObjectProtectionInput:
+    object_id: str
+    state: ObjectSpatialState
+    properties: CurrentProtectionProperties | None
+    reason: str | None = None
+    grid_json: str | None = None
+
+    def explicitly_empty(self):
+        """Whether removing this source preserves BOTH complete protection results."""
+        p = self.properties
+        return (
+            self.reason is None
+            and p is not None
+            and (p.rain is not None or p.precipitation is not None)
+            and p.wind is not None
+            and not p.wind.boundaries
+            and not (p.rain and p.rain.local_cells)
+            and not (p.precipitation and p.precipitation.local_cells)
+        )
+
+
+@dataclass(frozen=True, slots=True)
+class SceneProtectionInputs:
+    """One query's detached complete inputs, never a mutable fact mirror."""
+
+    scene_id: str
+    objects: tuple[ObjectProtectionInput, ...]
 
 
 class ObjectSpatialService:
@@ -139,6 +170,12 @@ class ObjectSpatialService:
             raise ValueError("Expected typed candidate spatial state")
         if properties is not None and type(properties) is not CurrentProtectionProperties:
             raise ValueError("Expected typed current protection properties")
+        prepared = self._protection_input(sid, oid, package, candidate, properties)
+        return self._project_protection_input(prepared, wind_from)
+
+    def _protection_input(self, sid, oid, package, candidate=None, properties=None):
+        if properties is not None and type(properties) is not CurrentProtectionProperties:
+            raise ValueError("Expected typed current protection properties")
         state = candidate if candidate is not None else self.state(sid, oid, package)
         obj = self.h.facts.object(sid, oid)
         reason = None
@@ -149,15 +186,7 @@ class ObjectSpatialService:
         elif state.scene_id is None or state.anchor is None:
             reason = "ground_protection_pose_required"
         if reason:
-            return ObjectProtectionProjection(
-                oid,
-                state.scene_id,
-                wind_from,
-                "unsupported",
-                "unsupported",
-                rain_reason=reason,
-                wind_reason=reason,
-            )
+            return ObjectProtectionInput(oid, state, None, reason)
         # Validate canonical pose using the SAME transform/orientation constraints.
         self.cells(package, oid, state.anchor, state.orientation)
         if properties is None and self.protection_provider is not None:
@@ -165,7 +194,7 @@ class ObjectSpatialService:
                 sid, oid, package, candidate=state
             )
         if properties is None:
-            return ObjectProtectionProjection(oid, state.scene_id, wind_from)
+            return ObjectProtectionInput(oid, state, None)
         if type(properties) is not CurrentProtectionProperties:
             raise ValueError("Provider must return typed current properties or None")
         try:
@@ -173,16 +202,51 @@ class ObjectSpatialService:
         except StateMachineError as exc:
             if exc.code != "spatial_unconfigured":
                 raise
+            return ObjectProtectionInput(oid, state, properties, "scene_grid_required")
+        return ObjectProtectionInput(oid, state, properties, grid_json=canonical_json(grid))
+
+    @staticmethod
+    def _project_protection_input(prepared, wind_from):
+        import json
+
+        oid, state = prepared.object_id, prepared.state
+        if prepared.reason:
             return ObjectProtectionProjection(
                 oid,
                 state.scene_id,
                 wind_from,
                 "unsupported",
                 "unsupported",
-                rain_reason="scene_grid_required",
-                wind_reason="scene_grid_required",
+                rain_reason=prepared.reason,
+                wind_reason=prepared.reason,
             )
-        return _project_protection(oid, state, properties, wind_from, grid["width"], grid["height"])
+        if prepared.properties is None:
+            return ObjectProtectionProjection(oid, state.scene_id, wind_from)
+        grid = json.loads(prepared.grid_json)
+        return _project_protection(
+            oid, state, prepared.properties, wind_from, grid["width"], grid["height"]
+        )
+
+    def prepare_scene_protection(self, sid, scene_id, package, *, properties=None):
+        """Read every current input once; subsequent directions use this exact read set."""
+        _, objects = self.h.grid.reader.scene_occupants(sid, scene_id, package)
+        doors = {
+            p.door_object_id
+            for p in package.passages
+            if p.door_object_id and any(e.scene_id == scene_id for e in p.endpoints)
+        }
+        return SceneProtectionInputs(
+            scene_id,
+            tuple(
+                self._protection_input(
+                    sid,
+                    oid,
+                    package,
+                    properties=properties.get(oid) if properties is not None else None,
+                )
+                for oid in sorted({oid for oid, _ in objects} | doors)
+            ),
+        )
 
     def scene_protection_contributions(
         self,
@@ -192,6 +256,7 @@ class ObjectSpatialService:
         *,
         wind_from: Direction,
         properties: Mapping[str, CurrentProtectionProperties] | None = None,
+        prepared: SceneProtectionInputs | None = None,
     ) -> SceneProtectionProjection:
         """Immutable per-object outputs, including explicit unsupported shared doors.
 
@@ -200,23 +265,23 @@ class ObjectSpatialService:
         """
         if wind_from not in ORIENTATIONS:
             raise ValueError("wind_from must be a cardinal incoming direction")
-        _, objects = self.h.grid.reader.scene_occupants(sid, scene_id, package)
-        doors = {
-            p.door_object_id
-            for p in package.passages
-            if p.door_object_id and any(e.scene_id == scene_id for e in p.endpoints)
-        }
-        projections = []
-        for oid in sorted({oid for oid, _ in objects} | doors):
-            projection = self.project_protection(
-                sid,
-                oid,
-                package,
-                wind_from=wind_from,
-                properties=properties.get(oid) if properties is not None else None,
-            )
-            projections.append(replace(projection, scene_id=scene_id))
-        return SceneProtectionProjection(scene_id, wind_from, tuple(projections))
+        if prepared is not None and (
+            type(prepared) is not SceneProtectionInputs
+            or prepared.scene_id != scene_id
+            or properties is not None
+        ):
+            raise ValueError("Expected exact Scene inputs without a second property override")
+        prepared = prepared or self.prepare_scene_protection(
+            sid, scene_id, package, properties=properties
+        )
+        return SceneProtectionProjection(
+            scene_id,
+            wind_from,
+            tuple(
+                replace(self._project_protection_input(p, wind_from), scene_id=scene_id)
+                for p in prepared.objects
+            ),
+        )
 
     def project(self, sid, oid, package, *, candidate=None):
         state = candidate or self.state(sid, oid, package)

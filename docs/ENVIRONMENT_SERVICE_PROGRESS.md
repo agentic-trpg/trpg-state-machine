@@ -1,5 +1,90 @@
 # EnvironmentService 实施记录
 
+## Environment 派生 Snapshot 与显式降水保护（2026-10-19）
+
+本轮分支 `feat/environment-derived-snapshot`，基线为本轮 fetch 验证的最新
+`origin/main@d0fda62eba8f975232f47abe64be95660a791110`，初始 HEAD 与 main 相同、工作区干净。
+仓库、适用祖先及子目录没有 AGENTS.md，没有 check-fast 脚本／配置；使用实际 pytest、
+Ruff check／format、diff 检查。只交付本分支，不合并 main，不修改固定依赖或 Schema。
+
+先审计 Environment 模型／命令、WorldFacts JSON、CommandRuntime savepoint 与提交、
+OSS 当前状态／属性与投影、GridReader 当前配置／来源、Effects／UnitHeight provider、
+SessionAccess pin 与公开披露、WorldHandler 可见性及 Light 的真实准备路径；
+再在 [服务说明](ENVIRONMENT_SERVICE.md#snapshot-依赖设计2026-10-19实施前审计)
+形成依赖矩阵，随后实施。顶层 MODULE_CONTRACTS／World 设计保持所有权约束；
+其中早期 NOT IMPLEMENTED 表述不是本仓库实际代码现状或本轮完成证据。
+
+本轮实现已完成：
+
+- 两层独立有界 LRU：32 项 OSS 场景／风向防护，512 项已完成 Cell／height 结果。
+  只缓存实际算出的结果，不展开整张环境地图，不把屋顶覆盖等同完整环境相同。
+- 当前不可变输入验证，Session／Package／Scene／Grid／姿态／当前属性／来源与必要
+  参数隔离；不依赖 TTL、变化通知或 world_version。天气与 Effects 不使不变 OSS
+  几何重算；普通移动、明确无贡献物品拾取、时间与无关锁字段输入不变可继续命中。
+- OSS 输入准备与计算分离，provider 每次读取；多方向／区域使用同一次读取结果。
+  外部路径可 `environment_cacheable=False` 绕过跨查询复用。
+- 只读事务有界暂存，成功 COMMIT 后发布；写事务／无管理 scope 绕过共享缓存。
+  失败、回滚、提交失败、旧读取事务及 clear 期间的暂存不会污染新查询。
+- 显式 rain/snow/sleet/hail 的对象与静态防护，共用位置／旋转／裁剪算法。
+  旧 RainProtection／rain_cells 仍只声明 rain；新可选字段缺省不改变旧命令指纹，
+  无新增持久表／迁移。保留 local／outdoor、未知完整性和大气条件／地面暴露区别。
+- WindBoundary 自身格排除、旋转来向、距离、边界与高度空隙保持。
+- 区域查询一次观察者／Grid／Light 准备，每格继续授权可见性判断，任何失败整批拒绝。
+  缓存命中仍检查当前授权与披露，隐藏来源不变成 ID／状态／高度分段侧漏。
+
+确定性调用次数证据（`tests/test_environment_snapshot.py`，实际执行断言）：
+
+| 路径 | 合成次数 | 场景 OSS／屋顶投影次数 | 其他证据 |
+|---|---:|---:|---|
+| A、A、B、B，屋顶一次覆盖 16 格 | 2 | 1／1 | 两格温度／雾烟不同；最终仅缓存这 2 格；4 次公开查询仍各自准备并验证可见性 |
+| 同格天气雨强改变后再查 | 累计 2 | 仍 1／1 | 环境即刻更新，几何复用 |
+| 5 格区域查询，再查同区域 | 累计 5 | 共享按风向投影 | 每批 visibility／Light 准备各 1 次，逐目标检查各 5 次 |
+| 禁用跨查询复用后，同格再查两次 | 增加 2 | 场景投影增加 2 | 不使用不确定外部路径的缓存 |
+
+30 项新增测试还覆盖来源增加／删除／替换及范围、priority、exposure、observable，
+Effects 移动／修改／结束／不可用，当前防护、真实移动旋转／开关、内部 HP 采用与回滚，
+四类降水显式子集和旧 JSON，Session／Scene／Package／高度／Grid，故障／提交失败、
+旧 WAL 读取、公开授权与 Dark 光照、隐藏范围、有界淘汰、清空与重启一致性。
+最终环境／披露／OSS／Snapshot focused checks 为 **130 passed**（41.72 秒），
+包括 30 项新增专项，exit 0。全套原生四区为 **432／399／446／444 passed**，
+合计 **1,721**，全部 exit 0，耗时 208.69／175.00／246.24／213.39 秒。
+全套覆盖无关物品拾取优化后的实现；随后保留重构前“共享门也先验证显式属性类型”的
+兼容校验，并新增 1 项回归，最终 130 项 focused 全部再验证。当前 collection 为 1,722；
+不将后加的 1 项计入此前全套数字。78 个测试文件按 20／20／19／19 分区，无重复或遗漏。
+
+实际命令（cwd 为本仓库，Python／Ruff 为本地 `.venv/Scripts`，basetemp 各自独立）：
+
+```powershell
+.venv/Scripts/python.exe -m pytest -q tests/test_environment_snapshot.py tests/test_environment_service.py tests/test_environment_review_regressions.py tests/test_object_protection.py --basetemp=.test-tmp/env-snapshot-delivery-focused -o faulthandler_timeout=60
+
+# 四进程分别使用 $snapshotPart = 0、1、2、3；完整文件集合已核对。
+$snapshotFiles = @(Get-ChildItem tests -Filter 'test_*.py' | Sort-Object Name)
+$snapshotSubset = for ($snapshotIndex = 0; $snapshotIndex -lt $snapshotFiles.Count; $snapshotIndex++) {
+    if ($snapshotIndex % 4 -eq $snapshotPart) { $snapshotFiles[$snapshotIndex].FullName }
+}
+.venv/Scripts/python.exe -m pytest -q @snapshotSubset -o faulthandler_timeout=60 --basetemp=.test-tmp/env-snapshot-final-$snapshotPart
+
+.venv/Scripts/ruff.exe check .
+.venv/Scripts/ruff.exe format --check .
+git diff --check
+```
+
+Ruff check／format（254 files）及 diff 检查通过；四份文档本地链接与 fenced code
+完整性检查通过。全套使用原生本地 socket 权限执行 Engine 异步测试，无外部服务调用。
+只有既有 lark 的 sre_parse／sre_constants 弃用警告。实际安装 Engine／SRD 均为 0.6.0，
+direct_url commit_id 均为 `d596161060555630019163ab301e1d25fd816549`，与固定依赖相同，
+pyproject.toml／uv.lock／存储迁移无改动。
+
+已知限制：当前无专用依赖版本，命中仍需读取／校验来源、对象与 provider，比较成本随
+输入大小增长，Grid JSON 读取／规范化当前还可能逐对象重复；保守 Scene 级身份可能使
+无实际几何变化的开关／Grid 变化失效。
+缓存容量按项数限制，单项仍受现有来源／几何预算约束，未宣称生产内存或延迟指标。
+WO／Effects／Package 生产适配及角色实际高度仍是既有外部接入边界。
+不实现积雪、融雪、结冰、冰雹伤害、三维地图、角色交互或认知重构；
+Environment Snapshot 本轮完成，Light 跨查询 Snapshot 保留后续 Light 重构范围。
+
+以下是此前批次的历史记录，保留其各自基线、范围及验证结论。
+
 日期：2026-10-18。仓库：`agentic-trpg/trpg-state-machine`。
 分支：`feat/scene-environment-service`，基线为 fetch 后确认的最新
 `origin/main@9ce60cbe4fdbf91dce6ffef811969482369fb08a`，工作区开始时干净。
