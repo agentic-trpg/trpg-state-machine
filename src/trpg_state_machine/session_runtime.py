@@ -5,7 +5,7 @@ apply facts; this component coordinates versions, RNG, events and receipts.
 """
 
 import hashlib
-from dataclasses import asdict
+from dataclasses import asdict, replace
 
 from dnd5e_engine.evaluation_contracts import CheckPayload, CombatClosePayload, CombatIntentPayload
 from dnd5e_engine.evaluation_rng import RNGContext, RNGState
@@ -52,6 +52,7 @@ class SessionRuntime:
         self.store = store
         self.access = access
         self.persistence = persistence
+        self.time = None
 
     @property
     def _conn(self):
@@ -59,6 +60,177 @@ class SessionRuntime:
 
     def fingerprint(self, command, row, context):
         return _fingerprint(command, row["package_digest"], _binding(row), context)
+
+    def guard_time_owner(self, sid):
+        """Attached Drivers use one local dispatcher; other connections may read.
+
+        Reject foreign writers while the OS owner exists, so an earlier deadline
+        cannot be added without notifying the owner. No IPC or poller is needed.
+        """
+        if self.time is None or sid in self.time.drivers:
+            return
+        from .time_driver import _DriverLock
+
+        database = self._conn.execute("PRAGMA database_list").fetchone()[2]
+        if _DriverLock.path(database, sid).exists():
+            lock = _DriverLock(database, sid)
+            lock.close()
+
+    def refresh_time_drivers(self):
+        if self.time:
+            for driver in tuple(self.time.drivers.values()):
+                driver.refresh()
+
+    def coordinate_combat_time(self, row, package, command_id, previous_round, event_offset=0):
+        """RE retains Turn rules; only a completed Round advances six world ticks."""
+        import json
+
+        if self.time is None or previous_round is None:
+            return []
+        combat = self._conn.execute(
+            "SELECT state_json FROM combats WHERE session_id=?", (row["session_id"],)
+        ).fetchone()
+        state = json.loads(combat[0])
+        rounds = state["round_number"] - previous_round
+        if rounds < 0 or rounds > 1:
+            raise StateMachineError("invalid_rule_result", "Unexpected Round transition")
+        events = []
+        if rounds:
+            current = self.time.world.facts.time_state(row["session_id"])[1]
+            staged_row = dict(row)
+            staged_row["event_seq"] += event_offset
+            events = self.time._advance(staged_row, package, current + 6, command_id, "combat", 8)
+        if rounds or state["ended"]:
+            self.time.invalidate(row["session_id"])
+        return events
+
+    def prepare_timed_command(self, command, package, context, fingerprint):
+        """Pin the authorized operation's target once, before its business snapshot.
+
+        Only this command's admitted time changes may translate its version.
+        A later unrelated change still conflicts. Faults retain the sampled target;
+        replay uses the original fingerprint and never samples a second time.
+        """
+        if self.time is None or package.legacy_audit_only:
+            return command
+        from .time_coordination import SetTimeRunning
+
+        control = type(command.payload) is SetTimeRunning and command.payload.action != "cancel"
+        timed = (
+            control
+            or command.command_type.startswith("world.")
+            or command.command_type.startswith("activity.")
+            or command.command_type
+            in (
+                "rules.check",
+                "combat.initialize",
+                "combat.intent",
+                "combat.close",
+                "enter_scene",
+                "move_actor",
+                "set_object_state",
+            )
+        ) and command.command_type != "world.advance_time"
+        if not timed:
+            return command
+        sid = command.session_id
+        with self.store.transaction():
+            row = self.access._session(sid, package, context)
+            self.access._authorize_command(row, command.actor_id, command.payload, context)
+            self.access._npc_handoff_command_guard(command)
+            if self._command_replay(command, fingerprint):
+                return command
+            admission = self._conn.execute(
+                "SELECT * FROM time_command_admissions WHERE session_id=? AND command_id=?",
+                (sid, command.command_id),
+            ).fetchone()
+            driver = self.time.drivers.get(sid)
+            pending = self.time.progress(sid)
+            if control and pending and pending["status"] != "completed" and admission is None:
+                return command  # control itself reconciles the existing fixed target
+            combat_pending = (
+                pending and pending["source"] == "combat" and pending["status"] != "completed"
+            )
+            if (
+                admission is None
+                and pending
+                and pending["status"] != "completed"
+                and pending["source"] != "combat"
+            ):
+                raise StateMachineError("time_advance_pending", "Finish the saved time work first")
+            if admission is None and (
+                (
+                    not combat_pending
+                    and (
+                        driver is None
+                        or self.time.run(sid)["mode"] != "running"
+                        or self.time.world._active_combat(sid)
+                    )
+                )
+                or self.version_conflict(row, command)
+            ):
+                return command
+        with self.store.transaction(write=True):
+            row = self.access._session(sid, package, context)
+            self.guard_time_owner(sid)
+            self.access._authorize_command(row, command.actor_id, command.payload, context)
+            admission = self._conn.execute(
+                "SELECT * FROM time_command_admissions WHERE session_id=? AND command_id=?",
+                (sid, command.command_id),
+            ).fetchone()
+            if admission is None:
+                if self.version_conflict(row, command):
+                    return command
+                sampled = (
+                    pending["target_tick"] if combat_pending else driver.target(self.time.run(sid))
+                )
+                target = int(sampled)
+                self._conn.execute(
+                    "INSERT INTO time_command_admissions VALUES (?,?,?,?,?,?,0,?,?,?)",
+                    (
+                        sid,
+                        command.command_id,
+                        fingerprint,
+                        command.expected_world_version,
+                        row["world_version"],
+                        target,
+                        row["event_seq"],
+                        "combat" if combat_pending else "realtime",
+                        str(sampled - target),
+                    ),
+                )
+        # Persisted admission survives evaluation/storage failures and restarts.
+        with self.store.transaction(write=True):
+            row = self.access._session(sid, package, context)
+            self.access._authorize_command(row, command.actor_id, command.payload, context)
+            self.access._npc_handoff_command_guard(command)
+            admission = self._conn.execute(
+                "SELECT * FROM time_command_admissions WHERE session_id=? AND command_id=?",
+                (sid, command.command_id),
+            ).fetchone()
+            if admission["fingerprint"] != fingerprint:
+                raise StateMachineError("idempotency_conflict", "Different timed command content")
+            effective = replace(command, expected_world_version=admission["execution_version"])
+            if admission["ready"] or self.version_conflict(row, effective):
+                return effective
+            events = self.time._advance(
+                row, package, admission["target_tick"], command.command_id, admission["source"], 8
+            )
+            version = (
+                self.publish(effective, row, package, events) if events else row["world_version"]
+            )
+            ready = self.time.progress(sid)["status"] == "completed"
+            self._conn.execute(
+                "UPDATE time_command_admissions SET execution_version=?,ready=? "
+                "WHERE session_id=? AND command_id=?",
+                (version, int(ready), sid, command.command_id),
+            )
+        if not ready:
+            self.refresh_time_drivers()
+            raise StateMachineError(
+                "time_advance_pending", "Retry this command to continue its target"
+            )
+        return replace(command, expected_world_version=version)
 
     def prepare_scene_maps(self, sid, scene_ids, maps):
         """Lifecycle coordination only; Grid reads and builds the actual maps."""
@@ -82,6 +254,7 @@ class SessionRuntime:
         """Publish an admitted changed outcome inside its existing savepoint."""
         self.store.require_write()
         self.access._check_package_pin(row, package)
+        self.guard_time_owner(command.session_id)
         if self.version_conflict(row, command):
             raise StateMachineError("version_conflict", "Command was prepared on another version")
         version = row["world_version"] + 1
@@ -106,13 +279,29 @@ class SessionRuntime:
         end = self._conn.execute(
             "SELECT event_seq FROM sessions WHERE session_id=?", (command.session_id,)
         ).fetchone()[0]
+        admission = self._conn.execute(
+            "SELECT start_event_seq FROM time_command_admissions "
+            "WHERE session_id=? AND command_id=?",
+            (command.session_id, command.command_id),
+        ).fetchone()
+        start_seq = admission[0] if admission else row["event_seq"]
+        own_seqs = tuple(range(start_seq + 1, end + 1))
+        if admission:
+            own_seqs = tuple(
+                r[0]
+                for r in self._conn.execute(
+                    "SELECT event_seq FROM event_records WHERE session_id=? AND event_seq>? "
+                    "AND source_command_id=? ORDER BY event_seq",
+                    (command.session_id, start_seq, command.command_id),
+                )
+            )
         receipt = CommandReceipt(
             command.session_id,
             command.command_id,
             command.actor_id,
             status,
             version,
-            tuple(range(row["event_seq"] + 1, end + 1)),
+            own_seqs,
             error,
         )
         self.record_receipt(command, context, fingerprint, receipt)

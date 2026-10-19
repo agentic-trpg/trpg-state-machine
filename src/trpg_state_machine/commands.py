@@ -41,6 +41,7 @@ from .navigation_models import (
     ResumeNavigation,
     StartNavigation,
 )
+from .time_coordination import AdvanceSessionTime, SetTimeRunning, validate_time_operation
 from .world_commands import (
     OPENABLE_CHECK_OPERATIONS,
     WORLD_CAPABILITY_COMMANDS,
@@ -74,6 +75,8 @@ OPERATIONS = {
     "world.traverse_passage": TraversePassage,
     "world.place_object": PlaceObject,
     "world.advance_time": AdvanceGameTime,
+    "session.advance_time": AdvanceSessionTime,
+    "session.set_time_running": SetTimeRunning,
     "rules.check": CheckPayload,
     "combat.close": CombatClosePayload,
     "combat.intent": CombatIntentPayload,
@@ -136,6 +139,8 @@ class TypedCommand:
         | CombatClosePayload
         | CheckPayload
         | AdvanceGameTime
+        | AdvanceSessionTime
+        | SetTimeRunning
         | StartNavigation
         | AdvanceNavigation
         | ResumeNavigation
@@ -251,6 +256,9 @@ def validate_command(command: TypedCommand) -> None:
     }.get(type(command.payload))
     if local_version and command.payload.schema_version != local_version:
         raise StateMachineError("invalid_operation", "Unsupported local spatial operation version")
+    if type(command.payload) in (AdvanceSessionTime, SetTimeRunning):
+        validate_time_operation(command.payload)
+        return
     if type(command.payload) is AdvanceGameTime:
         if any(
             type(v) is not int or not 0 <= v <= 2147483647 for v in asdict(command.payload).values()
@@ -328,6 +336,7 @@ class CommandRuntime:
         validate_command(command)
         with self._transaction():
             admitted = self._session(command.session_id, package, context)
+            self._session_runtime.guard_time_owner(command.session_id)
             self._snapshot(admitted, package)
             fingerprint = self._session_runtime.fingerprint(command, admitted, context)
         if package.legacy_audit_only:
@@ -350,6 +359,9 @@ class CommandRuntime:
             raise StateMachineError("async_context_required", "Use await submit_command_async")
         if type(command.payload) is RuleOperation:
             return self._submit_mechanical(command, package, context, fingerprint)
+        command = self._session_runtime.prepare_timed_command(
+            command, package, context, fingerprint
+        )
         prepared = None
         if type(command.payload) is InitializeCombat:
             with self._transaction():
@@ -398,7 +410,12 @@ class CommandRuntime:
                                 source_command_id=command.command_id,
                             )
                         )
-                    events = self._expand_events(row, package, events, command.command_id)
+                    if type(command.payload) not in (
+                        AdvanceGameTime,
+                        AdvanceSessionTime,
+                        SetTimeRunning,
+                    ):
+                        events = self._expand_events(row, package, events, command.command_id)
                     if type(command.payload) is not InitializeCombat:
                         events.extend(
                             sync_npc_schedules(
@@ -438,6 +455,7 @@ class CommandRuntime:
             receipt = self._session_runtime.finish(
                 command, context, fingerprint, row, status, version, error
             )
+        self._session_runtime.refresh_time_drivers()
         return receipt
 
     def get_command_receipt(self, session_id, command_id, package, *, context):
@@ -471,6 +489,8 @@ def world_command_from_data(data):
         *ENVIRONMENT_COMMANDS,
         "world.step_actor",
         "world.advance_time",
+        "session.advance_time",
+        "session.set_time_running",
         "world.traverse_passage",
         "world.place_object",
         "world.unlock_door",

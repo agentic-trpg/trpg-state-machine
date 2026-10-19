@@ -130,6 +130,8 @@ class CombatHandler:
         self.runtime.set_mechanical_schema(row["session_id"], snapshot.snapshot_schema_version)
         self.records.initialize(sid, snapshot, spatial=spatial is not None, process_id=process_id())
         self.runtime.select_rule_rng(sid, rng.model_dump_json(), reset_position=True)
+        if self.runtime.time:
+            self.runtime.time.invalidate(sid)
         return [
             self.capture._capture_event(
                 sid,
@@ -182,6 +184,7 @@ class CombatHandler:
             )
         with self.store.transaction():
             row = self.sessions._session(command.session_id, package, context)
+            self.runtime.guard_time_owner(command.session_id)
             fingerprint = self.runtime.fingerprint(command, row, context)
         return await self._submit_dnd(command, package, context, fingerprint)
 

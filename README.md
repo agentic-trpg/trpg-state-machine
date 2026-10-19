@@ -11,7 +11,7 @@ Batch 1 实现了一个可运行的本地闭环：**验证原创合成 Adventure
 StateMachine 是统一 API 与组件装配入口；各领域 Facts / Records 管理所属权威事实，通过共享事务共同提交。Package 是不可变模板；返回的 Snapshot 是独立副本，修改副本不会写入数据库。已接入固定候选 SHA 的真实 D&D 基础攻击及受限胜利/TPK 关闭，同时保留隔离的合成测试路径；没有第二份运行态权威。正常关闭后可以保存并在新进程恢复；活跃战斗跨进程精确续玩仍不支持。
 
 Session Management 已分离为 SessionCreation 创建协调、SessionAccess 授权和 SessionRuntime
-执行元数据／公共提交协调。公开 create_session 等签名及 Schema36 保留；运行时 RE 校验、
+执行元数据／公共提交协调。公开 create_session 等签名保留；当前存储为 Schema37；运行时 RE 校验、
 求值和查询以持久化 Session 的三项绑定为准。已授权 NPC 移动也可延迟创建目标场景，
 不制造 PC 进入事件。完整领域能力配置实例化仍未完成，RE 固定素材快速接口尚未兼容接入。
 实际调用链、旧 Session 策略和字段缺口见 [Session 管理](docs/SESSION_MANAGEMENT.md)，
@@ -85,13 +85,17 @@ time = sm.world_time.read(result.session_id, package, context=context)
 授权、版本、幂等、事件证据、Outbox、回滚和战斗期间拒绝手动推进均沿用真实命令链。
 旧 NPC schedule、OB 100 tick、Gate 20／60 tick 策略保留抽象语义；秒制 Session
 当前拒绝配置型 NPC Runtime 和 NPC 观察访问，等待专门的秒制消费策略。
-整个 Combat Round 约六游戏秒；本轮没有 Round 接线或实时驱动，Turn 不独占六秒。
-目标默认实时倍率为现实 1 秒对应游戏 6 秒，尚未实现。
+完整 Combat Round 通过真实 RE Delta 增加 6 tick，Turn 不独占六秒。
+Session Runtime 已支持显式倍率、按业务边界推进的 TimeDriver、活动目标跳时和只读显示同步。
+**没有默认实时倍率**；未配置倍率仍允许手动／活动／Combat 推进，但不能启动实时流逝。
+唯一已提交时间、显示契约、版本／幂等、预算继续、重启与尚未接入项见
+[Session 时间协调](docs/SESSION_TIME_COORDINATION.md)，测试证据与范围见
+[实施记录](docs/SESSION_TIME_COORDINATION_PROGRESS.md)。
 已实现、迁移策略、接口和后续 TIME 依赖见 [WorldTimeService 进度](docs/WORLD_TIME_SERVICE_PROGRESS.md)。
 
 ## World W1–W8：可组合非战斗世界能力
 
-Package `/6` / SQLite Schema 31（当前存储版本 35）增加显式对象定义、内部耐久结果应用、独立卡住/门闩、
+Package `/6` / SQLite Schema 31（当前存储版本 37）增加显式对象定义、内部耐久结果应用、独立卡住/门闩、
 多锁、嵌套容器、受权 GM 多格布置、普通场景光源与一次性手动联动机关。
 普通操作仍通过 `submit_command` / `submit_command_async` 的既有命令、版本与回执入口；
 对象、角色位置、库存投影与事件证据在共享事务中提交。

@@ -517,7 +517,7 @@ class MechanismService:
             return []
         derived = []
         if kind == "game.time_advanced":
-            return self._reset_due(row, package)
+            return []  # Runtime boundary coordination is the sole deadline consumer.
         if kind == "item.picked_up" or (
             kind == "item.container_transferred" and payload.get("phase") == "after"
         ):
@@ -640,12 +640,23 @@ class MechanismService:
             fired.add(oid)
         return events
 
+    def next_boundary(self, session_id, package):
+        return self.h._conn.execute(
+            "SELECT min(reset_at_tick) FROM object_mechanisms WHERE session_id=?",
+            (session_id,),
+        ).fetchone()[0]
+
+    def settle_one(self, row, package, command_id):
+        from .time_coordination import DueResult
+
+        return DueResult(tuple(self._reset_due(row, package)))
+
     def _reset_due(self, row, package):
         sid, events = row["session_id"], []
         tick = self.h.facts.time_state(sid)[1]
         due = self.h._conn.execute(
             "SELECT object_id FROM object_mechanisms WHERE session_id=? AND reset_at_tick<=? "
-            "ORDER BY object_id LIMIT 33",
+            "ORDER BY reset_at_tick,object_id LIMIT 1",
             (sid, tick),
         ).fetchall()
         for (oid,) in due:

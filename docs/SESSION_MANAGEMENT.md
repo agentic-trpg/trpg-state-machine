@@ -4,6 +4,11 @@
 §10；不修改上游规范，不把目标完整实例化宣布为已完成。
 本批次基线 `3fe36e2`，验证与缺口见 [进度](SESSION_MANAGEMENT_PROGRESS.md)。
 
+2026-10-19 时间后续：当前 Schema37，SessionRuntime 已装配有界时间协调和 TimeDriver，
+创建保存暂停／未配置倍率状态，恢复读取配置并显式重建单调基准，不补离线时长。
+世界事实、共同命令和 RE 执行器继续复用。具体同步／回执／版本和业务接线边界见
+[Session 时间协调](SESSION_TIME_COORDINATION.md)。下文的 Schema36 是此前批次记录。
+
 2026-10-19 地图后续（基线 a25c35e）：SessionRuntime 通过 GridMaps 领域接口组织地图
 运行表示的准备和释放；SceneLifecycle 初始化后准备，原 CombatHandler 机械场景补建后
 准备，save／resume 在授权读取事务内准备当前场景。其他场景可首次读取时准备。

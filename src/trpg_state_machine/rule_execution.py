@@ -32,6 +32,7 @@ class RuleExecution:
         return self.store.connection
 
     async def submit(self, command, package, context, fingerprint):
+        command = self.runtime.prepare_timed_command(command, package, context, fingerprint)
         object_check = type(command.payload) in OPENABLE_CHECK_OPERATIONS
         mechanism_check = type(command.payload) is CheckMechanism
         domain_check = object_check or mechanism_check
@@ -181,6 +182,11 @@ class RuleExecution:
                             raise StateMachineError(
                                 "version_conflict", "Object check dependencies changed"
                             )
+                    previous_round = (
+                        snapshot.combat_state.round_number
+                        if hasattr(snapshot, "combat_state")
+                        else None
+                    )
                     self.rules._apply_dnd_changes(row, changes)
                     # Failure consequences and automatic hooks both consume the
                     # original rule result's candidate RNG successor. Never
@@ -277,6 +283,11 @@ class RuleExecution:
                                 )
                             )
                     events = self.effects._expand_events(row, package, events, command.command_id)
+                    events.extend(
+                        self.runtime.coordinate_combat_time(
+                            row, package, command.command_id, previous_round, len(events)
+                        )
+                    )
                     self.world._assert_spatial_consistency(command.session_id, package)
                     version = self.runtime.publish(command, row, package, events)
                 except StateMachineError as exc:
@@ -326,4 +337,5 @@ class RuleExecution:
             receipt = self.runtime.finish(
                 command, context, fingerprint, row, status, version, error
             )
+        self.runtime.refresh_time_drivers()
         return receipt

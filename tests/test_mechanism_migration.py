@@ -32,8 +32,10 @@ def test_schema33_armed_spent_preserved_migration_failure_atomic_and_retry(
         assert receipt.status == "committed"
     # Restore precisely the historical table contract using its bundled migration.
     with sqlite3.connect(db) as conn:
-        # Current setup includes additive ENV35/36 storage and triggers. Remove
+        # Current setup includes additive TIME37 and ENV35/36 storage. Remove
         # those additions before claiming this fixture is a Schema33 database.
+        for table in ("time_command_admissions", "session_time_progress", "session_time_runs"):
+            conn.execute("DROP TABLE " + table)
         for (name,) in conn.execute(
             "SELECT name FROM sqlite_master WHERE type='trigger' AND name GLOB 'env_*'"
         ).fetchall():

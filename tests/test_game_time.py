@@ -478,7 +478,7 @@ def test_actual_schema14_concurrent_upgrade_preserves_all_prior_authority(tmp_pa
             return sm._conn.execute("PRAGMA user_version").fetchone()[0]
 
     with ThreadPoolExecutor(max_workers=3) as pool:
-        assert list(pool.map(upgrade, range(3))) == [36] * 3
+        assert list(pool.map(upgrade, range(3))) == [37] * 3
     assert_preserved(db, original)
     from trpg_state_machine import load_adventure_package
 
@@ -516,7 +516,7 @@ def test_interrupted_schema15_migration_is_atomic_and_retryable(tmp_path, monkey
         assert conn.execute("PRAGMA user_version").fetchone()[0] == 14
     monkeypatch.undo()
     with StateMachine(db) as sm:
-        assert sm._conn.execute("PRAGMA user_version").fetchone()[0] == 36
+        assert sm._conn.execute("PRAGMA user_version").fetchone()[0] == 37
 
 
 def test_overlapping_schedule_fails_closed_without_partial_clock(
@@ -561,9 +561,9 @@ def test_real_dead_actor_is_not_started_and_combat_clock_is_unsupported(
             == "committed"
         )
         rng = sm.read_rng_context(sid, package, context=context)
-        rejected = tick(sm, sid, package, context, 11, key="clock.combat")
+        rejected = tick(sm, sid, package, context, 17, key="clock.combat")
         assert rejected.error_code == "unsupported_combat_world_operation"
-        assert sm.read_session(sid, package, context=context).world.game_tick == 10
+        assert sm.read_session(sid, package, context=context).world.game_tick == 16
         assert (
             sm.submit_command(
                 close_command(sm, sid, package, context), package, context=context
@@ -572,7 +572,7 @@ def test_real_dead_actor_is_not_started_and_combat_clock_is_unsupported(
         )
         assert not sm._characters.rule_actors(sid)[npc.observer_id]["is_alive"]
         # Read the real committed death flag, without deriving death from HP in SM.
-        assert tick(sm, sid, package, context, 11).status == "committed"
+        assert tick(sm, sid, package, context, 17).status == "committed"
         view = npc_view(sm, sid, package, npc)
         assert view.schedule_runs[0].status == "interrupted"
         assert view.runtime.current_activity is None

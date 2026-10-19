@@ -118,7 +118,7 @@ def snapshot(db):
 
 
 def assert_current(sm):
-    assert sm._conn.execute("PRAGMA user_version").fetchone()[0] == 36
+    assert sm._conn.execute("PRAGMA user_version").fetchone()[0] == 37
     assert sm._conn.execute("PRAGMA foreign_key_check").fetchall() == []
     assert sm._conn.execute("PRAGMA integrity_check").fetchone()[0] == "ok"
     assert sm._conn.execute("PRAGMA foreign_keys").fetchone()[0] == 1
@@ -248,7 +248,7 @@ def test_env34_concurrent_openers_migrate_once_under_existing_lock(tmp_path):
             return sm._conn.execute("PRAGMA user_version").fetchone()[0]
 
     with ThreadPoolExecutor(max_workers=3) as pool:
-        assert list(pool.map(opener, range(3))) == [36, 36, 36]
+        assert list(pool.map(opener, range(3))) == [37, 37, 37]
     assert_original_rows_equal(before, stored_rows(db))
 
 

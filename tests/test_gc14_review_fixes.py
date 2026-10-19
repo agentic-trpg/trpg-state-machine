@@ -529,9 +529,7 @@ def test_existing_arrival_package_trigger_keeps_source_link_and_scene_boundary(
         )
 
 
-def test_uninitialized_abstract_target_refuses_then_moves_after_existing_pc_visit(
-    tmp_path, context
-):
+def test_abstract_target_initializes_for_npc_and_preserves_pc_visit_semantics(tmp_path, context):
     data = yaml.safe_load((Path(__file__).parent / "fixtures/npc_station.yaml").read_text("utf-8"))
     mover = deepcopy(data["actors"][0])
     mover["actor_id"] = MOVER
@@ -550,10 +548,21 @@ def test_uninitialized_abstract_target_refuses_then_moves_after_existing_pc_visi
         sid = create(sm, p, context)
         before = sm.read_session(sid, p, context=context)
         assert B not in before.scenes
-        rejected = submit(sm, sid, p, context, MoveActor(MOVER, B), "uninitialized", MOVER)
-        assert rejected.error_code == "invalid_target" and rejected.event_seqs == ()
-        assert sm.read_session(sid, p, context=context).actors == before.actors
-        # Existing abstract NPC policy requires prior initialization; do not widen it.
+        receipt = submit(sm, sid, p, context, MoveActor(MOVER, B), "uninitialized", MOVER)
+        assert receipt.status == "committed" and len(receipt.event_seqs) == 2
+        initialized = sm.read_session(sid, p, context=context)
+        assert initialized.current_scene_id == A
+        assert initialized.scenes[B].visited_count == 0
+        assert initialized.scenes[A] == before.scenes[A]
+        assert [e.event_type for e in events_for(sm, sid, p, context, receipt)] == [
+            "actor.departed",
+            "actor.moved",
+        ]
+        assert (
+            submit(sm, sid, p, context, MoveActor(MOVER, A), "npc.return", MOVER).status
+            == "committed"
+        )
+        # SessionManagement already supports NPC lazy initialization, without PC visits.
         assert submit(sm, sid, p, context, EnterScene(B), "pc.initialize").status == "committed"
         assert submit(sm, sid, p, context, EnterScene(A), "pc.return").status == "committed"
         before = sm.read_session(sid, p, context=context)

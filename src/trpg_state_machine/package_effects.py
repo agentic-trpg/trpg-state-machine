@@ -9,6 +9,12 @@ from .errors import StateMachineError
 class PackageEffects:
     def __init__(self, store, world, capture):
         self.store, self.world, self.capture = store, world, capture
+        from .time_coordination import SessionTime
+
+        if world.runtime.time is None:
+            world.runtime.time = SessionTime(world.runtime, world, self)
+        else:
+            world.runtime.time.effects = self
 
     @property
     def _conn(self):

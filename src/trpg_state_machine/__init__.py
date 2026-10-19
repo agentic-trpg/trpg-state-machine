@@ -154,3 +154,8 @@ __all__ = [
     "TrustedContext",
     "load_adventure_package",
 ]
+
+from .time_coordination import AdvanceSessionTime, SetTimeRunning, TimeSync
+from .time_driver import TimeDriver
+
+__all__ += ["AdvanceSessionTime", "SetTimeRunning", "TimeSync", "TimeDriver"]

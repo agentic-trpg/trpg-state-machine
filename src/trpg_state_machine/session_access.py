@@ -25,6 +25,7 @@ from .navigation_models import NAVIGATION_OPERATIONS
 from .npc_outputs import _handoff_command
 from .package import AdventurePackage, RulesetBinding
 from .perception import NPCContext
+from .time_coordination import AdvanceSessionTime, SetTimeRunning
 from .world_commands import WORLD_CAPABILITY_OPERATIONS, RepositionObject
 
 
@@ -97,7 +98,10 @@ class SessionAccess:
             raise StateMachineError("unauthorized", "Trusted environment management grant required")
         if type(payload) is RepositionObject and not context.can_place_world_objects:
             raise StateMachineError("unauthorized", "Trusted GM placement grant required")
-        if type(payload) is AdvanceGameTime and not context.can_advance_time:
+        if (
+            type(payload) in (AdvanceGameTime, AdvanceSessionTime, SetTimeRunning)
+            and not context.can_advance_time
+        ):
             raise StateMachineError("unauthorized", "Trusted game-time grant required")
         if isinstance(payload, CheckPayload) and not context.can_adjudicate_checks:
             raise StateMachineError("unauthorized", "Trusted GM adjudication grant required")
