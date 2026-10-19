@@ -58,7 +58,7 @@ def test_schema38_preserves_all_old_rows_and_rolls_back_failed_ddl(
             assert conn.execute("PRAGMA user_version").fetchone()[0] == 37
     with StateMachine(path) as restored:
         restored.resume_session(sid, package, context=context)
-        assert restored._conn.execute("PRAGMA user_version").fetchone()[0] == 38
+        assert restored._conn.execute("PRAGMA user_version").fetchone()[0] == 39
         assert restored._conn.execute("SELECT * FROM session_time_waits").fetchall() == []
         assert restored._conn.execute("PRAGMA foreign_key_check").fetchall() == []
     current = stored_rows(path)

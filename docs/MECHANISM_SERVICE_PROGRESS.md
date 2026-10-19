@@ -1,5 +1,9 @@
 # MechanismService progress — 2026-10-18
 
+2026-10-20：能力配置和 effect 来源改取实例记录，触发索引每次从该 Session 的实际实例构建，
+不再按 Package digest 跨 Session／候选复用。规则 world-source 端口仍 unsupported。
+详见 [实例闭包与验证](INSTANCE_CONFIGURATION_PROGRESS.md)。
+
 ## Baseline and preserved work
 
 Feature-delivery branch: `feat/world-mechanism-service`. Implementation and validation run

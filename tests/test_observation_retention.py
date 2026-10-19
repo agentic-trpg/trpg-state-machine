@@ -335,7 +335,7 @@ def test_actual_schema15_upgrade_unknown_times_concurrent_and_repeat(tmp_path, o
             return sm._conn.execute("PRAGMA user_version").fetchone()[0]
 
     with ThreadPoolExecutor(3) as pool:
-        assert list(pool.map(upgrade, range(3))) == [38] * 3
+        assert list(pool.map(upgrade, range(3))) == [39] * 3
     assert_preserved(db, before)
     npc = NPCContext("agent:npc.caretaker", sid, "npc.caretaker")
     with StateMachine(db) as sm:
@@ -343,6 +343,7 @@ def test_actual_schema15_upgrade_unknown_times_concurrent_and_repeat(tmp_path, o
         unknown = sm.get_npc_observation_retention(sid, ob_package, context=npc)
         assert unknown and {x.retention_status for x in unknown} == {"legacy_unknown"}
         assert all(x.accepted_game_tick is x.expires_game_tick is None for x in unknown)
+        sm.upgrade_instance_configs(sid, ob_package, context=context)
         enter(sm, sid, ob_package, context, "scene.workshop")
         enter(sm, sid, ob_package, context, "scene.platform")
         new_observation(sm, sid, ob_package, context)

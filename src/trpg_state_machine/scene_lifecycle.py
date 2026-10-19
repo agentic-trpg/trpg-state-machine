@@ -53,18 +53,19 @@ class SceneLifecycleService:
             ):
                 self.npc_bootstrap.initialize(sid, actor)
         self.facts.initialize_mechanical_scene(sid, scene_id, package)
+        self.facts.instances.finish_scene(sid, scene_id)
         self.runtime.prepare_scene_maps(sid, (scene_id,), self.facts.maps)
         return True
 
     def _validate_scene(self, sid, scene_id, package):
         """Bounded structural check of currently persisted instance records."""
         conn = self.store.connection
-        for obj in package.scene(scene_id).objects:
-            if self.facts.object(sid, obj.object_id) is None:
+        for oid in self.facts.instances.scene(sid, scene_id).object_ids:
+            if self.facts.object(sid, oid) is None:
                 raise StateMachineError(
                     "incomplete_session", "Instantiated scene is missing an object"
                 )
-            definition = self.facts.object_definition(package, obj.object_id)
+            definition = self.facts.object_definition(sid, oid)
             if definition is not None:
                 for capability, reader in (
                     ("openable", self.facts.openable_state),
@@ -72,18 +73,15 @@ class SceneLifecycleService:
                     ("mechanism", self.facts.mechanism_state),
                     ("durability", self.facts.object_hp),
                 ):
-                    if (
-                        definition.capability(capability) is not None
-                        and reader(sid, obj.object_id) is None
-                    ):
+                    if definition.capability(capability) is not None and reader(sid, oid) is None:
                         raise StateMachineError(
                             "incomplete_session", "Instantiated object is missing capability state"
                         )
-        for actor in package.actors:
+        for actor_id in self.facts.instances.scene(sid, scene_id).actor_initial_ids:
+            self.facts.instances.get(sid, "actor", actor_id)
             if (
-                actor.initial_scene_id == scene_id
-                and conn.execute(
-                    "SELECT 1 FROM actors WHERE session_id=? AND actor_id=?", (sid, actor.actor_id)
+                conn.execute(
+                    "SELECT 1 FROM actors WHERE session_id=? AND actor_id=?", (sid, actor_id)
                 ).fetchone()
                 is None
             ):
@@ -91,7 +89,7 @@ class SceneLifecycleService:
                     "incomplete_session", "Instantiated scene is missing an Actor"
                 )
         if (
-            package.scene(scene_id).grid_json is not None
+            self.facts.instances.scene(sid, scene_id).grid_json is not None
             and conn.execute(
                 "SELECT 1 FROM mechanical_scenes WHERE session_id=? AND scene_id=?", (sid, scene_id)
             ).fetchone()

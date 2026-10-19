@@ -1,5 +1,24 @@
 # ContainerService 专项修复
 
+2026-10-20 冻结规则后续：Engine／SRD 同 pin a011eba，容器 require_unbound 的规则素材读取
+共享 WorldHandler 注入的固定对象；实例字段、邻接索引与重量 memo 的权威／生命周期不变。
+回归与当前限制见 [本批记录](INSTANCE_CONFIGURATION_PROGRESS.md)。
+
+## 2026-10-20 内容物索引、候选关系及重量复用
+
+ContainerService._rows 将一次读取的 objects 装配为 ContainmentState；直接子关系只建一次，
+subtree／total_weight／audit／require_unbound 复用，WOS 列表共用同一读取上下文。
+relocate 更新候选邻接关系并清空重量 memo；对象行只读。没有 Service／Store 全局状态缓存，
+拒绝、回滚及新事务不会复用旧结果；objects.container_id 仍唯一权威。
+
+101 节点检查计数 **10201 → 101**；102 节点两层检查 **10404 → 102**。
+同一状态重复遍历不增加扫描／索引构建；子树重量及定义读取每节点一次。
+循环／非容器已有内容物／缺失关系在未知重量下仍拒绝。重量／数量／体积／两层嵌套规则保持。
+实际 SQLite 计划原来选择 Session PK，Schema39 将既有 objects_container 扩展到
+(session_id,container_id,object_id)，支持有序直接内容物读取。
+配置实例闭包、生命周期、事务和最终验证见 [本轮记录](INSTANCE_CONFIGURATION_PROGRESS.md)。
+下文为此前范围修复的历史记录。
+
 基线：`9b35d1949896aad56359ea52b2211cc05c2b709a`，开始时 main 工作区干净。
 交付分支：`codex/container-service-fix`；不合并 main，不修改 RE/SRD pin、GC5 stash 或无关模块。
 仓库（包含隐藏目录，排除依赖与临时工作区）及祖先目录未发现适用 AGENTS.md；

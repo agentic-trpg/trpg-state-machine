@@ -1,5 +1,8 @@
 # W-01 场景生命周期切片进度
 
+2026-10-20：Schema39 保存实例配置；ensure_scene 新建后完成配置装配并清除未实例化预测计划，
+既有实例只读验证；旧库通过显式源校验升级。详见 [当前记录](INSTANCE_CONFIGURATION_PROGRESS.md)。
+
 2026-10-19 后续：[Session Management 批次](SESSION_MANAGEMENT_PROGRESS.md) 整理了创建／
 授权／Runtime 职责，ensure_scene 加入固定 Package 和必要实例结构核对；抽象 NPC 的
 合法移动现在也能在同一操作事务内延迟创建目标，不要求玩家先进入，不增加 PC 访问。

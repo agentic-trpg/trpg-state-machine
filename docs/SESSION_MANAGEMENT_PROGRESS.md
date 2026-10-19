@@ -1,5 +1,15 @@
 # Session Management 重构进度
 
+## 2026-10-20 实例配置与容器索引后续
+
+当前 Schema39；有效对象能力、Scene 配置、NPC senses 和辅助路径已保存并改读 Session；
+旧库通过显式 upgrade_instance_configs 升级，普通读取不补字段。容器操作内复用邻接索引及重量 memo。
+RE Openable 外部阻塞已解除：Engine／SRD 同 pin a011eba，默认／自定义素材在 Runtime 装配时冻结。
+初始化、实际求值、availability、持久绑定校验与恢复共享固定对象，连续运行无全量摘要。
+/36 旧 Session 保留绑定与实例升级，RE /37 下恢复或新求值不匹配时拒绝，不自动重绑。
+字段权威、创建／恢复、Package 审计、候选计数和最终检查见
+[本轮完整记录](INSTANCE_CONFIGURATION_PROGRESS.md)。下文未迁移清单与数字是历史批次快照。
+
 ## 地图运行表示后续批次（2026-10-19）
 
 在当前 `feat/session-management-refactor@a25c35e` 的干净工作区继续，未切 main。

@@ -636,7 +636,7 @@ class PerceptionRuntime:
                 (session_id, observer_id),
             ).fetchone()
             scene_id = actor[0]
-            definition = next(a for a in package.actors if a.actor_id == observer_id)
+            definition = self._world_facts.instances.actor(session_id, observer_id)
             version = self._conn.execute(
                 "SELECT world_version FROM sessions WHERE session_id=?", (session_id,)
             ).fetchone()[0]

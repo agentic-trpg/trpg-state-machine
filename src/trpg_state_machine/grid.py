@@ -269,7 +269,7 @@ class GridReader:
                 "SELECT 1 FROM scene_instances WHERE session_id=? AND scene_id=?", (sid, scene_id)
             ).fetchone()
             # Missing live grid is not permission to reset facts from a template.
-            raw = None if initialized else package.scene(scene_id).grid_json
+            raw = None if initialized else self.facts.instances.scene(sid, scene_id).grid_json
             prepared = None if raw is None else self.maps.template(sid, scene_id, raw)
         if prepared is None:
             raise StateMachineError("spatial_unconfigured", "Fine spatial data is unavailable")
@@ -310,9 +310,9 @@ class GridReader:
                 )
             }
             actors.extend(
-                (a.actor_id, a.initial_cell)
-                for a in package.actors
-                if a.initial_scene_id == scene_id and a.actor_id not in existing
+                (actor_id, cell)
+                for actor_id, cell in self.facts.instances.scene(sid, scene_id).pending_actors
+                if actor_id not in existing
             )
             existing_objects = {
                 r[0]
@@ -322,7 +322,7 @@ class GridReader:
             }
             objects.extend(
                 (o.object_id, o.initial_cell)
-                for o in package.scene(scene_id).objects
+                for o in self.facts.instances.scene(sid, scene_id).objects
                 if o.object_id not in existing_objects
             )
         return sorted(actors), sorted(objects)
@@ -353,7 +353,7 @@ class GridService:
 
     def prepared_package_topology(self, sid, package, scene_id):
         """Authorized Navigation's static map, separate from live Session facts."""
-        raw = package.scene(scene_id).grid_json
+        raw = self.h.facts.instances.scene(sid, scene_id).grid_json
         if raw is None:
             raise StateMachineError("spatial_unconfigured", "Scene has no grid")
         return self.reader.maps.template(sid, scene_id, raw).topology
@@ -420,7 +420,11 @@ class GridService:
             for p in projections.values()
         ):
             raise StateMachineError("invalid_spatial_state", "Current grid placement is incomplete")
-        doors = {p.door_object_id for p in package.passages if p.door_object_id}
+        doors = {
+            p.door_object_id
+            for p in self.h.facts.instances.get(sid, "session", sid)["passages"]
+            if p.door_object_id
+        }
         cells = set(raw["blocked_cells"])
         cells.update(cell for aid, cell in actors if aid != exclude_actor and cell is not None)
         cells.update(
@@ -429,7 +433,7 @@ class GridService:
             if oid != exclude_object and oid not in doors
             for cell in p.movement_blocking_cells
         )
-        for passage in package.passages:
+        for passage in self.h.facts.instances.get(sid, "session", sid)["passages"]:
             if passage.door_object_id and self.h._door_closed(sid, passage, package):
                 cells.update(
                     e.threshold_cell

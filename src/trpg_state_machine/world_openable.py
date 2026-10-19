@@ -40,7 +40,7 @@ class OpenableService:
         position = self.h._actor_position(sid, actor_id)
         if operation.scene_id != position.scene_id:
             raise StateMachineError("invalid_target", "Interaction must be in the actor's scene")
-        definition = self.facts.object_definition(package, operation.object_id)
+        definition = self.facts.object_definition(sid, operation.object_id)
         capability = definition.capability("openable") if definition else None
         if (
             capability
@@ -60,10 +60,10 @@ class OpenableService:
 
     def lock_status(self, sid, object_id, package):
         locked = self.h.facts.door_lock(sid, object_id)
-        definition = self.h.facts.object_definition(package, object_id)
-        configured = any(d.object_id == object_id for d in package.lockable_doors) or bool(
-            definition and definition.capability("locks")
-        )
+        definition = self.h.facts.object_definition(sid, object_id)
+        configured = any(
+            d.object_id == object_id for d in self.facts.instances.legacy_locks(sid)
+        ) or bool(definition and definition.capability("locks"))
         if (locked is not None) != configured:
             raise StateMachineError("invalid_lock_state", "Lock capability contradicts package")
         return locked
@@ -92,7 +92,7 @@ class OpenableService:
         if selected is None:
             raise StateMachineError("invalid_target", "Lock does not belong to object")
         locked = bool(selected[1])
-        definition = self.h.facts.object_definition(package, operation.object_id)
+        definition = self.h.facts.object_definition(row["session_id"], operation.object_id)
         config = definition.capability("locks") if definition else None
         policy = (
             next((lock for lock in config.locks if lock.lock_id == lock_id), None)
@@ -113,8 +113,7 @@ class OpenableService:
             or self.h.facts.placement(sid, operation.credential_instance_id)["carrier_id"]
             != actor_id
             or item["item_json"] is None
-            or operation.credential_instance_id
-            not in {i.instance_id for i in package.portable_items}
+            or not self.facts.instances.is_portable(sid, operation.credential_instance_id)
             or not self.h.facts.item_accessible(sid, operation.credential_instance_id)
             or not self.h.facts.accepts_credential(
                 sid, operation.object_id, operation.credential_instance_id, lock_id
@@ -181,8 +180,8 @@ class OpenableService:
             )
         ]
 
-    def jam_policy(self, package, oid):
-        d = self.facts.object_definition(package, oid)
+    def jam_policy(self, sid, oid):
+        d = self.facts.object_definition(sid, oid)
         c = d.capability("openable") if d else None
         return c.jam_policy if c else "prevent_transitions"
 
@@ -198,12 +197,12 @@ class OpenableService:
             sid,
             operation.object_id,
             operation.state.value,
-            jam_policy=self.jam_policy(package, operation.object_id),
+            jam_policy=self.jam_policy(sid, operation.object_id),
             current_state=(candidates or {}).get(operation.object_id).open_state
             if operation.object_id in (candidates or {})
             else None,
         )
-        if self.h.objects.spatial.config(package, operation.object_id):
+        if self.h.objects.spatial.config(sid, operation.object_id):
             self.h.objects.spatial.check_candidate(
                 sid,
                 operation.object_id,
@@ -261,7 +260,7 @@ class OpenableService:
             sid,
             operation.object_id,
             operation.state.value,
-            jam_policy=self.jam_policy(package, operation.object_id),
+            jam_policy=self.jam_policy(row["session_id"], operation.object_id),
         )
         self.h.objects.spatial.audit(sid, package)
         return [
@@ -286,7 +285,7 @@ class OpenableService:
         self.manual_target(sid, actor_id, operation, package)
         if h._actor_position(sid, actor_id).cell != operation.expected_cell:
             raise StateMachineError("position_conflict", "Actor position changed")
-        definition = self.facts.object_definition(package, operation.object_id)
+        definition = self.facts.object_definition(row["session_id"], operation.object_id)
         c = definition.capability("openable") if definition else None
         if c is None or c.initial_barred is None:
             raise StateMachineError("unsupported_object_capability", "Object has no bar")
@@ -332,7 +331,7 @@ class OpenableService:
             raise StateMachineError("position_conflict", "Interaction position changed")
         if self.facts.object_hp(sid, op.object_id) == 0:
             raise StateMachineError("object_destroyed", "Destroyed object is unusable")
-        d = self.facts.object_definition(package, op.object_id)
+        d = self.facts.object_definition(row["session_id"], op.object_id)
         c = d.capability("openable") if d else None
         if c is None:
             raise StateMachineError("unsupported_object_capability", "No openable definition")

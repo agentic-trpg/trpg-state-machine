@@ -56,7 +56,7 @@ class ObjectDurabilityService:
         ).fetchone()[0]
         if actual != result.expected_world_version:
             raise StateMachineError("version_conflict", "Settlement snapshot is stale")
-        d = h.facts.object_definition(package, result.object_id)
+        d = h.facts.object_definition(row["session_id"], result.object_id)
         capability = d.capability("durability") if d else None
         hp = h.facts.object_hp(result.session_id, result.object_id)
         if capability is None or hp is None:
@@ -67,7 +67,7 @@ class ObjectDurabilityService:
             0 <= result.current_hp <= hp <= capability.max_hp
         ):
             raise StateMachineError("invalid_rule_result", "Invalid damage settlement bounds")
-        if h.objects.spatial.config(package, result.object_id):
+        if h.objects.spatial.config(row["session_id"], result.object_id):
             h.objects.spatial.check_candidate(
                 result.session_id,
                 result.object_id,
@@ -84,7 +84,7 @@ class ObjectDurabilityService:
             (result.session_id, result.resolution_id, encoded),
         )
         h.objects.spatial.audit(result.session_id, package)
-        if package.portable_items:
+        if h.facts.instances.has_portable(row["session_id"]):
             h.characters.sync_world_inventory(result.session_id)
         position = h.facts.object_position(result.session_id, result.object_id)
         events = [

@@ -569,6 +569,7 @@ def test_old_environment_command_fingerprints_omit_new_absent_field(tmp_path, co
 
         raw = asdict(cmd)
         raw.pop("check_world_effects")
+        raw.pop("time_wait")  # The frozen legacy shape predates optional waits.
         raw["payload"]["protection"].pop("precipitation")
         expected = hashlib.sha256(
             canonical_json(

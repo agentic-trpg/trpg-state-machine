@@ -8,8 +8,12 @@ from .errors import StateMachineError
 from .grid import GridService, cell_in_bounds
 
 
-def granted_layout(row, actor, package):
-    knowledge = package.navigation
+def granted_layout(row, actor, package, *, instances=None):
+    knowledge = (
+        package.navigation
+        if instances is None
+        else instances.get(row["session_id"], "session", row["session_id"])["navigation"]
+    )
     if knowledge is None:
         raise StateMachineError(
             "navigation_knowledge_unavailable", "No approved navigation knowledge"
@@ -26,7 +30,8 @@ def granted_layout(row, actor, package):
 
 
 def plan_navigation(row, actor, position, operation, package, *, grid=None):
-    scenes, passage_ids = granted_layout(row, actor, package)
+    instances = grid.h.facts.instances if grid is not None else None
+    scenes, passage_ids = granted_layout(row, actor, package, instances=instances)
     if position.scene_id not in scenes or operation.target_scene_id not in scenes:
         raise StateMachineError(
             "navigation_knowledge_unavailable", "Target is outside approved knowledge"
@@ -47,13 +52,24 @@ def plan_navigation(row, actor, position, operation, package, *, grid=None):
         raise StateMachineError("invalid_spatial_state", "Actor needs a current Cell")
     # Only the approved connection graph and static grids enter this search.
     ports = {}
-    for passage in sorted(package.passages, key=lambda p: p.passage_id):
+    passages = (
+        package.passages
+        if instances is None
+        else instances.get(row["session_id"], "session", row["session_id"])["passages"]
+    )
+    for passage in sorted(passages, key=lambda p: p.passage_id):
         if passage.passage_id not in passage_ids:
             continue
         for endpoint in passage.endpoints:
             other = next(e for e in passage.endpoints if e.scene_id != endpoint.scene_id)
             if (
-                dict(package.scene(endpoint.scene_id).exit_passages).get(other.scene_id)
+                dict(
+                    (
+                        package.scene(endpoint.scene_id)
+                        if instances is None
+                        else instances.scene(row["session_id"], endpoint.scene_id)
+                    ).exit_passages
+                ).get(other.scene_id)
                 == passage.passage_id
             ):
                 ports.setdefault(endpoint.scene_id, []).append((passage, endpoint, other))

@@ -1,10 +1,56 @@
 """Bounded containment; parent links own location and inventory is a projection."""
 
 import json
+from collections.abc import Mapping
 from dataclasses import asdict
+from types import MappingProxyType
 
 from .errors import StateMachineError
 from .world_commands import PutItem, TakeItem
+
+
+class ContainmentState(Mapping):
+    """One detached state, adjacency index and memo; owned by a single operation.
+
+    Rows cannot change behind the index. relocate updates the candidate index and
+    expires all state-dependent weights. Nothing is published to a service/cache.
+    """
+
+    def __init__(self, rows):
+        self._rows, self.children = {}, {}
+        for r in rows.values():
+            oid = r["object_id"]
+            self._rows[oid] = MappingProxyType(dict(r))
+            self.children.setdefault(r["container_id"], []).append(oid)
+        self.weights = {}
+        self.definitions = {}
+
+    def __getitem__(self, key):
+        return self._rows[key]
+
+    def __iter__(self):
+        return iter(self._rows)
+
+    def __len__(self):
+        return len(self._rows)
+
+    def contents(self, oid):
+        return tuple(self._rows[i] for i in self.children.get(oid, ()))
+
+    def relocate(self, oid, **changes):
+        before = self._rows[oid]
+        after = {**before, **changes}
+        old, new = before["container_id"], after["container_id"]
+        if old != new:
+            self.children[old].remove(oid)
+            self.children.setdefault(new, []).append(oid)
+        self._rows[oid] = MappingProxyType(after)
+        self.weights.clear()
+
+    def definition(self, facts, oid):
+        if oid not in self.definitions:
+            self.definitions[oid] = facts.object_definition(self[oid]["session_id"], oid)
+        return self.definitions[oid]
 
 
 class ContainerService:
@@ -32,12 +78,12 @@ class ContainerService:
             h.objects.spatial.contact_cell(sid, actor, root, package)
         return obj
 
-    def config(self, package, oid):
-        d = self.facts.object_definition(package, oid)
+    def config(self, sid, oid):
+        d = self.facts.object_definition(sid, oid)
         return d.capability("container") if d else None
 
     def require_contents_access(self, sid, oid, package):
-        c = self.config(package, oid)
+        c = self.config(sid, oid)
         if c is None:
             raise StateMachineError(
                 "unsupported_object_capability", "Object has no container capability"
@@ -47,25 +93,36 @@ class ContainerService:
         return c
 
     def _rows(self, sid):
-        return {
-            r["object_id"]: dict(r)
-            for r in self.h._conn.execute("SELECT * FROM objects WHERE session_id=?", (sid,))
-        }
+        return ContainmentState(
+            {
+                r["object_id"]: dict(r)
+                for r in self.h._conn.execute("SELECT * FROM objects WHERE session_id=?", (sid,))
+            }
+        )
+
+    @staticmethod
+    def prepare(rows):
+        return rows if isinstance(rows, ContainmentState) else ContainmentState(rows)
 
     def total_weight(self, oid, rows, package, *, path=frozenset()):
-        if oid in path or oid not in rows:
+        state = self.prepare(rows)
+        return self._weight(oid, state, path)
+
+    def _weight(self, oid, state, path):
+        if oid in path or oid not in state:
             raise StateMachineError("container_cycle", "Invalid parent relation")
-        d = self.facts.object_definition(package, oid)
-        if d is None or d.weight_lb is None:
-            return None
-        data = json.loads(rows[oid]["item_json"]) if rows[oid]["item_json"] else {}
-        total = d.weight_lb * data.get("quantity", 1)
-        for child in rows.values():
-            if child["container_id"] == oid:
-                weight = self.total_weight(child["object_id"], rows, package, path=path | {oid})
-                if weight is None:
-                    return None
-                total += weight
+        if oid in state.weights:
+            return state.weights[oid]
+        d = state.definition(self.facts, oid)
+        children = state.contents(oid)
+        if children and (d is None or d.capability("container") is None):
+            raise StateMachineError("unsupported_object_capability", "Parent is not a container")
+        data = json.loads(state[oid]["item_json"]) if state[oid]["item_json"] else {}
+        total = None if d is None or d.weight_lb is None else d.weight_lb * data.get("quantity", 1)
+        for child in children:
+            weight = self._weight(child["object_id"], state, path | {oid})
+            total = None if total is None or weight is None else total + weight
+        state.weights[oid] = total
         return total
 
     def ancestry(self, oid, rows):
@@ -79,29 +136,33 @@ class ContainerService:
         return parents
 
     def subtree(self, oid, rows):
+        rows = self.prepare(rows)
         affected, pending = set(), [oid]
         while pending:
             current = pending.pop()
-            if current in affected:
+            if current in affected or current not in rows:
                 raise StateMachineError("container_cycle", "Invalid parent relation")
             affected.add(current)
-            pending.extend(r["object_id"] for r in rows.values() if r["container_id"] == current)
+            pending.extend(r["object_id"] for r in rows.contents(current))
         return affected
 
     def audit(self, rows, package, *, affected=None):
         """Global diagnostic by default; command admission passes its dependency scope."""
+        rows = self.prepare(rows)
         selected = rows.keys() if affected is None else sorted(affected)
         for oid in selected:
             parents = self.ancestry(oid, rows)
             configs = []
             for parent in parents:
-                config = self.config(package, parent)
+                d = rows.definition(self.facts, parent)
+                config = d.capability("container") if d else None
                 if config is None:
                     raise StateMachineError(
                         "unsupported_object_capability", "Parent is not a container"
                     )
                 configs.append(config)
-            if own := self.config(package, oid):
+            d = rows.definition(self.facts, oid)
+            if own := d.capability("container") if d else None:
                 configs.append(own)
             # Count containers, including a moved container itself, never ordinary items.
             if len(configs) > 2:
@@ -109,13 +170,18 @@ class ContainerService:
                     "container_nesting_limit", "Containment exceeds two container levels"
                 )
         for oid in selected:
-            c = self.config(package, oid)
+            d = rows.definition(self.facts, oid)
+            c = d.capability("container") if d else None
+            contents = rows.contents(oid)
             if c is None:
+                if contents:
+                    raise StateMachineError(
+                        "unsupported_object_capability", "Parent is not a container"
+                    )
                 continue
-            contents = [r for r in rows.values() if r["container_id"] == oid]
             weights, volumes = [], []
             for item in contents:
-                d = self.facts.object_definition(package, item["object_id"])
+                d = rows.definition(self.facts, item["object_id"])
                 if d is None or d.fit_profile is None or d.content_kind is None:
                     raise StateMachineError(
                         "unknown_item_fit", "Explicit fit/content metadata required"
@@ -207,9 +273,7 @@ class ContainerService:
         item = self.reachable(sid, actor, op.instance_id, package)
         self.reachable(sid, actor, op.container_id, package)
         self.require_contents_access(sid, op.container_id, package)
-        if item["item_json"] is None or op.instance_id not in {
-            i.instance_id for i in package.portable_items
-        }:
+        if not self.facts.instances.is_portable(sid, op.instance_id):
             raise StateMachineError(
                 "unsupported_object_capability", "Only approved portable instances"
             )
@@ -219,7 +283,8 @@ class ContainerService:
         moved = self.subtree(op.instance_id, candidate)
         affected = moved | set(self.ancestry(op.instance_id, candidate))
         self.require_unbound(sid, actor, op.instance_id, rows=candidate, affected=moved)
-        candidate[op.instance_id].update(
+        candidate.relocate(
+            op.instance_id,
             carrier_id=actor if type(op) is TakeItem else None,
             container_id=op.container_id if type(op) is PutItem else None,
             scene_id=None,

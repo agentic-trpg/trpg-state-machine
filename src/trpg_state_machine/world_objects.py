@@ -117,9 +117,9 @@ class WorldObjectService:
             raise StateMachineError("invalid_target", "No authorized local object")
         return obj
 
-    def view(self, sid, actor_id, oid, package):
+    def view(self, sid, actor_id, oid, package, *, containment=None):
         obj = self._visible(sid, actor_id, oid, package)
-        definition = self.facts.object_definition(package, oid)
+        definition = self.facts.object_definition(sid, oid)
         config = (
             asdict(definition)
             if definition
@@ -165,16 +165,19 @@ class WorldObjectService:
                 available[name] = True
             except StateMachineError:
                 available[name] = False
-        contents_visible = self.containers.config(
-            package, oid
-        ) and self.openable.contents_accessible(sid, oid)
+        contents_visible = self.containers.config(sid, oid) and self.openable.contents_accessible(
+            sid, oid
+        )
+        if contents_visible:
+            containment = containment if containment is not None else self.containers._rows(sid)
         total_weight = (
-            self.containers.total_weight(oid, self.containers._rows(sid), package)
-            if contents_visible
-            else None
+            self.containers.total_weight(oid, containment, package) if contents_visible else None
         )
         return {
-            "contents": tuple(c["object_id"] for c in self.facts.contents(sid, oid))
+            "contents": tuple(
+                c["object_id"]
+                for c in sorted(containment.contents(oid), key=lambda r: r["object_id"])
+            )
             if contents_visible
             else None,
             "contents_weight_lb": total_weight - definition.weight_lb
@@ -187,10 +190,10 @@ class WorldObjectService:
             "mechanism_state": asdict(self.facts.mechanism_state(sid, oid))
             if self.facts.mechanism_state(sid, oid)
             else None,
-            "linked_result_preview": "hidden" if self.mechanisms.config(package, oid) else None,
+            "linked_result_preview": "hidden" if self.mechanisms.config(sid, oid) else None,
             "light": self.facts.light_state(sid, oid),
-            "spatial": asdict(self.spatial.config(package, oid))
-            if self.spatial.config(package, oid)
+            "spatial": asdict(self.spatial.config(sid, oid))
+            if self.spatial.config(sid, oid)
             else None,
             "orientation": obj["orientation"],
             "occupied_cells": projection.occupied_cells,
@@ -231,11 +234,14 @@ class WorldObjectService:
         with h._transaction():
             h._spatial_reader(sid, actor_id, package, context)
             result = []
+            containment = self.containers._rows(sid)
             for obj in h._conn.execute(
                 "SELECT object_id FROM objects WHERE session_id=? ORDER BY object_id", (sid,)
             ):
                 try:
-                    result.append(self.view(sid, actor_id, obj[0], package))
+                    result.append(
+                        self.view(sid, actor_id, obj[0], package, containment=containment)
+                    )
                 except StateMachineError as exc:
                     if exc.code != "invalid_target":
                         raise

@@ -16,7 +16,7 @@ from trpg_state_machine.storage import SqliteStore
 
 def components(path, loader=None):
     """Explicit test wiring, deliberately never imports/constructs StateMachine."""
-    from dnd5e_srd_data import BundledAssetLoader
+    from dnd5e_engine.evaluation_ruleset import freeze_ruleset, get_default_ruleset
 
     from trpg_state_machine.combat_handler import CombatHandler
     from trpg_state_machine.domain_facts import CharacterFacts, CombatRecords, WorldFacts
@@ -28,14 +28,17 @@ def components(path, loader=None):
     from trpg_state_machine.session_access import SessionAccess
     from trpg_state_machine.spatial import WorldHandler
 
+    loader = get_default_ruleset() if loader is None else freeze_ruleset(loader)
     store = SqliteStore(path)
     sessions = SessionAccess(store)
     facts, records = WorldFacts(store), CombatRecords(store)
     characters = CharacterFacts(store, facts)
     capture, persistence = EventCapture(store, characters, facts), EventPersistence(store)
-    world = WorldHandler(store, sessions, characters, facts, records, capture, NPCBootstrap(store))
+    world = WorldHandler(
+        store, sessions, characters, facts, records, capture, NPCBootstrap(store), loader=loader
+    )
     effects = PackageEffects(store, world, capture)
-    rules = RulesAdapter(store, loader or BundledAssetLoader(), characters, facts, records, world)
+    rules = RulesAdapter(store, loader, characters, facts, records, world)
     combat = CombatHandler(
         store, sessions, characters, facts, records, world, rules, capture, effects, persistence
     )

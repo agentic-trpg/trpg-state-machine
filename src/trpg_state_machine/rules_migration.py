@@ -4,7 +4,7 @@ import copy
 
 from dnd5e_engine.evaluation_migration import migrate_snapshot_16
 from dnd5e_engine.evaluation_rng import RNGState
-from dnd5e_engine.evaluation_ruleset import RulesetBinding, ruleset_binding
+from dnd5e_engine.evaluation_ruleset import RulesetBinding, freeze_ruleset, ruleset_binding
 
 from .errors import StateMachineError
 from .package import _validate, canonical_json
@@ -18,6 +18,7 @@ def migrate_package_16(data, *, loader, package_version):
     """
     value = copy.deepcopy(data)
     try:
+        loader = freeze_ruleset(loader)
         source = RulesetBinding.model_validate(value["manifest"]["ruleset_binding"])
         if package_version == value["manifest"]["package_version"]:
             raise ValueError("migration requires a new Package version")

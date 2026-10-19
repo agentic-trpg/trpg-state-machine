@@ -154,7 +154,7 @@ class EnvironmentService:
             self.h._session(sid, package, context)
             if not context.can_manage_environment:
                 raise StateMachineError("unauthorized", "Environment management grant required")
-            for scene in package.scenes:
+            for scene in self.h.facts.instances.scenes(sid):
                 for role, provider in (
                     ("effects", self.effects_provider),
                     ("protection", self.h.objects.spatial.protection_provider),
@@ -227,7 +227,7 @@ class EnvironmentService:
     def _area(self, sid, scene_id, area, package, *, query=False):
         if type(area) is not EnvironmentArea:
             invalid("Expected typed area")
-        if scene_id not in {s.scene_id for s in package.scenes}:
+        if scene_id not in {s.scene_id for s in self.h.facts.instances.scenes(sid)}:
             raise StateMachineError("invalid_target", "Unknown environment Scene")
         if area.cells:
             topology = self.h.grid.reader.prepared_scene(sid, scene_id, package).topology

@@ -99,7 +99,7 @@ def assert_preserved(database, original):
         for table, (columns, rows) in original.items():
             after = set(conn.execute(f"SELECT {','.join(columns)} FROM {table}").fetchall())
             assert rows <= after, table
-        assert conn.execute("PRAGMA user_version").fetchone()[0] == 38
+        assert conn.execute("PRAGMA user_version").fetchone()[0] == 39
         assert conn.execute("PRAGMA integrity_check").fetchone()[0] == "ok"
         assert conn.execute("PRAGMA foreign_key_check").fetchall() == []
 
@@ -122,6 +122,7 @@ def test_actual_old_runtime_upgrade_preserves_authority_and_audits_history(
     original = stored_rows(database)
     with StateMachine(database) as sm:
         for sid in sessions:
+            sm.upgrade_instance_configs(sid, package, context=context)
             snapshot = sm.resume_session(sid, package, context=context)
             assert snapshot.package_digest == package.package_digest
             assert snapshot.ruleset_binding == package.ruleset_binding
@@ -132,7 +133,9 @@ def test_actual_old_runtime_upgrade_preserves_authority_and_audits_history(
                 sm.project_event(sid, 1, package, context=context, judgment=synthetic_notice)
                 == "legacy_unavailable"
             )
+        sm.upgrade_instance_configs(sessions[0], package, context=context)
         assert sm.resume_session(sessions[0], package, context=context).world_version == 3
+        sm.upgrade_instance_configs(sessions[1], package, context=context)
         assert sm.resume_session(sessions[1], package, context=context).world_version == 0
         assert (
             sm._conn.execute("SELECT count(*) FROM legacy_perception_boundaries").fetchone()[0] == 2
@@ -185,6 +188,7 @@ def test_real_schema4_nonzero_rng_and_mechanical_receipt_survive_upgrade(
     database, sessions = historical_database(tmp_path, 4, tmp_path / "mechanics.yaml")
     original = stored_rows(database)
     with StateMachine(database) as sm:
+        sm.upgrade_instance_configs(sessions[0], package, context=context)
         snapshot = sm.resume_session(sessions[0], package, context=context)
         assert snapshot.world_version == 4
         assert snapshot.rng.position == snapshot.rng.rng_version == 1
@@ -214,6 +218,7 @@ def test_legacy_boundary_allows_same_session_new_observations_but_holds_new_gaps
     original = stored_rows(database)
     with StateMachine(database) as sm:
         sid, other = sessions
+        sm.upgrade_instance_configs(sid, package, context=context)
         before = sm.resume_session(sid, package, context=context)
         boundary = before.event_seq
         sm.grant_npc_access(sid, "npc.caretaker", "npc.agent", package, context=context)
@@ -315,7 +320,7 @@ def test_concurrent_initialization_and_upgrade(tmp_path, version, monkeypatch):
             )
 
     with ThreadPoolExecutor(max_workers=4) as workers:
-        assert list(workers.map(open_runtime, range(4))) == [(38, 1, "wal")] * 4
+        assert list(workers.map(open_runtime, range(4))) == [(39, 1, "wal")] * 4
     assert len(version_reads) >= 4 and all(version_reads)
     monkeypatch.undo()
     assert_preserved(database, original)

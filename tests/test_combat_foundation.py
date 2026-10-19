@@ -133,6 +133,7 @@ def test_combat_migration_preserves_real_old_database(tmp_path, package, context
     before = stored_rows(db)
     with StateMachine(db) as sm:
         for sid in sessions:
+            sm.upgrade_instance_configs(sid, package, context=context)
             assert sm.resume_session(sid, package, context=context).session_id == sid
         assert sm._conn.execute("SELECT count(*) FROM combats").fetchone()[0] == 0
     assert_preserved(db, before)

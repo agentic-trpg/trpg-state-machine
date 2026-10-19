@@ -156,7 +156,9 @@ class ActivityHandler:
             return self._finish(record, package, "blocked", NavigationResult(code), command_id)
 
     def _check_plan_position(self, record, package, row):
-        scenes, passages = granted_layout(row, record["actor_id"], package)
+        scenes, passages = granted_layout(
+            row, record["actor_id"], package, instances=self.world.facts.instances
+        )
         plan = json.loads(record["plan_json"])
         if record["cursor"] < len(plan):
             step = plan[record["cursor"]]
@@ -179,7 +181,13 @@ class ActivityHandler:
         data = {k: v for k, v in step.items() if k != "kind"}
         if step["kind"] == "step":
             return StepActor(**data), True
-        passage = next(p for p in package.passages if p.passage_id == step["passage_id"])
+        passage = next(
+            p
+            for p in self.world.facts.instances.get(
+                record["session_id"], "session", record["session_id"]
+            )["passages"]
+            if p.passage_id == step["passage_id"]
+        )
         if passage.door_object_id and self.world._door_closed(
             record["session_id"], passage, package
         ):

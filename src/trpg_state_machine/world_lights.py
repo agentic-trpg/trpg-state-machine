@@ -13,15 +13,15 @@ class LightService:
     def __init__(self, handler):
         self.h = handler
 
-    def config(self, package, oid):
-        d = self.h.facts.object_definition(package, oid)
+    def config(self, sid, oid):
+        d = self.h.facts.object_definition(sid, oid)
         return d.capability("light") if d else None
 
     def sources(self, sid, scene, package):
         result = []
         for light in self.h._conn.execute("SELECT * FROM object_lights WHERE session_id=?", (sid,)):
             oid = light["object_id"]
-            c = self.config(package, oid)
+            c = self.config(sid, oid)
             if not light["enabled"] or self.h.facts.object_hp(sid, oid) == 0:
                 continue
             location = self.h.facts.placement(sid, oid)
@@ -29,7 +29,7 @@ class LightService:
                 continue
             transmission = "transmit"
             for parent in location["ancestry"]:
-                config = self.h.objects.containers.config(package, parent)
+                config = self.h.objects.containers.config(sid, parent)
                 obj = self.h.facts.object(sid, parent)
                 if self.h.facts.object_hp(sid, parent) == 0:
                     continue  # The supported destroyed shell no longer encloses light.
@@ -64,12 +64,12 @@ class LightService:
         if not sources:
             return grid, (), {}
         candidates = self.h.objects.spatial.movement_cells(sid, scene, package)
-        legacy = {o.object_id: o for s in package.scenes for o in s.objects}
+        legacy = {o.object_id: o for s in self.h.facts.instances.scenes(sid) for o in s.objects}
         _, actual = self.h.grid.reader.scene_occupants(sid, scene, package)
         candidates.update(
             cell for oid, cell in actual if legacy[oid].blocks_passage and cell is not None
         )
-        for passage in package.passages:
+        for passage in self.h.facts.instances.get(sid, "session", sid)["passages"]:
             if passage.door_object_id and self.h._door_closed(sid, passage, package):
                 candidates.update(
                     e.threshold_cell for e in passage.endpoints if e.scene_id == scene
@@ -126,7 +126,7 @@ class LightService:
         if (position.scene_id, position.cell) != (op.scene_id, op.expected_cell):
             raise StateMachineError("position_conflict", "Actor position changed")
         h.objects.containers.reachable(sid, actor, op.object_id, package)
-        c = self.config(package, op.object_id)
+        c = self.config(row["session_id"], op.object_id)
         if c is None:
             raise StateMachineError(
                 "unsupported_object_capability", "Object has no light capability"
@@ -144,7 +144,7 @@ class LightService:
             h.objects.mechanisms.qualify_link(
                 sid, origin, op.object_id, "set_light_enabled", op.enabled, package
             )
-        c = self.config(package, op.object_id)
+        c = self.config(row["session_id"], op.object_id)
         if c is None or h.facts.object_hp(sid, op.object_id) == 0:
             raise StateMachineError("unsupported_object_capability", "Emitter unavailable")
         old = h.facts.light_state(sid, op.object_id)

@@ -834,7 +834,7 @@ def test_real_cross_session_actor_reference_is_rejected_before_receipt(tmp_path,
     "fault", [None, "CREATE TABLE objects_gc3", "DROP TABLE objects", "PRAGMA user_version = 24"]
 )
 def test_genuine_schema23_upgrade_is_atomic_preserves_all_history_and_adds_no_capabilities(
-    tmp_path, context, monkeypatch, fault
+    tmp_path, context, monkeypatch, fault, pre_frozen_python
 ):
     root = Path(__file__).parents[1]
     archive = subprocess.run(
@@ -854,7 +854,7 @@ def test_genuine_schema23_upgrade_is_atomic_preserves_all_history_and_adds_no_ca
     db = tmp_path / "old.db"
     worker = subprocess.run(
         [
-            sys.executable,
+            str(pre_frozen_python),
             str(root / "tests/_item_legacy_worker.py"),
             str(source),
             str(db),
@@ -885,7 +885,7 @@ def test_genuine_schema23_upgrade_is_atomic_preserves_all_history_and_adds_no_ca
         assert stored_rows(db) == before
     package = load_adventure_package(document).package
     with StateMachine(db, dnd_loader=item_loader()) as sm:
-        assert sm._conn.execute("PRAGMA user_version").fetchone()[0] == 38
+        assert sm._conn.execute("PRAGMA user_version").fetchone()[0] == 39
         assert_original_rows_equal(before, stored_rows(db))
         assert (
             sm._conn.execute(
@@ -893,8 +893,12 @@ def test_genuine_schema23_upgrade_is_atomic_preserves_all_history_and_adds_no_ca
             ).fetchone()[0]
             == 0
         )
+        sm.upgrade_instance_configs(old["sid"], package, context=context)
+        with pytest.raises(StateMachineError) as error:
+            sm.resume_session(old["sid"], package, context=context)
+        assert error.value.code == "ruleset_binding_mismatch"
         assert (
-            sm.resume_session(old["sid"], package, context=context).package_digest
+            sm.read_session(old["sid"], package, context=context).package_digest
             == package.package_digest
         )
         assert sm._conn.execute("PRAGMA foreign_key_check").fetchall() == []

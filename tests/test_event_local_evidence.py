@@ -731,6 +731,7 @@ with StateMachine(sys.argv[1]) as sm:
     assert_original_rows_equal(before, after, excluded=("event_outbox",))
     with StateMachine(db) as sm:
         assert sm.project_event(pending, 1, package, context=context) == "resolved"
+        sm.upgrade_instance_configs(pending, package, context=context)
         enter(sm, pending, package, context, B, "new-world")
         assert evidence(db, pending, 4)["schema"] == "event-evidence/4"
         assert (
@@ -747,7 +748,7 @@ with StateMachine(sys.argv[1]) as sm:
         for sid in (complete, pending):
             assert evidence(db, sid, 2) == samples[sid]
     with sqlite3.connect(db) as conn:
-        assert conn.execute("PRAGMA user_version").fetchone()[0] == 38
+        assert conn.execute("PRAGMA user_version").fetchone()[0] == 39
         assert conn.execute("PRAGMA foreign_key_check").fetchall() == []
         assert conn.execute("SELECT session_id FROM event_observations").fetchall() == [(complete,)]
 
