@@ -28,6 +28,14 @@ RF-1 将现有世界交互和战斗编排改为显式组件组合，角色、世
 实现。字段责任与提交链见 [RF-1 设计](docs/RF1_DOMAIN_RUNTIME.md)，实际验证见
 [RF-1 Review](docs/reviews/RF1_DOMAIN_RUNTIME_REVIEW.md)。
 
+## 架构与运行契约核对（2026-10-20）
+
+当前 main 源码、Full Audit／局部准入／查询分类和待重构调用链见
+[Runtime validation scope review](docs/reviews/RUNTIME_VALIDATION_SCOPE_REVIEW.md)。
+共同规范以 sibling `agentic-trpg/docs/MODULE_CONTRACTS.md` §2.3、§6.5–§6.6 为准，
+现有接口／目标差异索引在 §1.6；开发入口为 [AGENTS.md](AGENTS.md)。
+本次对齐只修改文档，静态证据不是本次运行测试或性能修复。
+
 ## SceneLifecycleService：场景生命周期提取
 
 `sm.scene_lifecycle` 与 `WorldHandler.scenes` 引用同一组件，协调幂等初始化、
@@ -42,7 +50,7 @@ WorldHandler 保留移动合法性与其他世界业务。仅 W-01 的生命周�
 
 WorldHandler 的 GridService 统一网格读取、当前实体占格与 OSS 空间贡献、距离／邻接／范围
 候选及基础通行几何，复用 RE 公开接口。占用、移动阻挡、困难地形、视觉遮挡和掩护保持
-区分；查询使用一个读取事务或当前操作事务，没有位置副本和缓存。原探索、交互、导航、
+区分；查询使用一个读取事务或当前操作事务，没有位置副本。静态地图／基础拓扑已有 Store-local 有界复用；动态占用仍按当前事实组合，不能据此宣称局部 SQL 已实现。原探索、交互、导航、
 Light／Environment 调用点已迁移，原地图授权与 Combat guard 保留。
 
 角色目前只表示单锚点；动态视觉阻挡组合显式 unsupported，不能宣称完整动态 LoS 或战斗

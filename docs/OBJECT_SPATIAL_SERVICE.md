@@ -21,7 +21,7 @@ WorldObjectService（WOS）组合 OSS、Openable、Container、Mechanism、Light
 | 数据 | 权威／读取方式 |
 |---|---|
 | 物体位置和朝向 | WorldFacts 的 `objects.scene_id/cell/orientation`；未初始化场景只读 Package 初始事实，已有实例不回退模板 |
-| 原空间能力 | Package spatial 配置；开合／耐久策略沿既有明确的属性选择规则读取 |
+| 原空间能力 | Schema39 的持久实例有效 Spatial 配置；开合／耐久策略组合所属当前状态，已存在实例不回查 Package 补字段 |
 | 挡雨／挡风当前属性 | WO 侧提供 `CurrentProtectionProperties`，通过显式参数或 `CurrentProtectionProvider` 只读取得 |
 | 物体基准高度 | 当前属性的 `base_height_ft`，相对场景统一高度基准，不能从 Cell、地面或 HP 猜测 |
 | 天气／风向 | 调用方传入 `wind_from`；OSS 不保存或生成天气 |
@@ -270,3 +270,8 @@ repeatable/lifecycle/automatic extension and its OPEN dependencies are documente
 in [MechanismService contract](MECHANISM_SERVICE.md) and
 [progress](MECHANISM_SERVICE_PROGRESS.md). W-02, SA-01 and other component work
 are not closed. No main merge is implied.
+
+
+## 2026-10-20 当前实例与校验范围
+
+当前 main 的对象配置取 WorldFacts.instances；显式初建／升级与旧库策略见 [实例配置记录](INSTANCE_CONFIGURATION_PROGRESS.md)。check_candidate 仍调用全场景 _check_scene，operate 仍调用全 Session audit；不因名称含 candidate 就视为局部准入已完成。完整调用链及后续等价替代要求见 [校验范围审查](reviews/RUNTIME_VALIDATION_SCOPE_REVIEW.md)，共同规范引用 MC §2.3、§6.5–§6.6。WO 动态防护生产提供方仍未全面接线。
