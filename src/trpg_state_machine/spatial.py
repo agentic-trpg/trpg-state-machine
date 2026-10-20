@@ -283,7 +283,7 @@ class WorldHandler:
         self._visible_target(sid, actor_id, operation.to_cell, package)
         handled_thresholds = {
             (p.passage_id, e.threshold_cell)
-            for p in self.facts.instances.session_value(sid, "passages")
+            for p in self.facts.instances.passages(sid, scene_id=position.scene_id)
             for e in p.endpoints
             if e.scene_id == position.scene_id
             and e.standing_cell == position.cell
@@ -494,7 +494,7 @@ class WorldHandler:
     def _door_ports(self, scene_id, object_id, package, *, sid):
         return tuple(
             (p, e)
-            for p in self.facts.instances.session_value(sid, "passages")
+            for p in self.facts.instances.passages(sid, scene_id=scene_id, object_id=object_id)
             if p.door_object_id == object_id
             for e in p.endpoints
             if e.scene_id == scene_id
@@ -561,7 +561,7 @@ class WorldHandler:
 
     def _validate_door_occupancy(self, sid, operation, package):
         if operation.state.value == "closed":
-            for passage in self.facts.instances.session_value(sid, "passages"):
+            for passage in self.facts.instances.passages(sid, object_id=operation.object_id):
                 if passage.door_object_id == operation.object_id:
                     for endpoint in passage.endpoints:
                         occupied = self._conn.execute(
@@ -614,7 +614,7 @@ class WorldHandler:
         if not pid or passage_id is not None and passage_id != pid:
             raise StateMachineError("scene_unreachable", "No authorized spatial passage")
         passage = next(
-            p for p in self.facts.instances.session_value(sid, "passages") if p.passage_id == pid
+            p for p in self.facts.instances.passages(sid, passage_id=pid) if p.passage_id == pid
         )
         a = next(e for e in passage.endpoints if e.scene_id == source.scene_id)
         b = next(e for e in passage.endpoints if e.scene_id == target.scene_id)
@@ -670,7 +670,9 @@ class WorldHandler:
             passage = next(
                 (
                     p
-                    for p in self.facts.instances.session_value(row["session_id"], "passages")
+                    for p in self.facts.instances.passages(
+                        row["session_id"], passage_id=operation.passage_id
+                    )
                     if p.passage_id == operation.passage_id
                 ),
                 None,
@@ -774,7 +776,7 @@ class WorldHandler:
                 for target, pid in self.facts.instances.scene(
                     session_id, position.scene_id
                 ).exit_passages
-                for p in self.facts.instances.session_value(session_id, "passages")
+                for p in self.facts.instances.passages(session_id, scene_id=position.scene_id)
                 if p.passage_id == pid
                 for e in p.endpoints
                 if e.scene_id == position.scene_id
@@ -792,7 +794,7 @@ class WorldHandler:
                     e.threshold_cell,
                     self.objects.openable.lock_status(session_id, p.door_object_id, package),
                 )
-                for p in self.facts.instances.session_value(session_id, "passages")
+                for p in self.facts.instances.passages(session_id, scene_id=position.scene_id)
                 if p.door_object_id
                 for e in p.endpoints
                 if e.scene_id == position.scene_id
@@ -883,7 +885,7 @@ class WorldHandler:
                 "unsupported_combat_dynamic_obstacles",
                 "Movement-only objects cannot be represented by the pinned combat evaluator",
             )
-        for passage in self.facts.instances.session_value(sid, "passages"):
+        for passage in self.facts.instances.passages(sid, scene_id=scene_id):
             if scene_id not in {e.scene_id for e in passage.endpoints}:
                 continue
             if passage.door_object_id and self._door_closed(sid, passage, package):

@@ -183,7 +183,9 @@ class ActivityHandler:
             return StepActor(**data), True
         passage = next(
             p
-            for p in self.world.facts.instances.session_value(record["session_id"], "passages")
+            for p in self.world.facts.instances.passages(
+                record["session_id"], passage_id=step["passage_id"]
+            )
             if p.passage_id == step["passage_id"]
         )
         if passage.door_object_id and self.world._door_closed(

@@ -79,7 +79,7 @@ class LightService:
             for oid, cell in actual
             if cell is not None and self.h.facts.instances.legacy_object(sid, oid).blocks_passage
         )
-        for passage in self.h.facts.instances.session_value(sid, "passages"):
+        for passage in self.h.facts.instances.passages(sid, scene_id=scene):
             if passage.door_object_id and self.h._door_closed(sid, passage, package):
                 candidates.update(
                     e.threshold_cell for e in passage.endpoints if e.scene_id == scene

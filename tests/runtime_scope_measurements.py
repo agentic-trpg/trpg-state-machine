@@ -15,7 +15,7 @@ from lock_support import CRED, A
 from test_lockable_passages import acquire
 from test_mechanism_service import ordered_data
 from test_object_spatial_service import OBSTACLE, oriented_data
-from test_scoped_runtime_validation import grow, measure
+from test_scoped_runtime_validation import grow, grow_scenes, measure
 from test_world_containers import BOX, container_data
 from test_world_lights import lighting_data
 from test_world_mechanisms import LEVER
@@ -52,6 +52,7 @@ with sm:
     for n in (0, 100):
         if n:
             grow(sm, sid, n)
+            grow_scenes(sm, sid, 20)
         sm._world_facts.maps.clear()
         builds.clear()
         with measure(sm) as (counts, sql):

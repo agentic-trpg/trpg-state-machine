@@ -187,7 +187,7 @@ class ObjectSpatialService:
         obj = self.h.facts.object(sid, oid)
         reason = None
         if any(
-            p.door_object_id == oid for p in self.h.facts.instances.session_value(sid, "passages")
+            p.door_object_id == oid for p in self.h.facts.instances.passages(sid, object_id=oid)
         ):
             reason = "shared_door_protection_geometry_unsupported"
         elif obj is not None and (obj["carrier_id"] is not None or obj["container_id"] is not None):
@@ -241,7 +241,7 @@ class ObjectSpatialService:
         _, objects = self.h.grid.reader.scene_occupants(sid, scene_id, package)
         doors = {
             p.door_object_id
-            for p in self.h.facts.instances.session_value(sid, "passages")
+            for p in self.h.facts.instances.passages(sid, scene_id=scene_id)
             if p.door_object_id and any(e.scene_id == scene_id for e in p.endpoints)
         }
         return SceneProtectionInputs(
@@ -364,7 +364,7 @@ class ObjectSpatialService:
         cells = set()
         doors = {
             p.door_object_id
-            for p in self.h.facts.instances.session_value(sid, "passages")
+            for p in self.h.facts.instances.passages(sid, scene_id=scene_id)
             if p.door_object_id
         }
         _, objects = self.h.grid.reader.scene_occupants(sid, scene_id, package)
@@ -383,7 +383,7 @@ class ObjectSpatialService:
         _, objects = self.h.grid.reader.scene_occupants(sid, scene_id, package)
         local_doors = {
             p.door_object_id
-            for p in self.h.facts.instances.session_value(sid, "passages")
+            for p in self.h.facts.instances.passages(sid, scene_id=scene_id)
             if p.door_object_id and any(e.scene_id == scene_id for e in p.endpoints)
         }
         result = {}
@@ -425,12 +425,12 @@ class ObjectSpatialService:
         blocking = set()
         doors = {
             p.door_object_id
-            for p in self.h.facts.instances.session_value(sid, "passages")
+            for p in self.h.facts.instances.passages(sid, scene_id=scene_id)
             if p.door_object_id
         }
         reserved = {
             cell
-            for p in self.h.facts.instances.session_value(sid, "passages")
+            for p in self.h.facts.instances.passages(sid, scene_id=scene_id)
             for e in p.endpoints
             if e.scene_id == scene_id
             for cell in (e.threshold_cell, e.standing_cell)
@@ -486,7 +486,7 @@ class ObjectSpatialService:
         blocking = set()
         doors = {
             p.door_object_id
-            for p in self.h.facts.instances.session_value(sid, "passages")
+            for p in self.h.facts.instances.passages(sid, scene_id=candidate.scene_id)
             if p.door_object_id
         }
         for target, state in replacements.items():
@@ -538,7 +538,7 @@ class ObjectSpatialService:
             )
         reserved = {
             c
-            for p in self.h.facts.instances.session_value(sid, "passages")
+            for p in self.h.facts.instances.passages(sid, scene_id=state.scene_id)
             for e in p.endpoints
             if e.scene_id == state.scene_id
             for c in (e.threshold_cell, e.standing_cell)
@@ -596,7 +596,7 @@ class ObjectSpatialService:
             raise StateMachineError("unsupported_object_orientation", "Orientation is not allowed")
         if any(
             p.door_object_id == op.object_id
-            for p in self.h.facts.instances.session_value(row["session_id"], "passages")
+            for p in self.h.facts.instances.passages(row["session_id"], object_id=op.object_id)
         ):
             raise StateMachineError(
                 "unsupported_object_capability", "Shared passage objects are fixed"

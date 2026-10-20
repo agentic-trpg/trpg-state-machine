@@ -245,7 +245,7 @@ class WorldObjectService:
             position = h._public_scope(sid, actor_id, package)
             doors = tuple(
                 p.door_object_id
-                for p in self.facts.instances.session_value(sid, "passages")
+                for p in self.facts.instances.passages(sid, scene_id=position.scene_id)
                 if p.door_object_id and any(e.scene_id == position.scene_id for e in p.endpoints)
             )
             candidates = self.facts.scene_object_rows(

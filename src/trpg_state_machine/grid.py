@@ -448,7 +448,7 @@ class GridService:
         for x, y in points:
             relevant.update(f"{x + dx},{y + dy}" for dx in (-1, 0, 1) for dy in (-1, 0, 1))
         encoded = json.dumps(sorted(relevant))
-        passages = self.h.facts.instances.session_value(sid, "passages")
+        passages = self.h.facts.instances.passages(sid, scene_id=scene_id)
         doors = json.dumps([p.door_object_id for p in passages if p.door_object_id])
         occupied = {
             r[0]
@@ -518,7 +518,7 @@ class GridService:
             raise StateMachineError("invalid_spatial_state", "Current grid placement is incomplete")
         doors = {
             p.door_object_id
-            for p in self.h.facts.instances.session_value(sid, "passages")
+            for p in self.h.facts.instances.passages(sid, scene_id=scene_id)
             if p.door_object_id
         }
         cells = set(raw["blocked_cells"])
@@ -529,7 +529,7 @@ class GridService:
             if oid != exclude_object and oid not in doors
             for cell in p.movement_blocking_cells
         )
-        for passage in self.h.facts.instances.session_value(sid, "passages"):
+        for passage in self.h.facts.instances.passages(sid, scene_id=scene_id):
             if passage.door_object_id and self.h._door_closed(sid, passage, package):
                 cells.update(
                     e.threshold_cell

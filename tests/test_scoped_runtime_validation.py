@@ -155,6 +155,67 @@ def grow(sm, sid, n):
             )
 
 
+def grow_scenes(sm, sid, count):
+    """Add complete lazy Scene plans and unrelated ports to the persisted fixture."""
+    from trpg_state_machine.instance_data import encode
+    from trpg_state_machine.package import PassageDefinition, PassageEndpoint
+
+    assert count % 2 == 0
+    f, conn = sm._world_facts, sm._conn
+    other = next(
+        r[0]
+        for r in conn.execute(
+            "SELECT scene_id FROM scene_instances WHERE session_id=? AND scene_id<>?", (sid, A)
+        )
+    )
+    template = f.instances.get(sid, "scene", other)
+    planned_grid = canonical_json(f.mechanical_scene(sid, other)["grid"])
+    session = f.instances.get(sid, "session", sid)
+    names = tuple(f"scene.unrelated_{i}" for i in range(count))
+    ports = []
+    with sm._transaction(write=True):
+        for i, name in enumerate(names):
+            peer = names[i ^ 1]
+            passage = f"passage.unrelated_{i // 2}"
+            f.instances.put(
+                sid,
+                "scene",
+                name,
+                {
+                    **template,
+                    "scene_id": name,
+                    "object_ids": (),
+                    "actor_ids": (),
+                    "actor_initial_ids": (),
+                    "pending_objects": (),
+                    "pending_definitions": (),
+                    "pending_actors": (),
+                    "has_grid": True,
+                    "grid_json": planned_grid,
+                    "exits": (peer,),
+                    "exit_passages": ((peer, passage),),
+                },
+            )
+            if i % 2 == 0:
+                ports.append(
+                    PassageDefinition(
+                        passage,
+                        (
+                            PassageEndpoint(name, "0,0", "1,0"),
+                            PassageEndpoint(peer, "0,0", "1,0"),
+                        ),
+                        None,
+                    )
+                )
+        session["scene_ids"] += names
+        session["passages"] += tuple(ports)
+        conn.execute(
+            "UPDATE instance_configs SET config_json=? WHERE session_id=? "
+            "AND domain='session' AND instance_id=?",
+            (canonical_json(encode(session)), sid, sid),
+        )
+
+
 @pytest.mark.parametrize("path", ("placement", "step"))
 def test_public_placement_scope_is_independent_of_unrelated_growth(
     tmp_path, context, monkeypatch, path
@@ -179,6 +240,7 @@ def test_public_placement_scope_is_independent_of_unrelated_growth(
             assert sm.query_world_action(sid, actor, op, package, context=gm).status == "available"
         initial = calls.copy()
         grow(sm, sid, 100)
+        grow_scenes(sm, sid, 20)
         sm._world_facts.maps.clear()
         calls.clear()
         with measure(sm) as (large, sql):
@@ -220,6 +282,23 @@ def test_container_closure_and_inventory_write_once(tmp_path, context, monkeypat
         assert sum(s.startswith("UPDATE characters SET inventory_json") for s in sql) == 1
         assert sm.get_object(sid, actor, BOX, package, context=context)["contents"] == (CRED,)
         print("container", dict(counts))
+
+
+def test_missing_session_config_is_not_treated_as_empty_passages(tmp_path, context):
+    sm, sid, package, _ = setup(tmp_path, context, oriented_data())
+    with sm:
+        actor = sm.read_session(sid, package, context=context).pc_actor_id
+        sm._conn.execute(
+            "DELETE FROM instance_configs WHERE session_id=? AND domain='session'", (sid,)
+        )
+        result = sm.query_world_action(
+            sid,
+            actor,
+            RepositionObject(A, OBSTACLE, "1,1", "1,1", "north", "east"),
+            package,
+            context=replace(context, can_place_world_objects=True),
+        )
+        assert result.status == "unavailable" and result.reason == "incomplete_instance_config"
 
 
 def test_object_list_prepares_light_once_and_does_not_materialize_remote_objects(
@@ -410,6 +489,30 @@ def test_task_reads_only_fixed_grants_with_growing_ungranted_history(tmp_path, o
             sm.get_pending_npc_observation_work(sid, ob_package, context=npc)
         assert not any("o.content_json" in s for s in metadata_sql)
         print("task_recovery", dict(small), dict(large))
+
+
+def test_npc_result_target_admission_does_not_enumerate_scenes(
+    tmp_path, ob_package, context, monkeypatch
+):
+    from test_npc_evaluation_tasks import create_task, prepare
+
+    from trpg_state_machine.npc_results import NPCActionIntent, NPCEvaluationResult
+
+    with StateMachine(tmp_path / "target.db") as sm:
+        sid, npc, ids = prepare(sm, ob_package, context)
+        task = create_task(sm, sid, ob_package, npc, ids)
+        calls = Counter()
+        observe(monkeypatch, sm._world_facts.instances, "scenes", calls, "scene_enumerations")
+        result = NPCEvaluationResult(
+            action_intents=(NPCActionIntent("move_actor", "scene.workshop", 0),)
+        )
+        with measure(sm) as (_, sql):
+            receipt = sm.submit_npc_evaluation_result(
+                task.evaluation_id, result, ob_package, context=npc
+            )
+        assert receipt.status == "completed"
+        assert calls == Counter()
+        assert any("SELECT 1 FROM instance_configs" in s and "domain='scene'" in s for s in sql)
 
 
 def test_real_schema39_migration_is_atomic_and_preserves_facts(tmp_path, context, monkeypatch):

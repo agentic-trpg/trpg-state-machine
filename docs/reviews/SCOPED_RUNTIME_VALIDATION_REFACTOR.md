@@ -18,8 +18,10 @@ feature branch. No main merge, main push, sibling modification or RE upgrade.
 The installed Engine/SRD pin stays `a011eba3ea2226e22d8081294ee38d3ec193b325`.
 
 Phase 1 commit: `4aa60a0` — scoped domain admission, transaction-local reuse,
-SQL filtering, Schema40 and initial real-path regressions. Phase 2 adds the
-full-suite compatibility repairs, additional scale evidence and this documentation.
+SQL filtering, Schema40 and initial real-path regressions. Phase 2 (`dd828c2`) adds full-suite compatibility repairs, additional scale evidence
+and this documentation. Phase 3 closes the final Scene/port metadata callers: one
+transaction-stage existence query and SQL-filtered port DTOs by Scene/Object/Passage.
+Only complete granted navigation layouts retain unfiltered fixed port input.
 Final validation and delivery commits are recorded below after execution.
 
 ## Responsibilities and invariant coverage
@@ -141,7 +143,8 @@ Mechanical components remain one authoritative aggregate JSON row. SQL filtering
 reduces returned data/Python validation and owner writes, but SQL JSON traversal
 and an updated aggregate's encoding still depend on stored content. Replacing
 that representation would require a separate storage migration, not an invented
-constant-cost result here. Capacity may legitimately load large ancestor subtrees;
+constant-cost result here. The aggregate Session port JSON also retains SQL-side traversal; only matching
+ports are decoded/returned. Capacity may legitimately load large ancestor subtrees;
 owner inventory validation may require the owner's complete inventory; full light
 projection and stage evidence may require complete scene inputs. No generic dynamic
 cache or extra gameplay version fields were added.
@@ -184,3 +187,18 @@ map distinction, relevant orphan equipment detection, original missing-config er
 code and synthetic old-schema reconstruction issues. Repairs retain original
 fact-preservation, invalid-state, rollback, authorization and identity assertions.
 Final frozen-source results and remaining failures are appended after execution.
+
+
+### Final source-scope follow-up
+
+The final indirect-call pass also migrated NPC Result target-scene admission to
+`InstanceData.has_scene`, shared with Environment source validation in one stage.
+`InstanceData.passages` filters before decoding by actual Scene/Object/Passage;
+shared-door callers still receive both endpoints. The scale fixture additionally
+adds 20 complete lazy Scene plans and 10 unrelated two-sided passages. Missing
+Session configuration fails explicitly rather than becoming an empty port list.
+The 78-case Scene/port/navigation/protection combination and 84-case
+Environment/NPC-result combination passed (exit 0; the latter excluded one
+process-named case only for the interim focused run). Complete coverage below
+includes every collected case. Interrupted preliminary partition runs are not
+counted as final passes.

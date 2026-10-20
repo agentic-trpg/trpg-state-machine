@@ -402,8 +402,8 @@ class NPCResultRuntime:
                     or not any(
                         p.door_object_id == intent.object_id
                         and intent.scene_id in {e.scene_id for e in p.endpoints}
-                        for p in self._world_facts.instances.session_value(
-                            row["session_id"], "passages"
+                        for p in self._world_facts.instances.passages(
+                            row["session_id"], scene_id=intent.scene_id, object_id=intent.object_id
                         )
                     )
                 ):
@@ -422,8 +422,9 @@ class NPCResultRuntime:
                 type(intent.expected_world_version) is not int
                 or intent.expected_world_version < 0
                 or type(intent.destination_scene_id) is not str
-                or intent.destination_scene_id
-                not in {s.scene_id for s in self._world_facts.instances.scenes(row["session_id"])}
+                or not self._world_facts.instances.has_scene(
+                    row["session_id"], intent.destination_scene_id
+                )
             ):
                 error = "invalid_npc_action"
             outputs.append(("action", intent, error))
