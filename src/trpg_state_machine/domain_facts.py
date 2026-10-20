@@ -588,10 +588,7 @@ class CharacterFacts:
     def position(self, sid, actor_id):
         from .spatial import SpatialPosition
 
-        actor = self._conn.execute(
-            "SELECT current_scene_id,cell FROM actors WHERE session_id=? AND actor_id=?",
-            (sid, actor_id),
-        ).fetchone()
+        actor = self.world.carrier_position(sid, actor_id)
         if actor is None:
             raise StateMachineError("invalid_actor", "No authorized actor")
         return SpatialPosition(actor[0], actor[1])
@@ -621,9 +618,17 @@ class WorldFacts:
             (sid, scene_id, canonical_json(asdict(facts))),
         )
 
+    @scoped_read
     def object(self, sid, oid):
         return self._conn.execute(
             "SELECT * FROM objects WHERE session_id=? AND object_id=?", (sid, oid)
+        ).fetchone()
+
+    @scoped_read
+    def carrier_position(self, sid, actor_id):
+        return self._conn.execute(
+            "SELECT current_scene_id,cell FROM actors WHERE session_id=? AND actor_id=?",
+            (sid, actor_id),
         ).fetchone()
 
     @staticmethod
@@ -1045,10 +1050,7 @@ class WorldFacts:
             if current is None:
                 raise StateMachineError("invalid_world_state", "Missing parent container")
         if current["carrier_id"] is not None:
-            position = self._conn.execute(
-                "SELECT current_scene_id,cell FROM actors WHERE session_id=? AND actor_id=?",
-                (sid, current["carrier_id"]),
-            ).fetchone()
+            position = self.carrier_position(sid, current["carrier_id"])
             scene, cell = position
         else:
             scene, cell = current["scene_id"], current["cell"]

@@ -42,6 +42,7 @@ class SceneLifecycleService:
         if row is None:
             raise StateMachineError("session_not_found", "Unknown session")
         self.sessions._check_package_pin(row, package)
+        self.facts.instances.session_value(sid, "evidence_schema")
         if not self.facts.initialize_scene(sid, scene_id, package):
             proof = self.store.connection.execute(
                 "SELECT complete FROM scene_integrity WHERE session_id=? AND scene_id=?",
@@ -112,6 +113,13 @@ class SceneLifecycleService:
 
             if not certify_scene(conn, sid, scene_id):
                 raise StateMachineError("incomplete_session", "Scene acceptance failed")
+        else:
+            proof = conn.execute(
+                "SELECT complete FROM scene_integrity WHERE session_id=? AND scene_id=?",
+                (sid, scene_id),
+            ).fetchone()
+            if proof is None or not proof[0]:
+                raise StateMachineError("incomplete_session", "Scene requires integrity acceptance")
 
     def validate_initialized(self, row, package):
         """Read only: uninstantiated scenes stay absent; no template replay."""

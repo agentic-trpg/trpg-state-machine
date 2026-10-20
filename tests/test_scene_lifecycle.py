@@ -207,6 +207,11 @@ def test_preexisting_environment_and_capability_facts_survive_initialization(tmp
             )
             c.store.connection.execute("INSERT INTO object_durability VALUES (?,?,7)", (sid, oid))
             c.store.connection.execute("INSERT INTO object_openables VALUES (?,?,1,0)", (sid, oid))
+            # The already-open door has an existing unlocked legacy lock; complete
+            # structural acceptance must not invent the Package's initial lock.
+            c.store.connection.execute(
+                "INSERT INTO door_locks VALUES (?,?,0,?)", (sid, oid, "lock." + oid)
+            )
             assert c.world.scenes.ensure_scene(sid, A, package)
             assert c.facts.object(sid, oid)["state"] == "open"
             assert c.facts.object(sid, oid)["cell"] == "4,4"

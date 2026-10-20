@@ -261,6 +261,7 @@ class GridReader:
                 yield
 
     @_read
+    @scoped_read
     def prepared_scene(self, sid, scene_id, package):
         stored = self.maps.scene(sid, scene_id, spatial_only=True)
         if stored is not None:

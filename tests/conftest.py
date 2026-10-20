@@ -74,6 +74,7 @@ def legacy_python():
     result = subprocess.run(
         ["uv", "sync", "--locked", "--group", "dev", "--project", str(destination)],
         cwd=root,
+        env={**os.environ, "UV_PROJECT_ENVIRONMENT": str(destination / ".venv")},
         capture_output=True,
         text=True,
         encoding="utf-8",
@@ -117,6 +118,7 @@ def pre_frozen_python():
             str(historical),
         ],
         cwd=root,
+        env={**os.environ, "UV_PROJECT_ENVIRONMENT": str(historical / ".venv")},
         capture_output=True,
         text=True,
         encoding="utf-8",
@@ -160,6 +162,7 @@ def rf4_baseline_python():
             str(historical),
         ],
         cwd=root,
+        env={**os.environ, "UV_PROJECT_ENVIRONMENT": str(historical / ".venv")},
         capture_output=True,
         text=True,
         encoding="utf-8",

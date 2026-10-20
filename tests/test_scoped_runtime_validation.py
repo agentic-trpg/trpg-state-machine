@@ -299,6 +299,27 @@ def test_missing_session_config_is_not_treated_as_empty_passages(tmp_path, conte
             context=replace(context, can_place_world_objects=True),
         )
         assert result.status == "unavailable" and result.reason == "incomplete_instance_config"
+        with sm._transaction(write=True), pytest.raises(StateMachineError, match="configuration"):
+            sm.scene_lifecycle.ensure_scene(sid, A, package)
+
+
+@pytest.mark.parametrize("legacy", [True, False])
+def test_deleted_lock_invalidates_scene_acceptance(tmp_path, context, legacy):
+    from lock_support import DOOR
+    from test_world_locks import multi_data
+    from world_support import world_data
+
+    sm, sid, package, _ = setup(tmp_path, context, world_data() if legacy else multi_data())
+    with sm:
+        lock = "lock." + DOOR if legacy else "lock.outer"
+        sm._conn.execute(
+            "DELETE FROM door_credentials WHERE session_id=? AND lock_id=?", (sid, lock)
+        )
+        sm._conn.execute("DELETE FROM door_locks WHERE session_id=? AND lock_id=?", (sid, lock))
+        with sm._transaction(write=True), pytest.raises(StateMachineError, match="acceptance"):
+            sm.scene_lifecycle.ensure_scene(sid, A, package)
+        with pytest.raises(StateMachineError):
+            sm.save_session(sid, package, context=context)
 
 
 def test_object_list_prepares_light_once_and_does_not_materialize_remote_objects(
@@ -439,6 +460,49 @@ def test_mechanism_index_is_once_per_real_cascade(tmp_path, context, monkeypatch
             == "committed"
         )
         assert calls["builds"] == 1
+
+
+def test_package_index_is_shared_by_dispatch_and_fired_signal_capture(
+    tmp_path, package_data, context, monkeypatch
+):
+    from spatial_support import create
+    from test_events import load_event_package
+
+    from trpg_state_machine import SetSceneFlag
+    from trpg_state_machine.package import AdventurePackage
+
+    package = load_event_package(tmp_path, package_data).package
+    calls = Counter()
+    original = AdventurePackage.__getattribute__
+
+    def observe_definitions(obj, name):
+        if obj is package and name == "events":
+            calls["definition_enumerations"] += 1
+        return original(obj, name)
+
+    monkeypatch.setattr(AdventurePackage, "__getattribute__", observe_definitions)
+    with StateMachine(tmp_path / "program.db") as sm:
+        sid = create(sm, package, context)
+        assert calls["definition_enumerations"] == 1
+        for i, value in enumerate((True, False, True)):
+            assert (
+                submit(
+                    sm,
+                    sid,
+                    package,
+                    context,
+                    SetSceneFlag(A, "flag.lamp_checked", value),
+                    f"flag.{i}",
+                ).status
+                == "committed"
+            )
+        assert calls["definition_enumerations"] == 1
+        assert (
+            sm._conn.execute(
+                "SELECT count(*) FROM trigger_history WHERE session_id=?", (sid,)
+            ).fetchone()[0]
+            == 1
+        )
 
 
 def test_close_updates_only_affected_accessibility(tmp_path, context):

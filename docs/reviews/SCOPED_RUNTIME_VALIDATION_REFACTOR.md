@@ -19,7 +19,7 @@ The installed Engine/SRD pin stays `a011eba3ea2226e22d8081294ee38d3ec193b325`.
 
 Phase 1 commit: `4aa60a0` — scoped domain admission, transaction-local reuse,
 SQL filtering, Schema40 and initial real-path regressions. Phase 2 (`dd828c2`) adds full-suite compatibility repairs, additional scale evidence
-and this documentation. Phase 3 closes the final Scene/port metadata callers: one
+and this documentation. Phase 3 (`0072d84`) closes the final Scene/port metadata callers: one
 transaction-stage existence query and SQL-filtered port DTOs by Scene/Object/Passage.
 Only complete granted navigation layouts retain unfiltered fixed port input.
 Final validation and delivery commits are recorded below after execution.
@@ -64,7 +64,7 @@ Store-installed SQL functions, as existing environment maintenance already does.
 than an address-only key, and expires on every mutation stage using SQLite
 `total_changes`. All raw command/rule savepoint rollback paths and Store savepoints
 clear it; commit/rollback destroys it. New transactions and old WAL readers never
-share dynamic memo values. It reuses actual positions, definitions, eligibility,
+share dynamic memo values. It reuses immutable raw object rows, carrier positions, prepared Scene inputs, definitions, eligibility,
 spatial contributions, light preparation and view inputs within one stage;
 authorization and observer filtering remain at each public entry. FrozenRuleset
 and content-keyed PreparedGrid remain unchanged. Navigation's explicitly static
@@ -96,7 +96,7 @@ Every row was checked against production callers, not only function names.
 | 17 | Fixed: item transfer prepares old subtree and updates new/old owners incrementally | Nested Put/Take/Pickup/Drop, bound/equipped/material refusals, access, quantity/charges and transaction tests |
 | 18 | Fixed: mutation owner projects once; generic finalize no longer repeats it | Real PutItem inventory UPDATE 2→1, owner UPDATE 4→1 in measurement fixture |
 | 19 | Fixed repeated Python owner scans and duplicate loads: owner/identity sets and by-owner slug index; `require_unbound` uses relevant actor once | Inventory output order and all supported binding restrictions retained; aggregate JSON encoding is an explicit storage cost |
-| 20 | Fixed: Package-lifetime index `(event_type, scene_id)` preserves definition order | Events/traceability/conditional effects/cascade/rollback suites; trigger history and 32-consequence limit unchanged |
+| 20 | Fixed: shared Package-lifetime trigger and definition-ID indexes preserve definition order | Real dispatch plus fired-signal capture enumerates definitions once across three flag commands; events/traceability/conditional effects/cascade/rollback suites; trigger history and 32-consequence limit unchanged |
 | 21 | Fixed: recent/pending/IDs/occupancy/limits down to SQL; metadata omits content; Task unions fixed Work/Recent grant once | Observation/Gate/EVA/mode/output/perception suites; TTL, cursor, ACK, recovery, epochs and redelivery policy unchanged |
 
 ## Deterministic measurements
@@ -113,17 +113,17 @@ construction, not every dataclass/deepcopy/allocation. Dynamic indexes are real;
 
 | Real path / condition | Before SELECT / rows | After SELECT / rows | Other measured work |
 |---|---:|---:|---|
-| GM placement availability, cold GridMaps, baseline fixture | 95 / 91 | 22 / 17 | definition models 23→1; returned string bytes 38440→8442 |
-| Same target, +100 unrelated objects (half same scene), +100 remote Actors, 34 ground portable instances | 645 / 641 | 22 / 17 | definition models 173→1; returned string bytes 161553→8442 |
-| PutItem, command already constructed, initial owned key→ground container | 515 / 545 | 158 / 133 | inventory UPDATE 2→1; owner UPDATE 4→1; all app UPDATE 9→5 |
-| Authorized list with container/carried emitter fixture | 377 / 354 | 122 / 107 | actual Light.project preparations 6→1 |
-| Real ordered mechanism cascade | 1863 / 1835 | 276 / 221 | index builds 4→1; all app UPDATE 8→5 |
+| GM placement availability, cold GridMaps, baseline fixture | 95 / 91 | 21 / 16 | definition models 23→1; returned string bytes 38440→7886 |
+| Same target, +100 unrelated objects (half same scene), +100 remote Actors, 34 ground portable instances, +20 lazy Scenes and 10 unrelated passages | 645 / 641 | 21 / 16 | definition models 173→1; returned string bytes 177193→7886 |
+| PutItem, command already constructed, initial owned key→ground container | 515 / 545 | 122 / 97 | inventory UPDATE 2→1; owner UPDATE 4→1; all app UPDATE 9→5 |
+| Authorized list with container/carried emitter fixture | 377 / 354 | 65 / 50 | actual Light.project preparations 6→1 |
+| Real ordered mechanism cascade | 1863 / 1835 | 223 / 168 | index builds 4→1; all app UPDATE 8→5 |
 | Task recovery, original fixed grant and no extra expired history | 13 / 19 | 13 / 19 | returned string bytes 4021→4021 |
 | Same Task, +30 actual arrival/departure observation batches, all expired | 13 / 79 | 13 / 19 | returned string bytes 20611→4021 |
 
-The last four after-counts were measured before final mechanical identity-closure
-hardening; final repeated counts, including any constant overhead, are recorded
-with final verification below. The placement scale assertions also count bytes,
+The application-path counts above were repeated after final mechanical identity,
+Scene/port closure and raw-row reuse changes; the Task recovery counts are also
+asserted by the deterministic regression suite. The placement scale assertions also count bytes,
 so merely returning one large unrelated configuration row does not satisfy them.
 Container closure is separately asserted to contain exactly the two relevant
 nodes while 100 unrelated persisted objects and Actors exist. Complete scene
@@ -202,3 +202,11 @@ Environment/NPC-result combination passed (exit 0; the latter excluded one
 process-named case only for the interim focused run). Complete coverage below
 includes every collected case. Interrupted preliminary partition runs are not
 counted as final passes.
+
+The last structural pass includes legacy door-lock dependency invalidation and a
+Session-configuration existence check on Scene entry. Full read-only save validation
+also rejects invalidated structural acceptance. Historical producer fixtures now
+explicitly target their own `.venv` rather than inheriting an outer
+`UV_PROJECT_ENVIRONMENT`. A detected old-RE environment was restored from the
+unchanged current lock before repeating validation. Its initialization failures
+are environment failures, not passing or product-regression evidence.

@@ -2,6 +2,7 @@
 
 import json
 from dataclasses import asdict, replace
+from types import MappingProxyType
 
 from dnd5e_engine.evaluation_state import MechanicalGrid
 
@@ -15,6 +16,24 @@ from .session_access import _binding
 class EventCapture:
     def __init__(self, store, characters, world):
         self.store, self.characters, self.world = store, characters, world
+        self._event_package = None
+        self._event_index = None
+
+    def event_index(self, package):
+        """One immutable Package index shared by dispatch and fired-signal lookup."""
+        if self._event_package is not package:
+            by_trigger, by_id = {}, {}
+            for definition in package.events:
+                by_trigger.setdefault((definition.trigger_type, definition.scene_id), []).append(
+                    definition
+                )
+                by_id[definition.event_definition_id] = definition
+            self._event_index = (
+                MappingProxyType({key: tuple(value) for key, value in by_trigger.items()}),
+                MappingProxyType(by_id),
+            )
+            self._event_package = package
+        return self._event_index
 
     @property
     def _conn(self):
@@ -64,11 +83,7 @@ class EventCapture:
                 )
             ]
         elif event_type == "package.event_fired":
-            signals = next(
-                e.signals
-                for e in package.events
-                if e.event_definition_id == payload["event_definition_id"]
-            )
+            signals = self.event_index(package)[1][payload["event_definition_id"]].signals
         return tuple(
             replace(
                 signal,

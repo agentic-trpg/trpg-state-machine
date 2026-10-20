@@ -48,12 +48,21 @@ def certify_scene(conn, sid, scene):
         complete = False
     else:
         data = decode(json.loads(row[0]))
+        session = conn.execute(
+            "SELECT json_extract(config_json,'$.legacy_lock_ids.tuple') FROM instance_configs "
+            "WHERE session_id=? AND domain='session' AND instance_id=?",
+            (sid, sid),
+        ).fetchone()
+        legacy_locks = set(json.loads(session[0])) if session is not None else set()
+        complete = session is not None
         if data["has_grid"]:
             required.add(("mechanical_scenes", scene))
         for actor in data["actor_initial_ids"]:
             required.update((("actors", actor), ("config:actor", actor)))
         for oid in data["object_ids"]:
             required.update((("objects", oid), ("config:object", oid)))
+            if oid in legacy_locks:
+                required.add(("door_locks", "lock." + oid))
             obj = conn.execute(
                 "SELECT config_json FROM instance_configs WHERE session_id=? AND "
                 "domain='object' AND instance_id=?",
