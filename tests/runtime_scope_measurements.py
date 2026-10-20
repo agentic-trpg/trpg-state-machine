@@ -8,6 +8,7 @@ The observer executes every real query/projection and only records returned work
 import json
 import sys
 from collections import Counter
+from contextlib import contextmanager
 from dataclasses import replace
 from pathlib import Path
 
@@ -29,6 +30,36 @@ from trpg_state_machine import (
     instance_data,
 )
 from trpg_state_machine.world_lights import LightService
+
+
+@contextmanager
+def containment_memory_reads():
+    """Observe real mapping operations separately from connection/cursor reads.
+
+    Count initializer input rows, mapping lookups (including membership tests),
+    and child rows returned by contents. This is not all Python memory traffic.
+    """
+    counts = Counter()
+    previous = sys.getprofile()
+
+    def profile(frame, event, result):
+        if frame.f_code.co_filename.endswith("world_containers.py"):
+            name = frame.f_code.co_name
+            if event == "call" and name == "__init__" and "rows" in frame.f_locals:
+                counts["containment_rows_indexed"] += len(frame.f_locals["rows"])
+            elif event == "call" and name == "__getitem__":
+                counts["containment_row_lookups"] += 1
+            elif event == "return" and name == "contents" and result is not None:
+                counts["containment_child_rows"] += len(result)
+        if previous is not None:
+            previous(frame, event, result)
+
+    sys.setprofile(profile)
+    try:
+        yield counts
+    finally:
+        sys.setprofile(previous)
+
 
 root = Path(sys.argv[1])
 root.mkdir(parents=True, exist_ok=False)
@@ -67,11 +98,12 @@ for case, data in [("container", container_data()), ("light_list", lighting_data
         if case == "container":
             acquire(sm, sid, p, ctx)
             cmd = command(sm, sid, p, ctx, PutItem(A, CRED, BOX, "0,0"), "put")
-            with measure(sm) as (counts, sql):
+            with measure(sm) as (counts, sql), containment_memory_reads() as memory:
                 r = sm.submit_command(cmd, p, context=ctx)
             assert r.status == "committed", r
             result[case] = {
                 **counts,
+                **memory,
                 "inventory_updates": sum(
                     s.startswith("UPDATE mechanical_components SET inventory_json") for s in sql
                 ),

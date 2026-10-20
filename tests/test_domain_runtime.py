@@ -56,6 +56,7 @@ def seed(c, package, context, sid="session.domain", pc="pc.domain"):
             sid, "rng." + sid, synthetic=package.ruleset_binding == SYNTHETIC_EVALUATION_RULESET
         )
         row = c.sessions._session(sid, package, context)
+        c.facts.initialize_locks(row, package)
         if package.noncombat_foundation_json:
             c.combat._initialize_noncombat(row, package)
         c.world.scenes.validate_initialized(row, package)

@@ -262,9 +262,16 @@ def test_uninitialized_scene_read_is_initial_facts_without_writes(tmp_path, pack
     with c.store.transaction(write=True):
         c.world.runtime.initialize(sid, p, context, p.pc_templates[0], "pc.lazy", "rng.lazy")
         c.facts.initialize_world(sid, p)
-        c.world.scenes.ensure_scene(sid, A, p)
+        c.world.scenes.ensure_scene(sid, A, p, _defer_acceptance=True)
         c.characters.initialize_pc(sid, "pc.lazy", A, p.pc_templates[0])
         c.world.runtime.initialize_rng(sid, "rng.lazy", synthetic=False)
+        for door in p.lockable_doors:
+            if c.facts.object(sid, door.object_id) is not None:
+                c.store.connection.execute(
+                    "INSERT INTO door_locks VALUES (?,?,?,?)",
+                    (sid, door.object_id, int(door.initial_locked), "lock." + door.object_id),
+                )
+        c.world.scenes._validate_scene(sid, A, p)
     try:
         before = stored_rows(tmp_path / "lazy.db")
         changes = c.store.connection.total_changes

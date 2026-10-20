@@ -126,7 +126,15 @@ Scene/port closure and raw-row reuse changes; the Task recovery counts are also
 asserted by the deterministic regression suite. The placement scale assertions also count bytes,
 so merely returning one large unrelated configuration row does not satisfy them.
 Container closure is separately asserted to contain exactly the two relevant
-nodes while 100 unrelated persisted objects and Actors exist. Complete scene
+nodes while 100 unrelated persisted objects and Actors exist. The same PutItem
+measurement separately profiles real `ContainmentState` memory operations: rows
+consumed by adjacency construction are 7→2, mapping lookups remain 16→16 and
+child rows returned by `contents` remain 1→1. These include repeated accesses and
+membership lookups, not SQL executions or all Python memory traffic; none of the
+observed implementation is bypassed. The transparent profiler restores the
+previous profile hook. `tests/runtime_scope_measurements.py` reproduces both SQL
+and memory counts with `PYTHONPATH=<revision>/src;<this-worktree>/tests` and a new
+fixture output directory, using the same locked interpreter. Complete scene
 lists/evidence and required ancestor/owner closures are allowed to grow with
 actual output/dependencies. No zero-SQL, zero-allocation or universal constant-cost
 claim is made.
@@ -210,3 +218,19 @@ explicitly target their own `.venv` rather than inheriting an outer
 `UV_PROJECT_ENVIRONMENT`. A detected old-RE environment was restored from the
 unchanged current lock before repeating validation. Its initialization failures
 are environment failures, not passing or product-regression evidence.
+
+### Frozen production and fixture follow-up
+
+Production code is frozen at `d4e88dc42711f0a3c0e852ef12733d424421442f`.
+The final 40-case scoped/Scene/migration combination passed (exit 0). The new
+legacy-lock acceptance check exposed two manually wired historical-style fixtures
+that accepted a Scene before installing its locks. Neither failure was suppressed:
+the direct-domain seed now installs locks before acceptance; the lazy Grid fixture
+installs only its instantiated Scene's required locks, leaving the destination
+uninitialized and retaining every no-write/fact-preservation assertion. All five
+files importing the shared seed passed together (213 cases, exit 0); the entire
+GridService file passed separately (23 cases, exit 0). The two affected incomplete
+partition runs were stopped after diagnosis and restarted; they are not passing
+full-suite evidence. No production code changed for these fixture repairs.
+The extra transparent memory profiler is an uncollected measurement utility,
+not a replacement implementation or test bypass.
