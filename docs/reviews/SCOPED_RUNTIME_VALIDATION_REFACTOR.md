@@ -234,3 +234,104 @@ partition runs were stopped after diagnosis and restarted; they are not passing
 full-suite evidence. No production code changed for these fixture repairs.
 The extra transparent memory profiler is an uncollected measurement utility,
 not a replacement implementation or test bypass.
+
+### Reproducible final commands and artifact scope
+
+The complete collection is split greedily by per-file case counts into 29/30/30
+files and 672/672/671 cases. Each file belongs to exactly one partition. Ignored
+local manifests and JUnit logs are retained under the isolated worktree's
+`.test-tmp/`; they are verification artifacts, not shipped production state.
+Manifest SHA256 values:
+
+- `release-p0.json`: `c2862c60ebcc5fc1fd8265235debea9f85f156acf4849e9c5c5d50a512af6e5f`
+- `release-p1.json`: `0d601245e33c455490816254e60b32fb55dbd0fc63fda9f6bab953733e92c9b3`
+- `release-p2.json`: `311d9aaf420d50d5f668f40567a7c132246f42950ddd047ed1e21c6d9b7a8434`
+
+Commands run from the isolated worktree in PowerShell, with the original locked
+`.venv` and repository-local cache/temp (no dependency or lock update):
+
+```powershell
+$env:UV_CACHE_DIR='D:\Projects\agentic-trpg\trpg-state-machine\.uv-cache'
+$env:UV_PROJECT_ENVIRONMENT='D:\Projects\agentic-trpg\trpg-state-machine\.venv'
+uv run --locked --no-sync ruff check src tests examples
+uv run --locked --no-sync ruff format --check src tests examples
+uv lock --check --offline
+$env:PYTHONPATH=(Join-Path (Get-Location) 'src')
+$env:GIT_CONFIG_COUNT='1'
+$env:GIT_CONFIG_KEY_0='core.longpaths'
+$env:GIT_CONFIG_VALUE_0='true'
+# Reproduce the three independently launched final commands serially.
+foreach ($taskIndex in 0..2) {
+    $taskPrefix=if ($taskIndex -eq 1) { 'release' } else { 'release2' }
+    $taskTemp=if ($taskIndex -eq 1) { 'release1' } else { "release2$taskIndex" }
+    $taskFiles=Get-Content ".test-tmp/release-p$taskIndex.json" -Raw | ConvertFrom-Json
+    & 'D:\Projects\agentic-trpg\trpg-state-machine\.venv\Scripts\python.exe' -m pytest -q @taskFiles "--basetemp=D:/Projects/agentic-trpg/trpg-state-machine/.test-tmp/$taskTemp" "--junitxml=.test-tmp/${taskPrefix}-p$taskIndex.xml" -o faulthandler_timeout=60
+}
+```
+
+The same interpreter also ran `-m pytest -q` with the complete focused files
+listed above and `--basetemp=<repository>/.test-tmp/complete-seed` (213 cases),
+`lazy-grid-complete2` (23 cases), and `freeze-guard5` (40 cases). These overlap the
+complete collection and must not be added to its total. Baseline/current work
+measurements ran `tests/runtime_scope_measurements.py` with separate new output
+directories and the corresponding revision's `src` on `PYTHONPATH`.
+
+For failure accounting: the first exploratory full run recorded 1989 passed /
+19 failed (exit 1), before the compatibility and scope repairs. A mistyped
+focused file selection exited 4 without running tests. A later contaminated
+old-RE environment produced initialization failures (40 failed, exit 1) and a
+measurement import failure (exit 1); after exact locked reinstall, the guards
+exposed fixture/assertion issues (36 passed / 4 failed, then 39 / 1, exit 1) before
+the final 40-case pass. The first lazy-Grid fixture correction still attempted to
+initialize locks for an uninstantiated other Scene (22 passed / 1 failed, exit 1);
+the corrected instantiated-scope fixture passed all 23. Cancelled preliminary
+partitions are not passes. These runs are retained as diagnostics, not combined
+with final passing totals. No GitHub Actions result is inferred from local runs.
+
+### Final executed results — complete collection
+
+| Run | Files / cases | Result | Exit |
+|---|---:|---|---:|
+| `release2-p0` | 29 / 672 | 672 passed; 566.83 s | 0 |
+| `release-p1` | 30 / 672 | 672 passed; 639.94 s | 0 |
+| `release2-p2` | 30 / 671 | 671 passed; 528.61 s | 0 |
+| Final complete collection / JUnit identity check | 89 / 2015 | 2015 unique passes; 0 failures/errors/skips; exact node-ID union | 0 |
+| Shared-seed dependent files | 5 / 213 | 213 passed; 56.94 s | 0 |
+| Lazy Grid fixture and entire GridService file | 1 / 23 | 23 passed; 13.53 s | 0 |
+| Final scoped/Scene/instance-migration combination | 3 / 40 | 40 passed; 22.38 s | 0 |
+| Ruff check / format | src, tests, examples / 207 files | passed | 0 |
+| `uv lock --check --offline` | existing lock / 19 packages | passed | 0 |
+| Changed Markdown links/anchors/fences | 20 files / 91 local links | passed | 0 |
+| `git diff --check` | complete branch diff | passed | 0 |
+
+The three complete partitions are disjoint; focused cases above overlap and are
+not added to 2015. Partition 1 ran at `d4e88dc`; partitions 0/2 at
+`4ee6426779db5dcc0efd131a0edc095f5f797fde`. Production `src`, `pyproject.toml`
+and `uv.lock` are byte-identical between those commits. The fixture changes
+relevant to partition 1 were additionally covered by all 213 shared-seed dependent
+cases. The final commit only records this evidence. The complete collection is
+not presented as a single monolithic invocation or a GitHub Actions result.
+Third-party Lark `sre_parse`/`sre_constants` deprecation warnings remain.
+
+JUnit SHA256 (artifacts retained in the isolated worktree):
+
+- `release2-p0.xml`: `e348467d2f093667d9ef67f323518bed1c5e312d238526b02ff12de09fc343ab`
+- `release-p1.xml`: `2fd2d2cd81d52d0566b0ce942048440a8a1022ef0f07f2a37dc3924dfb67d076`
+- `release2-p2.xml`: `e05580ffa463f2affd3d1ddc41854df54c27da1549779adbffa6e02f25c370e7`
+
+Implementation/delivery commits are `4aa60a0`, `dd828c2`, `0072d84`, `d4e88dc`
+and fixture/measurement commit `4ee6426`, followed by this evidence-only commit.
+The original requested feature branch is fast-forwarded from `7927a38` only after
+these checks and pushed normally to `origin/refactor/scoped-runtime-validation`;
+the final delivery response records the exact resulting SHA and push verification.
+The isolated worktree and local diagnostics are retained for review. The original
+untracked empty text document remains excluded and unchanged (SHA256
+`e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855`).
+
+The architecture repository remains at `bdbbdf31cc60f3e83a951541ddf7a70504526190`
+and RE at `f18e0ad0d0bb6641efb050b51bf919dd41a8631f`; their pre-existing untracked
+files are untouched. Installed Engine and SRD still resolve to
+`a011eba3ea2226e22d8081294ee38d3ec193b325`. No remaining test failure or external
+blocker is known in this scoped delivery. Aggregate-JSON and necessary dependency
+costs, plus the unsupported gameplay capabilities listed above, remain explicit
+limits rather than completed features.
