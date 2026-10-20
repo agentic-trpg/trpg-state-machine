@@ -386,6 +386,7 @@ class StateMachine(
             row = self._session(session_id, package, context)
             self._require_noncombat_save(row)
             self.scene_lifecycle.validate_initialized(row, package)
+            self._world._assert_spatial_consistency(session_id, package)
             if row["ruleset_id"] == "dnd-2024-srd-5.2.1" and not package.legacy_audit_only:
                 self._rules._verify_dnd_binding(package, row)
                 if row["mechanical_schema_version"] is not None:

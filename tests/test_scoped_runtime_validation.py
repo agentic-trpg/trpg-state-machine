@@ -1,0 +1,493 @@
+"""Real public paths, deterministic SQL/row/build counts and transaction fences."""
+
+import json
+from collections import Counter
+from contextlib import contextmanager
+from dataclasses import replace
+
+import pytest
+from lock_support import CRED, A
+from test_lockable_passages import acquire
+from test_npc_evaluation_tasks import evaluation_package as evaluation_package
+from test_object_spatial_service import OBSTACLE, oriented_data
+from test_observation_retention import ob_package as ob_package
+from test_world_containers import BOX, container_data
+from test_world_lights import lighting_data
+from world_support import setup, submit
+
+from trpg_state_machine import (
+    ObjectState,
+    PutItem,
+    RepositionObject,
+    SetObjectState,
+    StateMachine,
+    StateMachineError,
+)
+from trpg_state_machine.package import canonical_json
+
+
+class CountCursor:
+    def __init__(self, cursor, counts, sql):
+        self.cursor, self.counts, self.sql = cursor, counts, sql
+
+    def __getattr__(self, name):
+        return getattr(self.cursor, name)
+
+    def _row(self, row):
+        if row is not None and self.sql.lstrip().upper().startswith(("SELECT", "WITH", "EXPLAIN")):
+            self.counts["sql_rows"] += 1
+            self.counts["returned_bytes"] += sum(len(v.encode()) for v in row if isinstance(v, str))
+        return row
+
+    def fetchone(self):
+        return self._row(self.cursor.fetchone())
+
+    def fetchall(self):
+        return [self._row(r) for r in self.cursor.fetchall()]
+
+    def __iter__(self):
+        for row in self.cursor:
+            yield self._row(row)
+
+
+class CountConnection:
+    def __init__(self, connection, counts, statements):
+        self.connection, self.counts, self.statements = connection, counts, statements
+
+    def __getattr__(self, name):
+        return getattr(self.connection, name)
+
+    def execute(self, sql, parameters=()):
+        self.statements.append(sql)
+        operation = sql.lstrip().split()[0].upper()
+        self.counts["sql_selects" if operation in ("SELECT", "WITH") else operation] += 1
+        return CountCursor(self.connection.execute(sql, parameters), self.counts, sql)
+
+
+@contextmanager
+def measure(sm):
+    counts, statements = Counter(), []
+    original = sm._store._conn
+    sm._store._conn = CountConnection(original, counts, statements)
+    try:
+        yield counts, statements
+    finally:
+        sm._store._conn = original
+
+
+def observe(monkeypatch, obj, method, counts, label):
+    original = getattr(obj, method)
+
+    def counted(*args, **kwargs):
+        counts[label] += 1
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(obj, method, counted)
+
+
+def grow(sm, sid, n):
+    """Trusted fixture adds persisted unrelated instances, no mocked read paths.
+
+    Nonblocking overlapping objects are legal. Unrelated Actors use unique cells
+    in an expanded remote map; all current configuration stays in instance tables.
+    """
+    f, conn = sm._world_facts, sm._conn
+    remote = next(
+        r[0]
+        for r in conn.execute(
+            "SELECT scene_id FROM scene_instances WHERE session_id=? AND scene_id<>?", (sid, A)
+        )
+    )
+    template = f.instances.get(sid, "object", CRED)
+    definition = json.loads(template["definition"])
+    with sm._transaction(write=True):
+        conn.execute(
+            "UPDATE mechanical_scenes SET "
+            "state_json=json_set(state_json,'$.grid.width',?) WHERE session_id=? AND scene_id=?",
+            (n + 10, sid, remote),
+        )
+        for i in range(n):
+            oid = f"object.unrelated_{i}"
+            data = json.loads(json.dumps(definition))
+            data["fields"]["object_id"] = oid
+            data["fields"]["capabilities"] = {"tuple": []}
+            config = {
+                **template,
+                "definition": canonical_json(data),
+                "movable": False,
+                "blocks_passage": False,
+            }
+            conn.execute(
+                "INSERT INTO "
+                "objects(session_id,object_id,scene_id,cell,orientation,item_json) "
+                "VALUES (?,?,?,?,?,?)",
+                (
+                    sid,
+                    oid,
+                    A if i % 2 else remote,
+                    "2,2",
+                    "north",
+                    canonical_json(
+                        {
+                            "item_slug": "amulet",
+                            "quantity": 1,
+                            "charges_remaining_per_unit": 0,
+                            "accessible": True,
+                        }
+                    )
+                    if i % 3 == 0
+                    else None,
+                ),
+            )
+            f.instances.put(sid, "object", oid, config)
+            actor = f"npc.unrelated_{i}"
+            conn.execute(
+                "INSERT INTO "
+                "actors(session_id,actor_id,kind,current_scene_id,cell) VALUES (?,?,'npc',?,?)",
+                (sid, actor, remote, f"{i + 3},1"),
+            )
+            f.instances.put(
+                sid,
+                "actor",
+                actor,
+                {"actor_id": actor, "senses": (("visual", True), ("auditory", True))},
+            )
+
+
+def test_public_placement_scope_is_independent_of_unrelated_growth(tmp_path, context, monkeypatch):
+    sm, sid, package, _ = setup(tmp_path, context, oriented_data())
+    gm = replace(context, can_place_world_objects=True)
+    with sm:
+        actor = sm.read_session(sid, package, context=context).pc_actor_id
+        calls = Counter()
+        observe(monkeypatch, sm._objects.spatial, "_check_scene", calls, "full_scene_audits")
+        observe(
+            monkeypatch, sm._world_facts.instances, "object_definition", calls, "definition_reads"
+        )
+        op = RepositionObject(A, OBSTACLE, "1,1", "1,1", "north", "east")
+        sm._world_facts.maps.clear()
+        calls.clear()
+        with measure(sm) as (small, _):
+            assert sm.query_world_action(sid, actor, op, package, context=gm).status == "available"
+        initial = calls.copy()
+        grow(sm, sid, 100)
+        sm._world_facts.maps.clear()
+        calls.clear()
+        with measure(sm) as (large, sql):
+            assert sm.query_world_action(sid, actor, op, package, context=gm).status == "available"
+        assert calls == initial
+        assert calls["full_scene_audits"] == 0
+        assert large["sql_selects"] <= small["sql_selects"]
+        assert large["sql_rows"] <= small["sql_rows"]
+        assert large["returned_bytes"] <= small["returned_bytes"]
+        assert any("object_spatial_cells" in s for s in sql)
+        plan = sm._conn.execute(
+            "EXPLAIN QUERY PLAN SELECT object_id FROM object_spatial_cells "
+            "WHERE session_id=? AND scene_id=? AND cell=? AND blocks=1",
+            (sid, A, "1,1"),
+        ).fetchall()
+        assert any("spatial_cell_lookup" in r[3] for r in plan)
+        print("placement", dict(small), dict(large), dict(calls))
+
+
+def test_container_closure_and_inventory_write_once(tmp_path, context, monkeypatch):
+    sm, sid, package, _ = setup(tmp_path, context, container_data())
+    with sm:
+        acquire(sm, sid, package, context)
+        grow(sm, sid, 100)
+        actor = sm.read_session(sid, package, context=context).pc_actor_id
+        op = PutItem(A, CRED, BOX, "0,0")
+        calls = Counter()
+        observe(monkeypatch, sm._characters, "sync_world_inventory", calls, "full_sync")
+        observe(monkeypatch, sm._objects.spatial, "audit", calls, "full_audit")
+        scope = sm._objects.containers._rows(sid, (CRED, BOX))
+        assert set(scope) == {CRED, BOX}
+        with measure(sm) as (counts, sql):
+            result = submit(sm, sid, package, context, op, "scoped.put")
+        assert result.status == "committed"
+        assert calls == Counter()
+        assert (
+            sum(s.startswith("UPDATE mechanical_components SET inventory_json") for s in sql) == 1
+        )
+        assert sum(s.startswith("UPDATE characters SET inventory_json") for s in sql) == 1
+        assert sm.get_object(sid, actor, BOX, package, context=context)["contents"] == (CRED,)
+        print("container", dict(counts))
+
+
+def test_object_list_prepares_light_once_and_does_not_materialize_remote_objects(
+    tmp_path, context, monkeypatch
+):
+    sm, sid, package, _ = setup(tmp_path, context, lighting_data())
+    with sm:
+        grow(sm, sid, 30)
+        actor = sm.read_session(sid, package, context=context).pc_actor_id
+        builds = Counter()
+        # Observe the real function inside the memo wrapper, not bypass its work.
+        from trpg_state_machine.world_lights import LightService
+
+        method = LightService.project.__wrapped__
+
+        def counted(self, *args, **kwargs):
+            builds["light_preparations"] += 1
+            return method(self, *args, **kwargs)
+
+        from trpg_state_machine.scoped_reads import scoped_read
+
+        monkeypatch.setattr(LightService, "project", scoped_read(counted))
+        views = sm.list_scene_objects(sid, actor, package, context=context)
+        assert builds["light_preparations"] == 1
+        assert not {v["object_id"] for v in views} & {
+            f"object.unrelated_{i}" for i in range(0, 30, 2)
+        }
+
+
+def test_savepoint_and_old_reader_keep_spatial_index_transactional(tmp_path, context):
+    sm, sid, package, db = setup(tmp_path, context, oriented_data())
+    with sm, StateMachine(db, dnd_loader=sm._rules.loader) as reader:
+        old = tuple(
+            sm._conn.execute(
+                "SELECT cell,blocks FROM object_spatial_cells WHERE session_id=? "
+                "AND object_id=? ORDER BY cell",
+                (sid, OBSTACLE),
+            )
+        )
+        with reader._transaction():
+            assert [
+                tuple(r)
+                for r in reader._conn.execute(
+                    "SELECT cell,blocks FROM object_spatial_cells WHERE session_id=? "
+                    "AND object_id=? ORDER BY cell",
+                    (sid, OBSTACLE),
+                )
+            ] == [tuple(r) for r in old]
+            with sm._transaction(write=True):
+                with pytest.raises(RuntimeError), sm._store.savepoint():
+                    sm._world_facts.place(sid, OBSTACLE, "1,1", orientation="east")
+                    assert sm._objects.spatial.project(sid, OBSTACLE, package).occupied_cells == (
+                        "1,1",
+                        "1,2",
+                    )
+                    raise RuntimeError("rollback candidate")
+                assert sm._objects.spatial.project(sid, OBSTACLE, package).occupied_cells == (
+                    "1,1",
+                    "2,1",
+                )
+                sm._world_facts.place(sid, OBSTACLE, "1,1", orientation="east")
+            assert [
+                tuple(r)
+                for r in reader._conn.execute(
+                    "SELECT cell,blocks FROM object_spatial_cells WHERE session_id=? "
+                    "AND object_id=? ORDER BY cell",
+                    (sid, OBSTACLE),
+                )
+            ] == [tuple(r) for r in old]
+        assert tuple(
+            r[0]
+            for r in reader._conn.execute(
+                "SELECT cell FROM object_spatial_cells WHERE session_id=? AND "
+                "object_id=? ORDER BY cell",
+                (sid, OBSTACLE),
+            )
+        ) == ("1,1", "1,2")
+
+
+def test_reentry_uses_certificate_and_rejects_deleted_dependency(tmp_path, context, monkeypatch):
+    sm, sid, package, _ = setup(tmp_path, context, container_data())
+    with sm:
+        calls = Counter()
+        observe(monkeypatch, sm.scene_lifecycle, "_validate_scene", calls, "scene_audits")
+        with sm._transaction(write=True):
+            assert sm.scene_lifecycle.ensure_scene(sid, A, package) is False
+            assert calls == Counter()
+            with pytest.raises(RuntimeError), sm._store.savepoint():
+                sm._conn.execute(
+                    "DELETE FROM object_openables WHERE session_id=? AND object_id=?",
+                    (sid, BOX),
+                )
+                with pytest.raises(StateMachineError, match="acceptance"):
+                    sm.scene_lifecycle.ensure_scene(sid, A, package)
+                raise RuntimeError("restore dependency")
+            assert sm.scene_lifecycle.ensure_scene(sid, A, package) is False
+        sm._conn.execute(
+            "DELETE FROM object_openables WHERE session_id=? AND object_id=?", (sid, BOX)
+        )
+        with sm._transaction(write=True), pytest.raises(StateMachineError):
+            sm.scene_lifecycle.ensure_scene(sid, A, package)
+        with pytest.raises(StateMachineError):
+            sm.save_session(sid, package, context=context)
+
+
+def test_unrelated_event_does_not_build_mechanism_or_inventory_index(
+    tmp_path, context, monkeypatch
+):
+    from trpg_state_machine import SetSceneFlag
+
+    sm, sid, package, _ = setup(tmp_path, context, container_data())
+    with sm:
+        calls = Counter()
+        observe(monkeypatch, sm._objects.mechanisms, "_build_index", calls, "mechanism_builds")
+        observe(monkeypatch, sm._characters, "sync_world_inventory", calls, "inventory_syncs")
+        observe(monkeypatch, sm._objects.spatial, "audit", calls, "audits")
+        flag = package.scenes[0].flags[0][0]
+        old = dict(package.scenes[0].flags)[flag]
+        assert (
+            submit(sm, sid, package, context, SetSceneFlag(A, flag, not old), "flag").status
+            == "committed"
+        )
+        assert calls == Counter()
+
+
+def test_mechanism_index_is_once_per_real_cascade(tmp_path, context, monkeypatch):
+    from test_mechanism_service import ordered_data
+    from test_world_mechanisms import LEVER
+
+    from trpg_state_machine import ActivateMechanism
+
+    sm, sid, package, _ = setup(tmp_path, context, ordered_data())
+    with sm:
+        calls = Counter()
+        observe(monkeypatch, sm._objects.mechanisms, "_build_index", calls, "builds")
+        assert (
+            submit(sm, sid, package, context, ActivateMechanism(A, LEVER, "0,0"), "activate").status
+            == "committed"
+        )
+        assert calls["builds"] == 1
+
+
+def test_close_updates_only_affected_accessibility(tmp_path, context):
+    sm, sid, package, _ = setup(tmp_path, context, container_data())
+    with sm:
+        acquire(sm, sid, package, context)
+        assert (
+            submit(sm, sid, package, context, PutItem(A, CRED, BOX, "0,0"), "put").status
+            == "committed"
+        )
+        with measure(sm) as (_, sql):
+            assert (
+                submit(
+                    sm, sid, package, context, SetObjectState(A, BOX, ObjectState.CLOSED), "close"
+                ).status
+                == "committed"
+            )
+        assert (
+            sum(s.startswith("UPDATE mechanical_components SET inventory_json") for s in sql) == 0
+        )  # ground contents have no owner projection
+
+
+def test_task_reads_only_fixed_grants_with_growing_ungranted_history(tmp_path, ob_package, context):
+    from test_npc_evaluation_tasks import create_task, prepare
+    from test_npc_modes import new_observation
+    from test_observation_retention import advance
+
+    with StateMachine(tmp_path / "history.db") as sm:
+        sid, npc, ids = prepare(sm, ob_package, context)
+        task = create_task(sm, sid, ob_package, npc, ids)
+        advance(sm, sid, ob_package, context, 100)
+        with measure(sm) as (small, _):
+            original = sm.get_npc_evaluation_recovery_input(
+                task.evaluation_id, ob_package, context=npc
+            )
+        for i in range(30):
+            new_observation(sm, sid, ob_package, context, "scene.workshop" if i % 2 == 0 else A)
+        advance(sm, sid, ob_package, context, 200)
+        with measure(sm) as (large, sql):
+            recovered = sm.get_npc_evaluation_recovery_input(
+                task.evaluation_id, ob_package, context=npc
+            )
+        assert recovered == original
+        assert large["sql_selects"] <= small["sql_selects"]
+        assert large["sql_rows"] <= small["sql_rows"]
+        assert any("o.content_json" in s and "json_each" in s for s in sql)
+        with measure(sm) as (_, metadata_sql):
+            sm.get_pending_npc_observation_work(sid, ob_package, context=npc)
+        assert not any("o.content_json" in s for s in metadata_sql)
+        print("task_recovery", dict(small), dict(large))
+
+
+def test_real_schema39_migration_is_atomic_and_preserves_facts(tmp_path, context, monkeypatch):
+    import io
+    import os
+    import sqlite3
+    import subprocess
+    import sys
+    import zipfile
+    from pathlib import Path
+
+    from lock_support import lock_loader
+    from test_migrations import assert_original_rows_equal, stored_rows
+
+    from trpg_state_machine import runtime_integrity
+
+    root = Path(__file__).resolve().parents[1]
+    archive = subprocess.run(
+        ["git", "archive", "--format=zip", "7927a382738fc97e2420967c3e1c6280c717d1fb", "src"],
+        cwd=root,
+        check=True,
+        capture_output=True,
+    ).stdout
+    source = tmp_path / "schema39"
+    with zipfile.ZipFile(io.BytesIO(archive)) as bundle:
+        bundle.extractall(source)
+    document = tmp_path / "package.json"
+    document.write_text(json.dumps(oriented_data()), encoding="utf-8")
+    code = """
+import json,sys
+from pathlib import Path
+from world_support import setup
+from trpg_state_machine import TrustedContext
+sm,sid,p,db=setup(Path(sys.argv[1]),TrustedContext('authenticated:alice','player.alice'),json.load(open(sys.argv[2])))
+assert sm._conn.execute('PRAGMA user_version').fetchone()[0]==39
+print(sid)
+sm.close()
+"""
+    process = subprocess.run(
+        [sys.executable, "-c", code, str(tmp_path), str(document)],
+        cwd=tmp_path,
+        env={
+            **os.environ,
+            "PYTHONPATH": os.pathsep.join((str(source / "src"), str(root / "tests"))),
+        },
+        capture_output=True,
+        text=True,
+    )
+    assert process.returncode == 0, process.stderr
+    sid = process.stdout.strip()
+    db = tmp_path / "world.db"
+    before = stored_rows(db)
+    certify = runtime_integrity.certify_scene
+
+    def fail(*args):
+        raise RuntimeError("migration acceptance failpoint")
+
+    monkeypatch.setattr(runtime_integrity, "certify_scene", fail)
+    with pytest.raises(RuntimeError, match="failpoint"):
+        StateMachine(db, dnd_loader=lock_loader())
+    with sqlite3.connect(db) as conn:
+        assert conn.execute("PRAGMA user_version").fetchone()[0] == 39
+        assert not conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE name='object_spatial_cells'"
+        ).fetchone()
+    assert stored_rows(db) == before
+    monkeypatch.setattr(runtime_integrity, "certify_scene", certify)
+    with StateMachine(db, dnd_loader=lock_loader()) as sm:
+        assert sm._conn.execute("PRAGMA user_version").fetchone()[0] == 40
+        assert_original_rows_equal(before, stored_rows(db))
+        assert tuple(
+            r[0]
+            for r in sm._conn.execute(
+                "SELECT cell FROM object_spatial_cells WHERE session_id=? "
+                "AND object_id=? ORDER BY cell",
+                (sid, OBSTACLE),
+            )
+        ) == ("1,1", "2,1")
+        assert (
+            sm._conn.execute(
+                "SELECT complete FROM scene_integrity WHERE session_id=? AND scene_id=?", (sid, A)
+            ).fetchone()[0]
+            == 1
+        )
+    with sqlite3.connect(db) as conn:
+        conn.execute("DROP TRIGGER spatial_index_objects_update")
+    with pytest.raises(StateMachineError) as error:
+        StateMachine(db, dnd_loader=lock_loader())
+    assert error.value.code == "unsupported_storage_schema"

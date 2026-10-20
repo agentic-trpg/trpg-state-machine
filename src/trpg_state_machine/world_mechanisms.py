@@ -19,7 +19,6 @@ class MechanismService:
     def __init__(self, handler):
         self.h = handler
         self._invocation = None
-        self._index = {}
         self.effects = MechanismEffectRunner(handler)
 
     def config(self, sid, oid):
@@ -460,10 +459,10 @@ class MechanismService:
             raise StateMachineError(failure["error"].code, "Check outside supported rule facts")
         return plan
 
-    def component_destroyed(self, row, package, component):
-        self._build_index(row["session_id"])
+    def component_destroyed(self, row, package, component, *, prepared=None):
+        index = self._batch_index(row["session_id"], prepared)
         sid, events = row["session_id"], []
-        for oid, _, _ in self._index.get(("destroyed", None, component), ()):
+        for oid, _, _ in index.get(("destroyed", None, component), ()):
             state = self.h.facts.mechanism_state(sid, oid)
             if state is not None and state.status != "broken":
                 self.h.facts.set_mechanism_state(
@@ -489,31 +488,45 @@ class MechanismService:
 
     def _build_index(self, sid):
         index = {}
-        for definition in self.h.facts.instances.objects(sid):
-            c = definition.capability("mechanism")
-            if c is None:
-                continue
+        for oid, c in self.h.facts.instances.mechanism_configs(sid):
             for number, t in enumerate(c.triggers):
                 key = (t.kind, t.scene_id, t.target_object_id)
-                index.setdefault(key, []).append((definition.object_id, number, t))
-            for component in (definition.object_id, *c.components):
-                index.setdefault(("destroyed", None, component), []).append(
-                    (definition.object_id, 0, None)
-                )
-        self._index = {
+                index.setdefault(key, []).append((oid, number, t))
+            for component in (oid, *c.components):
+                index.setdefault(("destroyed", None, component), []).append((oid, 0, None))
+        return {
             key: tuple(sorted(value, key=lambda v: (v[0], v[1]))) for key, value in index.items()
         }
 
-    def automatic(self, row, package, event, command_id, source_seq):
-        self._build_index(row["session_id"])
+    def _batch_index(self, sid, prepared):
+        if prepared is None:
+            return self._build_index(sid)
+        if sid not in prepared:
+            prepared[sid] = self._build_index(sid)
+        return prepared[sid]
+
+    def automatic(self, row, package, event, command_id, source_seq, *, prepared=None):
         sid, payload, kind = row["session_id"], event.payload, event.event_type
+        if kind not in {
+            "actor.stepped",
+            "actor.moved",
+            "scene.entered",
+            "rules.check_rolled",
+            "object.state_changed",
+            "object.light_changed",
+            "door.lock_changed",
+            "object.bar_changed",
+            "object.jam_cleared",
+            "item.picked_up",
+            "item.dropped",
+            "item.container_transferred",
+        }:
+            return []
         if self.h._active_combat(sid):
             return []  # Combat mechanical hooks/Episode routing require a separate contract.
         if kind == "object.light_changed" and event.mechanical_phase != "world.after_light_update":
             return []
         derived = []
-        if kind == "game.time_advanced":
-            return []  # Runtime boundary coordination is the sole deadline consumer.
         if kind == "item.picked_up" or (
             kind == "item.container_transferred" and payload.get("phase") == "after"
         ):
@@ -548,8 +561,22 @@ class MechanismService:
                         phase="world.after_mechanism_stow",
                     )
                 )
-        if kind == "object.durability_changed" and payload.get("current_hp") == 0:
-            return self.component_destroyed(row, package, payload["object_id"])
+        # Durability applies component destruction synchronously before returning
+        # its event batch; dispatching that event must not repeat the same work.
+        if (
+            kind in ("actor.stepped", "actor.moved", "scene.entered")
+            and event.mechanical_motion is None
+        ):
+            return derived
+        if kind == "item.container_transferred" and payload.get("phase") != "after":
+            return []
+        if kind == "rules.check_rolled":
+            adjudication = payload.get("adjudication", {})
+            if not (
+                adjudication.get("openable_operation") or adjudication.get("mechanism_operation")
+            ):
+                return []
+        index = self._batch_index(sid, prepared)
         scene = payload.get("scene_id", payload.get("to_scene_id"))
         actor = payload.get("actor_id", payload.get("execution", {}).get("actor_id"))
         if actor is None and payload.get("execution", {}).get("activation_id"):
@@ -563,7 +590,7 @@ class MechanismService:
             if motion is None:
                 return derived
             scene, actor = motion.to_scene_id, motion.actor_id
-            candidates = self._index.get(("enter_region", scene, None), ())
+            candidates = index.get(("enter_region", scene, None), ())
             target_kind = "enter_region"
         elif kind == "rules.check_rolled":
             adjudication = payload.get("adjudication", {})
@@ -574,15 +601,13 @@ class MechanismService:
             if admitted is None:
                 return []
             actor = adjudication["payload"]["actor_id"]
-            candidates = self._index.get(
-                ("check_result", scene, admitted["payload"]["object_id"]), ()
-            )
+            candidates = index.get(("check_result", scene, admitted["payload"]["object_id"]), ())
             target_kind = "check_result"
         else:
             if kind == "item.container_transferred" and payload.get("phase") != "after":
                 return []
             target = payload.get("object_id", payload.get("instance_id"))
-            candidates = self._index.get(("object_operation", scene, target), ())
+            candidates = index.get(("object_operation", scene, target), ())
             target_kind = "object_operation"
         events, fired = derived, set()
         for oid, _, trigger in candidates:

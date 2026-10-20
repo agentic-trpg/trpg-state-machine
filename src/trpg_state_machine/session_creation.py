@@ -202,7 +202,7 @@ class SessionCreation:
             self.world.facts.initialize_locks(initial_row, package)
             if package.portable_items:
                 self.characters.rule_components(
-                    session_id, set(self.characters.rule_actors(session_id))
+                    session_id, set(self.characters.rule_actors(session_id)), full_audit=True
                 )
             self.world.scenes.validate_initialized(initial_row, package)
             self.world._assert_spatial_consistency(session_id, package)

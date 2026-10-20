@@ -29,11 +29,50 @@ class RecentObservation:
 
 
 class ObservationLifecycleRuntime:
-    def _observation_rows(self, sid, npc):
+    def _observation_rows(
+        self,
+        sid,
+        npc,
+        *,
+        recent=None,
+        pending=False,
+        observation_ids=None,
+        work_ids=None,
+        content=True,
+        unoccupied=False,
+        limit=None,
+    ):
         # Only this NPC's projection prefix fences reads. Processing and TTL
         # remain independent, and another NPC's work cannot hold this one.
+        filters, values = [], [sid, npc, self._npc_perception_cursor(sid, npc)]
+        if recent is not None:
+            filters.append(
+                "w.expires_game_tick>s.game_tick"
+                if recent
+                else "(w.expires_game_tick IS NULL OR w.expires_game_tick<=s.game_tick)"
+            )
+        if pending:
+            filters.append("w.status='pending'")
+        for column, identities in (("observation_id", observation_ids), ("work_id", work_ids)):
+            if identities is not None:
+                filters.append(f"w.{column} IN (SELECT value FROM json_each(?))")
+                values.append(json.dumps(tuple(identities)))
+        if unoccupied:
+            filters.append(
+                "NOT EXISTS (SELECT 1 FROM npc_evaluation_observations e "
+                "JOIN npc_evaluation_tasks t USING(evaluation_id) "
+                "WHERE e.work_id=w.work_id AND t.status='running')"
+            )
+        suffix = "".join(" AND " + f for f in filters)
+        if limit is not None:
+            suffix += " ORDER BY o.event_seq,w.observation_id LIMIT ?"
+            values.append(limit)
+        else:
+            suffix += " ORDER BY o.event_seq,w.observation_id"
         return self._conn.execute(
-            "SELECT w.*,o.content_json,o.event_seq,s.game_tick,EXISTS ("
+            "SELECT w.*,"
+            + ("o.content_json," if content else "")
+            + "o.event_seq,s.game_tick,EXISTS ("
             "SELECT 1 FROM npc_record_sources r WHERE r.session_id=w.session_id "
             "AND r.npc_id=w.npc_id AND r.source_kind='observation' "
             "AND r.reference_id=w.observation_id) AS referenced "
@@ -43,8 +82,8 @@ class ObservationLifecycleRuntime:
             "JOIN event_observations o USING(observation_id) "
             "JOIN world_states s ON s.session_id=w.session_id "
             "WHERE w.session_id=? AND w.npc_id=? "
-            "AND o.event_seq<=? ORDER BY o.event_seq,w.observation_id",
-            (sid, npc, self._npc_perception_cursor(sid, npc)),
+            "AND o.event_seq<=?" + suffix,
+            values,
         ).fetchall()
 
     def _retention(self, row):
@@ -76,8 +115,7 @@ class ObservationLifecycleRuntime:
     def _recent_observations(self, sid, npc):
         return tuple(
             RecentObservation(self._observation(row), self._retention(row))
-            for row in self._observation_rows(sid, npc)
-            if self._retention(row).retention_status == "recent"
+            for row in self._observation_rows(sid, npc, recent=True)
         )
 
     def get_recent_npc_observations(self, session_id, package, *, context):
@@ -97,15 +135,19 @@ class ObservationLifecycleRuntime:
         """Own-NPC metadata, including expiry/unknown/archival, never archived text."""
         with self._transaction():
             npc = self._npc_authorized(session_id, package, context)
-            return tuple(self._retention(row) for row in self._observation_rows(session_id, npc))
+            return tuple(
+                self._retention(row)
+                for row in self._observation_rows(session_id, npc, content=False)
+            )
 
     def get_pending_npc_observation_work(self, session_id, package, *, context):
         """Independent Pending scope; expired evidence needs task-scoped recovery."""
-        return tuple(
-            item
-            for item in self.get_npc_observation_retention(session_id, package, context=context)
-            if item.processing_status == "pending"
-        )
+        with self._transaction():
+            npc = self._npc_authorized(session_id, package, context)
+            return tuple(
+                self._retention(r)
+                for r in self._observation_rows(session_id, npc, pending=True, content=False)
+            )
 
     def get_npc_observation_expiry(self, session_id, package, *, context, observation_ids=None):
         """Idempotent metadata query for Host's next invocation; no Context/ACK writes."""
@@ -118,7 +160,12 @@ class ObservationLifecycleRuntime:
             raise StateMachineError("invalid_observation", "Expected a bounded unique OB scope")
         with self._transaction():
             npc = self._npc_authorized(session_id, package, context)
-            retained = tuple(self._retention(r) for r in self._observation_rows(session_id, npc))
+            retained = tuple(
+                self._retention(r)
+                for r in self._observation_rows(
+                    session_id, npc, observation_ids=observation_ids, content=False
+                )
+            )
             if observation_ids is not None and not set(observation_ids) <= {
                 r.observation_id for r in retained
             }:

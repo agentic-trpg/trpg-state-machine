@@ -51,14 +51,18 @@ class SqliteStore:
             raise StateMachineError("storage_error", "Cannot open SQLite database") from exc
         self._conn.row_factory = sqlite3.Row
         from .environment_versions import protection_key, source_key, wind_key
+        from .runtime_integrity import spatial_cells
 
         try:
             for name, function in (
+                ("runtime_spatial_cells", spatial_cells),
                 ("env_source_key", source_key),
                 ("env_protection_key", protection_key),
                 ("env_wind_key", wind_key),
             ):
-                self._conn.create_function(name, 1, function, deterministic=True)
+                self._conn.create_function(
+                    name, 5 if name == "runtime_spatial_cells" else 1, function, deterministic=True
+                )
             self._conn.execute("PRAGMA foreign_keys = ON")
             self._conn.execute("PRAGMA busy_timeout = 5000")
             self._migrate()
@@ -91,7 +95,7 @@ class SqliteStore:
 
     def _migrate(self):
         scripts = [Path(__file__).with_name("_schema.sql")] + [
-            Path(__file__).with_name(f"_migration_{v}.sql") for v in range(2, 40)
+            Path(__file__).with_name(f"_migration_{v}.sql") for v in range(2, 41)
         ]
         steps = [_migration_statements(path.read_text("utf-8")) for path in scripts]
         # Migration 4 rebuilds a referenced table. Disable FK enforcement only on
@@ -101,7 +105,7 @@ class SqliteStore:
             self._conn.execute("BEGIN IMMEDIATE")
             # Read AFTER acquiring the cross-process SQLite migration write lock.
             version = self._conn.execute("PRAGMA user_version").fetchone()[0]
-            if version not in range(40):
+            if version not in range(41):
                 raise StateMachineError(
                     "unsupported_storage_schema", f"Unsupported storage version: {version}"
                 )
@@ -118,11 +122,40 @@ class SqliteStore:
             validate_environment_versions(self._conn, required=version >= 36)
             if version >= 34:
                 reconcile_schema34(self._conn, version, steps[33])
-            for target in range(version + 1, 40):
+            for target in range(version + 1, 41):
                 for statement in steps[target - 1]:
                     self._conn.execute(statement)
                 if self._conn.execute("PRAGMA user_version").fetchone()[0] != target:
                     raise StateMachineError("storage_error", "Non-contiguous schema migration")
+            if version < 40:
+                from .runtime_integrity import certify_scene
+
+                for row in self._conn.execute(
+                    "SELECT session_id,scene_id FROM scene_instances"
+                ).fetchall():
+                    certify_scene(self._conn, row[0], row[1])
+            # Derived lookups/certificates are only trustworthy with every
+            # transaction-maintenance trigger installed, including on reopen.
+            import re
+
+            for statement in steps[39]:
+                declaration = re.search(
+                    r"CREATE\s+(?:UNIQUE\s+)?(TABLE|INDEX|TRIGGER)\s+(\w+)",
+                    statement,
+                    re.IGNORECASE,
+                )
+                if declaration is None:
+                    continue
+                kind, name = declaration.groups()
+                stored = self._conn.execute(
+                    "SELECT sql FROM sqlite_master WHERE type=? AND name=?",
+                    (kind.lower(), name),
+                ).fetchone()
+                expected = statement[declaration.start() :].strip().rstrip(";")
+                if stored is None or " ".join(stored[0].split()) != " ".join(expected.split()):
+                    raise StateMachineError(
+                        "unsupported_storage_schema", "Runtime integrity maintenance is incomplete"
+                    )
             reconcile_schema34(self._conn, 35, steps[33])
             validate_environment_versions(self._conn, required=True)
             if version < 5:
@@ -206,6 +239,7 @@ class SqliteStore:
                 self._conn.rollback()
                 raise
             finally:
+                scope.read_memo.clear()
                 scope.derived_pending.clear()
                 scope.active = False
                 self._scope = None
@@ -222,6 +256,8 @@ class UnitOfWork:
         self.write = write
         self.active = True
         self.derived_pending = {}
+        self.read_memo = {}
+        self.read_stage = -1
 
     def _connection(self):
         self._store.ensure_open()
@@ -257,6 +293,7 @@ class UnitOfWork:
             yield self
         except BaseException:
             connection.execute("ROLLBACK TO domain_effects")
+            self.read_memo.clear()
             raise
         finally:
             connection.execute("RELEASE domain_effects")

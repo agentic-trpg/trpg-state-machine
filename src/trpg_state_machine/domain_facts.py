@@ -15,6 +15,7 @@ from pydantic import TypeAdapter
 from .errors import StateMachineError
 from .item_units import valid_item_unit
 from .package import canonical_json
+from .scoped_reads import scoped_read
 
 
 class CharacterFacts:
@@ -246,11 +247,33 @@ class CharacterFacts:
             "INSERT INTO mechanical_components VALUES (?,?,?,?,?,?)", (sid, *expected)
         )
 
-    def rule_components(self, sid, owner_ids):
+    @scoped_read
+    def rule_components(self, sid, owner_ids, *, full_audit=False):
         """Read persisted facts, then project owners; absence is never an empty component."""
+        owners = json.dumps(sorted(owner_ids))
+        projections = []
+        for field, path, owner in (
+            ("inventory_json", "$.entries", "owner_id"),
+            ("resources_json", "$.pools", "owner_id"),
+            ("casting_json", "$.actors", "actor_id"),
+            ("effects_json", "$", "target_id"),
+        ):
+            selected = (
+                f"(SELECT json_group_array(json(v.value)) FROM json_each({field},'{path}') v "
+                f"WHERE json_extract(v.value,'$.{owner}') IN (SELECT value FROM json_each(?)))"
+            )
+            value = selected if path == "$" else f"json_set({field},'{path}',json({selected}))"
+            projections.append(f"CASE WHEN {field}='null' THEN 'null' ELSE {value} END AS {field}")
         row = self._conn.execute(
-            "SELECT * FROM mechanical_components WHERE session_id=?", (sid,)
+            "SELECT schema_version,"
+            + ",".join(projections)
+            + " FROM mechanical_components WHERE session_id=?",
+            (owners, owners, owners, owners, sid),
         ).fetchone()
+        if full_audit:
+            row = self._conn.execute(
+                "SELECT * FROM mechanical_components WHERE session_id=?", (sid,)
+            ).fetchone()
         if row is None or row["schema_version"] != "engine-snapshot/17":
             raise StateMachineError(
                 "unsupported_mechanical_version", "Explicit component facts are missing"
@@ -275,7 +298,7 @@ class CharacterFacts:
             )
             effects = TypeAdapter(tuple[EffectState, ...]).validate_json(row["effects_json"])
             effects = [v.model_dump(mode="json") for v in effects]
-            known = set(self.rule_actors(sid))
+            known = set(self.rule_actors(sid, None if full_audit else owner_ids))
             references = {v["owner_id"] for v in inventory["entries"]}
             references |= {v["target_id"] for v in effects}
             if resources is not None:
@@ -284,7 +307,9 @@ class CharacterFacts:
                 references |= {v["actor_id"] for v in casting["actors"]}
             if not references <= known:
                 raise ValueError("component owner is missing")
-            self.validate_portable_inventory(sid, inventory)
+            self.validate_portable_inventory(
+                sid, inventory, owner_ids=None if full_audit else owner_ids
+            )
             inventory["entries"] = [v for v in inventory["entries"] if v["owner_id"] in owner_ids]
             if resources is not None:
                 resources["pools"] = [v for v in resources["pools"] if v["owner_id"] in owner_ids]
@@ -301,9 +326,13 @@ class CharacterFacts:
                 "invalid_mechanical_state", "Stored component closure is incomplete"
             ) from exc
 
-    def validate_portable_inventory(self, sid, inventory):
+    def validate_portable_inventory(self, sid, inventory, *, owner_ids=None):
         """Validate the complete portable subset before any owner projection."""
-        identities, expected = self.world.portable_inventory(sid)
+        identities, expected = self.world.portable_inventory(
+            sid,
+            owner_ids=owner_ids,
+            instance_ids=tuple(e["instance_id"] for e in inventory["entries"]),
+        )
         actual = {
             e["instance_id"]: e for e in inventory["entries"] if e["instance_id"] in identities
         }
@@ -312,12 +341,12 @@ class CharacterFacts:
                 "invalid_mechanical_state", "Portable inventory differs from location facts"
             )
         if identities:
-            for aid, actor in self.rule_actors(sid).items():
-                slugs = {
-                    e["item_slug"]
-                    for e in inventory["entries"]
-                    if e["owner_id"] == aid and e["quantity"] > 0
-                }
+            by_owner = {}
+            for e in inventory["entries"]:
+                if e["quantity"] > 0:
+                    by_owner.setdefault(e["owner_id"], set()).add(e["item_slug"])
+            for aid, actor in self.rule_actors(sid, owner_ids).items():
+                slugs = by_owner.get(aid, set())
                 if (
                     len(actor["carried_item_slugs"]) != len(slugs)
                     or set(actor["carried_item_slugs"]) != slugs
@@ -327,21 +356,118 @@ class CharacterFacts:
                         "Carried projection differs from owned instances",
                     )
 
-    def project_item_transfer(self, sid, before, after):
-        self.store.require_write()
-        if before["object_id"] != after["object_id"] or before["item_json"] != after["item_json"]:
-            raise StateMachineError("invalid_mechanical_state", "Invalid instance transition")
-        stored = self._conn.execute(
-            "SELECT inventory_json FROM mechanical_components WHERE session_id=?", (sid,)
-        ).fetchone()
-        inventory = json.loads(stored[0]) if stored else None
-        if inventory is None or next(
-            (e for e in inventory["entries"] if e["instance_id"] == before["object_id"]), None
-        ) != self.world.item_entry(before):
+    def prepare_inventory_change(self, sid, roots):
+        """Validate the old moving/accessibility subtree and affected owner closure."""
+        rows = self.world.descendant_objects(sid, roots)
+        portable = [r for r in rows if r["item_json"] is not None]
+        if not portable:
+            return None
+        identities = {r["object_id"] for r in portable}
+        owners = {self.world.placement(sid, r["object_id"])["carrier_id"] for r in portable}
+        owners.discard(None)
+        if owners:
+            self.rule_components(sid, owners)
+        inventory = self._inventory_selection(sid, owners, identities)
+        expected = {r["object_id"]: self.world.item_entry(r) for r in portable}
+        actual = {
+            e["instance_id"]: e for e in inventory["entries"] if e["instance_id"] in identities
+        }
+        if actual != {i: e for i, e in expected.items() if e is not None}:
             raise StateMachineError(
                 "invalid_mechanical_state", "Item projection precondition differs"
             )
-        self.sync_world_inventory(sid)
+        return identities, owners
+
+    def _inventory_selection(self, sid, owners, identities):
+        stored = self._conn.execute(
+            "SELECT json_set(inventory_json,'$.entries',json((SELECT "
+            "json_group_array(json(e.value)) "
+            "FROM json_each(inventory_json,'$.entries') e WHERE "
+            "json_extract(e.value,'$.owner_id') IN (SELECT value FROM json_each(?)) OR "
+            "json_extract(e.value,'$.instance_id') IN (SELECT value FROM json_each(?))))) "
+            "FROM mechanical_components WHERE session_id=?",
+            (json.dumps(sorted(owners)), json.dumps(sorted(identities)), sid),
+        ).fetchone()
+        if stored is None:
+            raise StateMachineError("unsupported_mechanical_version", "Explicit inventory missing")
+        return InventoryState.model_validate_json(stored[0]).model_dump(mode="json")
+
+    def project_item_transfer(self, sid, before, after, *, prepared=None):
+        self.store.require_write()
+        if before["object_id"] != after["object_id"] or before["item_json"] != after["item_json"]:
+            raise StateMachineError("invalid_mechanical_state", "Invalid instance transition")
+        if prepared is None:
+            # Compatibility for trusted direct participants: reconstruct the old
+            # root pose. Production callers validate the entire old subtree first.
+            old_entry = self.world.item_entry(before)
+            prepared = ({before["object_id"]}, {old_entry["owner_id"]} if old_entry else set())
+            entries = self._inventory_selection(sid, prepared[1], prepared[0])["entries"]
+            if (
+                next((e for e in entries if e["instance_id"] == before["object_id"]), None)
+                != old_entry
+            ):
+                raise StateMachineError(
+                    "invalid_mechanical_state", "Item projection precondition differs"
+                )
+        self.sync_inventory_change(sid, prepared)
+
+    def sync_inventory_change(self, sid, prepared):
+        """One inventory UPDATE and only changed owner mirrors; no Session reconstruction.
+
+        The legacy aggregate JSON row still requires SQLite JSON traversal/encoding.
+        Python validation/construction is limited to affected owners and the subtree.
+        """
+        self.store.require_write()
+        if prepared is None:
+            return
+        identities, owners = prepared
+        owners = set(owners)
+        for oid in identities:
+            owners.add(self.world.placement(sid, oid)["carrier_id"])
+        owners.discard(None)
+        old = self._inventory_selection(sid, owners, identities)
+        portable, expected = self.world.portable_inventory(
+            sid, owner_ids=owners, instance_ids=identities
+        )
+        selected = {e["instance_id"]: e for e in old["entries"]}
+        remove = portable - expected.keys()
+        replacements = {i: e for i, e in expected.items() if i in selected and selected[i] != e}
+        additions = [e for i, e in expected.items() if i not in selected]
+        if remove & selected.keys() or replacements or additions:
+            self._conn.execute(
+                "UPDATE mechanical_components SET "
+                "inventory_json=json_set(inventory_json,'$.entries',"
+                "json((SELECT json_group_array(json(value)) FROM ("
+                "SELECT CASE WHEN p.key IS NULL THEN e.value ELSE p.value END AS value "
+                "FROM json_each(inventory_json,'$.entries') e LEFT JOIN json_each(?) p "
+                "ON p.key=json_extract(e.value,'$.instance_id') "
+                "WHERE json_extract(e.value,'$.instance_id') NOT IN (SELECT value FROM "
+                "json_each(?)) "
+                "UNION ALL SELECT value FROM json_each(?))))) WHERE session_id=?",
+                (
+                    canonical_json(replacements),
+                    json.dumps(sorted(remove)),
+                    canonical_json(additions),
+                    sid,
+                ),
+            )
+        entries = [e for e in old["entries"] if e["instance_id"] not in portable] + list(
+            expected.values()
+        )
+        by_owner = {}
+        for entry in entries:
+            if entry["quantity"] > 0:
+                by_owner.setdefault(entry["owner_id"], set()).add(entry["item_slug"])
+        for aid, actor in self.rule_actors(sid, owners).items():
+            wanted = by_owner.get(aid, set())
+            current = actor["carried_item_slugs"]
+            slugs = [v for v in current if v in wanted] + sorted(wanted - set(current))
+            if slugs != current:
+                self._conn.execute(
+                    "UPDATE characters SET inventory_json=? WHERE session_id=? AND actor_id=?",
+                    (canonical_json(slugs), sid, aid),
+                )
+        self.validate_portable_inventory(sid, {"entries": entries}, owner_ids=owners)
 
     def sync_world_inventory(self, sid):
         """Rebuild only the authoritative portable subset; preserve every other entry."""
@@ -362,9 +488,10 @@ class CharacterFacts:
         old_order = [
             e["instance_id"] for e in inventory["entries"] if e["instance_id"] in identities
         ]
+        old_ids = set(old_order)
         others = [e for e in inventory["entries"] if e["instance_id"] not in identities]
         inventory["entries"] = others + [entries[i] for i in old_order if i in entries]
-        inventory["entries"].extend(entries[i] for i in entries if i not in old_order)
+        inventory["entries"].extend(entries[i] for i in entries if i not in old_ids)
         InventoryState.model_validate_json(canonical_json(inventory))
         self._conn.execute(
             "UPDATE mechanical_components SET inventory_json=? WHERE session_id=?",
@@ -412,14 +539,20 @@ class CharacterFacts:
                 (cell, row["session_id"], actor_id),
             )
 
-    def rule_actors(self, sid):
+    @scoped_read
+    def rule_actors(self, sid, owner_ids=None):
         result = {}
         for actor in self._conn.execute(
             "SELECT m.actor_id,m.state_json,c.current_hp,c.max_hp,c.inventory_json,"
             "c.resources_json,c.effects_json "
             "FROM mechanical_actors m JOIN characters c USING(session_id,actor_id) "
-            "WHERE session_id=?",
-            (sid,),
+            "WHERE session_id=?"
+            + (
+                " AND m.actor_id IN (SELECT value FROM json_each(?))"
+                if owner_ids is not None
+                else ""
+            ),
+            (sid, json.dumps(sorted(owner_ids))) if owner_ids is not None else (sid,),
         ):
             if json.loads(actor["resources_json"]) or json.loads(actor["effects_json"]):
                 raise StateMachineError(
@@ -481,15 +614,16 @@ class WorldFacts:
 
     @property
     def instances(self):
-        from .instance_data import InstanceData
-
-        return InstanceData(self)
+        return self._instances
 
     def object_definition(self, sid, oid):
         return self.instances.object_definition(sid, oid)
 
     def __init__(self, store):
+        from .instance_data import InstanceData
+
         self.store = store
+        self._instances = InstanceData(self)
 
     @property
     def _conn(self):
@@ -925,6 +1059,67 @@ class WorldFacts:
             (sid, oid),
         ).fetchall()
 
+    def descendant_objects(self, sid, roots):
+        return self._conn.execute(
+            "WITH RECURSIVE closure(id) AS (SELECT value FROM json_each(?) UNION "
+            "SELECT o.object_id FROM objects o JOIN closure c ON o.container_id=c.id "
+            "WHERE o.session_id=?) SELECT o.* FROM objects o JOIN closure c ON c.id=o.object_id "
+            "WHERE o.session_id=? ORDER BY o.object_id",
+            (json.dumps(tuple(roots)), sid, sid),
+        ).fetchall()
+
+    def related_objects(self, sid, roots):
+        """Ancestors plus their complete descendant aggregates, in stable ID order.
+
+        UNION terminates corrupt cycles; the domain admission still rejects them.
+        Sibling subtrees are required for ancestor weight/capacity, not optional.
+        """
+        return self._conn.execute(
+            "WITH RECURSIVE ancestors(id) AS (SELECT value FROM json_each(?) UNION "
+            "SELECT o.container_id FROM objects o JOIN ancestors a ON o.object_id=a.id "
+            "WHERE o.session_id=? AND o.container_id IS NOT NULL), "
+            "closure(id) AS (SELECT id FROM ancestors UNION "
+            "SELECT o.object_id FROM objects o JOIN closure c ON o.container_id=c.id "
+            "WHERE o.session_id=?) "
+            "SELECT o.* FROM objects o JOIN closure c ON c.id=o.object_id "
+            "WHERE o.session_id=? ORDER BY o.object_id",
+            (json.dumps(tuple(roots)), sid, sid, sid),
+        ).fetchall()
+
+    def scene_object_rows(
+        self, sid, scene_id, *, carrier_id=None, all_carriers=False, extra=(), lights_only=False
+    ):
+        """Ground/carried roots and descendants; actual pose, never template membership."""
+        return self._conn.execute(
+            "WITH RECURSIVE local(id) AS ("
+            "SELECT object_id FROM objects WHERE session_id=? AND (scene_id=? OR "
+            "carrier_id=? OR (? AND carrier_id IN (SELECT actor_id FROM actors "
+            "WHERE session_id=? AND current_scene_id=?)) OR object_id IN "
+            "(SELECT value FROM json_each(?))) UNION "
+            "SELECT o.object_id FROM objects o JOIN local l ON o.container_id=l.id "
+            "WHERE o.session_id=?) "
+            "SELECT o.* FROM objects o JOIN local l ON l.id=o.object_id "
+            "WHERE o.session_id=?"
+            + (
+                " AND EXISTS (SELECT 1 FROM object_lights l WHERE "
+                "l.session_id=o.session_id AND l.object_id=o.object_id)"
+                if lights_only
+                else ""
+            )
+            + " ORDER BY o.object_id",
+            (
+                sid,
+                scene_id,
+                carrier_id,
+                all_carriers,
+                sid,
+                scene_id,
+                json.dumps(tuple(extra)),
+                sid,
+                sid,
+            ),
+        ).fetchall()
+
     def item_entry(self, row):
         sid, oid = row["session_id"], row["object_id"]
         placement = self.placement(sid, oid, row=row)
@@ -934,11 +1129,23 @@ class WorldFacts:
         data["accessible"] = data["accessible"] and self.item_accessible(sid, oid, row=row)
         return {"instance_id": oid, "owner_id": placement["carrier_id"], **data}
 
-    def portable_inventory(self, sid):
+    def portable_inventory(self, sid, *, owner_ids=None, instance_ids=()):
         identities, entries = set(), {}
-        for row in self._conn.execute(
-            "SELECT * FROM objects WHERE session_id=? AND item_json IS NOT NULL", (sid,)
-        ):
+        if owner_ids is None:
+            rows = self._conn.execute(
+                "SELECT * FROM objects WHERE session_id=? AND item_json IS NOT NULL", (sid,)
+            )
+        else:
+            rows = self._conn.execute(
+                "WITH RECURSIVE owned(id) AS (SELECT object_id FROM objects WHERE session_id=? "
+                "AND carrier_id IN (SELECT value FROM json_each(?)) UNION "
+                "SELECT o.object_id FROM objects o JOIN owned c ON o.container_id=c.id "
+                "WHERE o.session_id=?) SELECT * FROM objects WHERE session_id=? "
+                "AND item_json IS NOT NULL AND (object_id IN (SELECT id FROM owned) "
+                "OR object_id IN (SELECT value FROM json_each(?))) ORDER BY object_id",
+                (sid, json.dumps(sorted(owner_ids)), sid, sid, json.dumps(tuple(instance_ids))),
+            )
+        for row in rows:
             identities.add(row["object_id"])
             data = json.loads(row["item_json"])
             # Ground metadata is validated without constructing a fictional owner.

@@ -61,7 +61,7 @@ print(json.dumps({'session_id': sid, 'database': str(db)}))
     before = stored_state(db)
     package = _validate(json.loads((destination / "package.json").read_text("utf-8")))
     with StateMachine(db, dnd_loader=lock_loader()) as sm:
-        assert sm._conn.execute("PRAGMA user_version").fetchone()[0] == 39
+        assert sm._conn.execute("PRAGMA user_version").fetchone()[0] == 40
         after_schema = stored_state(db)
         assert after_schema["instance_configs"] == ()
         assert {key: after_schema[key] for key in before} == before

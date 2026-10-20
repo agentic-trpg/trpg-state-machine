@@ -496,6 +496,7 @@ def test_actual_ob2_upgrade_preserves_gate_task_scope_and_recovers_old_work(
     before = stored_rows(db)
     with StateMachine(db) as sm:
         assert_preserved(db, before)
+        sm.upgrade_instance_configs(sid, ob_package, context=context)
         npc = NPCContext("agent:npc.caretaker", sid, "npc.caretaker")
         data = sm.get_npc_evaluation_task(eid, ob_package, context=npc)
         assert data.task.status == "running" and data.observations

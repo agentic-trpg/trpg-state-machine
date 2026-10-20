@@ -12,6 +12,7 @@ from types import SimpleNamespace
 
 from .errors import StateMachineError
 from .package import canonical_json
+from .scoped_reads import scoped_read
 
 
 @lru_cache(maxsize=1)
@@ -66,6 +67,30 @@ class SceneConfig(SimpleNamespace):
         planned_grid = data.pop("grid_json")
         super().__init__(**data)
         self._instances, self._sid, self._planned_grid = instances, sid, planned_grid
+
+    def _collection(self, field):
+        row = self._instances.conn.execute(
+            "SELECT json_extract(config_json,?) FROM instance_configs WHERE session_id=? "
+            "AND domain='scene' AND instance_id=?",
+            ("$." + field, self._sid, self.scene_id),
+        ).fetchone()
+        return decode(json.loads(row[0]))
+
+    @property
+    def object_ids(self):
+        return self._collection("object_ids")
+
+    @property
+    def actor_initial_ids(self):
+        return self._collection("actor_initial_ids")
+
+    @property
+    def pending_objects(self):
+        return self._collection("pending_objects")
+
+    @property
+    def pending_actors(self):
+        return self._collection("pending_actors")
 
     @property
     def objects(self):
@@ -126,6 +151,22 @@ class InstanceData:
             raise StateMachineError(
                 "incomplete_instance_config", "Invalid instance configuration"
             ) from exc
+
+    @scoped_read
+    def session_value(self, sid, field):
+        row = self.conn.execute(
+            "SELECT json_extract(config_json,?) FROM instance_configs WHERE session_id=? "
+            "AND domain='session' AND instance_id=?",
+            ("$." + field, sid, sid),
+        ).fetchone()
+        if row is None:
+            raise StateMachineError("incomplete_instance_config", "Missing Session configuration")
+        value = row[0]
+        return (
+            decode(json.loads(value))
+            if isinstance(value, str) and value[:1] in ("{", "[")
+            else value
+        )
 
     def initialize_world(self, sid, package):
         self.put(
@@ -222,9 +263,10 @@ class InstanceData:
                     },
                 )
 
+    @scoped_read
     def object_definition(self, sid, oid):
         if self.facts.object(sid, oid) is None:
-            for scene_id in self.get(sid, "session", sid)["scene_ids"]:
+            for scene_id in self.session_value(sid, "scene_ids"):
                 data = self.get(sid, "scene", scene_id)
                 for definition in data["pending_definitions"]:
                     if definition.object_id == oid:
@@ -287,6 +329,21 @@ class InstanceData:
             if (d := self.object_definition(sid, r[0])) is not None
         )
 
+    def mechanism_configs(self, sid):
+        """Only configured mechanism capability data, no unrelated state hydration."""
+        for row in self.conn.execute(
+            "SELECT m.object_id,c.value FROM object_mechanisms m "
+            "JOIN instance_configs i ON i.session_id=m.session_id AND i.domain='object' "
+            "AND i.instance_id=m.object_id, "
+            "json_each(json_extract(i.config_json,'$.definition'),'$.fields.capabilities.tuple') c "
+            "WHERE m.session_id=? AND json_extract(c.value,'$.type')='Mechanism' "
+            "ORDER BY m.object_id",
+            (sid,),
+        ):
+            data = json.loads(row[1])
+            data["fields"]["initial_status"] = self.facts.mechanism_status(sid, row[0])
+            yield row[0], decode(data)
+
     def legacy_object(self, sid, oid):
         data = self.get(sid, "object", oid)
         obj = self.facts.object(sid, oid)
@@ -300,20 +357,22 @@ class InstanceData:
         )
 
     def scene(self, sid, scene_id):
-        if scene_id not in self.get(sid, "session", sid)["scene_ids"]:
+        row = self.conn.execute(
+            "SELECT json_remove(config_json,'$.object_ids','$.actor_initial_ids',"
+            "'$.pending_objects','$.pending_actors','$.pending_definitions') FROM instance_configs "
+            "WHERE session_id=? AND domain='scene' AND instance_id=?",
+            (sid, scene_id),
+        ).fetchone()
+        if row is None:
             raise StateMachineError("unknown_scene", f"Unknown scene: {scene_id}")
-        data = self.get(sid, "scene", scene_id)
-        return SceneConfig(self, sid, data)
+        return SceneConfig(self, sid, decode(json.loads(row[0])))
 
     def scenes(self, sid):
-        return tuple(
-            self.scene(sid, scene_id) for scene_id in self.get(sid, "session", sid)["scene_ids"]
-        )
+        return tuple(self.scene(sid, scene_id) for scene_id in self.session_value(sid, "scene_ids"))
 
     def legacy_locks(self, sid):
         return tuple(
-            SimpleNamespace(object_id=oid)
-            for oid in self.get(sid, "session", sid)["legacy_lock_ids"]
+            SimpleNamespace(object_id=oid) for oid in self.session_value(sid, "legacy_lock_ids")
         )
 
     def finish_scene(self, sid, scene_id):

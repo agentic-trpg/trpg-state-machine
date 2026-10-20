@@ -25,6 +25,7 @@ from .object_protection import (
     project_protection as _project_protection,
 )
 from .package import canonical_json
+from .scoped_reads import scoped_read
 
 if TYPE_CHECKING:
     from .package import AdventurePackage
@@ -85,6 +86,7 @@ class ObjectSpatialService:
         self.h = handler
         self.protection_provider = protection_provider
 
+    @scoped_read
     def config(self, sid, oid):
         d = self.h.facts.object_definition(sid, oid)
         return d.capability("spatial") if d else None
@@ -99,6 +101,7 @@ class ObjectSpatialService:
             if o.object_id == oid
         )
 
+    @scoped_read
     def state(self, sid, oid, package):
         obj = self.h.facts.object(sid, oid)
         if obj is not None:
@@ -192,8 +195,7 @@ class ObjectSpatialService:
         obj = self.h.facts.object(sid, oid)
         reason = None
         if any(
-            p.door_object_id == oid
-            for p in self.h.facts.instances.get(sid, "session", sid)["passages"]
+            p.door_object_id == oid for p in self.h.facts.instances.session_value(sid, "passages")
         ):
             reason = "shared_door_protection_geometry_unsupported"
         elif obj is not None and (obj["carrier_id"] is not None or obj["container_id"] is not None):
@@ -247,7 +249,7 @@ class ObjectSpatialService:
         _, objects = self.h.grid.reader.scene_occupants(sid, scene_id, package)
         doors = {
             p.door_object_id
-            for p in self.h.facts.instances.get(sid, "session", sid)["passages"]
+            for p in self.h.facts.instances.session_value(sid, "passages")
             if p.door_object_id and any(e.scene_id == scene_id for e in p.endpoints)
         }
         return SceneProtectionInputs(
@@ -298,6 +300,7 @@ class ObjectSpatialService:
             ),
         )
 
+    @scoped_read
     def project(self, sid, oid, package, *, candidate=None):
         state = candidate or self.state(sid, oid, package)
         cells = self.cells(package, oid, state.anchor, state.orientation, sid=sid)
@@ -315,6 +318,7 @@ class ObjectSpatialService:
             tuple((cell, props.cover) for cell in cells) if props.cover != "none" else (),
         )
 
+    @scoped_read
     def target_cells(self, sid, scene_id, oid, package):
         ports = self.h._door_ports(scene_id, oid, package, sid=sid)
         if ports:
@@ -322,6 +326,7 @@ class ObjectSpatialService:
         state = self.state(sid, oid, package)
         return self.project(sid, oid, package).occupied_cells if state.scene_id == scene_id else ()
 
+    @scoped_read
     def visible_cells(self, sid, actor, oid, package):
         position = self.h._public_scope(sid, actor, package)
         base = self.h.grid.base_topology(sid, position.scene_id, package)
@@ -345,8 +350,13 @@ class ObjectSpatialService:
             visible = tuple(dict.fromkeys((*visible, position.cell)))
         if not visible:
             raise StateMachineError("invalid_target", "No authorized local object")
-        movement = self.h.grid.exploration_topology(
-            sid, position.scene_id, package, exclude_actor=actor, exclude_object=oid
+        movement = self.h.grid.local_topology(
+            sid,
+            position.scene_id,
+            package,
+            (position.cell, *visible),
+            exclude_actor=actor,
+            exclude_object=oid,
         )
         reachable = [
             cell
@@ -357,11 +367,12 @@ class ObjectSpatialService:
             raise StateMachineError("object_out_of_reach", "Object requires clear adjacent reach")
         return min(reachable, key=lambda cell: (movement.distance_ft(position.cell, cell), cell))
 
+    @scoped_read
     def movement_cells(self, sid, scene_id, package, *, exclude_object=None):
         cells = set()
         doors = {
             p.door_object_id
-            for p in self.h.facts.instances.get(sid, "session", sid)["passages"]
+            for p in self.h.facts.instances.session_value(sid, "passages")
             if p.door_object_id
         }
         _, objects = self.h.grid.reader.scene_occupants(sid, scene_id, package)
@@ -370,6 +381,7 @@ class ObjectSpatialService:
                 cells.update(self.project(sid, oid, package).movement_blocking_cells)
         return cells
 
+    @scoped_read
     def scene_contributions(self, sid, scene_id, package):
         """Trusted composition seam: per-object full-cell inputs for one local map.
 
@@ -379,7 +391,7 @@ class ObjectSpatialService:
         _, objects = self.h.grid.reader.scene_occupants(sid, scene_id, package)
         local_doors = {
             p.door_object_id
-            for p in self.h.facts.instances.get(sid, "session", sid)["passages"]
+            for p in self.h.facts.instances.session_value(sid, "passages")
             if p.door_object_id and any(e.scene_id == scene_id for e in p.endpoints)
         }
         result = {}
@@ -421,12 +433,12 @@ class ObjectSpatialService:
         blocking = set()
         doors = {
             p.door_object_id
-            for p in self.h.facts.instances.get(sid, "session", sid)["passages"]
+            for p in self.h.facts.instances.session_value(sid, "passages")
             if p.door_object_id
         }
         reserved = {
             cell
-            for p in self.h.facts.instances.get(sid, "session", sid)["passages"]
+            for p in self.h.facts.instances.session_value(sid, "passages")
             for e in p.endpoints
             if e.scene_id == scene_id
             for cell in (e.threshold_cell, e.standing_cell)
@@ -478,14 +490,92 @@ class ObjectSpatialService:
             raise StateMachineError(
                 "unsupported_object_geometry", "Cross-scene placement unsupported"
             )
-        self._check_scene(
-            sid,
-            candidate.scene_id,
-            package,
-            replacements={**(candidates or {}), oid: candidate},
-            error_code=error_code,
-        )
+        replacements = {**(candidates or {}), oid: candidate}
+        blocking = set()
+        doors = {
+            p.door_object_id
+            for p in self.h.facts.instances.session_value(sid, "passages")
+            if p.door_object_id
+        }
+        for target, state in replacements.items():
+            if state.scene_id != candidate.scene_id:
+                raise StateMachineError("unsupported_object_geometry", "Candidate scenes differ")
+            projection = self.project(sid, target, package, candidate=state)
+            if target in doors:
+                # Shared endpoint thresholds are checked by Openable on BOTH sides.
+                continue
+            self._check_shape(sid, target, package, state, projection, error_code)
+            current = set(projection.movement_blocking_cells)
+            if current & blocking:
+                raise StateMachineError(error_code, "Blocking candidate footprints overlap")
+            blocking.update(current)
+        if blocking:
+            import json
+
+            actors = self.h._conn.execute(
+                "SELECT actor_id FROM actors WHERE session_id=? AND current_scene_id=? "
+                "AND cell IN (SELECT value FROM json_each(?)) LIMIT 1",
+                (sid, candidate.scene_id, json.dumps(sorted(blocking))),
+            ).fetchone()
+            if actors is not None:
+                raise StateMachineError(error_code, "Blocking footprint overlaps an actor")
+            for other in self._touching(sid, candidate.scene_id, blocking):
+                if other in replacements or other in doors:
+                    continue
+                if blocking.intersection(self.project(sid, other, package).movement_blocking_cells):
+                    raise StateMachineError(error_code, "Blocking footprints overlap")
         return self.project(sid, oid, package, candidate=candidate)
+
+    def _check_shape(self, sid, oid, package, state, projection, error_code):
+        base = self.h.grid.base_topology(sid, state.scene_id)
+        cells = set(projection.occupied_cells)
+        if not cells:
+            raise StateMachineError(error_code, "Ground footprint needs an anchor")
+        if self.config(sid, oid) is None:
+            if any(not base.is_valid_cell(c) for c in cells):
+                raise StateMachineError(error_code, "Invalid object location")
+            return
+        walls = self.h.grid.reader.scene_grid(sid, state.scene_id, package)["wall_segments"]
+        if any(
+            not all(float(w[k]).is_integer() for k in ("x1", "y1", "x2", "y2"))
+            or (w["x1"] != w["x2"] and w["y1"] != w["y2"])
+            for w in walls
+        ):
+            raise StateMachineError(
+                "unsupported_object_geometry", "Object shapes require grid-edge walls"
+            )
+        reserved = {
+            c
+            for p in self.h.facts.instances.session_value(sid, "passages")
+            for e in p.endpoints
+            if e.scene_id == state.scene_id
+            for c in (e.threshold_cell, e.standing_cell)
+        }
+        if cells & reserved or any(not base.is_valid_cell(c) for c in cells):
+            raise StateMachineError(error_code, "Object footprint conflicts with grid")
+        for cell in cells:
+            x, y = map(int, cell.split(","))
+            for other in (f"{x + 1},{y}", f"{x},{y + 1}"):
+                if other in cells and base.edge_distance(cell, other) is None:
+                    raise StateMachineError(error_code, "Rigid footprint crosses a wall")
+
+    def _touching(self, sid, scene, cells):
+        """SQL pose filtering; only intersecting objects are hydrated in Python.
+
+        SQLite triggers maintain the rebuildable cell index with source facts;
+        candidates, savepoint rollback and old WAL readers see their own state.
+        """
+        import json
+
+        return tuple(
+            r[0]
+            for r in self.h._conn.execute(
+                "SELECT DISTINCT object_id FROM object_spatial_cells WHERE session_id=? "
+                "AND scene_id=? AND blocks=1 AND cell IN (SELECT value FROM json_each(?)) "
+                "ORDER BY object_id",
+                (sid, scene, json.dumps(sorted(cells))),
+            )
+        )
 
     def validate_placement(self, row, actor, op, package):
         h, sid = self.h, row["session_id"]
@@ -514,9 +604,7 @@ class ObjectSpatialService:
             raise StateMachineError("unsupported_object_orientation", "Orientation is not allowed")
         if any(
             p.door_object_id == op.object_id
-            for p in self.h.facts.instances.get(row["session_id"], "session", row["session_id"])[
-                "passages"
-            ]
+            for p in self.h.facts.instances.session_value(row["session_id"], "passages")
         ):
             raise StateMachineError(
                 "unsupported_object_capability", "Shared passage objects are fixed"
@@ -532,7 +620,6 @@ class ObjectSpatialService:
         if before == candidate:
             return []
         h.facts.place(sid, op.object_id, candidate.anchor, orientation=candidate.orientation)
-        self.audit(sid, package)
         return [
             h._capture_event(
                 sid,

@@ -103,7 +103,7 @@ def test_schema8_failure_rolls_back_all_migration_steps(tmp_path, package_data, 
     with sqlite3.connect(db) as conn:
         assert conn.execute("PRAGMA user_version").fetchone()[0] == 7
     with StateMachine(db) as sm:
-        assert sm._conn.execute("PRAGMA user_version").fetchone()[0] == 39
+        assert sm._conn.execute("PRAGMA user_version").fetchone()[0] == 40
         assert sm._conn.execute("PRAGMA foreign_key_check").fetchall() == []
 
 

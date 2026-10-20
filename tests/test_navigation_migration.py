@@ -52,7 +52,7 @@ def test_actual_rf1_database_upgrade_preserves_all_rows_digest_and_command_repla
     original = stored_rows(db)
     package = load_adventure_package(document).package
     with StateMachine(db) as sm:
-        assert sm._conn.execute("PRAGMA user_version").fetchone()[0] == 39
+        assert sm._conn.execute("PRAGMA user_version").fetchone()[0] == 40
         assert_original_rows_equal(original, stored_rows(db))
         sm.upgrade_instance_configs(old["session_id"], package, context=context)
         state = sm.resume_session(old["session_id"], package, context=context)

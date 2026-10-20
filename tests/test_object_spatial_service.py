@@ -623,7 +623,7 @@ def test_real_schema32_save_receipt_replay_and_all_old_columns_preserved(
             sm.resume_session(sid, p, context=context)
         assert error.value.code == "ruleset_binding_mismatch"
         assert_original_rows_equal(before, stored_rows(db))
-        assert sm._conn.execute("PRAGMA user_version").fetchone()[0] == 39
+        assert sm._conn.execute("PRAGMA user_version").fetchone()[0] == 40
         assert {r[0] for r in sm._conn.execute("SELECT orientation FROM objects")} == {"north"}
         replay = sm.submit_command(world_command_from_data(old["command"]), p, context=gm)
         assert json.loads(json.dumps(asdict(replay))) == old["receipt"]

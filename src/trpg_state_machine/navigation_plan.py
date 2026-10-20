@@ -12,7 +12,7 @@ def granted_layout(row, actor, package, *, instances=None):
     knowledge = (
         package.navigation
         if instances is None
-        else instances.get(row["session_id"], "session", row["session_id"])["navigation"]
+        else instances.session_value(row["session_id"], "navigation")
     )
     if knowledge is None:
         raise StateMachineError(
@@ -55,7 +55,7 @@ def plan_navigation(row, actor, position, operation, package, *, grid=None):
     passages = (
         package.passages
         if instances is None
-        else instances.get(row["session_id"], "session", row["session_id"])["passages"]
+        else instances.session_value(row["session_id"], "passages")
     )
     for passage in sorted(passages, key=lambda p: p.passage_id):
         if passage.passage_id not in passage_ids:

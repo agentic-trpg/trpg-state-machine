@@ -29,7 +29,7 @@ class SceneLifecycleService:
         self.capture = capture
         self.npc_bootstrap = npc_bootstrap
 
-    def ensure_scene(self, sid, scene_id, package):
+    def ensure_scene(self, sid, scene_id, package, *, _defer_acceptance=False):
         """Internal admitted-write participant; never activates or records entry.
 
         Callers authorize the operation before this method. Only fresh instances
@@ -43,7 +43,15 @@ class SceneLifecycleService:
             raise StateMachineError("session_not_found", "Unknown session")
         self.sessions._check_package_pin(row, package)
         if not self.facts.initialize_scene(sid, scene_id, package):
-            self._validate_scene(sid, scene_id, package)
+            proof = self.store.connection.execute(
+                "SELECT complete FROM scene_integrity WHERE session_id=? AND scene_id=?",
+                (sid, scene_id),
+            ).fetchone()
+            if proof is None or not proof[0]:
+                raise StateMachineError(
+                    "incomplete_session", "Scene requires explicit integrity acceptance"
+                )
+            self.facts.instances.scene(sid, scene_id)
             self.runtime.prepare_scene_maps(sid, (scene_id,), self.facts.maps)
             return False
         self.facts.initialize_object_capabilities(sid, scene_id, package)
@@ -54,6 +62,8 @@ class SceneLifecycleService:
                 self.npc_bootstrap.initialize(sid, actor)
         self.facts.initialize_mechanical_scene(sid, scene_id, package)
         self.facts.instances.finish_scene(sid, scene_id)
+        if not _defer_acceptance:
+            self._validate_scene(sid, scene_id, package)
         self.runtime.prepare_scene_maps(sid, (scene_id,), self.facts.maps)
         return True
 
@@ -97,6 +107,12 @@ class SceneLifecycleService:
         ):
             raise StateMachineError("incomplete_session", "Instantiated scene is missing its grid")
 
+        if self.store._scope is not None and self.store._scope.write:
+            from .runtime_integrity import certify_scene
+
+            if not certify_scene(conn, sid, scene_id):
+                raise StateMachineError("incomplete_session", "Scene acceptance failed")
+
     def validate_initialized(self, row, package):
         """Read only: uninstantiated scenes stay absent; no template replay."""
         for scene in self.store.connection.execute(
@@ -106,11 +122,11 @@ class SceneLifecycleService:
 
     def initialize_session(self, sid, pc_actor_id, pc, package):
         """Fresh-session participant; creation replay is handled by the caller."""
-        self.ensure_scene(sid, package.entry_scene_id, package)
+        self.ensure_scene(sid, package.entry_scene_id, package, _defer_acceptance=True)
         # Existing spatial initialization policy: navigation may inspect both sides.
         for scene in package.scenes:
             if scene.grid_json is not None and scene.scene_id != package.entry_scene_id:
-                self.ensure_scene(sid, scene.scene_id, package)
+                self.ensure_scene(sid, scene.scene_id, package, _defer_acceptance=True)
         self.characters.initialize_pc(sid, pc_actor_id, package.entry_scene_id, pc)
         self.runtime.move_pc_scene(sid, package.entry_scene_id)
         self.facts.visit(sid, package.entry_scene_id)

@@ -96,7 +96,7 @@ class EventCapture:
         self.store.require_write()
         signals = self._event_signals(package, event_type, payload, source_actor_id)
         evidence = {
-            "schema": self.world.instances.get(sid, "session", sid)["evidence_schema"],
+            "schema": self.world.instances.session_value(sid, "evidence_schema"),
             "world_version": None,
             "game_tick": self._conn.execute(
                 "SELECT game_tick FROM world_states WHERE session_id=?", (sid,)
@@ -188,8 +188,7 @@ class EventCapture:
             uncertainty, light_sources = (), {}
             if (
                 grid is not None
-                and self.world.instances.get(sid, "session", sid)["evidence_schema"]
-                == "event-evidence/6"
+                and self.world.instances.session_value(sid, "evidence_schema") == "event-evidence/6"
             ):
                 grid, uncertainty, light_sources = self.lights.project(sid, scene_id, package, grid)
                 topology = self.world.maps.for_grid(sid, scene_id, grid).topology
@@ -206,10 +205,7 @@ class EventCapture:
                     )
                 ),
             }
-            if (
-                self.world.instances.get(sid, "session", sid)["evidence_schema"]
-                == "event-evidence/6"
-            ):
+            if self.world.instances.session_value(sid, "evidence_schema") == "event-evidence/6":
                 evidence["scenes"][scene_id]["light_uncertain_cells"] = list(uncertainty)
                 evidence["scenes"][scene_id]["lighting_sources"] = light_sources
         for actor in [*actors, *evidence["source_actors"]]:

@@ -92,11 +92,15 @@ class ContainerService:
             raise StateMachineError("container_inaccessible", "Container contents are inaccessible")
         return c
 
-    def _rows(self, sid):
+    def _rows(self, sid, roots=None):
         return ContainmentState(
             {
                 r["object_id"]: dict(r)
-                for r in self.h._conn.execute("SELECT * FROM objects WHERE session_id=?", (sid,))
+                for r in (
+                    self.h._conn.execute("SELECT * FROM objects WHERE session_id=?", (sid,))
+                    if roots is None
+                    else self.facts.related_objects(sid, roots)
+                )
             }
         )
 
@@ -216,13 +220,13 @@ class ContainerService:
 
     def require_unbound(self, sid, actor, iid, *, rows=None, affected=None):
         h = self.h
-        known = set(h.characters.rule_actors(sid))
-        if actor not in known:
+        actors = h.characters.rule_actors(sid, {actor})
+        if actor not in actors:
             raise StateMachineError("unsupported_actor_state", "Explicit mechanical facts required")
-        components = h.characters.rule_components(sid, known)
+        components = h.characters.rule_components(sid, {actor})
         if any(e["target_id"] == actor and not e["disabled"] for e in components["effect_states"]):
             raise StateMachineError("unsupported_actor_state", "Active effect transfer unsupported")
-        rows = self._rows(sid) if rows is None else rows
+        rows = self._rows(sid, (iid,)) if rows is None else rows
         affected = self.subtree(iid, rows) if affected is None else affected
         casting = components["casting_state"]
         if casting and any(
@@ -233,7 +237,7 @@ class ContainerService:
             raise StateMachineError(
                 "unsupported_actor_activity", "Casting-bound item transfer unsupported"
             )
-        state = h.characters.rule_actors(sid)[actor]
+        state = actors[actor]
         for oid in affected:
             obj = self.facts.object(sid, oid)
             if not obj["item_json"]:
@@ -279,7 +283,7 @@ class ContainerService:
             )
         if type(op) is TakeItem and item["container_id"] != op.container_id:
             raise StateMachineError("position_conflict", "Item is not in the specified container")
-        candidate = self._rows(sid)
+        candidate = self._rows(sid, (op.instance_id, op.container_id))
         moved = self.subtree(op.instance_id, candidate)
         affected = moved | set(self.ancestry(op.instance_id, candidate))
         self.require_unbound(sid, actor, op.instance_id, rows=candidate, affected=moved)
@@ -309,13 +313,14 @@ class ContainerService:
                 source_actor_id=op.instance_id,
             )
         ]
+        inventory_change = h.characters.prepare_inventory_change(sid, (op.instance_id,))
         after = self.facts.transfer_item(
             sid,
             item,
             carrier_id=actor if type(op) is TakeItem else None,
             container_id=op.container_id if type(op) is PutItem else None,
         )
-        h.characters.project_item_transfer(sid, item, after)
+        h.characters.project_item_transfer(sid, item, after, prepared=inventory_change)
         events.append(
             h._capture_event(
                 sid,

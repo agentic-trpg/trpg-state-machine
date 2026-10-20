@@ -67,7 +67,13 @@ class ObjectDurabilityService:
             0 <= result.current_hp <= hp <= capability.max_hp
         ):
             raise StateMachineError("invalid_rule_result", "Invalid damage settlement bounds")
-        if h.objects.spatial.config(row["session_id"], result.object_id):
+        destroyed = hp > 0 and result.current_hp == 0
+        obj = h.facts.object(result.session_id, result.object_id)
+        if (
+            destroyed
+            and obj["scene_id"] is not None
+            and h.objects.spatial.config(row["session_id"], result.object_id)
+        ):
             h.objects.spatial.check_candidate(
                 result.session_id,
                 result.object_id,
@@ -78,14 +84,17 @@ class ObjectDurabilityService:
                 ),
                 error_code="invalid_spatial_state",
             )
+        inventory_change = (
+            h.characters.prepare_inventory_change(result.session_id, (result.object_id,))
+            if destroyed
+            else None
+        )
         h.facts.apply_object_hp(result.session_id, result.object_id, hp, result.current_hp)
         h._conn.execute(
             "INSERT INTO world_result_adoptions VALUES (?,?,?)",
             (result.session_id, result.resolution_id, encoded),
         )
-        h.objects.spatial.audit(result.session_id, package)
-        if h.facts.instances.has_portable(row["session_id"]):
-            h.characters.sync_world_inventory(result.session_id)
+        h.characters.sync_inventory_change(result.session_id, inventory_change)
         position = h.facts.object_position(result.session_id, result.object_id)
         events = [
             h._capture_event(

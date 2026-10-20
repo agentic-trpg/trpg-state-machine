@@ -233,8 +233,10 @@ class NPCEvaluationRuntime:
         self._conn.executemany(
             "INSERT INTO npc_evaluation_recent_scope VALUES (?,?,?,?)",
             [
-                (eid, sid, context.observer_id, item.observation.observation_id)
-                for item in self._recent_observations(sid, context.observer_id)
+                (eid, sid, context.observer_id, item["observation_id"])
+                for item in self._observation_rows(
+                    sid, context.observer_id, recent=True, content=False
+                )
             ],
         )
         return self._task(
@@ -248,13 +250,23 @@ class NPCEvaluationRuntime:
             row = self._evaluation_row(evaluation_id, package, context)
             task = self._task(row)
             meta = self._npc_view(row["session_id"], row["npc_id"], package, context=context)
-            recent = self._task_recent_observations(row)
+            authorized = self._task_recent_ids(row)
             # Existing field continues to describe Task Work, now only valid OB.
             # Expired/unknown Work content is available through explicit recovery.
             current = {
                 r["observation_id"]: r
-                for r in self._observation_rows(row["session_id"], row["npc_id"])
+                for r in self._observation_rows(
+                    row["session_id"],
+                    row["npc_id"],
+                    recent=True,
+                    observation_ids=set(task.source_observation_ids) | authorized,
+                )
             }
+            recent = tuple(
+                RecentObservation(self._observation(r), self._retention(r))
+                for oid, r in current.items()
+                if oid in authorized
+            )
             observations = tuple(
                 self._observation(current[oid])
                 for oid in task.source_observation_ids
@@ -262,25 +274,38 @@ class NPCEvaluationRuntime:
             )
             return NPCEvaluationInput(task, meta, observations, recent)
 
-    def _task_recent_observations(self, row):
-        authorized = {
+    def _task_recent_ids(self, row):
+        return {
             r[0]
             for r in self._conn.execute(
                 "SELECT observation_id FROM npc_evaluation_recent_scope WHERE evaluation_id=?",
                 (row["evaluation_id"],),
             )
         }
+
+    def _task_recent_observations(self, row):
         return tuple(
-            item
-            for item in self._recent_observations(row["session_id"], row["npc_id"])
-            if item.observation.observation_id in authorized
+            RecentObservation(self._observation(r), self._retention(r))
+            for r in self._observation_rows(
+                row["session_id"],
+                row["npc_id"],
+                recent=True,
+                observation_ids=self._task_recent_ids(row),
+            )
         )
 
     def _meta_observation_scope(self, row):
         # Original Work grants survive TTL for safe in-flight/recovery processing.
         # Completed background OB requires both immutable Task grant and validity now.
         return set(self._task(row).source_observation_ids) | {
-            item.observation.observation_id for item in self._task_recent_observations(row)
+            item["observation_id"]
+            for item in self._observation_rows(
+                row["session_id"],
+                row["npc_id"],
+                recent=True,
+                observation_ids=self._task_recent_ids(row),
+                content=False,
+            )
         }
 
     def get_npc_evaluation_recovery_input(self, evaluation_id, package, *, context):
@@ -295,10 +320,13 @@ class NPCEvaluationRuntime:
             scope = set(self._task(row).source_observation_ids)
             return tuple(
                 RecentObservation(self._observation(item), self._retention(item))
-                for item in self._observation_rows(row["session_id"], row["npc_id"])
-                if item["observation_id"] in scope
-                and item["status"] == "pending"
-                and self._retention(item).retention_status != "recent"
+                for item in self._observation_rows(
+                    row["session_id"],
+                    row["npc_id"],
+                    observation_ids=scope,
+                    pending=True,
+                    recent=False,
+                )
             )
 
     def list_npc_evaluation_tasks(self, session_id, package, *, context):

@@ -3,6 +3,7 @@
 from dataclasses import asdict
 
 from .errors import StateMachineError
+from .scoped_reads import scoped_read
 from .world_commands import (
     OPENABLE_CHECK_OPERATIONS,
     ActivateMechanism,
@@ -117,6 +118,12 @@ class WorldObjectService:
             raise StateMachineError("invalid_target", "No authorized local object")
         return obj
 
+    @scoped_read
+    def _view_inputs(self, sid, actor_id):
+        return self.handler._actor_position(sid, actor_id), self.handler._conn.execute(
+            "SELECT * FROM sessions WHERE session_id=?", (sid,)
+        ).fetchone()
+
     def view(self, sid, actor_id, oid, package, *, containment=None):
         obj = self._visible(sid, actor_id, oid, package)
         definition = self.facts.object_definition(sid, oid)
@@ -145,10 +152,7 @@ class WorldObjectService:
         projection = self.spatial.project(sid, oid, package)
         from ._operations import ObjectState, SetObjectState
 
-        position = self.handler._actor_position(sid, actor_id)
-        row = self.handler._conn.execute(
-            "SELECT * FROM sessions WHERE session_id=?", (sid,)
-        ).fetchone()
+        position, row = self._view_inputs(sid, actor_id)
         available = {}
         for name, op in (
             ("can_activate", ActivateMechanism(position.scene_id, oid, position.cell)),
@@ -169,7 +173,9 @@ class WorldObjectService:
             sid, oid
         )
         if contents_visible:
-            containment = containment if containment is not None else self.containers._rows(sid)
+            containment = (
+                containment if containment is not None else self.containers._rows(sid, (oid,))
+            )
         total_weight = (
             self.containers.total_weight(oid, containment, package) if contents_visible else None
         )
@@ -234,13 +240,22 @@ class WorldObjectService:
         with h._transaction():
             h._spatial_reader(sid, actor_id, package, context)
             result = []
-            containment = self.containers._rows(sid)
-            for obj in h._conn.execute(
-                "SELECT object_id FROM objects WHERE session_id=? ORDER BY object_id", (sid,)
-            ):
+            from .world_containers import ContainmentState
+
+            position = h._public_scope(sid, actor_id, package)
+            doors = tuple(
+                p.door_object_id
+                for p in self.facts.instances.session_value(sid, "passages")
+                if p.door_object_id and any(e.scene_id == position.scene_id for e in p.endpoints)
+            )
+            candidates = self.facts.scene_object_rows(
+                sid, position.scene_id, carrier_id=actor_id, extra=doors
+            )
+            containment = ContainmentState({r["object_id"]: r for r in candidates})
+            for obj in candidates:
                 try:
                     result.append(
-                        self.view(sid, actor_id, obj[0], package, containment=containment)
+                        self.view(sid, actor_id, obj["object_id"], package, containment=containment)
                     )
                 except StateMachineError as exc:
                     if exc.code != "invalid_target":

@@ -1,9 +1,11 @@
 """Ordinary scenario emitters; no fuel, magic, sunlight or effect lifecycle."""
 
+import json
 from dataclasses import asdict
 
 from ._execution import _execution_data
 from .errors import StateMachineError
+from .scoped_reads import scoped_read
 from .world_commands import SetLightEnabled
 
 _RANK = {"dark": 0, "dim": 1, "bright": 2}
@@ -17,9 +19,15 @@ class LightService:
         d = self.h.facts.object_definition(sid, oid)
         return d.capability("light") if d else None
 
+    @scoped_read
     def sources(self, sid, scene, package):
         result = []
-        for light in self.h._conn.execute("SELECT * FROM object_lights WHERE session_id=?", (sid,)):
+        local = self.h.facts.scene_object_rows(sid, scene, all_carriers=True, lights_only=True)
+        for light in self.h._conn.execute(
+            "SELECT * FROM object_lights WHERE session_id=? AND object_id IN "
+            "(SELECT value FROM json_each(?))",
+            (sid, json.dumps([r["object_id"] for r in local])),
+        ):
             oid = light["object_id"]
             c = self.config(sid, oid)
             if not light["enabled"] or self.h.facts.object_hp(sid, oid) == 0:
@@ -56,6 +64,7 @@ class LightService:
             )
         return result
 
+    @scoped_read
     def project(self, sid, scene, package, raw):
         """Return a derived grid plus explicit uncertainty and source-stage evidence."""
         grid = {**raw, "lighting": dict(raw["lighting"])}
@@ -64,12 +73,13 @@ class LightService:
         if not sources:
             return grid, (), {}
         candidates = self.h.objects.spatial.movement_cells(sid, scene, package)
-        legacy = {o.object_id: o for s in self.h.facts.instances.scenes(sid) for o in s.objects}
         _, actual = self.h.grid.reader.scene_occupants(sid, scene, package)
         candidates.update(
-            cell for oid, cell in actual if legacy[oid].blocks_passage and cell is not None
+            cell
+            for oid, cell in actual
+            if cell is not None and self.h.facts.instances.legacy_object(sid, oid).blocks_passage
         )
-        for passage in self.h.facts.instances.get(sid, "session", sid)["passages"]:
+        for passage in self.h.facts.instances.session_value(sid, "passages"):
             if passage.door_object_id and self.h._door_closed(sid, passage, package):
                 candidates.update(
                     e.threshold_cell for e in passage.endpoints if e.scene_id == scene

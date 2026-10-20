@@ -297,7 +297,6 @@ class RuleExecution:
                             row, package, command.command_id, previous_round, len(events)
                         )
                     )
-                    self.world._assert_spatial_consistency(command.session_id, package)
                     version = self.runtime.publish(command, row, package, events)
                 except StateMachineError as exc:
                     if exc.code not in {
@@ -333,6 +332,7 @@ class RuleExecution:
                         # outer transaction rolls back without persisting a refusal.
                         raise
                     self._conn.execute("ROLLBACK TO dnd_effects")
+                    self.world.store._scope.read_memo.clear()
                     status = (
                         "conflict"
                         if exc.code == "version_conflict"
@@ -347,7 +347,6 @@ class RuleExecution:
                 with self.store.savepoint():
                     events = self.runtime.finish_time_wait_reply(row, package, command)
                     events = self.effects._expand_events(row, package, events, command.command_id)
-                    self.world._assert_spatial_consistency(command.session_id, package)
                     version = self.runtime.publish(command, row, package, events)
             receipt = self.runtime.finish(
                 command, context, fingerprint, row, status, version, error

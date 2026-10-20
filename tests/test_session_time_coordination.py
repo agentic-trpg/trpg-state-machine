@@ -404,7 +404,7 @@ def test_schema36_migration_preserves_every_old_row_and_does_not_create_run_rows
         db.execute("PRAGMA user_version=36")
     before = stored_rows(path)
     with StateMachine(path) as restored:
-        assert restored._conn.execute("PRAGMA user_version").fetchone()[0] == 39
+        assert restored._conn.execute("PRAGMA user_version").fetchone()[0] == 40
         assert_original_rows_equal(before, stored_rows(path))
         for table in (
             "session_time_waits",

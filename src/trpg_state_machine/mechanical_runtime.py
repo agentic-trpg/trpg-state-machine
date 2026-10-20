@@ -226,6 +226,7 @@ class MechanicalRuntime:
                     if exc.code != "event_cascade_limit":
                         raise
                     self._conn.execute("ROLLBACK TO mechanical_effects")
+                    self._store._scope.read_memo.clear()
                     version = row["world_version"]
                     status, error = "rejected", exc.code
                 finally:

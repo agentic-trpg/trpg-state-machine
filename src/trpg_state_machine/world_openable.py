@@ -120,10 +120,10 @@ class OpenableService:
             )
         ):
             raise StateMachineError("credential_unavailable", "No usable owned credential")
-        known = set(self.h.characters.rule_actors(sid))
+        known = set(self.h.characters.rule_actors(sid, {actor_id}))
         if actor_id not in known:
             raise StateMachineError("unsupported_actor_state", "Explicit actor facts required")
-        components = self.h.characters.rule_components(sid, known)
+        components = self.h.characters.rule_components(sid, {actor_id})
         if any(e["target_id"] == actor_id for e in components["effect_states"]):
             raise StateMachineError("unsupported_actor_state", "Active effects need adjudication")
         entry = next(
@@ -256,13 +256,14 @@ class OpenableService:
         sid = row["session_id"]
         if self.facts.object(sid, operation.object_id)["state"] == operation.state.value:
             return []
+        inventory_change = self.h.characters.prepare_inventory_change(sid, (operation.object_id,))
         self.facts.switch(
             sid,
             operation.object_id,
             operation.state.value,
             jam_policy=self.jam_policy(row["session_id"], operation.object_id),
         )
-        self.h.objects.spatial.audit(sid, package)
+        self.h.characters.sync_inventory_change(sid, inventory_change)
         return [
             self.h._capture_event(
                 sid,
@@ -307,7 +308,6 @@ class OpenableService:
         if self.facts.openable_state(sid, operation.object_id)["barred"] == barred:
             return []
         self.facts.set_object_bar(sid, operation.object_id, barred)
-        self.h.objects.spatial.audit(sid, package)
         return [
             self.h._capture_event(
                 sid,
@@ -510,7 +510,6 @@ class OpenableService:
                         package,
                     )
                 )
-        self.h._assert_spatial_consistency(sid, package)
         return events
 
     def check_availability(self, row, actor_id, op, package):

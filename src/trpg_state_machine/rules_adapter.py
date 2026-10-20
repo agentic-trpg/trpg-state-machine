@@ -297,7 +297,6 @@ class RulesAdapter:
             raise StateMachineError(
                 "unsupported_mechanical_version", "Complete noncombat state was not initialized"
             )
-        actors = self.characters.rule_actors(sid)
         present = [
             a[0]
             for a in self._conn.execute(
@@ -308,6 +307,7 @@ class RulesAdapter:
                 (sid, row["current_scene_id"]),
             )
         ]
+        actors = self.characters.rule_actors(sid, set(present))
         scene_data = self.facts.mechanical_scene(sid, row["current_scene_id"])
         if scene_data is not None and package is not None:
             projected, unknown, _ = self.world.objects.lights.project(
@@ -359,7 +359,7 @@ class RulesAdapter:
             raise StateMachineError(
                 "invalid_mechanical_state", "Stored Actor facts are invalid"
             ) from exc
-        self.characters.rule_components(row["session_id"], set(actors))
+        self.characters.rule_components(row["session_id"], set(actors), full_audit=True)
 
     def _combat_snapshot(self, row):
         sid = row["session_id"]
@@ -371,7 +371,7 @@ class RulesAdapter:
         if combat is None:
             raise StateMachineError("combat_not_initialized", "Session has no mechanical encounter")
         state = json.loads(combat["state_json"])
-        actors = self.characters.rule_actors(sid)
+        actors = self.characters.rule_actors(sid, set(state["initiative_ids"]))
         scene = self.facts.mechanical_scene(sid, combat["scene_id"])
         if not state["ended"]:
             state["actor_zone"] = self._current_cells(
@@ -453,18 +453,14 @@ class RulesAdapter:
                     "invalid_spatial_state", "Encounter roster must cover present actors"
                 )
             data["snapshot"]["scene_state"] = spatial
-        if not self.facts.instances.get(row["session_id"], "session", row["session_id"])[
-            "has_noncombat"
-        ]:
+        if not self.facts.instances.session_value(row["session_id"], "has_noncombat"):
             data["snapshot"]["character_states"] = [
                 self.characters.initial_rule_actor(row["session_id"], actor).model_dump(mode="json")
                 for actor in CombatSnapshot.model_validate_json(
                     canonical_json(data["snapshot"])
                 ).character_states
             ]
-        if self.facts.instances.get(row["session_id"], "session", row["session_id"])[
-            "has_noncombat"
-        ]:
+        if self.facts.instances.session_value(row["session_id"], "has_noncombat"):
             actors = self.characters.rule_actors(row["session_id"])
             try:
                 roster = data["snapshot"]["combat_state"]["initiative_ids"]

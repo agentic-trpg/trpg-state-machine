@@ -735,7 +735,7 @@ def test_slug_equipment_ambiguity_refuses_drop_without_mutating_any_facts(
     "fault",
     ["missing", "bad_other_owner", "portable_mismatch", "ground_ghost", "bad_slug_projection"],
 )
-def test_full_inventory_validation_precedes_actor_projection(tmp_path, context, fault):
+def test_local_inventory_projection_and_explicit_full_validation(tmp_path, context, fault):
     sm, sid, package, db = setup(tmp_path, context)
     with sm:
         ready(sm, sid, package, context)
@@ -780,9 +780,15 @@ def test_full_inventory_validation_precedes_actor_projection(tmp_path, context, 
                 (sid, pc),
             )
         before = stored_rows(db)
-        # NPC-only projection must still validate corrupt PC/other facts first.
-        with pytest.raises(StateMachineError):
+        # Unrelated PC corruption belongs to explicit full diagnostics/recovery.
+        # The ordinary NPC projection only validates its actual owner closure.
+        if fault == "missing":
+            with pytest.raises(StateMachineError):
+                sm.read_carried_items(sid, NPC, package, context=context)
+        else:
             sm.read_carried_items(sid, NPC, package, context=context)
+        with pytest.raises(StateMachineError):
+            sm.save_session(sid, package, context=context)
         with pytest.raises(StateMachineError):
             sm.read_noncombat_snapshot(sid, package, context=context)
         assert stored_rows(db) == before
@@ -885,7 +891,7 @@ def test_genuine_schema23_upgrade_is_atomic_preserves_all_history_and_adds_no_ca
         assert stored_rows(db) == before
     package = load_adventure_package(document).package
     with StateMachine(db, dnd_loader=item_loader()) as sm:
-        assert sm._conn.execute("PRAGMA user_version").fetchone()[0] == 39
+        assert sm._conn.execute("PRAGMA user_version").fetchone()[0] == 40
         assert_original_rows_equal(before, stored_rows(db))
         assert (
             sm._conn.execute(

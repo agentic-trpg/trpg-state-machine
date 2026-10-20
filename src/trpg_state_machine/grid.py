@@ -16,6 +16,7 @@ from dnd5e_engine.specs import GridScene
 
 from .errors import StateMachineError
 from .grid_maps import PreparedGrid, ReadOnlyTopology
+from .scoped_reads import scoped_read
 from .world_spatial import ObjectSpatialProjection
 
 
@@ -359,6 +360,7 @@ class GridService:
         return self.reader.maps.template(sid, scene_id, raw).topology
 
     @_read
+    @scoped_read
     def base_topology(self, sid, scene_id, package=None, *, with_extent=False):
         """Legacy static/Light authorized-visibility input; not the combined current view."""
         scene = self.reader.maps.scene(sid, scene_id, spatial_only=True)
@@ -395,6 +397,94 @@ class GridService:
         return GridView(scene_id, row[0], prepared.grid_json, occupants, objects, prepared)
 
     @_read
+    @scoped_read
+    def local_topology(
+        self,
+        sid,
+        scene_id,
+        package,
+        cells,
+        *,
+        exclude_actor=None,
+        exclude_object=None,
+        handled_thresholds=(),
+    ):
+        """Dynamic blockers for local edges only; includes diagonal corner cells.
+
+        Consumers may test edges among the supplied cells, never use this as a
+        complete map for path planning. The immutable base topology is reused.
+        """
+        proof = self.h._conn.execute(
+            "SELECT complete FROM scene_integrity WHERE session_id=? AND scene_id=?",
+            (sid, scene_id),
+        ).fetchone()
+        initialized = self.h._conn.execute(
+            "SELECT 1 FROM scene_instances WHERE session_id=? AND scene_id=?", (sid, scene_id)
+        ).fetchone()
+        if initialized and (proof is None or not proof[0]):
+            raise StateMachineError(
+                "incomplete_session", "Scene requires explicit integrity acceptance"
+            )
+        if not initialized:
+            # Prediction for a genuinely absent destination uses the existing
+            # complete scene input. No live instance can enter this fallback.
+            return self.exploration_topology(
+                sid,
+                scene_id,
+                package,
+                exclude_actor=exclude_actor,
+                exclude_object=exclude_object,
+                handled_thresholds=handled_thresholds,
+            )
+        prepared = self.reader.prepared_scene(sid, scene_id, package)
+        points = [tuple(map(int, c.split(","))) for c in cells]
+        relevant = set(cells)
+        for x, y in points:
+            relevant.update(f"{x + dx},{y + dy}" for dx in (-1, 0, 1) for dy in (-1, 0, 1))
+        encoded = json.dumps(sorted(relevant))
+        passages = self.h.facts.instances.session_value(sid, "passages")
+        doors = json.dumps([p.door_object_id for p in passages if p.door_object_id])
+        occupied = {
+            r[0]
+            for r in self.h._conn.execute(
+                "SELECT cell FROM actors WHERE session_id=? AND current_scene_id=? "
+                "AND actor_id IS NOT ? AND cell IN (SELECT value FROM json_each(?))",
+                (sid, scene_id, exclude_actor, encoded),
+            )
+        }
+        occupied.update(
+            r[0]
+            for r in self.h._conn.execute(
+                "SELECT cell FROM object_spatial_cells WHERE session_id=? AND scene_id=? "
+                "AND object_id IS NOT ? AND blocks=1 AND cell IN (SELECT value FROM json_each(?)) "
+                "AND object_id NOT IN (SELECT value FROM json_each(?))",
+                (sid, scene_id, exclude_object, encoded, doors),
+            )
+        )
+        for passage in passages:
+            if passage.door_object_id == exclude_object:
+                continue
+            endpoints = [
+                e
+                for e in passage.endpoints
+                if e.scene_id == scene_id
+                and e.threshold_cell in relevant
+                and (passage.passage_id, e.threshold_cell) not in handled_thresholds
+            ]
+            if endpoints and passage.door_object_id and self.h._door_closed(sid, passage, package):
+                occupied.update(e.threshold_cell for e in endpoints)
+        raw = prepared.copy_data()
+        return self.reader.topology_for_grid(
+            sid,
+            scene_id,
+            {
+                **raw,
+                "blocked_cells": sorted(set(raw["blocked_cells"]) | occupied),
+            },
+        )
+
+    @_read
+    @scoped_read
     def exploration_topology(
         self,
         sid,
@@ -422,7 +512,7 @@ class GridService:
             raise StateMachineError("invalid_spatial_state", "Current grid placement is incomplete")
         doors = {
             p.door_object_id
-            for p in self.h.facts.instances.get(sid, "session", sid)["passages"]
+            for p in self.h.facts.instances.session_value(sid, "passages")
             if p.door_object_id
         }
         cells = set(raw["blocked_cells"])
@@ -433,7 +523,7 @@ class GridService:
             if oid != exclude_object and oid not in doors
             for cell in p.movement_blocking_cells
         )
-        for passage in self.h.facts.instances.get(sid, "session", sid)["passages"]:
+        for passage in self.h.facts.instances.session_value(sid, "passages"):
             if passage.door_object_id and self.h._door_closed(sid, passage, package):
                 cells.update(
                     e.threshold_cell

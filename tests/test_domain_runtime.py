@@ -58,6 +58,7 @@ def seed(c, package, context, sid="session.domain", pc="pc.domain"):
         row = c.sessions._session(sid, package, context)
         if package.noncombat_foundation_json:
             c.combat._initialize_noncombat(row, package)
+        c.world.scenes.validate_initialized(row, package)
     return sid, pc
 
 

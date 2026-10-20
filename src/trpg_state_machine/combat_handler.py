@@ -88,9 +88,7 @@ class CombatHandler:
             )
         current_actors = (
             self.characters.rule_actors(sid)
-            if self.facts.instances.get(row["session_id"], "session", row["session_id"])[
-                "has_noncombat"
-            ]
+            if self.facts.instances.session_value(row["session_id"], "has_noncombat")
             else {}
         )
         for actor in snapshot.character_states:
@@ -112,22 +110,16 @@ class CombatHandler:
                 raise StateMachineError(
                     "invalid_combat_foundation", "Actor kind differs from Session"
                 )
-            if self.facts.instances.get(row["session_id"], "session", row["session_id"])[
-                "has_noncombat"
-            ]:
+            if self.facts.instances.session_value(row["session_id"], "has_noncombat"):
                 continue
             self.characters.initialize_rule_actor(row, actor, encounter=True)
         if (
-            not self.facts.instances.get(row["session_id"], "session", row["session_id"])[
-                "has_noncombat"
-            ]
+            not self.facts.instances.session_value(row["session_id"], "has_noncombat")
             and spatial is None
         ):
             self.facts.initialize_rule_scene(sid, snapshot.scene_state)
             self.runtime.prepare_scene_maps(sid, (snapshot.scene_state.scene_id,), self.facts.maps)
-        if not self.facts.instances.get(row["session_id"], "session", row["session_id"])[
-            "has_noncombat"
-        ]:
+        if not self.facts.instances.session_value(row["session_id"], "has_noncombat"):
             self.characters.initialize_rule_components(sid, snapshot)
         elif self.characters.rule_components(
             sid, {a.entity_id for a in snapshot.character_states}

@@ -401,11 +401,6 @@ class CommandRuntime:
                 try:
                     if command.time_wait is not None:
                         self._session_runtime.time.waits.validate(row, package, command)
-                    if self._world_facts.instances.has_portable(command.session_id):
-                        self._characters.rule_components(
-                            command.session_id,
-                            set(self._characters.rule_actors(command.session_id)),
-                        )
                     if type(command.payload) in NAVIGATION_OPERATIONS:
                         events = self._activities.operate(
                             row,
@@ -446,9 +441,6 @@ class CommandRuntime:
                                 "event_cascade_limit", "Bounded schedule cascade exceeded"
                             )
                     if events:
-                        if self._world_facts.instances.has_portable(command.session_id):
-                            self._characters.sync_world_inventory(command.session_id)
-                        self._assert_spatial_consistency(command.session_id, package)
                         version = self._session_runtime.publish(command, row, package, events)
                 except StateMachineError as exc:
                     if exc.code in {
@@ -461,6 +453,7 @@ class CommandRuntime:
                     }:
                         raise
                     self._conn.execute("ROLLBACK TO command_effects")
+                    self._store._scope.read_memo.clear()
                     version = row["world_version"]
                     status = (
                         "pending_choice"

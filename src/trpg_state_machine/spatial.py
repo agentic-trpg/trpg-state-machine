@@ -30,6 +30,7 @@ from .game_time import AdvanceGameTime
 from .grid import GridService, cell_in_bounds
 from .models import TrustedContext
 from .package import AdventurePackage, canonical_json
+from .scoped_reads import scoped_read
 from .world_commands import WORLD_CAPABILITY_OPERATIONS
 
 
@@ -147,6 +148,7 @@ class WorldHandler:
     def _initialize_scene(self, sid, scene_id, package):
         return self.scenes.ensure_scene(sid, scene_id, package)
 
+    @scoped_read
     def _world_actor_ready(self, sid, actor_id, *, navigation_scope=None):
         qualified = self.activities.qualifies(navigation_scope, sid, actor_id)
         if self.activities.active(sid, actor_id) and not qualified:
@@ -182,7 +184,17 @@ class WorldHandler:
                 "unsupported_actor_activity", "Active NPC activity needs adjudication"
             )
 
+    @scoped_read
     def _public_scope(self, sid, actor_id, package):
+        proof = self._conn.execute(
+            "SELECT complete FROM scene_integrity WHERE session_id=? AND scene_id="
+            "(SELECT current_scene_id FROM actors WHERE session_id=? AND actor_id=?)",
+            (sid, sid, actor_id),
+        ).fetchone()
+        if proof is None or not proof[0]:
+            raise StateMachineError(
+                "incomplete_session", "Scene requires explicit integrity acceptance"
+            )
         position = self._actor_position(sid, actor_id)
         if not self.facts.instances.scene(sid, position.scene_id).public_interactions:
             raise StateMachineError(
@@ -234,8 +246,12 @@ class WorldHandler:
             raise StateMachineError("invalid_cell", "Target is outside this local map")
         if position.cell == operation.to_cell:
             return position
-        topology = self.grid.exploration_topology(
-            sid, position.scene_id, package, exclude_actor=actor_id
+        topology = self.grid.local_topology(
+            sid,
+            position.scene_id,
+            package,
+            (position.cell, operation.to_cell),
+            exclude_actor=actor_id,
         )
         if topology.edge_distance(position.cell, operation.to_cell) is None:
             raise StateMachineError("movement_unavailable", "No legal adjacent step")
@@ -259,12 +275,7 @@ class WorldHandler:
             raise StateMachineError(
                 "unsupported_object_capability", "Use authorized placement policy"
             )
-        definition = next(
-            o
-            for s in self.facts.instances.scenes(sid)
-            for o in s.objects
-            if o.object_id == operation.object_id
-        )
+        definition = self.facts.instances.legacy_object(sid, operation.object_id)
         if not definition.movable:
             raise StateMachineError("unsupported_object_capability", "Object cannot be adjusted")
         if obj[1] != operation.expected_cell:
@@ -272,16 +283,17 @@ class WorldHandler:
         self._visible_target(sid, actor_id, operation.to_cell, package)
         handled_thresholds = {
             (p.passage_id, e.threshold_cell)
-            for p in self.facts.instances.get(sid, "session", sid)["passages"]
+            for p in self.facts.instances.session_value(sid, "passages")
             for e in p.endpoints
             if e.scene_id == position.scene_id
             and e.standing_cell == position.cell
             and e.threshold_cell in (obj[1], operation.to_cell)
         }
-        topology = self.grid.exploration_topology(
+        topology = self.grid.local_topology(
             sid,
             position.scene_id,
             package,
+            (position.cell, obj[1], operation.to_cell),
             exclude_actor=actor_id,
             exclude_object=operation.object_id,
             handled_thresholds=handled_thresholds,
@@ -345,8 +357,8 @@ class WorldHandler:
         if type(operation) is PickupItem and target != operation.expected_cell:
             raise StateMachineError("position_conflict", "Item position precondition differs")
         base = self.grid.base_topology(sid, position.scene_id, package)
-        topology = self.grid.exploration_topology(
-            sid, position.scene_id, package, exclude_actor=actor_id
+        topology = self.grid.local_topology(
+            sid, position.scene_id, package, (position.cell, target), exclude_actor=actor_id
         )
         if not base.is_valid_cell(target) or (
             target != position.cell and topology.edge_distance(position.cell, target) is None
@@ -359,12 +371,12 @@ class WorldHandler:
             for aid, cell in self.grid.reader.scene_occupants(sid, position.scene_id, package)[0]
         ):
             raise StateMachineError("item_out_of_reach", "Item destination is occupied")
-        known = set(self.characters.rule_actors(sid))
+        known = set(self.characters.rule_actors(sid, {actor_id}))
         if actor_id not in known:
             raise StateMachineError(
                 "unsupported_actor_state", "Carrier needs explicit mechanical facts"
             )
-        components = self.characters.rule_components(sid, known)
+        components = self.characters.rule_components(sid, {actor_id})
         if any(e["target_id"] == actor_id for e in components["effect_states"]):
             raise StateMachineError(
                 "unsupported_actor_state", "Active effects need unsupported adjudication"
@@ -372,7 +384,7 @@ class WorldHandler:
         if type(operation) is DropItem:
             if self.facts.contents(sid, operation.instance_id):
                 self.objects.containers.require_unbound(sid, actor_id, operation.instance_id)
-            state = self.characters.rule_actors(sid)[actor_id]
+            state = self.characters.rule_actors(sid, {actor_id})[actor_id]
             casting = components["casting_state"]
             if casting is not None and any(
                 material["inventory_instance_id"] == operation.instance_id
@@ -426,6 +438,7 @@ class WorldHandler:
                     source_actor_id=before["object_id"],
                 )
             )
+        inventory_change = self.characters.prepare_inventory_change(sid, (before["object_id"],))
         after = self.facts.transfer_item(
             sid,
             before,
@@ -433,7 +446,7 @@ class WorldHandler:
             scene_id=None if pickup else position.scene_id,
             cell=None if pickup else operation.to_cell,
         )
-        self.characters.project_item_transfer(sid, before, after)
+        self.characters.project_item_transfer(sid, before, after, prepared=inventory_change)
         if not pickup:
             events.append(
                 self._capture_event(
@@ -450,7 +463,7 @@ class WorldHandler:
     def read_carried_items(self, session_id, actor_id, package, *, context):
         with self._transaction():
             self._spatial_reader(session_id, actor_id, package, context)
-            known = set(self.characters.rule_actors(session_id))
+            known = set(self.characters.rule_actors(session_id, {actor_id}))
             if actor_id not in known:
                 raise StateMachineError(
                     "unsupported_mechanical_version", "Explicit inventory is unavailable"
@@ -476,7 +489,7 @@ class WorldHandler:
     def _door_ports(self, scene_id, object_id, package, *, sid):
         return tuple(
             (p, e)
-            for p in self.facts.instances.get(sid, "session", sid)["passages"]
+            for p in self.facts.instances.session_value(sid, "passages")
             if p.door_object_id == object_id
             for e in p.endpoints
             if e.scene_id == scene_id
@@ -517,10 +530,11 @@ class WorldHandler:
                     for p, e in ports
                     if e.threshold_cell == endpoint.threshold_cell
                 }
-                topology = self.grid.exploration_topology(
+                topology = self.grid.local_topology(
                     sid,
                     position.scene_id,
                     package,
+                    (position.cell, endpoint.threshold_cell),
                     exclude_actor=actor_id,
                     handled_thresholds=handled,
                 )
@@ -542,13 +556,27 @@ class WorldHandler:
 
     def _validate_door_occupancy(self, sid, operation, package):
         if operation.state.value == "closed":
-            for passage in self.facts.instances.get(sid, "session", sid)["passages"]:
+            for passage in self.facts.instances.session_value(sid, "passages"):
                 if passage.door_object_id == operation.object_id:
                     for endpoint in passage.endpoints:
-                        actors, _ = self.grid.reader.scene_occupants(
-                            sid, endpoint.scene_id, package
-                        )
-                        if any(cell == endpoint.threshold_cell for _, cell in actors):
+                        occupied = self._conn.execute(
+                            "SELECT 1 FROM actors WHERE session_id=? AND current_scene_id=? "
+                            "AND cell=? LIMIT 1",
+                            (sid, endpoint.scene_id, endpoint.threshold_cell),
+                        ).fetchone()
+                        initialized = self._conn.execute(
+                            "SELECT 1 FROM scene_instances WHERE session_id=? AND scene_id=?",
+                            (sid, endpoint.scene_id),
+                        ).fetchone()
+                        pending_occupied = False
+                        if initialized is None:
+                            pending_occupied = any(
+                                cell == endpoint.threshold_cell
+                                for _, cell in self.facts.instances.scene(
+                                    sid, endpoint.scene_id
+                                ).pending_actors
+                            )
+                        if occupied or pending_occupied:
                             raise StateMachineError(
                                 "passage_unavailable", "Door threshold is occupied"
                             )
@@ -576,9 +604,7 @@ class WorldHandler:
         if not pid or passage_id is not None and passage_id != pid:
             raise StateMachineError("scene_unreachable", "No authorized spatial passage")
         passage = next(
-            p
-            for p in self.facts.instances.get(sid, "session", sid)["passages"]
-            if p.passage_id == pid
+            p for p in self.facts.instances.session_value(sid, "passages") if p.passage_id == pid
         )
         a = next(e for e in passage.endpoints if e.scene_id == source.scene_id)
         b = next(e for e in passage.endpoints if e.scene_id == target.scene_id)
@@ -595,8 +621,12 @@ class WorldHandler:
                 "passage_out_of_reach", "Actor must be at the declared standing point"
             )
         for endpoint in (a, b):
-            topology = self.grid.exploration_topology(
-                sid, endpoint.scene_id, package, exclude_actor=actor_id
+            topology = self.grid.local_topology(
+                sid,
+                endpoint.scene_id,
+                package,
+                (endpoint.standing_cell, endpoint.threshold_cell),
+                exclude_actor=actor_id,
             )
             if (
                 not topology.is_valid_cell(endpoint.standing_cell)
@@ -630,9 +660,7 @@ class WorldHandler:
             passage = next(
                 (
                     p
-                    for p in self.facts.instances.get(
-                        row["session_id"], "session", row["session_id"]
-                    )["passages"]
+                    for p in self.facts.instances.session_value(row["session_id"], "passages")
                     if p.passage_id == operation.passage_id
                 ),
                 None,
@@ -721,12 +749,7 @@ class WorldHandler:
                 (session_id, position.scene_id),
             ):
                 if topology.can_see(position.cell, obj[1]):
-                    definition = next(
-                        o
-                        for s in self.facts.instances.scenes(session_id)
-                        for o in s.objects
-                        if o.object_id == obj[0]
-                    )
+                    definition = self.facts.instances.legacy_object(session_id, obj[0])
                     blocking = self.objects.spatial.blocks(session_id, obj[0], package)
                     objects.append(
                         (
@@ -741,7 +764,7 @@ class WorldHandler:
                 for target, pid in self.facts.instances.scene(
                     session_id, position.scene_id
                 ).exit_passages
-                for p in self.facts.instances.get(session_id, "session", session_id)["passages"]
+                for p in self.facts.instances.session_value(session_id, "passages")
                 if p.passage_id == pid
                 for e in p.endpoints
                 if e.scene_id == position.scene_id
@@ -759,7 +782,7 @@ class WorldHandler:
                     e.threshold_cell,
                     self.objects.openable.lock_status(session_id, p.door_object_id, package),
                 )
-                for p in self.facts.instances.get(session_id, "session", session_id)["passages"]
+                for p in self.facts.instances.session_value(session_id, "passages")
                 if p.door_object_id
                 for e in p.endpoints
                 if e.scene_id == position.scene_id
@@ -800,6 +823,7 @@ class WorldHandler:
             ]
         return self.scenes.move_admitted(row, package, actor_id, destination)
 
+    @scoped_read
     def _actor_position(self, sid, actor_id):
         return self.characters.position(sid, actor_id)
 
@@ -841,16 +865,15 @@ class WorldHandler:
                 "unsupported_combat_dynamic_obstacles",
                 "Object spatial properties need RE integration",
             )
-        definitions = {o.object_id: o for s in self.facts.instances.scenes(sid) for o in s.objects}
         objects = self._conn.execute(
             "SELECT object_id FROM objects WHERE session_id=? AND scene_id=?", (sid, scene_id)
         ).fetchall()
-        if any(definitions[o[0]].blocks_passage for o in objects):
+        if any(self.facts.instances.legacy_object(sid, o[0]).blocks_passage for o in objects):
             raise StateMachineError(
                 "unsupported_combat_dynamic_obstacles",
                 "Movement-only objects cannot be represented by the pinned combat evaluator",
             )
-        for passage in self.facts.instances.get(sid, "session", sid)["passages"]:
+        for passage in self.facts.instances.session_value(sid, "passages"):
             if scene_id not in {e.scene_id for e in passage.endpoints}:
                 continue
             if passage.door_object_id and self._door_closed(sid, passage, package):

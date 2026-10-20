@@ -372,7 +372,7 @@ def test_actual_legacy_combat_upgrade_preserves_mechanics_rng_receipt(
             sm.get_command_receipt(sid, "old.real.attack", package, context=context).status
             == "committed"
         )
-        assert sm._conn.execute("PRAGMA user_version").fetchone()[0] == 39
+        assert sm._conn.execute("PRAGMA user_version").fetchone()[0] == 40
         assert sm._conn.execute("PRAGMA foreign_key_check").fetchall() == []
         sm.upgrade_instance_configs(sid, package, context=context)
         before = sm.read_session(sid, package, context=context)

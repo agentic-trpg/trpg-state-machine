@@ -227,7 +227,14 @@ class EnvironmentService:
     def _area(self, sid, scene_id, area, package, *, query=False):
         if type(area) is not EnvironmentArea:
             invalid("Expected typed area")
-        if scene_id not in {s.scene_id for s in self.h.facts.instances.scenes(sid)}:
+        if (
+            self.h._conn.execute(
+                "SELECT 1 FROM instance_configs WHERE session_id=? AND domain='scene' "
+                "AND instance_id=?",
+                (sid, scene_id),
+            ).fetchone()
+            is None
+        ):
             raise StateMachineError("invalid_target", "Unknown environment Scene")
         if area.cells:
             topology = self.h.grid.reader.prepared_scene(sid, scene_id, package).topology

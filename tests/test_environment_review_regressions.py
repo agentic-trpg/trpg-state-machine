@@ -50,6 +50,7 @@ def legacy_fingerprint(cmd, package, context):
     """Frozen pre-fix algorithm for DTOs without legacy Reposition optional fields."""
     data = asdict(cmd)
     data.pop("check_world_effects")
+    data.pop("time_wait")  # This frozen algorithm predates the optional field.
     return hashlib.sha256(
         canonical_json(
             {

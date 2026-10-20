@@ -96,7 +96,13 @@ class NPCModeRuntime:
                 ):
                     raise StateMachineError("idempotency_conflict", "Gate scope changed")
                 current = {
-                    r["work_id"]: r for r in self._observation_rows(session_id, context.observer_id)
+                    r["work_id"]: r
+                    for r in self._observation_rows(
+                        session_id,
+                        context.observer_id,
+                        work_ids={i["work_id"] for i in data["input"]["observations"]},
+                        content=False,
+                    )
                 }
                 if any(
                     item["work_id"] not in current
@@ -105,7 +111,15 @@ class NPCModeRuntime:
                 ):
                     raise StateMachineError("stale_gate", "Expired input needs Work recovery")
                 return self._memory_gate_input(data["input"])
-            rows = self._observation_rows(session_id, context.observer_id)
+            rows = self._observation_rows(
+                session_id,
+                context.observer_id,
+                pending=True,
+                recent=True,
+                work_ids=observation_work_ids,
+                unoccupied=True,
+                limit=100 if observation_work_ids is None else None,
+            )
             available = {
                 r["work_id"]: r
                 for r in rows
@@ -184,7 +198,7 @@ class NPCModeRuntime:
             is not None
         )
         result = []
-        for row in self._observation_rows(sid, npc):
+        for row in self._observation_rows(sid, npc, pending=True, content=False):
             if row["status"] != "pending":
                 continue
             retention = self._retention(row).retention_status
@@ -264,7 +278,10 @@ class NPCModeRuntime:
             return NPCObservationRoute(
                 data["result"]["status"], None, tuple(data["result"]["observation_work_ids"])
             )
-        rows = {r["work_id"]: r for r in self._observation_rows(sid, context.observer_id)}
+        rows = {
+            r["work_id"]: r
+            for r in self._observation_rows(sid, context.observer_id, work_ids=scope, content=False)
+        }
         for wid in scope:
             row = rows.get(wid)
             if (
@@ -326,7 +343,10 @@ class NPCModeRuntime:
         # Priority chooses the bounded set; original committed order determines
         # Task's immutable Work ordering, completion and evidence provenance.
         works = [
-            r for r in self._observation_rows(sid, context.observer_id) if r["work_id"] in selected
+            r
+            for r in self._observation_rows(
+                sid, context.observer_id, work_ids=selected, content=False
+            )
         ]
         interactive = self._mode(sid, context.observer_id) == "interactive"
         task = self._create_evaluation(

@@ -402,9 +402,9 @@ class NPCResultRuntime:
                     or not any(
                         p.door_object_id == intent.object_id
                         and intent.scene_id in {e.scene_id for e in p.endpoints}
-                        for p in self._world_facts.instances.get(
-                            row["session_id"], "session", row["session_id"]
-                        )["passages"]
+                        for p in self._world_facts.instances.session_value(
+                            row["session_id"], "passages"
+                        )
                     )
                 ):
                     error = "invalid_npc_action"
