@@ -5,7 +5,6 @@ import json
 import os
 import sqlite3
 import subprocess
-import sys
 import zipfile
 from pathlib import Path
 
@@ -31,7 +30,9 @@ from trpg_state_machine.perception_conditions import judge_signal, signal_enviro
 A, B = "scene.platform", "scene.workshop"
 
 
-def authored_package(base, *, spatial=False, nontrivial=False, origin_cell=None):
+def authored_package(
+    base, *, spatial=False, nontrivial=False, origin_cell=None, return_source=False
+):
     assets = modern_loader()
     data = modern_data(base, assets, spatial=spatial)
     if nontrivial:
@@ -56,7 +57,7 @@ def authored_package(base, *, spatial=False, nontrivial=False, origin_cell=None)
         definition["signals"][0]["origin"]["cell"] = origin_cell
     data["events"] = [definition]
     data["scenes"][0]["event_definition_ids"] = [definition["event_definition_id"]]
-    return _validate(data), assets
+    return (data if return_source else _validate(data)), assets
 
 
 def command(sm, sid, package, context, kind, payload, key):
@@ -442,7 +443,7 @@ def test_evidence_or_outbox_fault_rolls_back_all_facts_and_same_command_retries(
 
 
 def test_actual_baseline_missing_evidence_is_preserved_without_automatic_repair(
-    tmp_path, package_data, context
+    tmp_path, package_data, context, rf4_baseline_python
 ):
     root = Path(__file__).resolve().parents[1]
     baseline = "4e4e678e1b2e580959fc22d07465940211c66a3a"
@@ -466,7 +467,12 @@ import trpg_state_machine.event_capture as capture
 assert Path(capture.__file__).is_relative_to(Path(sys.argv[4]))
 from test_rf4_position_evidence import authored_package, create, initialize, fire
 from trpg_state_machine import StateMachine, TrustedContext
-package, assets = authored_package(json.loads(Path(sys.argv[2]).read_text('utf-8')))
+from trpg_state_machine.package import _validate
+data, assets = authored_package(
+    json.loads(Path(sys.argv[2]).read_text('utf-8')), return_source=True)
+package = _validate(data)
+Path(sys.argv[2]).with_name('historical-package.json').write_text(
+    json.dumps(data), encoding='utf-8')
 context = TrustedContext('authenticated:alice', 'player.alice', ('npc.caretaker','npc.attendant'))
 with StateMachine(sys.argv[3], dnd_loader=assets) as sm:
  sid = create(sm, package, context)
@@ -475,20 +481,23 @@ with StateMachine(sys.argv[3], dnd_loader=assets) as sm:
  print(json.dumps([sid,event.event_seq]))
 """
     process = subprocess.run(
-        [sys.executable, "-c", script, str(root / "tests"), str(base), str(db), str(old)],
+        [str(rf4_baseline_python), "-c", script, str(root / "tests"), str(base), str(db), str(old)],
         cwd=tmp_path,
         env=dict(os.environ, PYTHONPATH=str(old / "src")),
         capture_output=True,
         text=True,
-        check=True,
+        check=False,
     )
+    assert process.returncode == 0, process.stderr
     sid, seq = json.loads(process.stdout)
     frozen = saved_evidence(db, sid, seq)
     assert json.loads(frozen)["actors"][0]["mechanical"]["cell"] is None
     before = stored_rows(db)
-    package, assets = authored_package(package_data)
+    package = _validate(json.loads(base.with_name("historical-package.json").read_text("utf-8")))
+    assets = modern_loader()
     with StateMachine(db, dnd_loader=assets) as sm:
         assert_original_rows_equal(before, stored_rows(db))
+        sm.upgrade_instance_configs(sid, package, context=context)
         assert (
             sm._conn.execute(
                 "SELECT count(*) FROM objects WHERE carrier_id IS NOT NULL OR item_json IS NOT NULL"

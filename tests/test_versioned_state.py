@@ -1,6 +1,7 @@
 """V2 facts before combat, unique SQL ownership, isolation and migration rollback."""
 
 import json
+import os
 import sqlite3
 import subprocess
 from pathlib import Path
@@ -121,6 +122,7 @@ def test_schema9_interrupt_rolls_back_and_restart_completes(tmp_path, monkeypatc
             str(database),
         ],
         cwd=tmp_path,
+        env={**os.environ, "PYTHONPATH": str(Path(legacy_python).parents[2] / "src")},
         check=True,
         capture_output=True,
     )

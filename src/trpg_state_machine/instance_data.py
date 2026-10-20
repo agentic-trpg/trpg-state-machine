@@ -85,6 +85,10 @@ class SceneConfig(SimpleNamespace):
         return self._collection("actor_initial_ids")
 
     @property
+    def actor_ids(self):
+        return self._collection("actor_ids")
+
+    @property
     def pending_objects(self):
         return self._collection("pending_objects")
 
@@ -266,12 +270,14 @@ class InstanceData:
     @scoped_read
     def object_definition(self, sid, oid):
         if self.facts.object(sid, oid) is None:
-            for scene_id in self.session_value(sid, "scene_ids"):
-                data = self.get(sid, "scene", scene_id)
-                for definition in data["pending_definitions"]:
-                    if definition.object_id == oid:
-                        return definition
-            return None
+            row = self.conn.execute(
+                "SELECT d.value FROM instance_configs i, "
+                "json_each(i.config_json,'$.pending_definitions.tuple') d "
+                "WHERE i.session_id=? AND i.domain='scene' "
+                "AND json_extract(d.value,'$.fields.object_id')=? LIMIT 1",
+                (sid, oid),
+            ).fetchone()
+            return decode(json.loads(row[0])) if row else None
         data = json.loads(self.get(sid, "object", oid)["definition"])
         if data is None:
             return None
@@ -320,6 +326,18 @@ class InstanceData:
             raise StateMachineError("incomplete_instance_config", "Object config identity differs")
         return definition
 
+    def pending_object(self, sid, oid):
+        row = self.conn.execute(
+            "SELECT i.instance_id,p.value FROM instance_configs i, "
+            "json_each(i.config_json,'$.pending_objects.tuple') p "
+            "WHERE i.session_id=? AND i.domain='scene' "
+            "AND json_extract(p.value,'$.fields.object_id')=? LIMIT 1",
+            (sid, oid),
+        ).fetchone()
+        if row is None:
+            raise StateMachineError("invalid_target", "Object instance has not been created")
+        return row[0], decode(json.loads(row[1]))
+
     def objects(self, sid):
         return tuple(
             d
@@ -356,14 +374,31 @@ class InstanceData:
             initial_orientation=obj["orientation"],
         )
 
+    @scoped_read
     def scene(self, sid, scene_id):
         row = self.conn.execute(
-            "SELECT json_remove(config_json,'$.object_ids','$.actor_initial_ids',"
+            "SELECT json_remove(config_json,'$.object_ids','$.actor_ids','$.actor_initial_ids',"
             "'$.pending_objects','$.pending_actors','$.pending_definitions') FROM instance_configs "
             "WHERE session_id=? AND domain='scene' AND instance_id=?",
             (sid, scene_id),
         ).fetchone()
         if row is None:
+            session = self.conn.execute(
+                "SELECT config_json FROM instance_configs WHERE session_id=? "
+                "AND domain='session' AND instance_id=?",
+                (sid, sid),
+            ).fetchone()
+            declared = (
+                session is not None
+                and self.conn.execute(
+                    "SELECT 1 FROM json_each(?,'$.scene_ids.tuple') WHERE value=? LIMIT 1",
+                    (session[0], scene_id),
+                ).fetchone()
+            )
+            if session is None or declared:
+                raise StateMachineError(
+                    "incomplete_instance_config", "Explicit instance upgrade required"
+                )
             raise StateMachineError("unknown_scene", f"Unknown scene: {scene_id}")
         return SceneConfig(self, sid, decode(json.loads(row[0])))
 

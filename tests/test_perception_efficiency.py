@@ -307,6 +307,9 @@ with StateMachine(sys.argv[1]) as sm:
     assert "npc_perception_cursors" not in after
     assert after["instance_configs"][1] == set()
     assert set(before) - {"npc_perception_cursors"} == set(after) - {
+        "object_spatial_cells",
+        "scene_integrity",
+        "scene_integrity_dependencies",
         "instance_configs",
         "session_time_waits",
         "session_time_runs",

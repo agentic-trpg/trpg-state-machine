@@ -304,26 +304,30 @@ class GridReader:
             )
         ]
         if not initialized:
+            pending_actors = self.facts.instances.scene(sid, scene_id).pending_actors
             existing = {
                 r[0]
                 for r in self.store.connection.execute(
-                    "SELECT actor_id FROM actors WHERE session_id=?", (sid,)
+                    "SELECT actor_id FROM actors WHERE session_id=? "
+                    "AND actor_id IN (SELECT value FROM json_each(?))",
+                    (sid, json.dumps([a for a, _ in pending_actors])),
                 )
             }
             actors.extend(
-                (actor_id, cell)
-                for actor_id, cell in self.facts.instances.scene(sid, scene_id).pending_actors
-                if actor_id not in existing
+                (actor_id, cell) for actor_id, cell in pending_actors if actor_id not in existing
             )
+            pending_objects = self.facts.instances.scene(sid, scene_id).objects
             existing_objects = {
                 r[0]
                 for r in self.store.connection.execute(
-                    "SELECT object_id FROM objects WHERE session_id=?", (sid,)
+                    "SELECT object_id FROM objects WHERE session_id=? "
+                    "AND object_id IN (SELECT value FROM json_each(?))",
+                    (sid, json.dumps([o.object_id for o in pending_objects])),
                 )
             }
             objects.extend(
                 (o.object_id, o.initial_cell)
-                for o in self.facts.instances.scene(sid, scene_id).objects
+                for o in pending_objects
                 if o.object_id not in existing_objects
             )
         return sorted(actors), sorted(objects)
@@ -354,7 +358,7 @@ class GridService:
 
     def prepared_package_topology(self, sid, package, scene_id):
         """Authorized Navigation's static map, separate from live Session facts."""
-        raw = self.h.facts.instances.scene(sid, scene_id).grid_json
+        raw = package.scene(scene_id).grid_json
         if raw is None:
             raise StateMachineError("spatial_unconfigured", "Scene has no grid")
         return self.reader.maps.template(sid, scene_id, raw).topology
@@ -437,6 +441,8 @@ class GridService:
                 handled_thresholds=handled_thresholds,
             )
         prepared = self.reader.prepared_scene(sid, scene_id, package)
+        if any(not cell_in_bounds(prepared.topology, c) for c in cells):
+            raise StateMachineError("invalid_spatial_state", "Local edge placement is incomplete")
         points = [tuple(map(int, c.split(","))) for c in cells]
         relevant = set(cells)
         for x, y in points:

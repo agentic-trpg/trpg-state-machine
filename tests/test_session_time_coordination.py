@@ -393,6 +393,10 @@ def test_schema36_migration_preserves_every_old_row_and_does_not_create_run_rows
     path = sm._conn.execute("PRAGMA database_list").fetchone()[2]
     sm.close()
     with sqlite3.connect(path) as db:
+        from test_migrations import remove_post39_derived_storage
+
+        remove_post39_derived_storage(db)
+        db.execute("DROP TABLE instance_configs")
         for table in (
             "session_time_waits",
             "session_time_runs",

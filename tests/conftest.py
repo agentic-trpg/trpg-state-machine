@@ -123,3 +123,46 @@ def pre_frozen_python():
     )
     assert synced.returncode == 0, synced.stderr
     return historical / ".venv" / ("Scripts/python.exe" if os.name == "nt" else "bin/python")
+
+
+@pytest.fixture(scope="session")
+def rf4_baseline_python():
+    """Run the actual RF4 producer with its own lock and evaluator /36."""
+    root = Path(__file__).resolve().parents[1]
+    historical = root / ".test-tmp" / "rf4-4e4e678"
+    if not (historical / "uv.lock").exists():
+        archive = subprocess.run(
+            [
+                "git",
+                "archive",
+                "--format=zip",
+                "4e4e678e1b2e580959fc22d07465940211c66a3a",
+                "src",
+                "pyproject.toml",
+                "uv.lock",
+            ],
+            cwd=root,
+            check=True,
+            capture_output=True,
+        ).stdout
+        with zipfile.ZipFile(io.BytesIO(archive)) as bundle:
+            bundle.extractall(historical)
+    result = subprocess.run(
+        [
+            "uv",
+            "sync",
+            "--locked",
+            "--group",
+            "dev",
+            "--cache-dir",
+            str(root / ".uv-cache"),
+            "--project",
+            str(historical),
+        ],
+        cwd=root,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+    )
+    assert result.returncode == 0, result.stderr
+    return historical / ".venv" / ("Scripts/python.exe" if os.name == "nt" else "bin/python")

@@ -23,3 +23,12 @@ Result submission, Meta updates, mode coordination/Gate, outputs and Completed C
 Final verification: `uv sync --locked --group dev`; `uv run --locked python -m pytest -q` — **479 passed**, 17 added, 121.33 s, two existing upstream Lark deprecation warnings. `ruff check .`, `ruff format --check .` (74 files) and `git diff --check` passed. First full run found four obsolete latest-schema assertions; two subprocess imports also encountered an editing-time syntax error. Those were corrected and the complete unchanged-source run above passed. No historical tests were removed or skipped.
 
 Batch source/SQL review: authorization and version checks run under the same SQLite write lock as task insertion; detached NPC input reads share one read transaction; one partial unique index prevents dual valid tasks; new projection associations commit with the existing Perception result/Inbox. No new authority, model, command executor or completion claim. No confirmed P0/P1/P2 in the implemented SM-15 scope.
+
+
+## 2026-10-20 Scoped runtime validation refactor
+
+本批实现采用 Schema40 的事务内派生占格索引和结构验收记录，普通命令由领域
+局部准入保护，操作内复用读取，提交不再默认完整空间审查或库存重建。
+逐项能力、读取范围、存档兼容、实际计数及本批验证结果见
+[系统性重构验收](reviews/SCOPED_RUNTIME_VALIDATION_REFACTOR.md)。
+上文历史测试数字与旧 Schema/待办保持原批次语境，不作为本轮验证结果。

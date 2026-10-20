@@ -35,6 +35,10 @@ def test_schema38_preserves_all_old_rows_and_rolls_back_failed_ddl(
     # empty new table to construct the exact previous schema, including real
     # commands' admissions, receipts, Outbox, running settings and pending work.
     with sqlite3.connect(path) as conn:
+        from test_migrations import remove_post39_derived_storage
+
+        remove_post39_derived_storage(conn)
+        conn.execute("DROP TABLE instance_configs")
         conn.execute("DROP TABLE session_time_waits")
         conn.execute("PRAGMA user_version=37")
     original = stored_rows(path)
@@ -57,6 +61,7 @@ def test_schema38_preserves_all_old_rows_and_rolls_back_failed_ddl(
         with sqlite3.connect(path) as conn:
             assert conn.execute("PRAGMA user_version").fetchone()[0] == 37
     with StateMachine(path) as restored:
+        restored.upgrade_instance_configs(sid, package, context=context)
         restored.resume_session(sid, package, context=context)
         assert restored._conn.execute("PRAGMA user_version").fetchone()[0] == 40
         assert restored._conn.execute("SELECT * FROM session_time_waits").fetchall() == []

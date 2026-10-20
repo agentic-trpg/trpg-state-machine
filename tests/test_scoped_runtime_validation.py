@@ -22,6 +22,7 @@ from trpg_state_machine import (
     SetObjectState,
     StateMachine,
     StateMachineError,
+    StepActor,
 )
 from trpg_state_machine.package import canonical_json
 
@@ -154,7 +155,10 @@ def grow(sm, sid, n):
             )
 
 
-def test_public_placement_scope_is_independent_of_unrelated_growth(tmp_path, context, monkeypatch):
+@pytest.mark.parametrize("path", ("placement", "step"))
+def test_public_placement_scope_is_independent_of_unrelated_growth(
+    tmp_path, context, monkeypatch, path
+):
     sm, sid, package, _ = setup(tmp_path, context, oriented_data())
     gm = replace(context, can_place_world_objects=True)
     with sm:
@@ -164,7 +168,11 @@ def test_public_placement_scope_is_independent_of_unrelated_growth(tmp_path, con
         observe(
             monkeypatch, sm._world_facts.instances, "object_definition", calls, "definition_reads"
         )
-        op = RepositionObject(A, OBSTACLE, "1,1", "1,1", "north", "east")
+        op = (
+            RepositionObject(A, OBSTACLE, "1,1", "1,1", "north", "east")
+            if path == "placement"
+            else StepActor(A, "0,0", "1,0")
+        )
         sm._world_facts.maps.clear()
         calls.clear()
         with measure(sm) as (small, _):

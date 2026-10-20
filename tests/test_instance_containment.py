@@ -364,8 +364,14 @@ def test_old_save_upgrade_is_explicit_atomic_and_preserves_facts(tmp_path, conte
             )
         sm.upgrade_instance_configs(sid, package, context=context)
         after = stored_state(db)
-        assert {k: v for k, v in after.items() if k != "instance_configs"} == {
-            k: v for k, v in before.items() if k != "instance_configs"
+        derived = {
+            "instance_configs",
+            "object_spatial_cells",
+            "scene_integrity",
+            "scene_integrity_dependencies",
+        }
+        assert {k: v for k, v in after.items() if k not in derived} == {
+            k: v for k, v in before.items() if k not in derived
         }
         assert sm._world_facts.object(sid, CRED)["container_id"] == BAG
         prohibit_templates(monkeypatch, package)

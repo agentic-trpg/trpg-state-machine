@@ -461,9 +461,9 @@ class RulesAdapter:
                 ).character_states
             ]
         if self.facts.instances.session_value(row["session_id"], "has_noncombat"):
-            actors = self.characters.rule_actors(row["session_id"])
             try:
                 roster = data["snapshot"]["combat_state"]["initiative_ids"]
+                actors = self.characters.rule_actors(row["session_id"], set(roster))
                 data["snapshot"]["character_states"] = [actors[a] for a in roster]
                 data["snapshot"].update(
                     self.characters.rule_components(row["session_id"], set(roster))

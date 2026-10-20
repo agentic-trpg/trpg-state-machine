@@ -87,7 +87,7 @@ class CombatHandler:
                 "version_conflict", "Combat positions changed during preparation"
             )
         current_actors = (
-            self.characters.rule_actors(sid)
+            self.characters.rule_actors(sid, {a.entity_id for a in snapshot.character_states})
             if self.facts.instances.session_value(row["session_id"], "has_noncombat")
             else {}
         )

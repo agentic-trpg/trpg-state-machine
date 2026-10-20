@@ -97,3 +97,12 @@ verify_ruleset／求值请求／查询请求／指纹仍由 Session 驱动；真
 真实错误绑定结果和查询结果拒绝且不写事实／RNG／回执；SQLite late fault 验证新建场景、
 NPC 位置、版本、事件／Outbox 和回执一起回滚。既有权限、重放、指纹冲突、OCC、
 pending_choice 以及历史兼容测试复用现有真实公开路径。
+
+
+## 2026-10-20 Scoped runtime validation refactor
+
+本批实现采用 Schema40 的事务内派生占格索引和结构验收记录，普通命令由领域
+局部准入保护，操作内复用读取，提交不再默认完整空间审查或库存重建。
+逐项能力、读取范围、存档兼容、实际计数及本批验证结果见
+[系统性重构验收](reviews/SCOPED_RUNTIME_VALIDATION_REFACTOR.md)。
+上文历史测试数字与旧 Schema/待办保持原批次语境，不作为本轮验证结果。

@@ -467,3 +467,15 @@ StateMachine(sys.argv[2])
     with StateMachine(database):
         pass
     assert_preserved(database, original)
+
+
+def remove_post39_derived_storage(conn):
+    """A synthetic older schema must not retain newer lookup/maintenance objects."""
+    for (name,) in conn.execute(
+        "SELECT name FROM sqlite_master WHERE type='trigger' "
+        "AND (name GLOB 'spatial_index_*' OR name GLOB 'integrity_*')"
+    ).fetchall():
+        conn.execute('DROP TRIGGER "' + name.replace('"', '""') + '"')
+    for table in ("object_spatial_cells", "scene_integrity_dependencies", "scene_integrity"):
+        conn.execute("DROP TABLE " + table)
+    conn.execute("DROP INDEX actors_cell_lookup")

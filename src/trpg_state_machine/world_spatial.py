@@ -94,12 +94,7 @@ class ObjectSpatialService:
     def _legacy(self, sid, oid):
         if self.h.facts.object(sid, oid) is not None:
             return self.h.facts.instances.legacy_object(sid, oid)
-        return next(
-            o
-            for scene in self.h.facts.instances.scenes(sid)
-            for o in scene.objects
-            if o.object_id == oid
-        )
+        return self.h.facts.instances.pending_object(sid, oid)[1]
 
     @scoped_read
     def state(self, sid, oid, package):
@@ -112,19 +107,16 @@ class ObjectSpatialService:
                 obj["state"],
                 self.h.facts.object_hp(sid, oid) == 0,
             )
-        for scene in self.h.facts.instances.scenes(sid):
-            initial = next((o for o in scene.pending_objects if o.object_id == oid), None)
-            if initial is not None:
-                d = self.h.facts.object_definition(sid, oid)
-                durability = d.capability("durability") if d else None
-                return ObjectSpatialState(
-                    scene.scene_id,
-                    initial.initial_cell,
-                    initial.initial_orientation,
-                    initial.state,
-                    bool(durability and durability.initial_hp == 0),
-                )
-        raise StateMachineError("invalid_target", "Object instance has not been created")
+        scene_id, initial = self.h.facts.instances.pending_object(sid, oid)
+        d = self.h.facts.object_definition(sid, oid)
+        durability = d.capability("durability") if d else None
+        return ObjectSpatialState(
+            scene_id,
+            initial.initial_cell,
+            initial.initial_orientation,
+            initial.state,
+            bool(durability and durability.initial_hp == 0),
+        )
 
     def blocks(self, sid, oid, package, *, candidate=None):
         c = self.config(sid, oid)

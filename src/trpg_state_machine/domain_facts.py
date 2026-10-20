@@ -250,29 +250,52 @@ class CharacterFacts:
     @scoped_read
     def rule_components(self, sid, owner_ids, *, full_audit=False):
         """Read persisted facts, then project owners; absence is never an empty component."""
-        owners = json.dumps(sorted(owner_ids))
-        projections = []
-        for field, path, owner in (
-            ("inventory_json", "$.entries", "owner_id"),
-            ("resources_json", "$.pools", "owner_id"),
-            ("casting_json", "$.actors", "actor_id"),
-            ("effects_json", "$", "target_id"),
-        ):
-            selected = (
-                f"(SELECT json_group_array(json(v.value)) FROM json_each({field},'{path}') v "
-                f"WHERE json_extract(v.value,'$.{owner}') IN (SELECT value FROM json_each(?)))"
-            )
-            value = selected if path == "$" else f"json_set({field},'{path}',json({selected}))"
-            projections.append(f"CASE WHEN {field}='null' THEN 'null' ELSE {value} END AS {field}")
-        row = self._conn.execute(
-            "SELECT schema_version,"
-            + ",".join(projections)
-            + " FROM mechanical_components WHERE session_id=?",
-            (owners, owners, owners, owners, sid),
-        ).fetchone()
         if full_audit:
             row = self._conn.execute(
                 "SELECT * FROM mechanical_components WHERE session_id=?", (sid,)
+            ).fetchone()
+        else:
+            projections = []
+            for field, path, owner in (
+                ("inventory_json", "$.entries", "owner_id"),
+                ("resources_json", "$.pools", "owner_id"),
+                ("casting_json", "$.actors", "actor_id"),
+                ("effects_json", "$", "target_id"),
+            ):
+                condition = f"json_extract(v.value,'$.{owner}') IN (SELECT id FROM target_owners)"
+                if field == "inventory_json":
+                    # Include identity collisions and orphaned equipment actually
+                    # referenced by the selected Actors, never every other owner.
+                    condition += (
+                        " OR json_extract(v.value,'$.instance_id') "
+                        "IN (SELECT id FROM target_items) "
+                        "OR (json_extract(v.value,'$.item_slug') "
+                        "IN (SELECT slug FROM target_slugs) "
+                        "AND NOT EXISTS (SELECT 1 FROM mechanical_actors a "
+                        "WHERE a.session_id=mechanical_components.session_id "
+                        "AND a.actor_id=json_extract(v.value,'$.owner_id')))"
+                    )
+                selected = (
+                    f"(SELECT json_group_array(json(v.value)) FROM json_each({field},'{path}') v "
+                    f"WHERE {condition})"
+                )
+                value = selected if path == "$" else f"json_set({field},'{path}',json({selected}))"
+                projections.append(
+                    f"CASE WHEN {field}='null' THEN 'null' ELSE {value} END AS {field}"
+                )
+            row = self._conn.execute(
+                "WITH target_owners(id) AS MATERIALIZED (SELECT value FROM json_each(?)), "
+                "target_items(id) AS MATERIALIZED (SELECT json_extract(e.value,'$.instance_id') "
+                "FROM mechanical_components m,json_each(m.inventory_json,'$.entries') e "
+                "WHERE m.session_id=? AND json_extract(e.value,'$.owner_id') "
+                "IN (SELECT id FROM target_owners)), "
+                "target_slugs(slug) AS MATERIALIZED (SELECT v.value FROM characters c, "
+                "json_each(c.inventory_json) v WHERE c.session_id=? "
+                "AND c.actor_id IN (SELECT id FROM target_owners)) "
+                "SELECT schema_version,"
+                + ",".join(projections)
+                + " FROM mechanical_components WHERE session_id=?",
+                (json.dumps(sorted(owner_ids)), sid, sid, sid),
             ).fetchone()
         if row is None or row["schema_version"] != "engine-snapshot/17":
             raise StateMachineError(
@@ -365,9 +388,11 @@ class CharacterFacts:
         identities = {r["object_id"] for r in portable}
         owners = {self.world.placement(sid, r["object_id"])["carrier_id"] for r in portable}
         owners.discard(None)
-        if owners:
-            self.rule_components(sid, owners)
-        inventory = self._inventory_selection(sid, owners, identities)
+        inventory = (
+            self.rule_components(sid, owners)["inventory_state"]
+            if owners
+            else self._inventory_selection(sid, owners, identities)
+        )
         expected = {r["object_id"]: self.world.item_entry(r) for r in portable}
         actual = {
             e["instance_id"]: e for e in inventory["entries"] if e["instance_id"] in identities
@@ -497,26 +522,19 @@ class CharacterFacts:
             "UPDATE mechanical_components SET inventory_json=? WHERE session_id=?",
             (canonical_json(inventory), sid),
         )
-        for actor in self.rule_actors(sid):
-            slugs = sorted(
-                {
-                    e["item_slug"]
-                    for e in inventory["entries"]
-                    if e["owner_id"] == actor and e["quantity"] > 0
-                }
-            )
-            core = self._conn.execute(
-                "SELECT inventory_json FROM characters WHERE session_id=? AND actor_id=?",
-                (sid, actor),
-            ).fetchone()
-            old = json.loads(core[0])
-            slugs = [slug for slug in old if slug in slugs] + [
-                slug for slug in slugs if slug not in old
-            ]
-            self._conn.execute(
-                "UPDATE characters SET inventory_json=? WHERE session_id=? AND actor_id=?",
-                (canonical_json(slugs), sid, actor),
-            )
+        by_owner = {}
+        for entry in inventory["entries"]:
+            if entry["quantity"] > 0:
+                by_owner.setdefault(entry["owner_id"], set()).add(entry["item_slug"])
+        for actor, current in self.rule_actors(sid).items():
+            wanted = by_owner.get(actor, set())
+            old = current["carried_item_slugs"]
+            slugs = [slug for slug in old if slug in wanted] + sorted(wanted - set(old))
+            if slugs != old:
+                self._conn.execute(
+                    "UPDATE characters SET inventory_json=? WHERE session_id=? AND actor_id=?",
+                    (canonical_json(slugs), sid, actor),
+                )
         self.validate_portable_inventory(sid, inventory)
 
     def initialize_rule_positions(self, row, cells, scene_id):
@@ -1122,12 +1140,19 @@ class WorldFacts:
 
     def item_entry(self, row):
         sid, oid = row["session_id"], row["object_id"]
+        data = self.require_item_unit(row)
         placement = self.placement(sid, oid, row=row)
         if placement["carrier_id"] is None:
             return None
-        data = json.loads(row["item_json"])
         data["accessible"] = data["accessible"] and self.item_accessible(sid, oid, row=row)
         return {"instance_id": oid, "owner_id": placement["carrier_id"], **data}
+
+    @staticmethod
+    def require_item_unit(row):
+        data = json.loads(row["item_json"]) if row["item_json"] is not None else None
+        if not valid_item_unit(data):
+            raise StateMachineError("invalid_mechanical_state", "Portable unit metadata is invalid")
+        return data
 
     def portable_inventory(self, sid, *, owner_ids=None, instance_ids=()):
         identities, entries = set(), {}

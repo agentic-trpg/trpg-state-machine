@@ -242,7 +242,7 @@ class ContainerService:
             obj = self.facts.object(sid, oid)
             if not obj["item_json"]:
                 continue
-            slug = json.loads(obj["item_json"])["item_slug"]
+            slug = self.facts.require_item_unit(obj)["item_slug"]
             asset = h.loader.get_item(slug)
             if asset and (asset.requires_attunement or asset.passive_effects):
                 raise StateMachineError(

@@ -399,3 +399,12 @@ Effects provider 返回当前有效来源 tuple；空 tuple 明确没有效果�
 MECH-01 沿用最新 main 的机关实施结论，本次环境整合不重新裁定该问题。
 本轮 Environment 功能已实现，不另新增 Environment 延期待办；外围组件按既有归属接入。
 实际验证命令与结果见 [实施记录](ENVIRONMENT_SERVICE_PROGRESS.md)。
+
+
+## 2026-10-20 Scoped runtime validation refactor
+
+本批实现采用 Schema40 的事务内派生占格索引和结构验收记录，普通命令由领域
+局部准入保护，操作内复用读取，提交不再默认完整空间审查或库存重建。
+逐项能力、读取范围、存档兼容、实际计数及本批验证结果见
+[系统性重构验收](reviews/SCOPED_RUNTIME_VALIDATION_REFACTOR.md)。
+上文历史测试数字与旧 Schema/待办保持原批次语境，不作为本轮验证结果。

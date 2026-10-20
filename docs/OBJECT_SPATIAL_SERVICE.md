@@ -275,3 +275,12 @@ are not closed. No main merge is implied.
 ## 2026-10-20 当前实例与校验范围
 
 当前 main 的对象配置取 WorldFacts.instances；显式初建／升级与旧库策略见 [实例配置记录](INSTANCE_CONFIGURATION_PROGRESS.md)。check_candidate 仍调用全场景 _check_scene，operate 仍调用全 Session audit；不因名称含 candidate 就视为局部准入已完成。完整调用链及后续等价替代要求见 [校验范围审查](reviews/RUNTIME_VALIDATION_SCOPE_REVIEW.md)，共同规范引用 MC §2.3、§6.5–§6.6。WO 动态防护生产提供方仍未全面接线。
+
+
+## 2026-10-20 Scoped runtime validation refactor
+
+本批实现采用 Schema40 的事务内派生占格索引和结构验收记录，普通命令由领域
+局部准入保护，操作内复用读取，提交不再默认完整空间审查或库存重建。
+逐项能力、读取范围、存档兼容、实际计数及本批验证结果见
+[系统性重构验收](reviews/SCOPED_RUNTIME_VALIDATION_REFACTOR.md)。
+上文历史测试数字与旧 Schema/待办保持原批次语境，不作为本轮验证结果。

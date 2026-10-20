@@ -354,6 +354,7 @@ class WorldHandler:
             raise StateMachineError(
                 "unsupported_object_capability", "No approved portable capability"
             )
+        self.facts.require_item_unit(item)
         if type(operation) is PickupItem and target != operation.expected_cell:
             raise StateMachineError("position_conflict", "Item position precondition differs")
         base = self.grid.base_topology(sid, position.scene_id, package)
@@ -366,9 +367,13 @@ class WorldHandler:
             raise StateMachineError(
                 "item_out_of_reach", "Item transfer requires clear adjacent reach"
             )
-        if type(operation) is DropItem and any(
-            aid != actor_id and cell == target
-            for aid, cell in self.grid.reader.scene_occupants(sid, position.scene_id, package)[0]
+        if (
+            type(operation) is DropItem
+            and self._conn.execute(
+                "SELECT 1 FROM actors WHERE session_id=? AND current_scene_id=? "
+                "AND cell=? AND actor_id<>? LIMIT 1",
+                (sid, position.scene_id, target, actor_id),
+            ).fetchone()
         ):
             raise StateMachineError("item_out_of_reach", "Item destination is occupied")
         known = set(self.characters.rule_actors(sid, {actor_id}))
@@ -501,7 +506,7 @@ class WorldHandler:
         if operation.scene_id != position.scene_id:
             raise StateMachineError("invalid_target", "Interaction must be in the actor's scene")
         definition = self.facts.object_definition(sid, operation.object_id)
-        fine = self.facts.instances.scene(sid, position.scene_id).grid_json is not None
+        fine = self.facts.instances.scene(sid, position.scene_id).has_grid
         if fine:
             self._world_actor_ready(sid, actor_id, navigation_scope=navigation_scope)
             self._public_scope(sid, actor_id, package)
@@ -572,7 +577,12 @@ class WorldHandler:
                         if initialized is None:
                             pending_occupied = any(
                                 cell == endpoint.threshold_cell
-                                for _, cell in self.facts.instances.scene(
+                                and self._conn.execute(
+                                    "SELECT 1 FROM actors WHERE session_id=? AND actor_id=?",
+                                    (sid, actor),
+                                ).fetchone()
+                                is None
+                                for actor, cell in self.facts.instances.scene(
                                     sid, endpoint.scene_id
                                 ).pending_actors
                             )
@@ -585,17 +595,17 @@ class WorldHandler:
         position = self._actor_position(sid, actor_id)
         source = self.facts.instances.scene(sid, position.scene_id)
         # Retain the abstract API's unknown-scene rejection.
-        if source.grid_json is None:
+        if not source.has_grid:
             self.facts.instances.scene(sid, to_scene_id)
         if to_scene_id not in source.exits:
             raise StateMachineError(
-                "invalid_target" if source.grid_json is not None else "scene_unreachable",
+                "invalid_target" if source.has_grid else "scene_unreachable",
                 "No authorized directed exit",
             )
         target = self.facts.instances.scene(sid, to_scene_id)
-        if source.grid_json is None and target.grid_json is None:
+        if not source.has_grid and not target.has_grid:
             return SpatialPosition(target.scene_id, None)
-        if source.grid_json is None or target.grid_json is None:
+        if not source.has_grid or not target.has_grid:
             raise StateMachineError(
                 "unsupported_spatial_transition", "Abstract/fine conversion is unsupported"
             )
@@ -641,7 +651,7 @@ class WorldHandler:
         self._world_actor_ready(sid, actor_id, navigation_scope=navigation_scope)
         position = self._actor_position(sid, actor_id)
         # Establish caller capability before looking up any target reference.
-        if self.facts.instances.scene(row["session_id"], position.scene_id).grid_json is not None:
+        if self.facts.instances.scene(row["session_id"], position.scene_id).has_grid:
             self._public_scope(sid, actor_id, package)
         if type(operation) is StepActor:
             return self._validate_step(sid, actor_id, operation, package)
@@ -895,15 +905,7 @@ class WorldHandler:
             return door[0] == "closed"
         # An unvisited Scene has not instantiated its objects yet. This is an
         # initial fact only, never a replacement for an existing runtime row.
-        return (
-            next(
-                o.state
-                for s in self.facts.instances.scenes(sid)
-                for o in s.objects
-                if o.object_id == passage.door_object_id
-            )
-            == "closed"
-        )
+        return self.facts.instances.pending_object(sid, passage.door_object_id)[1].state == "closed"
 
     def _spatial_reader(self, sid, actor_id, package, context):
         if type(actor_id) is not str or not actor_id:

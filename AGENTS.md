@@ -32,3 +32,10 @@ Requirements:
 - For local-query/admission changes, add deterministic scale-growth evidence with target scope held fixed while unrelated scenes/objects/actors/items increase. Count SQL rows, parsing, construction, projections or scans; static findings and elapsed time alone do not prove the required scaling.
 - Check corresponding DOC and Progress after implementation; update only evidence-backed capability claims and keep dated history. The current audit and remaining refactors are indexed in [Runtime validation scope review](docs/reviews/RUNTIME_VALIDATION_SCOPE_REVIEW.md).
 - Complete scoped commit and push when authorized by the task, after reviewing the staged diff; stage named task files only. Never automatically merge main. Report branch, starting/final SHA, executed checks, push result, limitations and follow-up issues. Do not claim GitHub Actions passed from local checks.
+
+## Scoped runtime implementation (2026-10-20)
+
+- Apply the upstream MC §2.3 and §6.5–§6.6 classification using the implemented interfaces and cost boundaries in [the scoped runtime acceptance report](docs/reviews/SCOPED_RUNTIME_VALIDATION_REFACTOR.md). Keep Full Audit at initialization acceptance, recovery/load, migration or explicit diagnostics; ordinary callers use affected domain admission.
+- Schema40 spatial lookup and scene acceptance data are derived. Changes to their source facts, indexes or required-row maintenance must preserve trigger installation, rollback, old-reader isolation and incomplete-instance refusal. Do not write these tables as a second state authority.
+- Operation memo values belong to one UnitOfWork mutation stage. New writes and every savepoint rollback must invalidate them; public permission/disclosure checks still run.
+- Extend `tests/test_scoped_runtime_validation.py` through real public paths for changes to local admission/reading. Count SQL statements, fetched rows, model construction and preparation separately; include scale growth with fixed target scope and distinguish necessary aggregate JSON work.

@@ -54,3 +54,12 @@ Hold target entities/cells fixed, independently grow unrelated Scenes/Objects/Ac
 Current SM: Schema39; Engine/SRD pin `a011eba3ea2226e22d8081294ee38d3ec193b325`; command /1, Evaluation /24, Snapshot /17, Availability /13, StageFacts /2, evaluator /37. RE main differs from that pin only in AGENTS documentation; package source diff is empty. Full field/type/status/current-versus-target matrix lives in sibling Module Contracts §1.6.
 
 Evidence read: instance/frozen tests above, `test_session_management.py`, `test_session_time_coordination.py`, `test_session_time_recovery.py`, `test_session_time_wait_commands.py`, `test_dnd_npc_availability.py`, `test_container_admission.py`, plus corresponding source and dated Progress. Existing historical test results are not rerun here. Default realtime rate and host waiting policy remain OPEN; production time deadlines currently come from mechanisms, while complete Effects/Activity/NPC/OB/Gate and waiting-reply consumers remain gaps. World-source rules.effect, generalized Delta adoption, Turn/Round Episode and active-combat precise restore remain unsupported/incomplete.
+
+
+## 2026-10-20 Implementation follow-up
+
+The dated static findings above remain historical evidence. The scoped runtime
+refactor implements local admission/read scopes and removes routine finalize
+audits; see [the 21-item acceptance and verification ledger](SCOPED_RUNTIME_VALIDATION_REFACTOR.md).
+Its explicit aggregate-JSON, necessary mechanical/ancestor and complete-scene
+consumer costs remain bounded by their real dependencies, not by an audit name.

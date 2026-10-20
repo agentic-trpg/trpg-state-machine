@@ -32,6 +32,19 @@ def test_schema33_armed_spent_preserved_migration_failure_atomic_and_retry(
         assert receipt.status == "committed"
     # Restore precisely the historical table contract using its bundled migration.
     with sqlite3.connect(db) as conn:
+        for (name,) in conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='trigger' "
+            "AND (name GLOB 'spatial_index_*' OR name GLOB 'integrity_*')"
+        ).fetchall():
+            conn.execute('DROP TRIGGER "' + name.replace('"', '""') + '"')
+        for table in (
+            "object_spatial_cells",
+            "scene_integrity_dependencies",
+            "scene_integrity",
+            "instance_configs",
+        ):
+            conn.execute("DROP TABLE " + table)
+        conn.execute("DROP INDEX actors_cell_lookup")
         # Current setup includes additive TIME37/38 and ENV35/36 storage. Remove
         # those additions before claiming this fixture is a Schema33 database.
         for table in (
