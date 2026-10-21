@@ -181,10 +181,17 @@ def test_delivery_retry_gap_and_isolation(tmp_path, package, context, request_fo
         assert sm.delivery_cursor(other.session_id, package, context=context) == 0
         assert len(received) == 2
         attempts = sm._conn.execute(
-            "SELECT attempts FROM event_outbox WHERE session_id=? AND event_seq=1",
+            "SELECT attempts FROM event_outbox WHERE session_id=? AND event_seq=1 "
+            "AND consumer='delivery'",
             (created.session_id,),
         ).fetchone()[0]
         assert attempts == 2
+        with sqlite3.connect(database) as disk:
+            assert disk.execute(
+                "SELECT consumer,attempts FROM event_outbox "
+                "WHERE session_id=? AND event_seq=1 ORDER BY consumer",
+                (created.session_id,),
+            ).fetchall() == [("delivery", 2), ("perception", 0)]
 
 
 def test_evidence_is_event_time_not_current_state(tmp_path, package, context, request_for):
