@@ -4,7 +4,7 @@ from dataclasses import asdict
 
 from ._execution import _execution_data
 from .errors import StateMachineError
-from .scoped_reads import scoped_read
+from .runtime_instances import instance_read
 from .world_commands import SetLightEnabled
 
 _RANK = {"dark": 0, "dim": 1, "bright": 2}
@@ -18,12 +18,10 @@ class LightService:
         d = self.h.facts.object_definition(sid, oid)
         return d.capability("light") if d else None
 
-    @scoped_read
+    @instance_read("scene", "lighting", "sources")
     def sources(self, sid, scene, package):
         result = []
-        local = self.h.facts.scene_object_rows(sid, scene, all_carriers=True, lights_only=True)
-        for obj in local:
-            oid = obj["object_id"]
+        for oid in self.h.facts.scene_capability_ids(sid, scene, "object_lights"):
             light = self.h.facts.light_state(sid, oid)
             c = self.config(sid, oid)
             if not light["enabled"] or self.h.facts.object_hp(sid, oid) == 0:
@@ -60,16 +58,68 @@ class LightService:
             )
         return result
 
-    @scoped_read
-    def project(self, sid, scene, package, raw):
-        """Return a derived grid plus explicit uncertainty and source-stage evidence."""
-        grid = {**raw, "lighting": dict(raw["lighting"])}
-        topology = self.h.grid.reader.topology_for_grid(sid, scene, raw)
+    @instance_read("scene", "lighting", "projection")
+    def current_project(self, sid, scene, package):
+        raw = self.h.grid.reader.current_grid(sid, scene, package).copy_data()
+        geometry = self.geometry(sid, scene, package) if self.sources(sid, scene, package) else None
+        return self.project(sid, scene, package, raw, geometry=geometry)
+
+    @instance_read("scene", "lighting", "cells", capacity=128)
+    def current_cell(self, sid, scene, package, cell):
+        prepared = self.h.grid.reader.current_grid(sid, scene, package)
         sources = self.sources(sid, scene, package)
         if not sources:
-            return grid, (), {}
+            return (
+                prepared.data["lighting"].get(cell, prepared.data["default_lighting"]),
+                False,
+                (),
+            )
+        candidates, geometry = self.geometry(sid, scene, package)
+        return self._illuminate_cell(prepared.topology, geometry, candidates, sources, cell)
+
+    @staticmethod
+    def _illuminate_cell(topology, uncertain_geometry, candidates, sources, cell):
+        """Original light composition for one requested cell, shared by full maps."""
+        level = topology.light_on_cell(cell)
+        contributions, unknown = [], False
+        for source in sources:
+            origin, mode = source["cell"], source["mode"]
+            distance = topology.distance_ft(origin, cell) if origin is not None else None
+            if distance is None:
+                unknown = True
+                continue
+            if distance > mode.dim_outer_radius_ft:
+                continue
+            if (
+                not topology.has_line_of_sight(origin, cell)
+                or topology.cover_between(origin, cell) == "total"
+            ):
+                continue
+            if (
+                source["transmission"] == "unknown"
+                or cell in candidates
+                or not uncertain_geometry.has_line_of_sight(origin, cell)
+            ):
+                unknown = True
+                continue
+            value = (
+                "bright"
+                if mode.bright_radius_ft is not None and distance <= mode.bright_radius_ft
+                else "dim"
+            )
+            if _RANK[value] > _RANK[level]:
+                level = value
+            contributions.append(source["object_id"])
+        return level, unknown, tuple(contributions)
+
+    @instance_read("scene", "lighting", "geometry")
+    def geometry(self, sid, scene, package):
+        raw = self.h.grid.reader.current_grid(sid, scene, package).copy_data()
+        return self._geometry(sid, scene, package, raw)
+
+    def _geometry(self, sid, scene, package, raw):
         candidates = self.h.objects.spatial.movement_cells(sid, scene, package)
-        _, actual = self.h.grid.reader.scene_occupants(sid, scene, package)
+        actual = self.h.grid.reader.scene_object_occupants(sid, scene, package)
         candidates.update(
             cell
             for oid, cell in actual
@@ -83,45 +133,33 @@ class LightService:
         uncertain_geometry = self.h.grid.reader.topology_for_grid(
             sid, scene, {**raw, "blocked_cells": sorted(set(raw["blocked_cells"]) | candidates)}
         )
+        return frozenset(candidates), uncertain_geometry
+
+    def project(self, sid, scene, package, raw, *, cells=None, geometry=None):
+        """Explicit fixed-map inputs remain separate from current scene fields."""
+        grid = {**raw, "lighting": dict(raw["lighting"])}
+        topology = self.h.grid.reader.topology_for_grid(sid, scene, raw)
+        sources = self.sources(sid, scene, package)
+        if not sources:
+            return grid, (), {}
+        candidates, uncertain_geometry = (
+            self._geometry(sid, scene, package, raw) if geometry is None else geometry
+        )
         uncertain, evidence = [], {}
-        for y in range(raw["height"]):
-            for x in range(raw["width"]):
-                cell = f"{x},{y}"
-                level = topology.light_on_cell(cell)
-                contributions, unknown = [], False
-                for source in sources:
-                    origin, mode = source["cell"], source["mode"]
-                    distance = topology.distance_ft(origin, cell) if origin is not None else None
-                    if distance is None:
-                        unknown = True
-                        continue
-                    if distance > mode.dim_outer_radius_ft:
-                        continue
-                    if (
-                        not topology.has_line_of_sight(origin, cell)
-                        or topology.cover_between(origin, cell) == "total"
-                    ):
-                        continue
-                    if (
-                        source["transmission"] == "unknown"
-                        or cell in candidates
-                        or not uncertain_geometry.has_line_of_sight(origin, cell)
-                    ):
-                        unknown = True
-                        continue
-                    value = (
-                        "bright"
-                        if mode.bright_radius_ft is not None and distance <= mode.bright_radius_ft
-                        else "dim"
-                    )
-                    if _RANK[value] > _RANK[level]:
-                        level = value
-                    contributions.append(source["object_id"])
-                if unknown:
-                    uncertain.append(cell)
-                grid["lighting"][cell] = level
-                if contributions:
-                    evidence[cell] = contributions
+        selected = (
+            cells
+            if cells is not None
+            else (f"{x},{y}" for y in range(raw["height"]) for x in range(raw["width"]))
+        )
+        for cell in selected:
+            level, unknown, contributions = self._illuminate_cell(
+                topology, uncertain_geometry, candidates, sources, cell
+            )
+            if unknown:
+                uncertain.append(cell)
+            grid["lighting"][cell] = level
+            if contributions:
+                evidence[cell] = list(contributions)
         return grid, tuple(uncertain), evidence
 
     def validate(self, row, actor, op, package):
@@ -205,9 +243,9 @@ class LightService:
                 raise StateMachineError("invalid_query", "Invalid grid coordinate") from exc
             if not visible_cell:
                 raise StateMachineError("invalid_target", "No authorized local position")
-            grid, uncertain, sources = self.project(sid, position.scene_id, package, raw)
+            level, uncertain, sources = self.current_cell(sid, position.scene_id, package, cell)
             visible = []
-            for oid in sources.get(cell, ()):
+            for oid in sources:
                 try:
                     h.objects._visible(sid, actor, oid, package)
                     visible.append(oid)
@@ -215,10 +253,8 @@ class LightService:
                     pass
             return {
                 "cell": cell,
-                "illumination": None
-                if cell in uncertain
-                else grid["lighting"].get(cell, grid["default_lighting"]),
-                "status": "unknown" if cell in uncertain else "known",
+                "illumination": None if uncertain else level,
+                "status": "unknown" if uncertain else "known",
                 "contributing_sources": tuple(visible),
                 "sunlight": raw["sunlight"],
             }

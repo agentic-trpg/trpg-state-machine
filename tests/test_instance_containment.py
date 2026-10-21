@@ -172,7 +172,7 @@ def test_index_build_and_weight_work_linear_for_100_items(tmp_path, context, mon
 
 
 @pytest.mark.parametrize("nested", [False, True])
-def test_public_queries_for_100_persisted_contents_share_one_index(
+def test_public_queries_for_100_persisted_contents_use_owner_fields(
     tmp_path, context, monkeypatch, nested
 ):
     from copy import deepcopy
@@ -222,11 +222,11 @@ def test_public_queries_for_100_persisted_contents_share_one_index(
         view = sm.get_object(sid, actor, BOX, package, context=context)
         assert view["contents"] == ((BAG,) if nested else tuple(sorted(identities)))
         assert view["contents_weight_lb"] == (102 if nested else 100)
-        assert len(builds) == 1
+        assert builds == []
         builds.clear()
         views = sm.list_scene_objects(sid, actor, package, context=context)
         assert next(v for v in views if v["object_id"] == BOX) == view
-        assert len(builds) == 1
+        assert builds == []
 
 
 def test_candidate_relocation_expires_weights_and_preserves_snapshot(tmp_path, context):

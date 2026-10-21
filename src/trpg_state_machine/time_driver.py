@@ -134,6 +134,8 @@ class TimeDriver:
             return
         self._cancel()
         with self.runtime.store.transaction():
+            if self.closed:
+                return
             run = self.time.run(self.sid)
             target = self.target(run)
             if run["mode"] != "running" or self.time.world._active_combat(self.sid):
@@ -172,6 +174,8 @@ class TimeDriver:
             return
         try:
             with self.runtime.store.transaction():
+                if self.closed:
+                    return
                 run = self.time.run(self.sid)
                 if generation != run["generation"] or run["mode"] != "running":
                     return

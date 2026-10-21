@@ -332,14 +332,19 @@ def test_cross_command_weight_and_relationship_index_reuse(tmp_path, context, mo
         actor = sm.read_session(sid, package, context=context).pc_actor_id
         put = command(sm, sid, package, context, PutItem(A, CRED, BOX, "0,0"), "weight.put")
         sm.submit_command(put, package, context=context)
-        weight = sm._objects.containers._weight
+        from trpg_state_machine.world_containers import ContainerService
+
+        weight = ContainerService.contents_weight.__wrapped__
         calls = []
 
-        def counted(*args, **kwargs):
-            calls.append(args[0])
-            return weight(*args, **kwargs)
+        from trpg_state_machine.runtime_instances import instance_read
 
-        monkeypatch.setattr(sm._objects.containers, "_weight", counted)
+        @instance_read("object", "container", "contents_weight")
+        def counted(self, *args, **kwargs):
+            calls.append(args[0])
+            return weight(self, *args, **kwargs)
+
+        monkeypatch.setattr(ContainerService, "contents_weight", counted)
         first = sm.get_object(sid, actor, BOX, package, context=context)
         before = len(calls)
         assert first["contents"] == (CRED,) and before > 0

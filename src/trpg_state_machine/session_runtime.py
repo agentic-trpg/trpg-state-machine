@@ -56,6 +56,18 @@ class SessionRuntime:
         self.access = access
         self.persistence = persistence
         self.time = None
+        store._recovery_listeners.append(self._release_recovered_driver)
+
+    def _release_recovered_driver(self, sid):
+        """Called only on this Store's owning thread, before reopening reads."""
+        if self.time is not None:
+            drivers = (
+                tuple(self.time.drivers.values())
+                if sid is None
+                else ((self.time.drivers[sid],) if sid in self.time.drivers else ())
+            )
+            for driver in drivers:
+                driver.close()
 
     @property
     def _conn(self):

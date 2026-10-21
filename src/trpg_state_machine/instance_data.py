@@ -12,6 +12,7 @@ from types import SimpleNamespace
 
 from .errors import StateMachineError
 from .package import canonical_json
+from .runtime_instances import instance_read
 from .scoped_reads import scoped_read
 
 
@@ -268,7 +269,7 @@ class InstanceData:
                     },
                 )
 
-    @scoped_read
+    @instance_read("object", None, "definition")
     def object_definition(self, sid, oid):
         if self.facts.object(sid, oid) is None:
             row = self.conn.execute(

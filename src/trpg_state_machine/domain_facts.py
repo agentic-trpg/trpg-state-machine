@@ -16,6 +16,7 @@ from pydantic import TypeAdapter
 from .errors import StateMachineError
 from .item_units import valid_item_unit
 from .package import canonical_json
+from .runtime_instances import instance_read
 from .scoped_reads import scoped_read
 
 _EFFECTS = TypeAdapter(tuple[EffectState, ...])
@@ -607,7 +608,7 @@ class CharacterFacts:
 
 
 class WorldFacts:
-    @scoped_read
+    @instance_read("scene", "environment", "facts")
     def environment(self, sid, scene_id):
         from .environment_commands import facts_from_data
 
@@ -631,7 +632,7 @@ class WorldFacts:
             (sid, scene_id, canonical_json(asdict(facts))),
         )
 
-    @scoped_read
+    @instance_read("object", None, "facts")
     def object(self, sid, oid):
         return self._conn.execute(
             "SELECT * FROM objects WHERE session_id=? AND object_id=?", (sid, oid)
@@ -1087,6 +1088,7 @@ class WorldFacts:
                 return False
         return True
 
+    @instance_read("object", "container", "contents")
     def contents(self, sid, oid):
         return self._conn.execute(
             "SELECT * FROM objects WHERE session_id=? AND container_id=? ORDER BY object_id",
@@ -1125,6 +1127,7 @@ class WorldFacts:
                 pending.append(row["container_id"])
         return self.descendant_objects(sid, ancestors)
 
+    @instance_read("scene", "objects", "contributors", capacity=8)
     def scene_object_rows(
         self, sid, scene_id, *, carrier_id=None, all_carriers=False, extra=(), lights_only=False
     ):
@@ -1157,6 +1160,81 @@ class WorldFacts:
             )
         rows = self.descendant_objects(sid, roots)
         return [row for row in rows if not lights_only or self.light_state(sid, row["object_id"])]
+
+    @instance_read("scene", "objects", "direct")
+    def direct_objects(self, sid, scene_id):
+        """Stable IDs of ground roots only; carried/nested objects stay separate."""
+        return tuple(
+            r[0]
+            for r in self._conn.execute(
+                "SELECT object_id FROM objects WHERE session_id=? AND scene_id=? "
+                "ORDER BY object_id",
+                (sid, scene_id),
+            )
+        )
+
+    def scene_capability_ids(self, sid, scene_id, table):
+        """Cold association construction through existing position/parent indices.
+
+        Only identities are read before capability filtering. No unrelated config,
+        JSON or capability state is hydrated. Callers retain the resulting links.
+        """
+        if table not in ("object_lights", "object_mechanisms"):
+            raise ValueError("Unsupported capability relation")
+        memory = self.store.memory
+        # Discovery owns the Scene membership version. Do not retain one
+        # validity dependency per unrelated object/carrier merely to confirm
+        # an already loaded association. Individual consumers still track the
+        # selected instances' actual configurations/poses/state.
+        collectors, memory.collectors = memory.collectors, []
+        try:
+            return self._discover_capability_ids(sid, scene_id, table)
+        finally:
+            memory.collectors = collectors
+            memory.scene_association(table, sid, scene_id)
+
+    def _discover_capability_ids(self, sid, scene_id, table):
+        if not self._has_capability(sid, table):
+            return ()
+        pending = list(self.direct_objects(sid, scene_id))
+        for actor in self._conn.execute(
+            "SELECT actor_id FROM actors WHERE session_id=? AND current_scene_id=?",
+            (sid, scene_id),
+        ):
+            pending.extend(
+                r[0]
+                for r in self._conn.execute(
+                    "SELECT object_id FROM objects WHERE session_id=? AND carrier_id=?",
+                    (sid, actor[0]),
+                )
+            )
+        seen, result = set(), []
+        while pending:
+            oid = pending.pop()
+            if oid in seen:
+                continue
+            seen.add(oid)
+            if self._conn.execute(
+                f"SELECT object_id FROM {table} WHERE session_id=? AND object_id=?", (sid, oid)
+            ).fetchone():
+                result.append(oid)
+            pending.extend(
+                r[0]
+                for r in self._conn.execute(
+                    "SELECT object_id FROM objects WHERE session_id=? AND container_id=?",
+                    (sid, oid),
+                )
+            )
+        return tuple(sorted(result))
+
+    @scoped_read(membership=("object_lights", "object_mechanisms"))
+    def _has_capability(self, sid, table):
+        return (
+            self._conn.execute(
+                f"SELECT 1 FROM {table} WHERE session_id=? LIMIT 1", (sid,)
+            ).fetchone()
+            is not None
+        )
 
     @scoped_read(membership=("object_lights",))
     def _has_lights(self, sid):

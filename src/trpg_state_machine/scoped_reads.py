@@ -88,8 +88,8 @@ def scoped_read(method=None, *, membership=()):
             sorted(
                 (
                     (
-                        table.partition("#")[0] + ":membership"
-                        if table.partition("#")[0] in membership
+                        table.partition("#")[0].partition("@")[0] + ":membership"
+                        if table.partition("#")[0].partition("@")[0] in membership
                         else table,
                         sid,
                     )

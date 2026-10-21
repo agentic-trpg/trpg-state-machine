@@ -16,6 +16,7 @@ from dnd5e_engine.specs import GridScene
 
 from .errors import StateMachineError
 from .grid_maps import PreparedGrid, ReadOnlyTopology
+from .runtime_instances import instance_read
 from .scoped_reads import scoped_read
 from .world_spatial import ObjectSpatialProjection
 
@@ -261,7 +262,7 @@ class GridReader:
                 yield
 
     @_read
-    @scoped_read
+    @instance_read("scene", "spatial", "map")
     def prepared_scene(self, sid, scene_id, package):
         stored = self.maps.scene(sid, scene_id, spatial_only=True)
         if stored is not None:
@@ -281,11 +282,51 @@ class GridReader:
     def scene_grid(self, sid, scene_id, package):
         return self.prepared_scene(sid, scene_id, package).copy_data()
 
+    @_read
+    @instance_read("scene", "spatial", "mechanical_map")
+    def current_grid(self, sid, scene_id, package):
+        """Mechanical-only maps need not grant fine spatial operations."""
+        stored = self.maps.scene(sid, scene_id)
+        if stored is not None and stored.grid is not None:
+            return stored.grid
+        return self.prepared_scene(sid, scene_id, package)
+
     def topology_for_grid(self, sid, scene_id, raw):
         """Exact detached projection, including every supplied lighting/geometry input."""
         return self.maps.for_grid(sid, scene_id, raw).topology
 
     @_read
+    @instance_read("scene", "spatial", "object_positions")
+    def scene_object_occupants(self, sid, scene_id, package):
+        initialized = self.store.connection.execute(
+            "SELECT 1 FROM scene_instances WHERE session_id=? AND scene_id=?", (sid, scene_id)
+        ).fetchone()
+        objects = [
+            tuple(r)
+            for r in self.store.connection.execute(
+                "SELECT object_id,cell FROM objects WHERE session_id=? AND scene_id=?",
+                (sid, scene_id),
+            )
+        ]
+        if not initialized:
+            pending_objects = self.facts.instances.scene(sid, scene_id).objects
+            existing_objects = {
+                r[0]
+                for r in self.store.connection.execute(
+                    "SELECT object_id FROM objects WHERE session_id=? "
+                    "AND object_id IN (SELECT value FROM json_each(?))",
+                    (sid, json.dumps([o.object_id for o in pending_objects])),
+                )
+            }
+            objects.extend(
+                (o.object_id, o.initial_cell)
+                for o in pending_objects
+                if o.object_id not in existing_objects
+            )
+        return sorted(objects)
+
+    @_read
+    @instance_read("scene", "spatial", "occupants")
     def scene_occupants(self, sid, scene_id, package):
         initialized = self.store.connection.execute(
             "SELECT 1 FROM scene_instances WHERE session_id=? AND scene_id=?", (sid, scene_id)
@@ -294,13 +335,6 @@ class GridReader:
             tuple(r)
             for r in self.store.connection.execute(
                 "SELECT actor_id,cell FROM actors WHERE session_id=? AND current_scene_id=?",
-                (sid, scene_id),
-            )
-        ]
-        objects = [
-            tuple(r)
-            for r in self.store.connection.execute(
-                "SELECT object_id,cell FROM objects WHERE session_id=? AND scene_id=?",
                 (sid, scene_id),
             )
         ]
@@ -317,21 +351,28 @@ class GridReader:
             actors.extend(
                 (actor_id, cell) for actor_id, cell in pending_actors if actor_id not in existing
             )
-            pending_objects = self.facts.instances.scene(sid, scene_id).objects
-            existing_objects = {
-                r[0]
-                for r in self.store.connection.execute(
-                    "SELECT object_id FROM objects WHERE session_id=? "
-                    "AND object_id IN (SELECT value FROM json_each(?))",
-                    (sid, json.dumps([o.object_id for o in pending_objects])),
-                )
-            }
-            objects.extend(
-                (o.object_id, o.initial_cell)
-                for o in pending_objects
-                if o.object_id not in existing_objects
+        return sorted(actors), self.scene_object_occupants(sid, scene_id, package)
+
+    @_read
+    @instance_read("scene", "spatial", "cells", capacity=128)
+    def cell_occupants(self, sid, scene_id, cell):
+        """The loaded cell relation, backed by the existing position indices."""
+        actors = tuple(
+            r[0]
+            for r in self.store.connection.execute(
+                "SELECT actor_id FROM actors WHERE session_id=? AND current_scene_id=? AND cell=?",
+                (sid, scene_id, cell),
             )
-        return sorted(actors), sorted(objects)
+        )
+        objects = tuple(
+            r[0]
+            for r in self.store.connection.execute(
+                "SELECT object_id FROM object_spatial_cells "
+                "WHERE session_id=? AND scene_id=? AND blocks=1 AND cell=?",
+                (sid, scene_id, cell),
+            )
+        )
+        return actors, objects
 
 
 class GridService:
@@ -366,16 +407,28 @@ class GridService:
 
     @_read
     @scoped_read
-    def base_topology(self, sid, scene_id, package=None, *, with_extent=False):
+    def base_topology(self, sid, scene_id, package=None, *, with_extent=False, cells=None):
         """Legacy static/Light authorized-visibility input; not the combined current view."""
         scene = self.reader.maps.scene(sid, scene_id, spatial_only=True)
         if scene is None or scene.grid is None:
             raise StateMachineError("spatial_unconfigured", "Scene has no fine spatial capability")
         prepared = scene.grid
+        if package is not None and cells is not None:
+            lighting = {
+                cell: self.h.objects.lights.current_cell(sid, scene_id, package, cell)[0]
+                for cell in dict.fromkeys(cells)
+                if cell_in_bounds(prepared.topology, cell)
+            }
+            topology = prepared.topology.with_lighting(lighting)
+            return (
+                (topology, (prepared.data["width"], prepared.data["height"]))
+                if with_extent
+                else topology
+            )
         grid = prepared.copy_data()
         topology = prepared.topology
         if package is not None:
-            grid, _, _ = self.h.objects.lights.project(sid, scene_id, package, grid)
+            grid, _, _ = self.h.objects.lights.current_project(sid, scene_id, package)
             topology = self.reader.topology_for_grid(sid, scene_id, grid)
         return (topology, (grid["width"], grid["height"])) if with_extent else topology
 
@@ -448,26 +501,15 @@ class GridService:
         relevant = set(cells)
         for x, y in points:
             relevant.update(f"{x + dx},{y + dy}" for dx in (-1, 0, 1) for dy in (-1, 0, 1))
-        encoded = json.dumps(sorted(relevant))
         passages = self.h.facts.instances.passages(sid, scene_id=scene_id)
-        doors = json.dumps([p.door_object_id for p in passages if p.door_object_id])
-        occupied = {
-            r[0]
-            for r in self.h._conn.execute(
-                "SELECT cell FROM actors WHERE session_id=? AND current_scene_id=? "
-                "AND actor_id IS NOT ? AND cell IN (SELECT value FROM json_each(?))",
-                (sid, scene_id, exclude_actor, encoded),
-            )
-        }
-        occupied.update(
-            r[0]
-            for r in self.h._conn.execute(
-                "SELECT cell FROM object_spatial_cells WHERE session_id=? AND scene_id=? "
-                "AND object_id IS NOT ? AND blocks=1 AND cell IN (SELECT value FROM json_each(?)) "
-                "AND object_id NOT IN (SELECT value FROM json_each(?))",
-                (sid, scene_id, exclude_object, encoded, doors),
-            )
-        )
+        doors = {p.door_object_id for p in passages if p.door_object_id}
+        occupied = set()
+        for cell in sorted(relevant):
+            actors, objects = self.reader.cell_occupants(sid, scene_id, cell)
+            if any(aid != exclude_actor for aid in actors) or any(
+                oid != exclude_object and oid not in doors for oid in objects
+            ):
+                occupied.add(cell)
         for passage in passages:
             if passage.door_object_id == exclude_object:
                 continue

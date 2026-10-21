@@ -78,7 +78,7 @@ def test_version_hit_rain_and_wind_call_counts(tmp_path, context, monkeypatch):
         b = project(sm, sid, p, "4,3", height=3)
         assert project(sm, sid, p, "4,3", height=3) == b
         assert (count["sources"], count["objects"], count["projection"], count["compose"]) == (
-            2,
+            1,
             1,
             1,
             2,
@@ -308,6 +308,11 @@ def test_old_reader_result_is_not_published_as_current_and_versions_do_not_accum
     sm, sid, p, db, _, _ = ready(tmp_path, context)
     with sm, StateMachine(db, dnd_loader=lock_loader()) as writer:
         env = sm.environment
+
+        def entries():
+            cached = sm._store.memory.values.get(("instance", sid, "scene", A))
+            return cached[0].environment.cells if cached else ()
+
         project(sm, sid, p, "3,3")
         old = env.versions.current(sid, A)
         with sm._transaction():
@@ -321,10 +326,13 @@ def test_old_reader_result_is_not_published_as_current_and_versions_do_not_accum
                 "new",
             )
             assert value(env.project_cell(sid, A, "4,3", p).temperature) == Temperature(8)
-        assert not any(key[1] == old and key[2][-2:] == ("4,3", None) for key in env._cells._values)
+        assert not any(
+            entry.parameter[2] == old and entry.parameter[3][-2:] == ("4,3", None)
+            for entry in entries()
+        )
         assert value(project(sm, sid, p, "3,3").temperature) == Temperature(88)
         current = env.versions.current(sid, A)
-        assert all(k[1] == current for k in env._cells._values)
+        assert all(entry.parameter[2] == current for entry in entries())
         for number in range(8):
             submit(
                 writer,

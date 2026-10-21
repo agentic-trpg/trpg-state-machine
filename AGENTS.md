@@ -1,5 +1,7 @@
 ## Project Architecture Authority
 
+2026-10-22 runtime instance ownership: read the paired [MC §2.3a](https://github.com/agentic-trpg/agentic-trpg/blob/docs/runtime-instance-ownership/docs/MODULE_CONTRACTS.md#23a-实例字段关联与局部准入-decided) and the [local inventory and acceptance](docs/reviews/RUNTIME_INSTANCE_OWNERSHIP.md). The paired docs branch is not main; in this task its logical sibling is `.worktrees/runtime-instance-ownership/agentic-trpg`. Follow target-instance fields/associations/indices and affected candidate dependencies; ordinary queries and operations must not replace these with Session/Scene scans or Full Audit. Runtime fields belong to the existing SessionMemory/UnitOfWork publication, with immutable owner replacements, bounded retention, rollback isolation and per-connection recovery invalidation. Check real consumers before claiming completion; do not introduce another Session/transaction authority.
+
 This repository is part of the Agentic TRPG project.
 
 Before analyzing, designing, or modifying code, read the authoritative project documents located in the sibling repository:

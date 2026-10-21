@@ -1,5 +1,13 @@
 # World W1–W8 implementation record
 
+2026-10-22 后续：Object.container 持有直接内容物、自身重量、内容物重量和含后代总重量；
+公开 view/list 直接使用这些字段，不构建 ContainmentState 或全候选键。隔离候选容量仍检查
+移动子树及两端必要祖先。Scene.lighting 的 sources／geometry／cells／projection 已接入
+单格公开照明、Grid topology、非战斗 RE Snapshot 和阶段证据；显式完整地图及战斗固定地图
+仍保持对应输入含义。场景 objects.direct 不混入携带／嵌套物品，贡献关联另沿实际位置解析。
+这些是当前分支后续实现；历史 W1–W8 数字不重复计入。本次验收与限制见
+[实例归属报告](reviews/RUNTIME_INSTANCE_OWNERSHIP.md)。
+
 Baseline: `1fa7cea5dab7bb95f3f6fa975f8e681c691937a6`; remote main verified at that
 commit on 2026-10-15. Implementation uses an isolated clone on `feat/world-w1-w8`
 under `.test-tmp/world-w1-w8`. The original checkout's uncommitted GC5 changes are

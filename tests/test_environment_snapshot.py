@@ -142,7 +142,7 @@ def test_a_projection_serves_b_without_claiming_same_environment(tmp_path, conte
         assert value(a.temperature) == Temperature(8) and value(b.temperature) == Temperature(31)
         assert a.obscurant != b.obscurant
         assert count["visibility"] == count["target"] == 4
-        assert count["light"] == 1  # unchanged RAM inputs reuse the derived light grid
+        assert count["light"] == 0  # target-cell visibility does not project a whole light grid
         assert len(sm.environment._cells) == 2  # The other 14 covered cells were not composed.
         with pytest.raises(FrozenInstanceError):
             a.temperature.status = "none"
@@ -484,9 +484,9 @@ def test_area_prepares_visibility_once_and_cached_results_still_authorized(
             return sm.environment.query_area(sid, pc, A, area, p, context=ctx)
 
         baseline = query()
-        assert count["visibility"] == count["light"] == 1 and count["target"] == 5
+        assert count["visibility"] == 1 and count["light"] == 0 and count["target"] == 5
         assert query() == baseline
-        assert count["visibility"] == 2 and count["light"] == 1 and count["compose"] == 5
+        assert count["visibility"] == 2 and count["light"] == 0 and count["compose"] == 5
         with pytest.raises(StateMachineError):
             query(replace(context, player_id="other"))
         effects.current = (

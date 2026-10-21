@@ -1,5 +1,15 @@
 # Session Management
 
+## 2026-10-22 实例字段归属与跨连接恢复
+
+当前分支沿原 SessionMemory／UnitOfWork 实施 ObjectRuntime、SceneRuntime 和 WorldRuntime
+字段；它们是现有事实的不可变运行表示与派生关联，不是第二套 Session 或事务管理器。
+消费者、维护规则和验收见 [实例归属报告](reviews/RUNTIME_INSTANCE_OWNERSHIP.md)。
+普通查询／准入沿目标及必要索引；候选祖先隔离计算，未改子树只在原 scope／stage 复用。
+每次修改仍增量 SQLite COMMIT 后发布 RAM。共享恢复代次使各上下文在自己的线程清除旧
+当前表示及旧 Driver；旧读取范围不能在恢复后重新发布，即使 `data_version` 没有变化。
+卸载／LRU／冷补入与固定旧 DTO 保留。下面带日期的历史证据不覆盖此后续结果。
+
 ## 2026-10-22 当前生产实现
 
 当前已支持入口统一通过 Store 的 RAM／候选读取与增量提交后发布，不提供业务可选的旧 SQL 模式。

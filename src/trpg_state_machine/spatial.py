@@ -215,16 +215,18 @@ class WorldHandler:
             )
         return position
 
-    def _prepare_visible_targets(self, sid, actor_id, package):
+    def _prepare_visible_targets(self, sid, actor_id, package, *, cells=None):
         position = self._public_scope(sid, actor_id, package)
         topology, extent = self.grid.base_topology(
-            sid, position.scene_id, package, with_extent=True
+            sid, position.scene_id, package, with_extent=True, cells=cells
         )
         return position, topology, extent
 
     def _visible_target(self, sid, actor_id, cell, package, *, prepared=None):
         position, topology = (
-            self._prepare_visible_targets(sid, actor_id, package) if prepared is None else prepared
+            self._prepare_visible_targets(sid, actor_id, package, cells=(cell,))
+            if prepared is None
+            else prepared
         )[:2]
         if not cell_in_bounds(topology, cell) or not cell_in_bounds(topology, position.cell):
             raise StateMachineError(
@@ -240,7 +242,7 @@ class WorldHandler:
         position = self._public_scope(sid, actor_id, package)
         if position.scene_id != operation.scene_id or position.cell != operation.expected_cell:
             raise StateMachineError("position_conflict", "Position precondition differs")
-        base = self.grid.base_topology(sid, position.scene_id, package)
+        base = self.grid.base_topology(sid, position.scene_id)
         if not cell_in_bounds(base, operation.to_cell):
             raise StateMachineError("invalid_cell", "Target is outside this local map")
         if position.cell == operation.to_cell:
@@ -356,7 +358,7 @@ class WorldHandler:
         self.facts.require_item_unit(item)
         if type(operation) is PickupItem and target != operation.expected_cell:
             raise StateMachineError("position_conflict", "Item position precondition differs")
-        base = self.grid.base_topology(sid, position.scene_id, package)
+        base = self.grid.base_topology(sid, position.scene_id)
         topology = self.grid.local_topology(
             sid, position.scene_id, package, (position.cell, target), exclude_actor=actor_id
         )
@@ -521,7 +523,9 @@ class WorldHandler:
             return obj, None
         ports = self._door_ports(position.scene_id, operation.object_id, package, sid=sid)
         if ports:
-            base = self.grid.base_topology(sid, position.scene_id, package)
+            base = self.grid.base_topology(
+                sid, position.scene_id, package, cells=tuple(e.threshold_cell for _, e in ports)
+            )
             visible = [(p, e) for p, e in ports if base.can_see(position.cell, e.threshold_cell)]
             if not visible:
                 raise StateMachineError("invalid_target", "No authorized local door")

@@ -12,7 +12,7 @@ from ._execution import _WorldEffectKind, _WorldEffectOrigin
 from ._operations import ObjectState, SetObjectState
 from .errors import StateMachineError
 from .mechanism_effects import MechanismEffectRunner
-from .scoped_reads import scoped_read
+from .runtime_instances import MechanismLinks, instance_read, world_read
 from .world_commands import CheckMechanism, SetLightEnabled
 
 
@@ -25,6 +25,36 @@ class MechanismService:
     def config(self, sid, oid):
         d = self.h.facts.object_definition(sid, oid)
         return d.capability("mechanism") if d else None
+
+    @instance_read("object", "mechanism", "configuration")
+    def trigger_config(self, sid, oid):
+        """Static instance trigger/link fields do not depend on activation status."""
+        from .instance_data import decode
+
+        encoded = self.h.facts.instances.get(sid, "object", oid)["definition"]
+        data = self.h.store.memory.json(encoded)
+        if data:
+            for capability in data["fields"]["capabilities"]["tuple"]:
+                if capability["type"] == "Mechanism":
+                    fields = capability["fields"]
+                    return MechanismLinks(
+                        decode(fields.get("triggers", {"tuple": []})),
+                        decode(fields.get("components", {"tuple": []})),
+                    )
+        return None
+
+    @instance_read("scene", "mechanisms", "index")
+    def _scene_index(self, sid, scene):
+        index = {}
+        for oid in self.h.facts.scene_capability_ids(sid, scene, "object_mechanisms"):
+            config = self.trigger_config(sid, oid)
+            if config is None:
+                raise StateMachineError("incomplete_instance_config", "Missing mechanism config")
+            for number, trigger in enumerate(config.triggers):
+                if trigger.scene_id == scene:
+                    key = (trigger.kind, scene, trigger.target_object_id)
+                    index.setdefault(key, []).append((oid, number, trigger))
+        return {key: tuple(sorted(entries)) for key, entries in index.items()}
 
     def qualify_link(self, sid, origin, target, kind, value, package):
         if (
@@ -487,10 +517,16 @@ class MechanismService:
                 )
         return events
 
-    @scoped_read(membership=("object_mechanisms",))
+    @world_read("mechanisms", "index")
     def _build_index(self, sid):
+        """Cross-scene component reverse links; load only mechanism identities."""
         index = {}
-        for oid, c in self.h.facts.instances.mechanism_configs(sid):
+        for (oid,) in self.h._conn.execute(
+            "SELECT object_id FROM object_mechanisms WHERE session_id=? ORDER BY object_id", (sid,)
+        ):
+            c = self.trigger_config(sid, oid)
+            if c is None:
+                raise StateMachineError("incomplete_instance_config", "Missing mechanism config")
             for number, t in enumerate(c.triggers):
                 key = (t.kind, t.scene_id, t.target_object_id)
                 index.setdefault(key, []).append((oid, number, t))
@@ -578,8 +614,12 @@ class MechanismService:
                 adjudication.get("openable_operation") or adjudication.get("mechanism_operation")
             ):
                 return []
-        index = self._batch_index(sid, prepared)
         scene = payload.get("scene_id", payload.get("to_scene_id"))
+        if event.mechanical_motion is not None:
+            scene = event.mechanical_motion.to_scene_id
+        if scene is None:
+            return derived
+        index = self._scene_index(sid, scene)
         actor = payload.get("actor_id", payload.get("execution", {}).get("actor_id"))
         if actor is None and payload.get("execution", {}).get("activation_id"):
             adopted = self.h._conn.execute(

@@ -1,5 +1,12 @@
 # EnvironmentService 实施记录
 
+## 2026-10-22 后续：实例来源／防护／结果字段
+
+现有 area／cell／unit／height 消费者接入 Scene.environment；区域校验用目标场景存在性
+及已解析边界。原来源／防护／提供方版本协议、opt-out、可见性和高度语义不变，
+公开单格照明与完整投影另由 Scene.lighting 持有。回滚／旧引用／恢复／有界淘汰及
+局部失效的最终证据见 [实例归属验收](reviews/RUNTIME_INSTANCE_OWNERSHIP.md)。
+
 ## 2026-10-22 RAM 输入与生命周期
 
 基础事实／依赖版本由统一 RAM／候选读取，双版本与提供方登记协议不变；旧读取事务不能

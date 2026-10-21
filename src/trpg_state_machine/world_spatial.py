@@ -25,6 +25,7 @@ from .object_protection import (
     project_protection as _project_protection,
 )
 from .package import canonical_json
+from .runtime_instances import instance_read
 from .scoped_reads import scoped_read
 
 if TYPE_CHECKING:
@@ -238,7 +239,7 @@ class ObjectSpatialService:
 
     def prepare_scene_protection(self, sid, scene_id, package, *, properties=None):
         """Read every current input once; subsequent directions use this exact read set."""
-        _, objects = self.h.grid.reader.scene_occupants(sid, scene_id, package)
+        objects = self.h.grid.reader.scene_object_occupants(sid, scene_id, package)
         doors = {
             p.door_object_id
             for p in self.h.facts.instances.passages(sid, scene_id=scene_id)
@@ -321,12 +322,9 @@ class ObjectSpatialService:
     @scoped_read
     def visible_cells(self, sid, actor, oid, package):
         position = self.h._public_scope(sid, actor, package)
-        base = self.h.grid.base_topology(sid, position.scene_id, package)
-        return tuple(
-            cell
-            for cell in self.target_cells(sid, position.scene_id, oid, package)
-            if base.can_see(position.cell, cell)
-        )
+        targets = self.target_cells(sid, position.scene_id, oid, package)
+        base = self.h.grid.base_topology(sid, position.scene_id, package, cells=targets)
+        return tuple(cell for cell in targets if base.can_see(position.cell, cell))
 
     def contact_cell(self, sid, actor, oid, package):
         """Nearest visible legal adjacent contact, excluding only the target itself.
@@ -359,7 +357,7 @@ class ObjectSpatialService:
             raise StateMachineError("object_out_of_reach", "Object requires clear adjacent reach")
         return min(reachable, key=lambda cell: (movement.distance_ft(position.cell, cell), cell))
 
-    @scoped_read
+    @instance_read("scene", "spatial", "blockers", capacity=8)
     def movement_cells(self, sid, scene_id, package, *, exclude_object=None):
         cells = set()
         doors = {
@@ -367,7 +365,7 @@ class ObjectSpatialService:
             for p in self.h.facts.instances.passages(sid, scene_id=scene_id)
             if p.door_object_id
         }
-        _, objects = self.h.grid.reader.scene_occupants(sid, scene_id, package)
+        objects = self.h.grid.reader.scene_object_occupants(sid, scene_id, package)
         for oid, _ in objects:
             if oid != exclude_object and oid not in doors and self.config(sid, oid):
                 cells.update(self.project(sid, oid, package).movement_blocking_cells)
@@ -380,7 +378,7 @@ class ObjectSpatialService:
         This is not an actor-authorized catalogue or a merged terrain system.
         Shared doors contribute at this scene's endpoints, not their stored anchor.
         """
-        _, objects = self.h.grid.reader.scene_occupants(sid, scene_id, package)
+        objects = self.h.grid.reader.scene_object_occupants(sid, scene_id, package)
         local_doors = {
             p.door_object_id
             for p in self.h.facts.instances.passages(sid, scene_id=scene_id)

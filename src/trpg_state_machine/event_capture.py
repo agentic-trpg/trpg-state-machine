@@ -204,7 +204,14 @@ class EventCapture:
                 grid is not None
                 and self.world.instances.session_value(sid, "evidence_schema") == "event-evidence/6"
             ):
-                grid, uncertainty, light_sources = self.lights.project(sid, scene_id, package, grid)
+                if active:
+                    grid, uncertainty, light_sources = self.lights.project(
+                        sid, scene_id, package, grid
+                    )
+                else:
+                    grid, uncertainty, light_sources = self.lights.current_project(
+                        sid, scene_id, package
+                    )
                 topology = self.world.maps.for_grid(sid, scene_id, grid).topology
             topologies[scene_id] = topology
             evidence["scenes"][scene_id] = {

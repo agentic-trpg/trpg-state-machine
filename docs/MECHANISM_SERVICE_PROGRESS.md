@@ -1,5 +1,13 @@
 # MechanismService progress — 2026-10-18
 
+## 2026-10-22 后续：实例触发关联
+
+自动事件先过滤，Scene.mechanisms.index 持有跨命令有效关联，空结果可复用。
+Object.mechanism 的静态触发／组件链接不依赖 activation status；World 的反向组件关系
+按实际跨场景范围持有。成员／配置／有效场景变化由原事务捕获推进依赖，执行资格、
+次数、重置／解除／破坏仍重验。具体消费者、故障与规模证据见
+[实例归属验收](reviews/RUNTIME_INSTANCE_OWNERSHIP.md)，不是仅增加字段或批次字典。
+
 ## 2026-10-22 跨命令索引与发布
 
 触发／组件关联索引现由统一 RAM 范围跨命令复用；实例成员及配置改变失效，纯激活状态更新

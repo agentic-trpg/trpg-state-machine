@@ -1,5 +1,16 @@
 # EnvironmentService
 
+## 2026-10-22 场景环境字段与区域校验
+
+现有 public cell／area／unit／height 与内部投影接入 Scene.environment 的 facts、
+inputs、protection、cells、ranges 字段；原来源／防护双版本、正式提供方身份／时间依赖、
+未版本化 opt-out 和披露规则保留。命中不把偶然的锁具解码依赖替代已登记的防护协议。
+area 校验读取目标场景存在性和已解析边界，不枚举场景配置或计算完整环境。
+指定区域的可见性只准备请求格光照，不因权限判断隐式计算全图；整场景请求仍按明确范围执行。
+字段沿现有 COMMIT 后发布／savepoint 隔离，并受 SessionMemory 与每字段预算约束。
+当前提供方支持边界不扩大；验收及冷成本见
+[实例归属报告](reviews/RUNTIME_INSTANCE_OWNERSHIP.md)。
+
 ## 2026-10-22 当前运行层
 
 来源／防护版及分层缓存继续复用，事实输入统一读取同版本 RAM／候选；旧读取范围在外部提交后

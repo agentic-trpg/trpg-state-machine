@@ -1,5 +1,15 @@
 # GridService
 
+## 2026-10-22 场景空间字段
+
+GridReader 的生产读取使用 Scene.spatial 的 map／mechanical_map、occupants、
+object_positions 和有界 cells 字段。机械地图与精细空间授权仍分开；局部 topology
+读取请求格及边缘邻格的角色／Schema40 占格索引，不枚举场景目录。地图、关系和格子
+投影列依赖由同一候选／提交范围维护。Light／防护只读物体位置时不附带无关角色位置。
+单对象／门／指定区域的可见性用目标格照明覆盖，共享不可变几何，不逐对象解析或投影全图。
+完整 GridView 仍按明确场景范围构建，保留旧 View。证据见
+[实例归属报告](reviews/RUNTIME_INSTANCE_OWNERSHIP.md)。
+
 ## 2026-10-22 当前运行层
 
 GridMaps／局部空间输入现从统一 RAM 或候选读取，已加载地图不再为内容键重复 SELECT。

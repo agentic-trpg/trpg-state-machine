@@ -1,5 +1,14 @@
 # ContainerService 专项修复
 
+## 2026-10-22 后续：实例重量字段与无全候选键
+
+本批替代下节“绑定完整候选行”的通用重量缓存：公开 get/list 从 Object.container 的
+contents、own_weight、contents_weight、total_weight 读取；不构建 ContainmentState，
+`runtime_key` 已删除。候选移动仍沿受影响闭包校验，原 scope／stage 未改子树可复用有效
+字段，改动祖先独立重算。未知、数量语义、两层嵌套、访问／绑定和原销毁 shell 语义不变。
+实际消费者、确定性规模计数、回滚／恢复证据与限制见
+[实例归属验收](reviews/RUNTIME_INSTANCE_OWNERSHIP.md)。下节及更早数字保留为前批证据。
+
 ## 2026-10-22 RAM 关系与跨命令重量
 
 已通过统一记录范围维护主键／容器父子桶，局部祖先／后代读取复用 RAM；ContainmentState

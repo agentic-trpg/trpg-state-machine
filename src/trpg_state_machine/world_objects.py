@@ -172,25 +172,13 @@ class WorldObjectService:
         contents_visible = self.containers.config(sid, oid) and self.openable.contents_accessible(
             sid, oid
         )
-        if contents_visible:
-            containment = (
-                containment if containment is not None else self.containers._rows(sid, (oid,))
-            )
-        total_weight = (
-            self.containers.total_weight(oid, containment, package) if contents_visible else None
-        )
+        contents_weight = self.containers.contents_weight(sid, oid) if contents_visible else None
         return {
-            "contents": tuple(
-                c["object_id"]
-                for c in sorted(containment.contents(oid), key=lambda r: r["object_id"])
-            )
+            "contents": tuple(c["object_id"] for c in self.facts.contents(sid, oid))
             if contents_visible
             else None,
-            "contents_weight_lb": total_weight - definition.weight_lb
-            if contents_visible
-            and definition
-            and definition.weight_lb is not None
-            and total_weight is not None
+            "contents_weight_lb": contents_weight
+            if definition and definition.weight_lb is not None
             else None,
             "mechanism_status": self.facts.mechanism_status(sid, oid),
             "mechanism_state": asdict(self.facts.mechanism_state(sid, oid))
@@ -240,8 +228,6 @@ class WorldObjectService:
         with h._transaction():
             h._spatial_reader(sid, actor_id, package, context)
             result = []
-            from .world_containers import ContainmentState
-
             position = h._public_scope(sid, actor_id, package)
             doors = tuple(
                 p.door_object_id
@@ -251,12 +237,9 @@ class WorldObjectService:
             candidates = self.facts.scene_object_rows(
                 sid, position.scene_id, carrier_id=actor_id, extra=doors
             )
-            containment = ContainmentState({r["object_id"]: r for r in candidates})
             for obj in candidates:
                 try:
-                    result.append(
-                        self.view(sid, actor_id, obj["object_id"], package, containment=containment)
-                    )
+                    result.append(self.view(sid, actor_id, obj["object_id"], package))
                 except StateMachineError as exc:
                     if exc.code != "invalid_target":
                         raise

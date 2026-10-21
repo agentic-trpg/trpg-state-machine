@@ -6,7 +6,7 @@ data. Grid geometry remains separate from base-fact ownership and publication.
 """
 
 import json
-from collections import OrderedDict
+from collections import ChainMap, OrderedDict
 from dataclasses import dataclass
 from types import MappingProxyType
 
@@ -72,6 +72,16 @@ class ReadOnlyTopology(GridTopology):
 
     def __deepcopy__(self, memo):
         return self
+
+    def with_lighting(self, lighting):
+        """Immutable query overlay; share parsed geometry without rebuilding a map."""
+        result = object.__new__(type(self))
+        for name, value in vars(self).items():
+            object.__setattr__(result, name, value)
+        object.__setattr__(
+            result, "_lighting", MappingProxyType(ChainMap(_freeze(lighting), self._lighting))
+        )
+        return result
 
 
 @dataclass(frozen=True, slots=True)

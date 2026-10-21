@@ -2,7 +2,6 @@
 
 from dataclasses import asdict, dataclass, replace
 
-from .derived_cache import DerivedCache
 from .environment_commands import (
     AddEnvironmentSource,
     BatchEnvironment,
@@ -33,6 +32,7 @@ from .environment_versions import EnvironmentVersions
 from .errors import StateMachineError
 from .grid import cell_in_bounds
 from .object_protection import PRECIPITATION_KINDS
+from .runtime_instances import SceneFieldCache, resolve_field
 
 
 @dataclass(frozen=True, slots=True)
@@ -139,8 +139,8 @@ class EnvironmentService:
         self.command_submitter = command_submitter
         self.effects_provider = effects_provider
         self.unit_height_provider = unit_height_provider
-        self._projections = DerivedCache(32)
-        self._cells = DerivedCache(512)
+        self._projections = SceneFieldCache(handler.store, "protection", 32)
+        self._cells = SceneFieldCache(handler.store, "cells", 128)
         self.versions = EnvironmentVersions(handler.store)
 
     def clear_snapshots(self):
@@ -197,7 +197,22 @@ class EnvironmentService:
 
     def _environment_inputs(self, sid, scene, package, cache, public):
         if "environment" not in cache:
-            cache["environment"] = self._inputs(sid, scene, package)
+            cache["environment"] = (
+                self._inputs(sid, scene, package)
+                if cache["scope"] is None
+                else resolve_field(
+                    self.h.store,
+                    "scene",
+                    sid,
+                    scene,
+                    "environment",
+                    "inputs",
+                    (cache["identity"], cache["versions"]),
+                    lambda: self._inputs(sid, scene, package),
+                    capacity=4,
+                    versioned_parameters=True,
+                )
+            )
         if public:
             return self._disclosure_inputs(cache["environment"])
         return cache["environment"], frozenset()
@@ -720,7 +735,9 @@ class EnvironmentService:
             position = self.h._spatial_reader(sid, actor_id, package, context)
             if position.scene_id != scene_id:
                 raise StateMachineError("unauthorized", "Only Actor's current Scene is authorized")
-            visibility = self.h._prepare_visible_targets(sid, actor_id, package)
+            visibility = self.h._prepare_visible_targets(
+                sid, actor_id, package, cells=area.cells if area.cells else None
+            )
             cells = area.cells
             if not cells:
                 width, height = visibility[2]

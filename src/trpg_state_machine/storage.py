@@ -20,6 +20,8 @@ class _Coordinator:
     def __init__(self):
         self.lock = RLock()
         self.paused_sessions = set()
+        self.recovery_generations = {}
+        self.recovery_generation = 0
 
 
 _coordinators = WeakValueDictionary()
@@ -56,6 +58,7 @@ class SqliteStore:
         self._thread = get_ident()
         self._scope = None
         self._grid_maps = None
+        self._recovery_listeners = []
         with _coordinators_lock:
             identity = str(Path(database).resolve()).casefold()
             coordinator = _coordinators.get(identity)
@@ -280,6 +283,7 @@ class SqliteStore:
         committed = False
         try:
             self.memory.guard()
+            self.memory.sync_recovery()
             # Preparation reads one fixed RAM/SQLite snapshot. The database write
             # lock is acquired only at the first incremental persistence statement.
             self._conn.execute("BEGIN")
@@ -291,6 +295,8 @@ class SqliteStore:
                 self.memory.clear()
                 self._data_version = data_version
             scope.memory_versions = dict(self.memory.versions)
+            scope.recovery_generations = dict(self._coordinator.recovery_generations)
+            scope.recovery_generation = self._coordinator.recovery_generation
             self._scope = scope
             try:
                 yield scope
@@ -313,10 +319,27 @@ class SqliteStore:
                             ) from None
                         raise
                     latest = self._conn.execute("PRAGMA data_version").fetchone()[0]
-                    if latest != self._data_version:
+                    recovered = (
+                        scope.recovery_generation != self._coordinator.recovery_generation
+                        or any(
+                            scope.recovery_generations.get(sid, 0)
+                            != self._coordinator.recovery_generations.get(sid, 0)
+                            for sid in scope.memory_sessions
+                        )
+                    )
+                    if latest != self._data_version or recovered:
                         # An explicitly older reader may return its fixed input,
                         # but cannot publish it into current facts/derived caches.
-                        self.memory.clear()
+                        if latest != self._data_version or (
+                            scope.recovery_generation != self._coordinator.recovery_generation
+                        ):
+                            self.memory.clear()
+                        else:
+                            for sid in scope.memory_sessions:
+                                if scope.recovery_generations.get(sid, 0) != (
+                                    self._coordinator.recovery_generations.get(sid, 0)
+                                ):
+                                    self.memory.release(sid)
                         self._data_version = latest
                         scope.derived_pending.clear()
                         if write:
@@ -396,7 +419,14 @@ class SqliteStore:
         # gate until acceptance so another connection cannot enter current service
         # while the shared paused marker is temporarily removed.
         with self._coordinator.lock:
-            self.memory.clear()
+            coordinator = self._coordinator
+            if sid is None:
+                coordinator.recovery_generation += 1
+            else:
+                coordinator.recovery_generations[sid] = (
+                    coordinator.recovery_generations.get(sid, 0) + 1
+                )
+            self.memory.sync_recovery()
             self.memory.paused = False
             if sid is not None:
                 self.memory.paused_sessions.discard(sid)

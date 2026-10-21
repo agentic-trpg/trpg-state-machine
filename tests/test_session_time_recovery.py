@@ -206,3 +206,30 @@ def test_interrupted_jump_cancel_does_not_add_waiting_wall_time(session):
     session[4].advance(1000)
     assert submit(session, SetTimeRunning("cancel"), "cancel").status == "committed"
     assert sync(session).committed_tick == sync(session).estimated_target_tick == 18
+
+
+def test_other_context_recovery_detaches_old_driver_on_its_own_thread(session, monkeypatch):
+    driver = start(session)
+    sm, sid, package, context, clock, scheduler = session
+    database = sm._conn.execute("PRAGMA database_list").fetchone()[2]
+    operation = command(sm, sid, package, context, SetTimeRunning("rate", 2, 1), "fault.rate")
+
+    def fail(scope):
+        raise MemoryError("durable publication failed")
+
+    with monkeypatch.context() as patch:
+        patch.setattr(sm._store.memory, "publish", fail)
+        with pytest.raises(StateMachineError, match="reconcile RAM"):
+            sm.submit_command(operation, package, context=context)
+    with StateMachine(database) as other:
+        other.resume_session(sid, package, context=context)
+        clock.advance(1000)
+        current = sync(session)
+        assert driver.closed and sid not in sm._session_runtime.time.drivers
+        assert current.state == "detached"
+        assert current.estimated_target_tick == current.committed_tick
+        assert scheduler.active() == []
+        replacement = other.attach_time_driver(
+            sid, package, context=context, clock_ns=clock, scheduler=scheduler
+        )
+        assert not replacement.closed

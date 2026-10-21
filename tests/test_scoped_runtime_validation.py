@@ -326,6 +326,46 @@ def test_deleted_lock_invalidates_scene_acceptance(tmp_path, context, legacy):
             sm.save_session(sid, package, context=context)
 
 
+def test_loaded_cell_fields_ignore_unrelated_growth(tmp_path, context, monkeypatch):
+    from trpg_state_machine.grid import GridReader
+    from trpg_state_machine.runtime_instances import instance_read
+
+    sm, sid, package, _ = setup(tmp_path, context, oriented_data())
+    with sm:
+        actor = sm.read_session(sid, package, context=context).pc_actor_id
+        operation = StepActor(A, "0,0", "1,0")
+        assert (
+            sm.query_world_action(sid, actor, operation, package, context=context).status
+            == "available"
+        )
+        calls = []
+        original = GridReader.cell_occupants.__wrapped__
+        # _read is the outer consistent-scope wrapper.
+        original = original.__wrapped__
+
+        @instance_read("scene", "spatial", "cells", capacity=128)
+        def counted(self, *args):
+            calls.append(args)
+            return original(self, *args)
+
+        monkeypatch.setattr(GridReader, "cell_occupants", counted)
+        grow(sm, sid, 100)
+        grow_scenes(sm, sid, 20)
+        before = dict(sm._store.memory.stats)
+        with measure(sm) as (counts, statements):
+            for _ in range(3):
+                assert (
+                    sm.query_world_action(sid, actor, operation, package, context=context).status
+                    == "available"
+                )
+        assert calls == []
+        assert not any("FROM object_spatial_cells" in s for s in statements)
+        assert sm._store.memory.stats["model_parses"] == before["model_parses"]
+        owner = sm._store.memory.values[("instance", sid, "scene", A)][0]
+        assert owner.spatial.cells
+        assert counts["sql_rows"] < 20
+
+
 def test_object_list_prepares_light_once_and_does_not_materialize_remote_objects(
     tmp_path, context, monkeypatch
 ):
@@ -337,15 +377,19 @@ def test_object_list_prepares_light_once_and_does_not_materialize_remote_objects
         # Observe the real function inside the memo wrapper, not bypass its work.
         from trpg_state_machine.world_lights import LightService
 
-        method = LightService.project.__wrapped__
+        method = LightService.sources.__wrapped__
 
         def counted(self, *args, **kwargs):
             builds["light_preparations"] += 1
             return method(self, *args, **kwargs)
 
-        from trpg_state_machine.scoped_reads import scoped_read
+        from trpg_state_machine.runtime_instances import instance_read
 
-        monkeypatch.setattr(LightService, "project", scoped_read(counted))
+        monkeypatch.setattr(
+            LightService,
+            "sources",
+            instance_read("scene", "lighting", "sources")(counted),
+        )
         views = sm.list_scene_objects(sid, actor, package, context=context)
         assert builds["light_preparations"] == 1
         assert not {v["object_id"] for v in views} & {
@@ -458,7 +502,17 @@ def test_mechanism_index_is_once_per_real_cascade(tmp_path, context, monkeypatch
     sm, sid, package, _ = setup(tmp_path, context, ordered_data())
     with sm:
         calls = Counter()
-        observe(monkeypatch, sm._objects.mechanisms, "_build_index", calls, "builds")
+        from trpg_state_machine.runtime_instances import instance_read
+        from trpg_state_machine.world_mechanisms import MechanismService
+
+        original = MechanismService._scene_index.__wrapped__
+
+        @instance_read("scene", "mechanisms", "index")
+        def counted(self, *args):
+            calls["builds"] += 1
+            return original(self, *args)
+
+        monkeypatch.setattr(MechanismService, "_scene_index", counted)
         assert (
             submit(sm, sid, package, context, ActivateMechanism(A, LEVER, "0,0"), "activate").status
             == "committed"

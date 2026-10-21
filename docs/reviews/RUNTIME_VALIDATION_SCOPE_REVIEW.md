@@ -2,6 +2,10 @@
 
 ## 后续实施索引 — 2026-10-22
 
+目标实例字段、局部格子读取、候选重量及跨连接恢复的后续实现／实际消费者／独立计数见
+[实例归属报告](RUNTIME_INSTANCE_OWNERSHIP.md)。它补充既有 Session RAM 报告，明确去掉
+全候选重量键及 Scene 关联命中时的逐对象依赖检查；冷加载和合法完整结果成本单列。
+
 下文保持原静态审计证据；Schema40 局部准入的后续实施见
 [scoped runtime 验收](SCOPED_RUNTIME_VALIDATION_REFACTOR.md)。统一 RAM 事实、候选／提交后发布、
 跨命令容器重量及机关索引的本轮实现与实测见

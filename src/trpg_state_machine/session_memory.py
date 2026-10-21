@@ -197,12 +197,15 @@ class SessionMemory:
         self.range_keys = {}
         self.range_shapes = {}
         self.dependency_shapes = {}
+        self.projection_shapes = {}
         self.sizes, self.bytes = {}, 0
         self.versions = {}
         self.collectors = []
         self.paused = False
         self.paused_sessions = store._coordinator.paused_sessions
         self.generation = 0
+        self.recovery_generations = {}
+        self.recovery_generation = store._coordinator.recovery_generation
         self.stats = {
             "hits": 0,
             "cold_queries": 0,
@@ -218,6 +221,8 @@ class SessionMemory:
             "write_scope_ns": 0,
             "json_parses": 0,
             "model_parses": 0,
+            "instance_hits": 0,
+            "instance_builds": 0,
         }
         self.install()
 
@@ -263,6 +268,7 @@ class SessionMemory:
         self.bytes = 0
         self.versions.clear()
         self.dependency_shapes.clear()
+        self.projection_shapes.clear()
         self.generation += 1
 
     def guard(self, sid=None):
@@ -278,7 +284,9 @@ class SessionMemory:
                 owns = dict(item.predicates).get("session_id") in (sid, None)
             else:
                 dependencies = item[1] if key[0] == "parsed" else item[2]
-                owns = any(session in (sid, None) for _, session in dependencies)
+                owns = (key[0] == "instance" and key[1] == sid) or any(
+                    session in (sid, None) for _, session in dependencies
+                )
                 if key[0] == "parsed" and not dependencies:
                     owns = _references(key[3], sid)
             if owns:
@@ -288,8 +296,37 @@ class SessionMemory:
     def pause(self, scope):
         if scope.memory_sessions:
             self.paused_sessions.update(scope.memory_sessions)
+            coordinator = self.store._coordinator
+            for sid in scope.memory_sessions:
+                coordinator.recovery_generations[sid] = (
+                    coordinator.recovery_generations.get(sid, 0) + 1
+                )
         else:
             self.paused = True
+            self.store._coordinator.recovery_generation += 1
+
+    def sync_recovery(self):
+        """Invalidate on this connection's own thread, including partial publications.
+
+        data_version alone is insufficient: a failed publisher may already have
+        observed the committed database version before another context recovers.
+        """
+        coordinator = self.store._coordinator
+        if self.recovery_generation != coordinator.recovery_generation:
+            self.clear()
+            if self.store._grid_maps is not None:
+                self.store._grid_maps.clear()
+            for listener in self.store._recovery_listeners:
+                listener(None)
+            self.recovery_generation = coordinator.recovery_generation
+        for sid, generation in coordinator.recovery_generations.items():
+            if self.recovery_generations.get(sid, 0) != generation:
+                self.release(sid)
+                if self.store._grid_maps is not None:
+                    self.store._grid_maps.release(sid)
+                for listener in self.store._recovery_listeners:
+                    listener(sid)
+                self.recovery_generations[sid] = generation
 
     def dependency(self, table, sid):
         self.guard(sid)
@@ -309,6 +346,90 @@ class SessionMemory:
         scope = self.store._scope
         scope.memory_versions.setdefault(dependency, 0)
         return dependency
+
+    def projection_dependency(self, table, predicates, columns):
+        """A relation projection changes only with membership or selected columns."""
+        shape = tuple(name for name, _ in predicates)
+        columns = tuple(sorted(columns))
+        self.projection_shapes.setdefault(table, set()).add((shape, columns))
+        tag = f"{table}@{(predicates, columns)!r}"
+        dependency = self.dependency(tag, dict(predicates).get("session_id"))
+        self.store._scope.memory_versions.setdefault(dependency, 0)
+        return dependency
+
+    def scene_association(self, table, sid, scene):
+        dependency = self.dependency(f"{table}~scene:{scene!r}", sid)
+        self.store._scope.memory_versions.setdefault(dependency, 0)
+        return dependency
+
+    def _scene_for(self, row):
+        """Resolve only a changed row's position chain; no JSON or entity scan."""
+        if row is None:
+            return None
+        sid, seen = row["session_id"], set()
+        while row is not None and row["object_id"] not in seen:
+            seen.add(row["object_id"])
+            if row["scene_id"] is not None:
+                return row["scene_id"]
+            if row["carrier_id"] is not None:
+                actor = self.select(
+                    "SELECT current_scene_id FROM actors WHERE session_id=? AND actor_id=?",
+                    (sid, row["carrier_id"]),
+                ).fetchone()
+                return actor[0] if actor else None
+            row = (
+                self.select(
+                    "SELECT * FROM objects WHERE session_id=? AND object_id=?",
+                    (sid, row["container_id"]),
+                ).fetchone()
+                if row["container_id"]
+                else None
+            )
+        return None
+
+    def _association_changes(self, table, old, new):
+        impacted = set()
+        if table == "objects":
+            columns = ("scene_id", "container_id", "carrier_id", "object_id")
+            if old is not None and new is not None and all(old[c] == new[c] for c in columns):
+                return
+            for row in (old, new):
+                scene = self._scene_for(row)
+                if scene is not None:
+                    impacted.update(
+                        (t, row["session_id"], scene)
+                        for t in ("object_lights", "object_mechanisms")
+                    )
+        elif table == "actors":
+            if (
+                old is not None
+                and new is not None
+                and old["current_scene_id"] == new["current_scene_id"]
+            ):
+                return
+            for row in (old, new):
+                if row is not None:
+                    impacted.update(
+                        (t, row["session_id"], row["current_scene_id"])
+                        for t in ("object_lights", "object_mechanisms")
+                    )
+        elif table in ("object_lights", "object_mechanisms"):
+            if old is not None and new is not None and old["object_id"] == new["object_id"]:
+                return
+            for row in (old, new):
+                if row is not None:
+                    obj = self.select(
+                        "SELECT * FROM objects WHERE session_id=? AND object_id=?",
+                        (row["session_id"], row["object_id"]),
+                    ).fetchone()
+                    scene = self._scene_for(obj)
+                    if scene is not None:
+                        impacted.add((table, row["session_id"], scene))
+        scope = self.store._scope
+        for capability, sid, scene in impacted:
+            dependency = (f"{capability}~scene:{scene!r}", sid)
+            if dependency in scope.memory_versions:
+                scope.memory_versions[dependency] += 1
 
     def version(self, dependency):
         scope = self.store._scope
@@ -423,7 +544,12 @@ class SessionMemory:
         }
         for dependency in scope.memory_versions:
             name = dependency[0]
-            if name == table or name.startswith((table + "#", table + ":")):
+            if (
+                name == table
+                or name.startswith((table + "#", table + ":", table + "@"))
+                or table in ("objects", "actors")
+                and name.startswith(("object_lights~scene:", "object_mechanisms~scene:"))
+            ):
                 scope.memory_versions[dependency] += 1
 
     def changed(self, table, kind, *values):
@@ -437,6 +563,7 @@ class SessionMemory:
         new = None if kind == "DELETE" else Record(self.columns[table], values[count:])
         if kind == "UPDATE" and values[:count] == values[count:]:
             return 0
+        self._association_changes(table, old, new)
         sessions = {
             row["session_id"] if "session_id" in self.columns[table] else None
             for row in (old, new)
@@ -466,6 +593,23 @@ class SessionMemory:
         for dependency in affected:
             if dependency in scope.memory_versions:
                 scope.memory_versions[dependency] += 1
+        for shape, columns in self.projection_shapes.get(table, ()):
+            if (
+                old is not None
+                and new is not None
+                and all(old[c] == new[c] for c in (*shape, *columns))
+            ):
+                continue
+            affected = {
+                tuple((name, row[name]) for name in shape) for row in (old, new) if row is not None
+            }
+            for predicates in affected:
+                dependency = (
+                    f"{table}@{(predicates, columns)!r}",
+                    dict(predicates).get("session_id"),
+                )
+                if dependency in scope.memory_versions:
+                    scope.memory_versions[dependency] += 1
         return 0
 
     def select(self, sql, parameters):
@@ -476,7 +620,7 @@ class SessionMemory:
         if simple:
             table, predicates, selected, ordering = simple
             sid = dict(predicates).get("session_id")
-            self.range_dependency(table, predicates)
+            self.projection_dependency(table, predicates, (*selected, *ordering))
             key = ("range", table, predicates)
             relation = self.get(key)
             if relation is None and len(predicates) <= 8:

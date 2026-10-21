@@ -312,8 +312,8 @@ class RulesAdapter:
         actors = self.characters.rule_actors(sid, set(present))
         scene_data = self.facts.mechanical_scene(sid, row["current_scene_id"])
         if scene_data is not None and package is not None:
-            projected, unknown, _ = self.world.objects.lights.project(
-                sid, scene_data["scene_id"], package, scene_data["grid"]
+            projected, unknown, _ = self.world.objects.lights.current_project(
+                sid, scene_data["scene_id"], package
             )
             if unknown:
                 raise StateMachineError(

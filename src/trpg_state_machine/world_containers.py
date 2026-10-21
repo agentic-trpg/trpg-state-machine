@@ -5,7 +5,7 @@ from dataclasses import asdict
 from types import MappingProxyType
 
 from .errors import StateMachineError
-from .scoped_reads import scoped_read
+from .runtime_instances import instance_read
 from .world_commands import PutItem, TakeItem
 
 
@@ -13,11 +13,11 @@ class ContainmentState(Mapping):
     """One detached relationship candidate and its local adjacency/weight memo.
 
     Rows cannot change behind the index. relocate updates the candidate index and
-    expires local weights. Session memory separately reuses derived total_weight
-    results keyed by these exact rows and their instance-configuration dependencies.
+    expires local weights. Only unchanged subtrees in the originating scope/stage
+    can reuse instance weights; modified ancestors read this isolated candidate.
     """
 
-    def __init__(self, rows):
+    def __init__(self, rows, *, source_stage=None, source_scope=None):
         self._rows, self.children = {}, {}
         for r in rows.values():
             oid = r["object_id"]
@@ -25,6 +25,9 @@ class ContainmentState(Mapping):
             self.children.setdefault(r["container_id"], []).append(oid)
         self.weights = {}
         self.definitions = {}
+        self.source_stage = source_stage
+        self.source_scope = source_scope
+        self.weight_dirty = set()
 
     def __getitem__(self, key):
         return self._rows[key]
@@ -38,17 +41,25 @@ class ContainmentState(Mapping):
     def contents(self, oid):
         return tuple(self._rows[i] for i in self.children.get(oid, ()))
 
-    def runtime_key(self):
-        return tuple((oid, tuple(sorted(row.items()))) for oid, row in sorted(self._rows.items()))
-
     def relocate(self, oid, **changes):
+        def ancestors(current):
+            result = set()
+            while current in self._rows and current not in result:
+                result.add(current)
+                current = self._rows[current]["container_id"]
+            return result
+
         before = self._rows[oid]
+        self.weight_dirty.update(ancestors(before["container_id"]))
         after = {**before, **changes}
         old, new = before["container_id"], after["container_id"]
         if old != new:
             self.children[old].remove(oid)
             self.children.setdefault(new, []).append(oid)
         self._rows[oid] = MappingProxyType(after)
+        self.weight_dirty.update(ancestors(after["container_id"]))
+        if any(k not in ("container_id", "carrier_id", "scene_id", "cell") for k in changes):
+            self.weight_dirty.add(oid)
         self.weights.clear()
 
     def definition(self, facts, oid):
@@ -105,25 +116,78 @@ class ContainerService:
                     if roots is None
                     else self.facts.related_objects(sid, roots)
                 )
-            }
+            },
+            source_stage=self.h._conn.total_changes,
+            source_scope=self.h.store._scope,
         )
 
     @staticmethod
     def prepare(rows):
         return rows if isinstance(rows, ContainmentState) else ContainmentState(rows)
 
-    @scoped_read
     def total_weight(self, oid, rows, package, *, path=frozenset()):
+        if self.h.store._scope is None:
+            with self.h.store.transaction():
+                return self.total_weight(oid, rows, package, path=path)
         state = self.prepare(rows)
-        sid = state[oid]["session_id"]
-        self.h.store.memory.dependency("instance_configs", sid)
         return self._weight(oid, state, path)
+
+    @instance_read("object", "container", "own_weight")
+    def own_weight(self, sid, oid):
+        encoded = self.facts.instances.get(sid, "object", oid)["definition"]
+        definition = self.h.store.memory.json(encoded)
+        row = self.h._conn.execute(
+            "SELECT item_json FROM objects WHERE session_id=? AND object_id=?", (sid, oid)
+        ).fetchone()
+        if row is None:
+            raise StateMachineError("invalid_target", "Object does not exist")
+        data = self.h.store.memory.json(row["item_json"]) if row["item_json"] else {}
+        weight = definition["fields"]["weight_lb"] if definition else None
+        return None if weight is None else weight * data.get("quantity", 1)
+
+    @instance_read("object", "container", "total_weight", capacity=4)
+    def current_weight(self, sid, oid, *, path=frozenset()):
+        if oid in path:
+            raise StateMachineError("container_cycle", "Invalid parent relation")
+        children = self.facts.contents(sid, oid)
+        encoded = self.facts.instances.get(sid, "object", oid)["definition"]
+        definition = self.h.store.memory.json(encoded)
+        if children and (
+            definition is None
+            or not any(
+                c["type"] == "Container" for c in definition["fields"]["capabilities"]["tuple"]
+            )
+        ):
+            raise StateMachineError("unsupported_object_capability", "Parent is not a container")
+        total = self.own_weight(sid, oid)
+        for child in children:
+            weight = self.current_weight(sid, child["object_id"], path=path | {oid})
+            total = None if total is None or weight is None else total + weight
+        return total
+
+    @instance_read("object", "container", "contents_weight")
+    def contents_weight(self, sid, oid):
+        total = 0
+        for child in self.facts.contents(sid, oid):
+            weight = self.current_weight(sid, child["object_id"], path=frozenset((oid,)))
+            total = None if total is None or weight is None else total + weight
+        return total
 
     def _weight(self, oid, state, path):
         if oid in path or oid not in state:
             raise StateMachineError("container_cycle", "Invalid parent relation")
         if oid in state.weights:
             return state.weights[oid]
+        if (
+            state.source_stage is not None
+            and state.source_scope is self.h.store._scope
+            and state.source_scope is not None
+            and state.source_stage == self.h._conn.total_changes
+            and oid not in state.weight_dirty
+        ):
+            total = self.current_weight(state[oid]["session_id"], oid)
+            state.weights[oid] = total
+            return total
         d = state.definition(self.facts, oid)
         children = state.contents(oid)
         if children and (d is None or d.capability("container") is None):
