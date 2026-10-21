@@ -217,6 +217,7 @@ class SessionMemory:
             "publication_ns": 0,
             "write_scope_ns": 0,
             "json_parses": 0,
+            "model_parses": 0,
         }
         self.install()
 
@@ -337,6 +338,29 @@ class SessionMemory:
         if cached is None:
             value = json.loads(encoded)
             self.stats["json_parses"] += 1
+            dependencies = tuple(
+                ("__scope__", sid) for sid in sorted(self.store._scope.memory_sessions)
+            )
+            cached = (value, None, dependencies, ())
+            self.put(key, cached)
+        return deepcopy(cached[0])
+
+    def model_json(self, schema, encoded):
+        """Reuse pure schema decoding; domain/OCC/binding checks still run.
+
+        The encoded content and schema identity fully determine this value. The
+        returned model is detached, including nested fields; callers can prepare
+        new candidates without changing any prior input.
+        """
+        if self.store._scope is None:
+            with self.store.transaction():
+                return self.model_json(schema, encoded)
+        key = ("model-json", schema, encoded)
+        cached = self.get(key)
+        if cached is None:
+            validate = getattr(schema, "model_validate_json", None) or schema.validate_json
+            value = validate(encoded)
+            self.stats["model_parses"] += 1
             dependencies = tuple(
                 ("__scope__", sid) for sid in sorted(self.store._scope.memory_sessions)
             )

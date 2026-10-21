@@ -42,6 +42,16 @@ class ComponentInputs:
     def __repr__(self):
         return f"ComponentInputs({self.data!r}, {self.indices!r})"
 
+    def inventory(self, owners, identities):
+        raw = self.data["inventory_json"]
+        by_owner, by_id, _ = self.indices["inventory_json"]
+        selected = {n for owner in owners for n in by_owner.get(owner, ())}
+        selected.update(n for identity in identities for n in by_id.get(identity, ()))
+        return {
+            **{k: _thaw(v) for k, v in raw.items() if k != "entries"},
+            "entries": [_thaw(raw["entries"][n]) for n in sorted(selected)],
+        }
+
     def select(self, owners, slugs, owner_exists):
         result = {}
         for field, path in (

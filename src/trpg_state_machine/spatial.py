@@ -4,7 +4,6 @@ No geometry algorithm or rule cost is implemented here. A movement-only projecti
 must never be passed to the Engine or perception as a mechanical Grid.
 """
 
-import json
 from dataclasses import dataclass, replace
 
 from dnd5e_engine.evaluation_state import InventoryEntry, InventoryState
@@ -161,9 +160,9 @@ class WorldHandler:
             "SELECT state_json FROM mechanical_actors WHERE session_id=? AND actor_id=?",
             (sid, actor_id),
         ).fetchone()
-        state = json.loads(mechanical[0]) if mechanical else None
+        state = self.store.memory.json(mechanical[0]) if mechanical else None
         if (
-            (core and (core[0] <= 0 or json.loads(core[1])))
+            (core and (core[0] <= 0 or self.store.memory.json(core[1])))
             or state
             and (not state["is_alive"] or state["conditions"] or state["concentration_effect_id"])
         ):
@@ -177,7 +176,7 @@ class WorldHandler:
             self._actor_position(sid, actor_id).cell is not None
             and npc
             and npc[0]
-            and json.loads(npc[0])["current_activity"] is not None
+            and self.store.memory.json(npc[0])["current_activity"] is not None
             and not qualified
         ):
             raise StateMachineError(
@@ -209,7 +208,7 @@ class WorldHandler:
             "SELECT state_json FROM mechanical_actors WHERE session_id=? AND actor_id=?",
             (sid, actor_id),
         ).fetchone()
-        if mechanical and json.loads(mechanical[0])["conditions"]:
+        if mechanical and self.store.memory.json(mechanical[0])["conditions"]:
             raise StateMachineError(
                 "unsupported_target_visibility",
                 "Condition-aware target authorization is unavailable",
@@ -399,7 +398,7 @@ class WorldHandler:
                 raise StateMachineError(
                     "unsupported_actor_activity", "Item has a casting material binding"
                 )
-            slug = json.loads(item["item_json"])["item_slug"]
+            slug = self.store.memory.json(item["item_json"])["item_slug"]
             armor = state["worn_armor"]
             asset = self.loader.get_item(slug) if self.loader else None
             if (
@@ -474,8 +473,8 @@ class WorldHandler:
                     "unsupported_mechanical_version", "Explicit inventory is unavailable"
                 )
             components = self.characters.rule_components(session_id, {actor_id})
-            inventory = InventoryState.model_validate_json(
-                canonical_json(components["inventory_state"])
+            inventory = self.store.memory.model_json(
+                InventoryState, canonical_json(components["inventory_state"])
             )
             version = self._conn.execute(
                 "SELECT world_version FROM sessions WHERE session_id=?", (session_id,)

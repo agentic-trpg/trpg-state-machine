@@ -23,6 +23,8 @@ def test_public_hot_reads_do_not_select_parse_or_build_again(tmp_path, context, 
     with sm:
         actor = sm.read_session(sid, package, context=context).pc_actor_id
         sm.get_object(sid, actor, BOX, package, context=context)
+        sm.read_carried_items(sid, actor, package, context=context)
+        model_parses = sm._store.memory.stats["model_parses"]
         counts = {"json": 0}
         original = json.loads
 
@@ -38,8 +40,10 @@ def test_public_hot_reads_do_not_select_parse_or_build_again(tmp_path, context, 
                 sm.read_session(sid, package, context=context)
             for _ in range(4):
                 sm.get_object(sid, actor, BOX, package, context=context)
+                sm.read_carried_items(sid, actor, package, context=context)
         assert sql["sql_selects"] == sql["sql_rows"] == 0
         assert counts["json"] == 0
+        assert sm._store.memory.stats["model_parses"] == model_parses
 
 
 def test_fixed_snapshot_and_returned_nested_values_are_detached(tmp_path, context):

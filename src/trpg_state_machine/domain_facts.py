@@ -18,6 +18,8 @@ from .item_units import valid_item_unit
 from .package import canonical_json
 from .scoped_reads import scoped_read
 
+_EFFECTS = TypeAdapter(tuple[EffectState, ...])
+
 
 class CharacterFacts:
     RULE_FIELDS = frozenset(
@@ -119,7 +121,7 @@ class CharacterFacts:
             "SELECT resources_json FROM characters WHERE session_id=? AND actor_id=?",
             (sid, actor_id),
         ).fetchone()
-        resources = json.loads(row[0])
+        resources = self.store.memory.json(row[0])
         resources[resource_id] -= amount
         self._conn.execute(
             "UPDATE characters SET resources_json=? WHERE session_id=? AND actor_id=?",
@@ -162,20 +164,22 @@ class CharacterFacts:
                     raise StateMachineError(
                         "invalid_combat_foundation", "Initialization cannot reset HP"
                     )
-                if json.loads(core["resources_json"]) or json.loads(core["effects_json"]):
+                if self.store.memory.json(core["resources_json"]) or self.store.memory.json(
+                    core["effects_json"]
+                ):
                     raise StateMachineError(
                         "unsupported_combat_foundation",
                         "Legacy resources/effects cannot be converted implicitly",
                     )
-                if json.loads(core["inventory_json"]) != list(actor.carried_item_slugs):
+                if self.store.memory.json(core["inventory_json"]) != list(actor.carried_item_slugs):
                     raise StateMachineError(
                         "invalid_combat_foundation", "Equipment must match selected PC"
                     )
             if (
                 (core["current_hp"], core["max_hp"]) != (actor.hp_current, actor.hp_max)
-                or json.loads(core["inventory_json"]) != list(actor.carried_item_slugs)
-                or json.loads(core["resources_json"])
-                or json.loads(core["effects_json"])
+                or self.store.memory.json(core["inventory_json"]) != list(actor.carried_item_slugs)
+                or self.store.memory.json(core["resources_json"])
+                or self.store.memory.json(core["effects_json"])
             ):
                 raise StateMachineError(
                     "invalid_combat_foundation", "Initialization cannot reset core state"
@@ -217,7 +221,7 @@ class CharacterFacts:
         ).fetchone()
         if core is None:
             return approved
-        if json.loads(core["inventory_json"]) != list(approved.carried_item_slugs):
+        if self.store.memory.json(core["inventory_json"]) != list(approved.carried_item_slugs):
             raise StateMachineError(
                 "invalid_combat_foundation",
                 "Changed equipment requires explicit current inventory instance facts",
@@ -299,23 +303,27 @@ class CharacterFacts:
                     },
                 }
             inventory, resources, casting, effects = (
-                json.loads(row[field])
+                self.store.memory.json(row[field])
                 for field in ("inventory_json", "resources_json", "casting_json", "effects_json")
             )
-            inventory = InventoryState.model_validate_json(row["inventory_json"]).model_dump(
-                mode="json"
-            )
+            inventory = self.store.memory.model_json(
+                InventoryState, row["inventory_json"]
+            ).model_dump(mode="json")
             resources = (
-                ResourceState.model_validate_json(row["resources_json"]).model_dump(mode="json")
+                self.store.memory.model_json(ResourceState, row["resources_json"]).model_dump(
+                    mode="json"
+                )
                 if resources is not None
                 else None
             )
             casting = (
-                CastingState.model_validate_json(row["casting_json"]).model_dump(mode="json")
+                self.store.memory.model_json(CastingState, row["casting_json"]).model_dump(
+                    mode="json"
+                )
                 if casting is not None
                 else None
             )
-            effects = TypeAdapter(tuple[EffectState, ...]).validate_json(row["effects_json"])
+            effects = self.store.memory.model_json(_EFFECTS, row["effects_json"])
             effects = [v.model_dump(mode="json") for v in effects]
             known = set(self.rule_actors(sid, None if full_audit else owner_ids))
             references = {v["owner_id"] for v in inventory["entries"]}
@@ -401,17 +409,14 @@ class CharacterFacts:
 
     def _inventory_selection(self, sid, owners, identities):
         stored = self._conn.execute(
-            "SELECT json_set(inventory_json,'$.entries',json((SELECT "
-            "json_group_array(json(e.value)) "
-            "FROM json_each(inventory_json,'$.entries') e WHERE "
-            "json_extract(e.value,'$.owner_id') IN (SELECT value FROM json_each(?)) OR "
-            "json_extract(e.value,'$.instance_id') IN (SELECT value FROM json_each(?))))) "
-            "FROM mechanical_components WHERE session_id=?",
-            (json.dumps(sorted(owners)), json.dumps(sorted(identities)), sid),
+            "SELECT * FROM mechanical_components WHERE session_id=?", (sid,)
         ).fetchone()
         if stored is None:
             raise StateMachineError("unsupported_mechanical_version", "Explicit inventory missing")
-        return InventoryState.model_validate_json(stored[0]).model_dump(mode="json")
+        selected = self._component_inputs(stored).inventory(owners, identities)
+        return self.store.memory.model_json(InventoryState, canonical_json(selected)).model_dump(
+            mode="json"
+        )
 
     def project_item_transfer(self, sid, before, after, *, prepared=None):
         self.store.require_write()
@@ -504,7 +509,7 @@ class CharacterFacts:
                     "unsupported_mechanical_version", "Explicit inventory missing"
                 )
             return
-        inventory = InventoryState.model_validate_json(stored[0]).model_dump(mode="json")
+        inventory = self.store.memory.model_json(InventoryState, stored[0]).model_dump(mode="json")
         identities, entries = self.world.portable_inventory(sid)
         old_order = [
             e["instance_id"] for e in inventory["entries"] if e["instance_id"] in identities
@@ -513,7 +518,7 @@ class CharacterFacts:
         others = [e for e in inventory["entries"] if e["instance_id"] not in identities]
         inventory["entries"] = others + [entries[i] for i in old_order if i in entries]
         inventory["entries"].extend(entries[i] for i in entries if i not in old_ids)
-        InventoryState.model_validate_json(canonical_json(inventory))
+        self.store.memory.model_json(InventoryState, canonical_json(inventory))
         self._conn.execute(
             "UPDATE mechanical_components SET inventory_json=? WHERE session_id=?",
             (canonical_json(inventory), sid),
@@ -610,7 +615,7 @@ class WorldFacts:
             "SELECT facts_json FROM scene_environments WHERE session_id=? AND scene_id=?",
             (sid, scene_id),
         ).fetchone()
-        return facts_from_data(json.loads(row[0])) if row else None
+        return facts_from_data(self.store.memory.json(row[0])) if row else None
 
     def set_environment(self, sid, scene_id, facts):
         from dataclasses import asdict
@@ -1248,7 +1253,7 @@ class WorldFacts:
             "SELECT flags_json FROM scene_instances WHERE session_id=? AND scene_id=?",
             (sid, scene_id),
         ).fetchone()
-        return json.loads(row[0]) if row else None
+        return self.store.memory.json(row[0]) if row else None
 
     def set_scene_flags(self, sid, scene_id, flags):
         self.store.require_write()
@@ -1277,7 +1282,9 @@ class WorldFacts:
             "SELECT binding_json FROM world_time_bindings WHERE session_id=?",
             (sid,),
         ).fetchone()
-        return time_binding_from_data(json.loads(row[0])) if row else LegacyTimeBinding()
+        return (
+            time_binding_from_data(self.store.memory.json(row[0])) if row else LegacyTimeBinding()
+        )
 
     def time_state(self, sid):
         row = self._conn.execute(
@@ -1306,7 +1313,7 @@ class WorldFacts:
                     sid,
                     scene_id,
                     canonical_json(
-                        {"scene_id": scene_id, "grid": json.loads(definition.grid_json)}
+                        {"scene_id": scene_id, "grid": self.store.memory.json(definition.grid_json)}
                     ),
                     sid,
                     scene_id,
@@ -1315,7 +1322,7 @@ class WorldFacts:
             return
         if package.noncombat_foundation_json is None:
             return
-        initial = json.loads(package.noncombat_foundation_json)
+        initial = self.store.memory.json(package.noncombat_foundation_json)
         scenes = [initial["snapshot"]["scene_state"], *initial["additional_scenes"]]
         scene = next((s for s in scenes if s["scene_id"] == scene_id), None)
         if scene is not None:
@@ -1410,13 +1417,13 @@ class CombatRecords:
         combat = self._conn.execute(
             "SELECT state_json FROM combats WHERE session_id=?", (session_id,)
         ).fetchone()
-        return bool(combat and not json.loads(combat[0])["ended"])
+        return bool(combat and not self.store.memory.json(combat[0])["ended"])
 
     def require_noncombat_save(self, row):
         combat = self._conn.execute(
             "SELECT state_json FROM combats WHERE session_id=?", (row["session_id"],)
         ).fetchone()
-        if combat and (not json.loads(combat[0])["ended"]):
+        if combat and (not self.store.memory.json(combat[0])["ended"]):
             raise StateMachineError(
                 "combat_unrestorable", "MVP does not support active-combat save/resume"
             )

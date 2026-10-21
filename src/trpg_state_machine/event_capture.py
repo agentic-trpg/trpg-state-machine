@@ -1,6 +1,5 @@
 """Committed facts, bounded package effects and one durable delivery outbox."""
 
-import json
 from dataclasses import asdict, replace
 from types import MappingProxyType
 
@@ -195,7 +194,7 @@ class EventCapture:
         combat = self._conn.execute(
             "SELECT scene_id,state_json FROM combats WHERE session_id=?", (sid,)
         ).fetchone()
-        state = json.loads(combat["state_json"]) if combat else None
+        state = self.store.memory.json(combat["state_json"]) if combat else None
         active = state is not None and not state["ended"]
         topologies = {}
         for scene_id in sorted(scene_ids):
@@ -235,7 +234,7 @@ class EventCapture:
                 "SELECT state_json FROM mechanical_actors WHERE session_id=? AND actor_id=?",
                 (sid, actor["actor_id"]),
             ).fetchone()
-            data = json.loads(stored[0]) if stored else None
+            data = self.store.memory.json(stored[0]) if stored else None
             actor["mechanical"] = (
                 None
                 if data is None
@@ -265,7 +264,7 @@ class EventCapture:
                 return None, None
             # MechanicalGrid requires every sensory field. GridScene defaults
             # must not promote a movement-only projection into sensory evidence.
-            grid = MechanicalGrid.model_validate_json(canonical_json(scene["grid"]))
+            grid = self.store.memory.model_json(MechanicalGrid, canonical_json(scene["grid"]))
             topology = stored.grid.topology
             return grid.model_dump(mode="json"), topology
         except (KeyError, TypeError, ValueError):
