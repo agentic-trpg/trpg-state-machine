@@ -155,3 +155,17 @@ $containerFiles = @(
 逐项能力、读取范围、存档兼容、实际计数及本批验证结果见
 [系统性重构验收](reviews/SCOPED_RUNTIME_VALIDATION_REFACTOR.md)。
 上文历史测试数字与旧 Schema/待办保持原批次语境，不作为本轮验证结果。
+
+## 2026-10-21 全系统复用原则与跨操作重量缓存目标
+
+**Architecture Decision Status：`[DECIDED]`；跨操作内存重量缓存 Implementation Status：`[NOT IMPLEMENTED]`。** 共同规范见 [项目 MC §2.3](https://github.com/agentic-trpg/agentic-trpg/blob/docs/runtime-reuse-and-references/docs/MODULE_CONTRACTS.md#23-运行时数据复用派生-snapshot-与版本有效性-decided)，容器应用见 [World §2.1b](https://github.com/agentic-trpg/agentic-trpg/blob/docs/runtime-reuse-and-references/docs/WORLD_SUBSYSTEM_DESIGN.md#21b-容器重量派生与跨操作复用)，规则／世界观／工程资料见 [统一入口](https://github.com/agentic-trpg/agentic-trpg/blob/docs/runtime-reuse-and-references/docs/REFERENCES.md)。链接指向配套未合并文档分支；逻辑工作区中对应 `../agentic-trpg/docs/`，不表示 main 已包含本次补充。
+
+本次静态核对源码为 `refactor/scoped-runtime-validation@4341f69cbb560edd9c9c1b1bd907ed6c599c0ed0`，**该重构分支尚未合并**；核实的 origin/main 为 `7927a382738fc97e2420967c3e1c6280c717d1fb`，不能将该分支能力写成 main 已有能力。
+
+- [world_containers.py（固定 SHA）](https://github.com/agentic-trpg/trpg-state-machine/blob/4341f69cbb560edd9c9c1b1bd907ed6c599c0ed0/src/trpg_state_machine/world_containers.py) 的 `_rows` 每次建立 ContainmentState；`weights` 是单次操作状态内 memo，`relocate` 更新候选邻接并清空它，没有发布为 Service／Store 跨操作缓存。
+- `total_weight` 合计实例自身重量 × quantity 与全部后代；容量检查对直接内容物分别求 total_weight 后求和，因此“内容物重量”和“容器自身加内容物总重量”不同。未知重量传播为 None，不能按零计算。现有数量读取不表示支持部分数量转移。
+- `validate` 在移动候选上覆盖移动子树、原祖先与目标祖先的必要关系／聚合闭包；[test_container_admission.py](https://github.com/agentic-trpg/trpg-state-machine/blob/4341f69cbb560edd9c9c1b1bd907ed6c599c0ed0/tests/test_container_admission.py)、[test_world_containers.py](https://github.com/agentic-trpg/trpg-state-machine/blob/4341f69cbb560edd9c9c1b1bd907ed6c599c0ed0/tests/test_world_containers.py) 及[重构验收记录](reviews/SCOPED_RUNTIME_VALIDATION_REFACTOR.md)提供对应源码／历史证据。本次没有重新运行这些测试或重测性能。
+
+本次确定的后续设计是按需建立、跨操作复用的内存缓存，不要求新增持久化总重量字段。仅在修改前缓存有效且完整掌握变化时按差量更新；移动整个容器按真实子树贡献作用于旧／新必要祖先，共同祖先合并净变化。数量、有效重量、关系和实际摧毁后果都须维护依赖；旧值或变化不可靠时失效并按需重算。未知、权限、容量、循环、嵌套、版本及事务检查保持。当前摧毁 shell 保留内容并开放访问，不能因“摧毁”一词自动扣掉整个子树；未实现的新摧毁规则不能冒充既有行为。
+
+本批只追加设计／实现差异与查阅要求，不改代码、Schema40、依赖 pin、规则数据或 CI；没有实现跨操作缓存，也不改写上文历史日期、测试数字和证据范围。
