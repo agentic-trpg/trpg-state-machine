@@ -1,5 +1,14 @@
 # Session Management 重构进度
 
+## 2026-10-22 Session RAM 生产接入
+
+统一记录范围、解析复用、候选保存点、延迟取得 SQLite 写锁、共同提交后发布、失败暂停与
+持久实例重建已接入现有 World／RE／NPC／Activity／Time／Perception 写入口。补充授权卸载、
+Driver 和派生释放；没有升级 RE pin、Schema 版本／DTO，Schema40 兼容补齐私有空间查找索引，
+也未实现原来不支持的战斗任意阶段恢复。
+实际调用链、入口清单、缓存维护、测量和本轮最终检查见
+[本轮实施记录](reviews/SESSION_MEMORY_RUNTIME_IMPLEMENTATION.md)。以下历史批次原文保持。
+
 ## 2026-10-21 文档决定：Session 内存运行层待实施
 
 Architecture Decision Status **[DECIDED]**；完整 Session 内存运行层 Implementation Status **[NOT IMPLEMENTED]**；Acceptance Status **本次未执行运行验收**。 静态源码基线 `d6be5a99b12fefcf8cfc57fdebb81493c1ac4d34` 已为 fetch 后 main；原 Scoped runtime refactor 不再是未合并前提。现有 Schema40、操作 memo、GridMaps／Environment 缓存与旧验收数字保留原范围，不是完整内存事实层。

@@ -1,5 +1,12 @@
 # ObjectSpatialService 总体说明
 
+## 2026-10-22 当前运行层
+
+现有空间事实／候选统一由 Session RAM 范围供给，Schema40 派生索引仍由原事实和事务触发器
+维护。打开时兼容补齐 `spatial_object_lookup(session_id,object_id)`，消除局部移动触发器
+扫描无关单元；不更改 user_version、事实字段或公开 DTO。旧 View 隔离与兼容性证据见
+[本轮实施报告](reviews/SESSION_MEMORY_RUNTIME_IMPLEMENTATION.md)。以下日期段落保留原记录。
+
 本页统一描述 OSS 当前实现。2026-10-18 挡雨／挡风扩展基于最新
 `origin/main@97c5af102bd8ca2c397b84bd4d36664983db54a7`，位于
 `feat/oss-environment-shelter`，不合并 main。此前专项已经合并；

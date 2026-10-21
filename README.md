@@ -1,5 +1,12 @@
 # Agentic TRPG — State Machine Foundation
 
+## Session RAM runtime — 2026-10-22
+
+现有生产入口已接入统一 RAM／候选读取、SQLite 增量提交后发布与暂停恢复；普通命令不再
+为初始准入构造完整 SessionSnapshot。容器重量和机关索引跨命令复用；授权、原协议及恢复
+限制保持。入口／故障／容量／实际测试和成本见
+[实施报告](docs/reviews/SESSION_MEMORY_RUNTIME_IMPLEMENTATION.md)。下述 10 月 21 日目标段落保留原历史状态。
+
 ## Session memory runtime target — 2026-10-21
 
 Architecture Decision Status **[DECIDED]**；完整 Session 内存运行层 Implementation Status **[NOT IMPLEMENTED]**；Acceptance Status **本次未执行运行验收**。 活跃已加载事实的查询、检查、RE 输入、角色视图、Snapshot 与环境／光照／重量输入统一读取同版本 Session RAM；候选与旧固定输入隔离。每次修改通过 SQLite 短事务增量持久化，COMMIT 后发布 RAM，版本就绪后正常返回成功及投影。统一协议与现有组件差距见 [Session Management](docs/SESSION_MANAGEMENT.md)。当前 main `d6be5a9` 为 Schema40，已有操作 memo／GridMaps／环境缓存与空间索引，完整内存运行层及跨命令重量／机关索引仍待实施。未来 5–6 玩家负载不扩大单人 MVP；活跃战斗精确恢复仍不支持。下述批次版本、数字和兼容边界保留原时点。

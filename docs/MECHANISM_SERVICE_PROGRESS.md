@@ -1,5 +1,11 @@
 # MechanismService progress — 2026-10-18
 
+## 2026-10-22 跨命令索引与发布
+
+触发／组件关联索引现由统一 RAM 范围跨命令复用；实例成员及配置改变失效，纯激活状态更新
+不重新枚举机制配置。候选、保存点、共同提交、卸载及恢复沿统一生命周期；原去重、次数／频率、
+有界级联和 unsupported 端口边界不变。验收见 [本轮实施记录](reviews/SESSION_MEMORY_RUNTIME_IMPLEMENTATION.md)。
+
 ## 2026-10-21 文档目标补充（未实施）
 
 Architecture Decision Status **[DECIDED]**；完整 Session 内存运行层 Implementation Status **[NOT IMPLEMENTED]**；Acceptance Status **本次未执行运行验收**。 当前触发／组件索引每次或批内构建，跨命令复用仍 NOT IMPLEMENTED；目标接入同版本 RAM／候选及统一提交，维护配置／关系／损坏、加载／卸载与恢复依赖。 统一责任与验收引用 [Session Management](SESSION_MANAGEMENT.md#session-内存运行生命周期与事实访问2026-10-21)，沿既有 C-25／C-27／A2／DS 跟踪，不另造任务体系。本轮仅修改文档，未执行本领域业务或性能测试；下述历史日期／SHA／测试数字保留原证据范围。

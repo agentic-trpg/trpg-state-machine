@@ -1,5 +1,13 @@
 # Session Management
 
+## 2026-10-22 当前生产实现
+
+当前已支持入口统一通过 Store 的 RAM／候选读取与增量提交后发布，不提供业务可选的旧 SQL 模式。
+SessionRuntime 的原事务内 `publish` 已改名 `stage_outcome`；实际 RAM 发布属于 Store COMMIT 之后。
+完整读写入口、稀疏回滚、提交未知／部分发布失败、重建、卸载及现存成本见
+[本轮实施与验收](reviews/SESSION_MEMORY_RUNTIME_IMPLEMENTATION.md)。下文 2026-10-21 的
+NOT IMPLEMENTED 和更早测试数字保留当时证据，不作为本轮结论。
+
 ## Session 内存运行生命周期与事实访问（2026-10-21）
 
 Architecture Decision Status **[DECIDED]**；完整 Session 内存运行层 Implementation Status **[NOT IMPLEMENTED]**；Acceptance Status **本次未执行运行验收**。 单一领域所有权、统一 RAM 读取、SQLite 增量提交后发布与故障恢复由 [上游 MC §0.3／§2.3／§6](https://github.com/agentic-trpg/agentic-trpg/blob/docs/session-memory-runtime/docs/MODULE_CONTRACTS.md) 维护；本节细化本仓库责任，不复制另一套协议。链接指向本次配套文档分支，**不表示已合并 main**。逻辑并列工作区为 `session-memory-runtime/agentic-trpg`、`trpg-state-machine`、`trpg-rules-engine`；本地权威文档对应 `../agentic-trpg/docs/`。

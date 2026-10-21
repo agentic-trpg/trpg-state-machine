@@ -1,5 +1,12 @@
 # GridService
 
+## 2026-10-22 当前运行层
+
+GridMaps／局部空间输入现从统一 RAM 或候选读取，已加载地图不再为内容键重复 SELECT。
+原只读拓扑、动态几何算法及明确范围保留；固定旧 View 不被后续提交或卸载修改。
+本轮范围与成本见 [实施报告](reviews/SESSION_MEMORY_RUNTIME_IMPLEMENTATION.md)。
+下述 2026-10-21 目标段落保留历史状态。
+
 ## 2026-10-21 Session 运行层接入目标
 
 Architecture Decision Status **[DECIDED]**；完整 Session 内存运行层 Implementation Status **[NOT IMPLEMENTED]**；Acceptance Status **本次未执行运行验收**。 统一事实读取、候选／持久提交／内存发布与故障规则见 [Session Management](SESSION_MANAGEMENT.md#session-内存运行生命周期与事实访问2026-10-21) 及其 MC 引用；下文带日期接口与测试仍描述各自已有能力，不改变当前 ABI。

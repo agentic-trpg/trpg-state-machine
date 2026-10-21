@@ -1,5 +1,12 @@
 # EnvironmentService
 
+## 2026-10-22 当前运行层
+
+来源／防护版及分层缓存继续复用，事实输入统一读取同版本 RAM／候选；旧读取范围在外部提交后
+不能发布为当前缓存。卸载／故障重建释放该 Session 的派生值。光照通过 RAM 关系和光源状态
+取输入，原地图算法、提供方和规则接线边界保持。见 [本轮实施报告](reviews/SESSION_MEMORY_RUNTIME_IMPLEMENTATION.md)。
+下述 2026-10-21 目标段落保留历史状态。
+
 ## 2026-10-21 Session 运行层接入目标
 
 Architecture Decision Status **[DECIDED]**；完整 Session 内存运行层 Implementation Status **[NOT IMPLEMENTED]**；Acceptance Status **本次未执行运行验收**。 统一事实读取、候选／持久提交／内存发布与故障规则见 [Session Management](SESSION_MANAGEMENT.md#session-内存运行生命周期与事实访问2026-10-21) 及其 MC 引用；下文带日期接口与测试仍描述各自已有能力，不改变当前 ABI。

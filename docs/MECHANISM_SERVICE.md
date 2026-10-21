@@ -1,5 +1,12 @@
 # MechanismService contract (2026-10-18)
 
+## 2026-10-22 当前运行层
+
+现有自动／手动／重置与连锁入口已接入统一 RAM／候选和提交后发布；触发／组件索引跨命令
+复用，实例成员及配置改变失效，纯激活状态变化保留有效索引。原能力与规则端口边界保持。
+实现、故障和本轮验收见 [实施报告](reviews/SESSION_MEMORY_RUNTIME_IMPLEMENTATION.md)。
+下述 2026-10-21 NOT IMPLEMENTED 段落保留历史证据。
+
 ## 2026-10-21 Session 运行层接入目标
 
 Architecture Decision Status **[DECIDED]**；完整 Session 内存运行层 Implementation Status **[NOT IMPLEMENTED]**；Acceptance Status **本次未执行运行验收**。 统一事实读取、候选／持久提交／内存发布与故障规则见 [Session Management](SESSION_MANAGEMENT.md#session-内存运行生命周期与事实访问2026-10-21) 及其 MC 引用；下文带日期接口与测试仍描述各自已有能力，不改变当前 ABI。

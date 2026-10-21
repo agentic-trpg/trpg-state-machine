@@ -1,5 +1,12 @@
 # Session 游戏时间运行与协调
 
+## 2026-10-22 当前运行层
+
+TimeDriver 元数据、时间工作、Activity 与现有 Effects 的实际变化已通过共同 Store 协调及
+提交后 RAM 发布，game_tick 保持唯一时间事实。故障对账关闭旧 Driver，恢复后由调用方显式
+重新 attach；不补离线时长。见 [本轮实施报告](reviews/SESSION_MEMORY_RUNTIME_IMPLEMENTATION.md)。
+以下 Schema38 和批次身份属于 2026-10-20 原始记录；当前仍为 Schema40。
+
 2026-10-20；`feat/session-time-coordination`。采用“统一游戏时间，界面自行显示，
 后台按需推进并结算”。当前存储 Schema38；RE/SRD pin 不变。上游职责依据为
 MODULE_CONTRACTS §0.3、§8 的唯一事实所有者和共同短事务约束。本文件描述本仓库

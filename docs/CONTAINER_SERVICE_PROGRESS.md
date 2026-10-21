@@ -1,5 +1,12 @@
 # ContainerService 专项修复
 
+## 2026-10-22 RAM 关系与跨命令重量
+
+已通过统一记录范围维护主键／容器父子桶，局部祖先／后代读取复用 RAM；ContainmentState
+继续隔离候选，跨操作重量结果绑定候选行与实例配置依赖。关系／有效重量改变后失效，未知仍为
+None；portable unit quantity=1、容量／循环／两层／访问／绑定限制及销毁内容去向语义保持。
+生产路径、回滚／加载／卸载和验证范围见 [本轮实施记录](reviews/SESSION_MEMORY_RUNTIME_IMPLEMENTATION.md)。
+
 ## 2026-10-21 文档目标补充（未实施）
 
 Architecture Decision Status **[DECIDED]**；完整 Session 内存运行层 Implementation Status **[NOT IMPLEMENTED]**；Acceptance Status **本次未执行运行验收**。 当前 ContainmentState／weights 为操作内复用；跨命令父子索引／重量复用仍 NOT IMPLEMENTED。关系／数量／有效重量读同版本 RAM／候选，按真实子树与祖先更新或失效；未知／访问／容量／循环检查保持。 统一责任与验收引用 [Session Management](SESSION_MANAGEMENT.md#session-内存运行生命周期与事实访问2026-10-21)，沿既有 C-25／C-27／A2／DS 跟踪，不另造任务体系。本轮仅修改文档，未执行本领域业务或性能测试；下述历史日期／SHA／测试数字保留原证据范围。

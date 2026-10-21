@@ -1,5 +1,11 @@
 # W-01 GridService 切片进度
 
+## 2026-10-22 一致 RAM 输入
+
+GridMaps 的内容键和不可变地图继续复用；编码记录现从统一 RAM／候选范围取得，热命中不再
+重读同批 SQL。保存点／旧读／跨连接发布保护保持，卸载和 close 释放自有引用，旧 View 仍固定。
+没有声称所有空间／场景算法都已局部增量化。证据见 [实施报告](reviews/SESSION_MEMORY_RUNTIME_IMPLEMENTATION.md)。
+
 ## 2026-10-21 文档目标补充（未实施）
 
 Architecture Decision Status **[DECIDED]**；完整 Session 内存运行层 Implementation Status **[NOT IMPLEMENTED]**；Acceptance Status **本次未执行运行验收**。 既有地图／局部空间成果保持；读取输入从同版本 RAM 接入、候选空间及旧 View 隔离、版本一致冷加载仍须后续实现与验收。 统一责任与验收引用 [Session Management](SESSION_MANAGEMENT.md#session-内存运行生命周期与事实访问2026-10-21)，沿既有 C-25／C-27／A2／DS 跟踪，不另造任务体系。本轮仅修改文档，未执行本领域业务或性能测试；下述历史日期／SHA／测试数字保留原证据范围。

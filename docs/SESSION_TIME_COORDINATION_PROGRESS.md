@@ -1,5 +1,12 @@
 # Session 时间协调实施记录
 
+## 2026-10-22 统一 Session RAM 提交边界
+
+时间控制、准入／可靠进度、Driver attach、Activity 与已支持机关期限更新均经共同 Store；
+仍只维护 World game_tick。卸载和发布故障后的重建释放旧 Driver，显式重附着不补离线时长。
+未扩展秒制消费者或 Effects 能力；原回执、倍率、边界与恢复限制保持。
+入口及本轮验证见 [实施报告](reviews/SESSION_MEMORY_RUNTIME_IMPLEMENTATION.md)。
+
 2026-10-19，分支 `feat/session-time-coordination`；起始 HEAD
 `555421327a29fe6e1228b68d046307c69c88d9d2`。工作区开始时干净；适用目录没有 AGENTS.md，
 没有 check-fast／CI 统一脚本，使用 pytest、Ruff check／format、文档链接及 diff 检查。

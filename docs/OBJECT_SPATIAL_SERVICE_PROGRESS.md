@@ -1,5 +1,11 @@
 # ObjectSpatialService 实施与边界（2026-10-18）
 
+## 2026-10-22 事实读取与共同发布
+
+空间／开合／耐久及地图输入已接入一致 RAM／候选；Schema40 占格与验收触发器不变，其实际
+行变化也参与提交后内存索引维护。原局部准入、回滚、旧 View 和授权边界保持；完整地图消费者
+的算法成本另计。统一验证见 [实施报告](reviews/SESSION_MEMORY_RUNTIME_IMPLEMENTATION.md)。
+
 2026-10-20：运行几何／政策和环境依赖身份已改取 Session 实例配置；当前位置和朝向仍由 objects 独占。
 未实例化场景的预测取保存的 Session 计划，完成创建后清除；不写读查询。
 详见 [实例配置与验证](INSTANCE_CONFIGURATION_PROGRESS.md)。

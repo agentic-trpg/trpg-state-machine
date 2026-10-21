@@ -1,5 +1,13 @@
 # Runtime validation scope review — 2026-10-20
 
+## 后续实施索引 — 2026-10-22
+
+下文保持原静态审计证据；Schema40 局部准入的后续实施见
+[scoped runtime 验收](SCOPED_RUNTIME_VALIDATION_REFACTOR.md)。统一 RAM 事实、候选／提交后发布、
+跨命令容器重量及机关索引的本轮实现与实测见
+[Session memory 实施报告](SESSION_MEMORY_RUNTIME_IMPLEMENTATION.md)。该报告另列仍存在的
+聚合 JSON、必要机械闭包与完整地图消费者成本，不把读取层接入等同于所有算法优化完成。
+
 ## Scope and evidence
 
 Architecture authority: sibling `agentic-trpg/docs/MODULE_CONTRACTS.md` §2.3 and §6.5–§6.6, refined by State Machine Architecture and World Subsystem Design. Those shared rules are authoritative; this review records current code and follow-up recommendations, not a competing policy or runtime fix.
