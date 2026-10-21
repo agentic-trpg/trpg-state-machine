@@ -23,6 +23,8 @@ from trpg_state_machine import (
     StateMachine,
     StateMachineError,
     StepActor,
+    TakeItem,
+    TypedCommand,
 )
 from trpg_state_machine.package import canonical_json
 
@@ -235,6 +237,7 @@ def test_public_placement_scope_is_independent_of_unrelated_growth(
             else StepActor(A, "0,0", "1,0")
         )
         sm._world_facts.maps.clear()
+        sm._store.release_memory()
         calls.clear()
         with measure(sm) as (small, _):
             assert sm.query_world_action(sid, actor, op, package, context=gm).status == "available"
@@ -242,6 +245,7 @@ def test_public_placement_scope_is_independent_of_unrelated_growth(
         grow(sm, sid, 100)
         grow_scenes(sm, sid, 20)
         sm._world_facts.maps.clear()
+        sm._store.release_memory()
         calls.clear()
         with measure(sm) as (large, sql):
             assert sm.query_world_action(sid, actor, op, package, context=gm).status == "available"
@@ -534,6 +538,7 @@ def test_task_reads_only_fixed_grants_with_growing_ungranted_history(tmp_path, o
         sid, npc, ids = prepare(sm, ob_package, context)
         task = create_task(sm, sid, ob_package, npc, ids)
         advance(sm, sid, ob_package, context, 100)
+        sm._store.release_memory()
         with measure(sm) as (small, _):
             original = sm.get_npc_evaluation_recovery_input(
                 task.evaluation_id, ob_package, context=npc
@@ -541,6 +546,7 @@ def test_task_reads_only_fixed_grants_with_growing_ungranted_history(tmp_path, o
         for i in range(30):
             new_observation(sm, sid, ob_package, context, "scene.workshop" if i % 2 == 0 else A)
         advance(sm, sid, ob_package, context, 200)
+        sm._store.release_memory()
         with measure(sm) as (large, sql):
             recovered = sm.get_npc_evaluation_recovery_input(
                 task.evaluation_id, ob_package, context=npc
@@ -666,3 +672,87 @@ sm.close()
     with pytest.raises(StateMachineError) as error:
         StateMachine(db, dnd_loader=lock_loader())
     assert error.value.code == "unsupported_storage_schema"
+
+
+def test_container_sql_vm_and_ram_work_are_fixed_with_unrelated_growth(tmp_path, context):
+    from trpg_state_machine.commands import OPERATIONS
+
+    results = []
+    for growth in (0, 150):
+        folder = tmp_path / str(growth)
+        folder.mkdir()
+        sm, sid, package, _ = setup(folder, context, container_data())
+        with sm:
+            acquire(sm, sid, package, context)
+            if growth:
+                grow(sm, sid, growth)
+            state = sm.read_session(sid, package, context=context)
+            version, serial = state.world_version, 0
+
+            def cycle(sm=sm, sid=sid, state=state, package=package):
+                nonlocal version, serial
+                for payload in (PutItem(A, CRED, BOX, "0,0"), TakeItem(A, CRED, BOX, "0,0")):
+                    serial += 1
+                    kind = next(k for k, cls in OPERATIONS.items() if type(payload) is cls)
+                    receipt = sm.submit_command(
+                        TypedCommand(
+                            sid, f"vm.{serial}", state.pc_actor_id, kind, payload, version
+                        ),
+                        package,
+                        context=context,
+                    )
+                    assert receipt.status == "committed"
+                    version = receipt.world_version
+
+            cycle()
+            cycle()
+            vm_steps = 0
+
+            def progress():
+                nonlocal vm_steps
+                vm_steps += 1
+                return 0
+
+            previous = dict(sm._store.memory.stats)
+            sm._conn.set_progress_handler(progress, 1)
+            try:
+                with measure(sm) as (counts, _):
+                    cycle()
+                    cycle()
+            finally:
+                sm._conn.set_progress_handler(None, 0)
+            runtime = {k: sm._store.memory.stats[k] - previous[k] for k in previous}
+            results.append(
+                (
+                    vm_steps,
+                    counts["sql_selects"],
+                    counts["sql_rows"],
+                    runtime["ram_rows"],
+                    runtime["published_rows"],
+                )
+            )
+            assert runtime["snapshot_builds"] == runtime["json_parses"] == 0
+    assert results[0] == results[1]
+
+
+def test_schema40_object_lookup_addendum_preserves_facts_and_old_read_scope(tmp_path, context):
+    import sqlite3
+
+    sm, sid, package, database = setup(tmp_path, context, container_data())
+    before = sm.read_session(sid, package, context=context)
+    sm.close()
+    with sqlite3.connect(database) as disk:
+        disk.execute("DROP INDEX spatial_object_lookup")
+    with sqlite3.connect(database, isolation_level=None) as old:
+        old.execute("BEGIN")
+        fixed = old.execute("SELECT * FROM objects ORDER BY object_id").fetchall()
+        with StateMachine(database, dnd_loader=sm._rules.loader) as reopened:
+            assert reopened._conn.execute("PRAGMA user_version").fetchone()[0] == 40
+            assert reopened._conn.execute(
+                "SELECT sql FROM sqlite_master WHERE name='spatial_object_lookup'"
+            ).fetchone()[0] == (
+                "CREATE INDEX spatial_object_lookup ON object_spatial_cells(session_id,object_id)"
+            )
+            assert reopened.read_session(sid, package, context=context) == before
+        assert old.execute("SELECT * FROM objects ORDER BY object_id").fetchall() == fixed
+        old.rollback()

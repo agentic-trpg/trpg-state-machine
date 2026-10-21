@@ -13,6 +13,12 @@ class DerivedCache:
         self._values.clear()
         self._generation += 1
 
+    def release(self, sid):
+        for key in tuple(self._values):
+            if key[0][0] == sid:
+                del self._values[key]
+        self._generation += 1
+
     def __len__(self):
         return len(self._values)
 

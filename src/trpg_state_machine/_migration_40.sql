@@ -9,6 +9,7 @@ CREATE TABLE object_spatial_cells (
     FOREIGN KEY(session_id,object_id) REFERENCES objects(session_id,object_id) ON DELETE CASCADE
 );
 CREATE INDEX spatial_cell_lookup ON object_spatial_cells(session_id,scene_id,cell,blocks,object_id);
+CREATE INDEX spatial_object_lookup ON object_spatial_cells(session_id,object_id);
 CREATE INDEX actors_cell_lookup ON actors(session_id,current_scene_id,cell,actor_id);
 CREATE TABLE scene_integrity (
     session_id TEXT NOT NULL,

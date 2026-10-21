@@ -1,6 +1,5 @@
 """Ordinary scenario emitters; no fuel, magic, sunlight or effect lifecycle."""
 
-import json
 from dataclasses import asdict
 
 from ._execution import _execution_data
@@ -23,12 +22,9 @@ class LightService:
     def sources(self, sid, scene, package):
         result = []
         local = self.h.facts.scene_object_rows(sid, scene, all_carriers=True, lights_only=True)
-        for light in self.h._conn.execute(
-            "SELECT * FROM object_lights WHERE session_id=? AND object_id IN "
-            "(SELECT value FROM json_each(?))",
-            (sid, json.dumps([r["object_id"] for r in local])),
-        ):
-            oid = light["object_id"]
+        for obj in local:
+            oid = obj["object_id"]
+            light = self.h.facts.light_state(sid, oid)
             c = self.config(sid, oid)
             if not light["enabled"] or self.h.facts.object_hp(sid, oid) == 0:
                 continue

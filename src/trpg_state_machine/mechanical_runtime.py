@@ -219,7 +219,7 @@ class MechanicalRuntime:
                     self._session_runtime.advance_synthetic_rng(
                         command.session_id, result.rng_transition
                     )
-                    version = self._session_runtime.publish(command, row, package, events)
+                    version = self._session_runtime.stage_outcome(command, row, package, events)
                 except StateMachineError as exc:
                     # Only this deterministic domain limit is a durable rejection.
                     # Invalid results/configuration/storage failures remain retryable errors.

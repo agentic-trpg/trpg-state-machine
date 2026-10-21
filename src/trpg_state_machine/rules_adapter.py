@@ -30,6 +30,7 @@ from .dnd_checks import check_changes
 from .dnd_closure import closure_changes
 from .errors import StateMachineError
 from .package import canonical_json
+from .scoped_reads import scoped_read
 from .session_access import _binding
 
 
@@ -290,6 +291,7 @@ class RulesAdapter:
                 "ruleset_binding_mismatch", "Evaluator data/configuration differ"
             ) from exc
 
+    @scoped_read
     def _noncombat_snapshot(self, row, package=None):
         self.records.require_noncombat_save(row)
         sid = row["session_id"]
@@ -361,6 +363,7 @@ class RulesAdapter:
             ) from exc
         self.characters.rule_components(row["session_id"], set(actors), full_audit=True)
 
+    @scoped_read
     def _combat_snapshot(self, row):
         sid = row["session_id"]
         if row["mechanical_schema_version"] != "engine-snapshot/17":

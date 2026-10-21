@@ -297,7 +297,7 @@ class RuleExecution:
                             row, package, command.command_id, previous_round, len(events)
                         )
                     )
-                    version = self.runtime.publish(command, row, package, events)
+                    version = self.runtime.stage_outcome(command, row, package, events)
                 except StateMachineError as exc:
                     if exc.code not in {
                         "event_cascade_limit",
@@ -347,7 +347,7 @@ class RuleExecution:
                 with self.store.savepoint():
                     events = self.runtime.finish_time_wait_reply(row, package, command)
                     events = self.effects._expand_events(row, package, events, command.command_id)
-                    version = self.runtime.publish(command, row, package, events)
+                    version = self.runtime.stage_outcome(command, row, package, events)
             receipt = self.runtime.finish(
                 command, context, fingerprint, row, status, version, error
             )

@@ -3,8 +3,9 @@
 import sqlite3
 from contextlib import contextmanager
 from pathlib import Path
-from threading import get_ident
-from time import monotonic, sleep
+from threading import RLock, get_ident
+from time import monotonic, perf_counter_ns, sleep
+from weakref import WeakValueDictionary
 
 from .errors import StateMachineError
 from .storage_migrations import (
@@ -13,6 +14,16 @@ from .storage_migrations import (
     validate_environment_table,
     validate_environment_versions,
 )
+
+
+class _Coordinator:
+    def __init__(self):
+        self.lock = RLock()
+        self.paused_sessions = set()
+
+
+_coordinators = WeakValueDictionary()
+_coordinators_lock = RLock()
 
 
 def _migration_statements(script: str) -> tuple[str, ...]:
@@ -45,6 +56,13 @@ class SqliteStore:
         self._thread = get_ident()
         self._scope = None
         self._grid_maps = None
+        with _coordinators_lock:
+            identity = str(Path(database).resolve()).casefold()
+            coordinator = _coordinators.get(identity)
+            if coordinator is None:
+                coordinator = _Coordinator()
+                _coordinators[identity] = coordinator
+            self._coordinator = coordinator
         try:
             self._conn = sqlite3.connect(str(database), isolation_level=None, timeout=5.0)
         except sqlite3.Error as exc:
@@ -92,6 +110,11 @@ class SqliteStore:
             self._conn.close()
             self._closed = True
             raise
+        from .session_memory import RuntimeConnection, SessionMemory
+
+        self.memory = SessionMemory(self)
+        self._runtime_connection = RuntimeConnection(self)
+        self._data_version = self._conn.execute("PRAGMA data_version").fetchone()[0]
 
     def _migrate(self):
         scripts = [Path(__file__).with_name("_schema.sql")] + [
@@ -151,6 +174,14 @@ class SqliteStore:
                     "SELECT sql FROM sqlite_master WHERE type=? AND name=?",
                     (kind.lower(), name),
                 ).fetchone()
+                if stored is None and kind.lower() == "index" and name == "spatial_object_lookup":
+                    # Backward-compatible Schema40 index addendum. Install only
+                    # while opening under the migration write lock, never during
+                    # an ordinary command. Existing facts/readers remain valid.
+                    self._conn.execute(statement)
+                    stored = self._conn.execute(
+                        "SELECT sql FROM sqlite_master WHERE type='index' AND name=?", (name,)
+                    ).fetchone()
                 expected = statement[declaration.start() :].strip().rstrip(";")
                 if stored is None or " ".join(stored[0].split()) != " ".join(expected.split()):
                     raise StateMachineError(
@@ -188,7 +219,7 @@ class SqliteStore:
     @property
     def connection(self):
         self.ensure_open()
-        return self._conn
+        return self._runtime_connection
 
     def ensure_open(self):
         if self._closed:
@@ -215,6 +246,7 @@ class SqliteStore:
         self._conn.close()
         if self._grid_maps is not None:
             self._grid_maps.clear()
+        self.memory.clear()
         self._closed = True
 
     def savepoint(self):
@@ -223,20 +255,95 @@ class SqliteStore:
 
     @contextmanager
     def transaction(self, *, write=False):
+        # Readers acquire the gate when fixing their current version. Existing
+        # read scopes may finish against the explicitly pinned older snapshot.
+        gate = self._coordinator.lock
+        gate.acquire()
+        held = True
+        try:
+            with self._transaction_scope(write=write) as scope:
+                if not write:
+                    gate.release()
+                    held = False
+                yield scope
+        finally:
+            if held:
+                gate.release()
+
+    @contextmanager
+    def _transaction_scope(self, *, write=False):
         self.ensure_open()
         if self._scope is not None:
             raise StateMachineError("invalid_transaction", "Use a savepoint within a transaction")
         scope = UnitOfWork(self, write)
+        started = perf_counter_ns()
+        committed = False
         try:
-            self._conn.execute("BEGIN IMMEDIATE" if write else "BEGIN")
+            self.memory.guard()
+            # Preparation reads one fixed RAM/SQLite snapshot. The database write
+            # lock is acquired only at the first incremental persistence statement.
+            self._conn.execute("BEGIN")
+            # Pin the SQLite reading snapshot before accepting any RAM range.
+            # This metadata fence never rereads loaded domain facts.
+            self._conn.execute("PRAGMA schema_version").fetchone()
+            data_version = self._conn.execute("PRAGMA data_version").fetchone()[0]
+            if data_version != self._data_version:
+                self.memory.clear()
+                self._data_version = data_version
+            scope.memory_versions = dict(self.memory.versions)
             self._scope = scope
             try:
                 yield scope
-                self._conn.commit()
-                for (cache, generation), pending in scope.derived_pending.items():
-                    cache.publish(generation, pending)
+                with self._coordinator.lock:
+                    try:
+                        commit_started = perf_counter_ns()
+                        if write:
+                            self._commit()
+                        else:
+                            self._conn.commit()
+                        committed = write
+                        if write:
+                            self.memory.stats["commit_ns"] += perf_counter_ns() - commit_started
+                    except BaseException:
+                        if write and not self._conn.in_transaction:
+                            self.memory.pause(scope)
+                            raise StateMachineError(
+                                "commit_outcome_unknown",
+                                "Reconcile the original command/work key before retrying",
+                            ) from None
+                        raise
+                    latest = self._conn.execute("PRAGMA data_version").fetchone()[0]
+                    if latest != self._data_version:
+                        # An explicitly older reader may return its fixed input,
+                        # but cannot publish it into current facts/derived caches.
+                        self.memory.clear()
+                        self._data_version = latest
+                        scope.derived_pending.clear()
+                        if write:
+                            raise StateMachineError(
+                                "external_write_during_publication", "Reconcile external writer"
+                            )
+                    else:
+                        if write:
+                            publish_started = perf_counter_ns()
+                            self.memory.publish(scope)
+                            self.memory.stats["publication_ns"] += (
+                                perf_counter_ns() - publish_started
+                            )
+                            self.memory.stats["write_scope_ns"] += perf_counter_ns() - started
+                        else:
+                            self.memory.accept_read(scope)
+                        for (cache, generation), pending in scope.derived_pending.items():
+                            cache.publish(generation, pending)
             except BaseException:
-                self._conn.rollback()
+                if committed:
+                    self.memory.pause(scope)
+                    raise StateMachineError(
+                        "committed_publication_pending",
+                        "SQLite committed; reconcile RAM before serving current state",
+                    ) from None
+                if self._conn.in_transaction:
+                    self._conn.rollback()
                 raise
             finally:
                 scope.read_memo.clear()
@@ -246,6 +353,75 @@ class SqliteStore:
         except sqlite3.Error as exc:
             scope.active = False
             raise StateMachineError("storage_error", "SQLite transaction failed") from exc
+
+    def _commit(self):
+        """Single durable boundary, also the fault-injection seam."""
+        self._conn.commit()
+
+    def begin_persistence(self):
+        """Leave the preparation snapshot, lock/recheck, then persist the delta.
+
+        No writes have happened at this transition. SQL savepoints are recreated;
+        their sparse RAM candidates remain isolated. A foreign writer invalidates
+        the entire prepared read scope, never splices newer SQL into older RAM.
+        """
+        self.require_write()
+        scope = self._scope
+        if scope.persisting:
+            return
+        self._conn.rollback()
+        self._conn.execute("BEGIN IMMEDIATE")
+        self._conn.execute("PRAGMA schema_version").fetchone()
+        latest = self._conn.execute("PRAGMA data_version").fetchone()[0]
+        for name, *_ in scope.memory_savepoints:
+            self._conn.execute(f"SAVEPOINT {name}")
+        if latest != self._data_version:
+            self.memory.pause(scope)
+            raise StateMachineError(
+                "session_reconciliation_required", "Prepared facts changed before persistence"
+            )
+        scope.persisting = True
+
+    @contextmanager
+    def reconciliation(self, sid=None):
+        """Stop current service while the caller validates persisted instances.
+
+        The caller must check original stable receipts and existing recovery
+        boundaries before reopening. Failure leaves the runtime paused.
+        """
+        self.ensure_open()
+        if self._scope is not None:
+            raise StateMachineError("invalid_transaction", "Drain the active scope first")
+        # Validation temporarily permits this caller's persisted reads. Keep the
+        # gate until acceptance so another connection cannot enter current service
+        # while the shared paused marker is temporarily removed.
+        with self._coordinator.lock:
+            self.memory.clear()
+            self.memory.paused = False
+            if sid is not None:
+                self.memory.paused_sessions.discard(sid)
+            try:
+                yield
+            except BaseException:
+                if sid is None:
+                    self.memory.paused = True
+                else:
+                    self.memory.paused_sessions.add(sid)
+                raise
+
+    def release_memory(self, sid=None):
+        self.ensure_open()
+        if self._scope is not None:
+            raise StateMachineError("invalid_transaction", "Cannot release an active scope")
+        if sid is None:
+            self.memory.clear()
+        else:
+            self.memory.release(sid)
+        if self._grid_maps is not None:
+            if sid is None:
+                self._grid_maps.clear()
+            else:
+                self._grid_maps.release(sid)
 
 
 class UnitOfWork:
@@ -258,6 +434,12 @@ class UnitOfWork:
         self.derived_pending = {}
         self.read_memo = {}
         self.read_stage = -1
+        self.memory_pending = {}
+        self.memory_versions = {}
+        self.memory_changes = []
+        self.memory_savepoints = []
+        self.memory_sessions = set()
+        self.persisting = False
 
     def _connection(self):
         self._store.ensure_open()

@@ -1,10 +1,10 @@
 """Versioned local NPC domain data and authorized reads; no cognition write API."""
 
-import json
 from dataclasses import dataclass
 from typing import Literal
 
 from .errors import StateMachineError
+from .scoped_reads import scoped_read
 
 NPC_STATE_SCHEMA = "npc-state/1"
 
@@ -176,14 +176,21 @@ class NPCRuntime:
         observer = self._npc_authorized(session_id, package, context)
         if npc_id != observer:
             raise StateMachineError("unauthorized", "NPC private state belongs to the observer")
+        return self._npc_current_view(session_id, npc_id, package)
+
+    @scoped_read
+    def _npc_current_view(self, session_id, npc_id, package):
         row = self._conn.execute(
-            "SELECT n.*,a.current_scene_id FROM npc_states n JOIN actors a "
-            "ON a.session_id=n.session_id AND a.actor_id=n.npc_id "
-            "WHERE n.session_id=? AND n.npc_id=? AND a.kind='npc'",
+            "SELECT * FROM npc_states WHERE session_id=? AND npc_id=?",
             (session_id, npc_id),
         ).fetchone()
-        if row is None:
+        actor = self._conn.execute(
+            "SELECT current_scene_id,kind FROM actors WHERE session_id=? AND actor_id=?",
+            (session_id, npc_id),
+        ).fetchone()
+        if row is None or actor is None or actor["kind"] != "npc":
             raise StateMachineError("npc_state_unavailable", "NPC persistent state is missing")
+        row = {**dict(row), "current_scene_id": actor["current_scene_id"]}
         records = {kind: [] for kind in RECORD_TYPES}
         for stored in self._conn.execute(
             "SELECT * FROM npc_private_records WHERE session_id=? AND npc_id=? "
@@ -204,7 +211,7 @@ class NPCRuntime:
                     ),
                 ).fetchall()
             )
-            data = json.loads(stored["payload_json"])
+            data = self._store.memory.json(stored["payload_json"])
             data.update(
                 record_id=stored["record_id"],
                 version=stored["content_version"],
@@ -215,15 +222,17 @@ class NPCRuntime:
             records[stored["record_kind"]].append(
                 RECORD_TYPES[stored["record_kind"]](**data, sources=sources)
             )
-        known = tuple(
-            KnownFact(f["fact_id"], f["text"])
-            for f in self._conn.execute(
-                "SELECT f.fact_id,f.text FROM npc_known_facts k JOIN world_facts f "
-                "USING(session_id,fact_id) WHERE k.session_id=? AND k.npc_id=? "
-                "AND f.visibility='npc_authorized' ORDER BY f.fact_id",
-                (session_id, npc_id),
-            ).fetchall()
-        )
+        known = []
+        for (fid,) in self._conn.execute(
+            "SELECT fact_id FROM npc_known_facts WHERE session_id=? AND npc_id=? ORDER BY fact_id",
+            (session_id, npc_id),
+        ):
+            fact = self._conn.execute(
+                "SELECT text,visibility FROM world_facts WHERE session_id=? AND fact_id=?",
+                (session_id, fid),
+            ).fetchone()
+            if fact is not None and fact["visibility"] == "npc_authorized":
+                known.append(KnownFact(fid, fact["text"]))
         return NPCView(
             row["schema_version"],
             package.package_digest,
@@ -235,14 +244,14 @@ class NPCRuntime:
             row["initialization_origin"],
             row["npc_state_version"],
             row["current_scene_id"],
-            _profile(json.loads(row["profile_json"])) if row["profile_json"] else None,
-            known,
+            _profile(self._store.memory.json(row["profile_json"])) if row["profile_json"] else None,
+            tuple(known),
             tuple(records["memory"]),
             tuple(records["belief"]),
             tuple(records["relationship"]),
             tuple(records["goal"]),
             tuple(records["plan"]),
-            _runtime(json.loads(row["runtime_json"])) if row["runtime_json"] else None,
+            _runtime(self._store.memory.json(row["runtime_json"])) if row["runtime_json"] else None,
             tuple(
                 NPCScheduleRun(
                     r["schedule_id"],

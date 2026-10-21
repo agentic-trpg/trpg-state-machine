@@ -1,11 +1,11 @@
 """Durable execution progress; never a second position, map or character store."""
 
-import json
 from dataclasses import asdict, dataclass
 
 from .errors import StateMachineError
 from .navigation_models import NavigationActivity, NavigationResult
 from .package import canonical_json
+from .scoped_reads import scoped_read
 
 
 @dataclass(frozen=True, slots=True)
@@ -40,8 +40,9 @@ class ActivityRecords:
             (sid, actor),
         ).fetchone()
 
+    @scoped_read
     def snapshot(self, record, world_version):
-        plan = tuple(json.loads(record["plan_json"]))
+        plan = tuple(self.store.memory.json(record["plan_json"]))
         return NavigationActivity(
             record["session_id"],
             record["activity_id"],
@@ -53,7 +54,7 @@ class ActivityRecords:
             record["cursor"],
             len(plan),
             plan,
-            NavigationResult(**json.loads(record["last_result_json"])),
+            NavigationResult(**self.store.memory.json(record["last_result_json"])),
             record["source_command_id"],
             record["last_command_id"],
             world_version,
@@ -122,7 +123,7 @@ class ActivityRecords:
         self.store.require_write()
         npc = self._runtime(record)
         if npc and npc[0]:
-            data = json.loads(npc[0])
+            data = self.store.memory.json(npc[0])
             if data["current_activity"] is not None:
                 raise StateMachineError("activity_conflict", "Actor already has an activity")
             data["current_activity"] = self.marker(record)
@@ -132,7 +133,7 @@ class ActivityRecords:
         self.store.require_write()
         npc = self._runtime(record)
         if npc and npc[0]:
-            data = json.loads(npc[0])
+            data = self.store.memory.json(npc[0])
             if data["current_activity"] == self.marker(record):
                 data["current_activity"] = None
                 self._write_runtime(record, data)
@@ -180,4 +181,6 @@ class ActivityRecords:
         ):
             return False
         npc = self._runtime(record)
-        return not (npc and npc[0]) or json.loads(npc[0])["current_activity"] == self.marker(record)
+        return not (npc and npc[0]) or self.store.memory.json(npc[0])[
+            "current_activity"
+        ] == self.marker(record)

@@ -350,7 +350,7 @@ class CommandRuntime:
         with self._transaction():
             admitted = self._session(command.session_id, package, context)
             self._session_runtime.guard_time_owner(command.session_id)
-            self._snapshot(admitted, package)
+            self._session_runtime.admit(admitted)
             fingerprint = self._session_runtime.fingerprint(command, admitted, context)
         if package.legacy_audit_only:
             raise StateMachineError(
@@ -441,10 +441,11 @@ class CommandRuntime:
                                 "event_cascade_limit", "Bounded schedule cascade exceeded"
                             )
                     if events:
-                        version = self._session_runtime.publish(command, row, package, events)
+                        version = self._session_runtime.stage_outcome(command, row, package, events)
                 except StateMachineError as exc:
                     if exc.code in {
                         "storage_error",
+                        "session_reconciliation_required",
                         "invalid_rule_result",
                         "rule_evaluation_failed",
                         "rule_schema_error",

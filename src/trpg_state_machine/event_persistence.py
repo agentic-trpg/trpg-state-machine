@@ -14,6 +14,7 @@ from .package import (
     canonical_json,
 )
 from .perception import _evidence_v4
+from .scoped_reads import scoped_read
 from .session_access import _binding
 
 
@@ -152,6 +153,7 @@ class EventPersistence:
             "UPDATE sessions SET event_seq = ? WHERE session_id = ?", (seq, session_id)
         )
 
+    @scoped_read
     def _read_event(self, session_id, seq):
         row = self._conn.execute(
             "SELECT e.*, r.event_id, r.source_command_id, r.signals_json FROM events e "

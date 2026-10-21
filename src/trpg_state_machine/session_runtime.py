@@ -14,6 +14,7 @@ from pydantic import ValidationError
 from .environment_commands import ENVIRONMENT_OPERATIONS, environment_operation_to_data
 from .errors import StateMachineError
 from .package import canonical_json
+from .scoped_reads import scoped_read
 from .session_access import _binding
 from .world_commands import ActivateMechanism, RepositionObject
 
@@ -62,6 +63,40 @@ class SessionRuntime:
 
     def fingerprint(self, command, row, context):
         return _fingerprint(command, row["package_digest"], _binding(row), context)
+
+    def admit(self, row):
+        """Required session-local facts; no full SessionSnapshot for an operation."""
+        sid = row["session_id"]
+        world = self._conn.execute(
+            "SELECT game_tick FROM world_states WHERE session_id=?", (sid,)
+        ).fetchone()
+        pc = self._conn.execute(
+            "SELECT actor_id FROM characters WHERE session_id=? AND actor_id=?",
+            (sid, row["pc_actor_id"]),
+        ).fetchone()
+        actor = self._conn.execute(
+            "SELECT current_scene_id FROM actors WHERE session_id=? AND actor_id=?",
+            (sid, row["pc_actor_id"]),
+        ).fetchone()
+        scene = self._conn.execute(
+            "SELECT scene_id FROM scene_instances WHERE session_id=? AND scene_id=?",
+            (sid, row["current_scene_id"]),
+        ).fetchone()
+        rng = self._conn.execute(
+            "SELECT state_id FROM rng_states WHERE session_id=?", (sid,)
+        ).fetchone()
+        if (
+            world is None
+            or pc is None
+            or actor is None
+            or scene is None
+            or rng is None
+            or actor[0] != row["current_scene_id"]
+            or rng[0] != row["rng_ref"]
+        ):
+            raise StateMachineError(
+                "incomplete_session", "Required persisted Session facts missing"
+            )
 
     def guard_time_owner(self, sid):
         """Attached Drivers use one local dispatcher; other connections may read.
@@ -236,7 +271,9 @@ class SessionRuntime:
                 row, package, admission["target_tick"], command.command_id, admission["source"], 8
             )
             version = (
-                self.publish(effective, row, package, events) if events else row["world_version"]
+                self.stage_outcome(effective, row, package, events)
+                if events
+                else row["world_version"]
             )
             ready = self.time.progress(sid)["status"] == "completed"
             self._conn.execute(
@@ -269,8 +306,8 @@ class SessionRuntime:
         ).fetchone()
         return None if row is None else receipt_from_json(row[0])
 
-    def publish(self, command, row, package, events):
-        """Publish an admitted changed outcome inside its existing savepoint."""
+    def stage_outcome(self, command, row, package, events):
+        """Stage versions/events; Store publishes RAM only after durable COMMIT."""
         self.store.require_write()
         self.access._check_package_pin(row, package)
         self.guard_time_owner(command.session_id)
@@ -464,9 +501,11 @@ class SessionRuntime:
         )
 
     def rng_context(self, row):
-        rng = self._conn.execute(
-            "SELECT * FROM rng_states WHERE session_id=?", (row["session_id"],)
-        ).fetchone()
+        return self._rng_context(row["session_id"])
+
+    @scoped_read
+    def _rng_context(self, sid):
+        rng = self._conn.execute("SELECT * FROM rng_states WHERE session_id=?", (sid,)).fetchone()
         if (
             rng is None
             or rng["algorithm"] != "stdlib-mt19937"

@@ -1,6 +1,7 @@
-"""Controlled current facts. These services share the caller's SQLite scope.
+"""Controlled current facts over the caller's consistent RAM/candidate scope.
 
-No method commits, computes rules, or keeps an authoritative in-memory copy.
+No method commits or computes rules. Store coordinates the RAM representation
+of these same owned facts and their incremental persistent changes.
 Rules metadata edits have a closed field set matching the pinned adapter.
 """
 
@@ -248,60 +249,55 @@ class CharacterFacts:
         )
 
     @scoped_read
+    def _component_inputs(self, row):
+        from .component_reads import ComponentInputs
+
+        return ComponentInputs(
+            {
+                field: self.store.memory.json(row[field])
+                for field in ("inventory_json", "resources_json", "casting_json", "effects_json")
+            }
+        )
+
+    @scoped_read
     def rule_components(self, sid, owner_ids, *, full_audit=False):
         """Read persisted facts, then project owners; absence is never an empty component."""
-        if full_audit:
-            row = self._conn.execute(
-                "SELECT * FROM mechanical_components WHERE session_id=?", (sid,)
-            ).fetchone()
-        else:
-            projections = []
-            for field, path, owner in (
-                ("inventory_json", "$.entries", "owner_id"),
-                ("resources_json", "$.pools", "owner_id"),
-                ("casting_json", "$.actors", "actor_id"),
-                ("effects_json", "$", "target_id"),
-            ):
-                condition = f"json_extract(v.value,'$.{owner}') IN (SELECT id FROM target_owners)"
-                if field == "inventory_json":
-                    # Include identity collisions and orphaned equipment actually
-                    # referenced by the selected Actors, never every other owner.
-                    condition += (
-                        " OR json_extract(v.value,'$.instance_id') "
-                        "IN (SELECT id FROM target_items) "
-                        "OR (json_extract(v.value,'$.item_slug') "
-                        "IN (SELECT slug FROM target_slugs) "
-                        "AND NOT EXISTS (SELECT 1 FROM mechanical_actors a "
-                        "WHERE a.session_id=mechanical_components.session_id "
-                        "AND a.actor_id=json_extract(v.value,'$.owner_id')))"
-                    )
-                selected = (
-                    f"(SELECT json_group_array(json(v.value)) FROM json_each({field},'{path}') v "
-                    f"WHERE {condition})"
-                )
-                value = selected if path == "$" else f"json_set({field},'{path}',json({selected}))"
-                projections.append(
-                    f"CASE WHEN {field}='null' THEN 'null' ELSE {value} END AS {field}"
-                )
-            row = self._conn.execute(
-                "WITH target_owners(id) AS MATERIALIZED (SELECT value FROM json_each(?)), "
-                "target_items(id) AS MATERIALIZED (SELECT json_extract(e.value,'$.instance_id') "
-                "FROM mechanical_components m,json_each(m.inventory_json,'$.entries') e "
-                "WHERE m.session_id=? AND json_extract(e.value,'$.owner_id') "
-                "IN (SELECT id FROM target_owners)), "
-                "target_slugs(slug) AS MATERIALIZED (SELECT v.value FROM characters c, "
-                "json_each(c.inventory_json) v WHERE c.session_id=? "
-                "AND c.actor_id IN (SELECT id FROM target_owners)) "
-                "SELECT schema_version,"
-                + ",".join(projections)
-                + " FROM mechanical_components WHERE session_id=?",
-                (json.dumps(sorted(owner_ids)), sid, sid, sid),
-            ).fetchone()
+        row = self._conn.execute(
+            "SELECT * FROM mechanical_components WHERE session_id=?", (sid,)
+        ).fetchone()
         if row is None or row["schema_version"] != "engine-snapshot/17":
             raise StateMachineError(
                 "unsupported_mechanical_version", "Explicit component facts are missing"
             )
         try:
+            if not full_audit:
+                inputs = self._component_inputs(row)
+                slugs = set()
+                for owner in owner_ids:
+                    core = self._conn.execute(
+                        "SELECT inventory_json FROM characters WHERE session_id=? AND actor_id=?",
+                        (sid, owner),
+                    ).fetchone()
+                    if core:
+                        slugs.update(self.store.memory.json(core[0]))
+
+                def exists(owner):
+                    return (
+                        self._conn.execute(
+                            "SELECT actor_id FROM mechanical_actors "
+                            "WHERE session_id=? AND actor_id=?",
+                            (sid, owner),
+                        ).fetchone()
+                        is not None
+                    )
+
+                row = {
+                    "schema_version": row["schema_version"],
+                    **{
+                        field: canonical_json(value)
+                        for field, value in inputs.select(owner_ids, slugs, exists).items()
+                    },
+                }
             inventory, resources, casting, effects = (
                 json.loads(row[field])
                 for field in ("inventory_json", "resources_json", "casting_json", "effects_json")
@@ -558,32 +554,43 @@ class CharacterFacts:
             )
 
     @scoped_read
-    def rule_actors(self, sid, owner_ids=None):
-        result = {}
-        for actor in self._conn.execute(
-            "SELECT m.actor_id,m.state_json,c.current_hp,c.max_hp,c.inventory_json,"
-            "c.resources_json,c.effects_json "
-            "FROM mechanical_actors m JOIN characters c USING(session_id,actor_id) "
-            "WHERE session_id=?"
-            + (
-                " AND m.actor_id IN (SELECT value FROM json_each(?))"
-                if owner_ids is not None
-                else ""
-            ),
-            (sid, json.dumps(sorted(owner_ids))) if owner_ids is not None else (sid,),
-        ):
-            if json.loads(actor["resources_json"]) or json.loads(actor["effects_json"]):
-                raise StateMachineError(
-                    "invalid_mechanical_state", "Legacy core resources/effects have no typed source"
-                )
-            data = json.loads(actor["state_json"])
-            data.update(
-                hp_current=actor["current_hp"],
-                hp_max=actor["max_hp"],
-                carried_item_slugs=json.loads(actor["inventory_json"]),
+    def _rule_actor(self, sid, actor_id):
+        actor = self._conn.execute(
+            "SELECT state_json FROM mechanical_actors WHERE session_id=? AND actor_id=?",
+            (sid, actor_id),
+        ).fetchone()
+        core = self._conn.execute(
+            "SELECT * FROM characters WHERE session_id=? AND actor_id=?", (sid, actor_id)
+        ).fetchone()
+        if actor is None or core is None:
+            return None
+        parse = self.store.memory.json
+        if parse(core["resources_json"]) or parse(core["effects_json"]):
+            raise StateMachineError(
+                "invalid_mechanical_state", "Legacy core resources/effects have no typed source"
             )
-            result[actor["actor_id"]] = data
-        return result
+        data = parse(actor[0])
+        data.update(
+            hp_current=core["current_hp"],
+            hp_max=core["max_hp"],
+            carried_item_slugs=parse(core["inventory_json"]),
+        )
+        return data
+
+    @scoped_read
+    def rule_actors(self, sid, owner_ids=None):
+        if owner_ids is None:
+            owner_ids = tuple(
+                row[0]
+                for row in self._conn.execute(
+                    "SELECT actor_id FROM mechanical_actors WHERE session_id=?", (sid,)
+                )
+            )
+        return {
+            owner: data
+            for owner in sorted(owner_ids)
+            if (data := self._rule_actor(sid, owner)) is not None
+        }
 
     def position(self, sid, actor_id):
         from .spatial import SpatialPosition
@@ -595,6 +602,7 @@ class CharacterFacts:
 
 
 class WorldFacts:
+    @scoped_read
     def environment(self, sid, scene_id):
         from .environment_commands import facts_from_data
 
@@ -744,6 +752,7 @@ class WorldFacts:
         ).fetchone()
         return row[0] if row else None
 
+    @scoped_read
     def mechanism_state(self, sid, oid):
         from .mechanism_models import MechanismState
 
@@ -1080,13 +1089,19 @@ class WorldFacts:
         ).fetchall()
 
     def descendant_objects(self, sid, roots):
-        return self._conn.execute(
-            "WITH RECURSIVE closure(id) AS (SELECT value FROM json_each(?) UNION "
-            "SELECT o.object_id FROM objects o JOIN closure c ON o.container_id=c.id "
-            "WHERE o.session_id=?) SELECT o.* FROM objects o JOIN closure c ON c.id=o.object_id "
-            "WHERE o.session_id=? ORDER BY o.object_id",
-            (json.dumps(tuple(roots)), sid, sid),
-        ).fetchall()
+        found, visited, pending = {}, set(), list(roots)
+        while pending:
+            oid = pending.pop()
+            if oid in visited:
+                continue
+            visited.add(oid)
+            row = self.object(sid, oid)
+            if row is not None:
+                found[oid] = row
+            # Include children of a missing root as the previous SQL UNION did;
+            # domain admission, rather than traversal, reports corrupt relations.
+            pending.extend(row["object_id"] for row in self.contents(sid, oid))
+        return [found[oid] for oid in sorted(found)]
 
     def related_objects(self, sid, roots):
         """Ancestors plus their complete descendant aggregates, in stable ID order.
@@ -1094,52 +1109,61 @@ class WorldFacts:
         UNION terminates corrupt cycles; the domain admission still rejects them.
         Sibling subtrees are required for ancestor weight/capacity, not optional.
         """
-        return self._conn.execute(
-            "WITH RECURSIVE ancestors(id) AS (SELECT value FROM json_each(?) UNION "
-            "SELECT o.container_id FROM objects o JOIN ancestors a ON o.object_id=a.id "
-            "WHERE o.session_id=? AND o.container_id IS NOT NULL), "
-            "closure(id) AS (SELECT id FROM ancestors UNION "
-            "SELECT o.object_id FROM objects o JOIN closure c ON o.container_id=c.id "
-            "WHERE o.session_id=?) "
-            "SELECT o.* FROM objects o JOIN closure c ON c.id=o.object_id "
-            "WHERE o.session_id=? ORDER BY o.object_id",
-            (json.dumps(tuple(roots)), sid, sid, sid),
-        ).fetchall()
+        ancestors, pending = set(), list(roots)
+        while pending:
+            oid = pending.pop()
+            if oid in ancestors:
+                continue
+            ancestors.add(oid)
+            row = self.object(sid, oid)
+            if row is not None and row["container_id"] is not None:
+                pending.append(row["container_id"])
+        return self.descendant_objects(sid, ancestors)
 
     def scene_object_rows(
         self, sid, scene_id, *, carrier_id=None, all_carriers=False, extra=(), lights_only=False
     ):
         """Ground/carried roots and descendants; actual pose, never template membership."""
-        return self._conn.execute(
-            "WITH RECURSIVE local(id) AS ("
-            "SELECT object_id FROM objects WHERE session_id=? AND (scene_id=? OR "
-            "carrier_id=? OR (? AND carrier_id IN (SELECT actor_id FROM actors "
-            "WHERE session_id=? AND current_scene_id=?)) OR object_id IN "
-            "(SELECT value FROM json_each(?))) UNION "
-            "SELECT o.object_id FROM objects o JOIN local l ON o.container_id=l.id "
-            "WHERE o.session_id=?) "
-            "SELECT o.* FROM objects o JOIN local l ON l.id=o.object_id "
-            "WHERE o.session_id=?"
-            + (
-                " AND EXISTS (SELECT 1 FROM object_lights l WHERE "
-                "l.session_id=o.session_id AND l.object_id=o.object_id)"
-                if lights_only
-                else ""
+        if lights_only and not self._has_lights(sid):
+            return []
+        roots = set(extra)
+        roots.update(
+            row[0]
+            for row in self._conn.execute(
+                "SELECT object_id FROM objects WHERE session_id=? AND scene_id=?", (sid, scene_id)
             )
-            + " ORDER BY o.object_id",
-            (
-                sid,
-                scene_id,
-                carrier_id,
-                all_carriers,
-                sid,
-                scene_id,
-                json.dumps(tuple(extra)),
-                sid,
-                sid,
-            ),
-        ).fetchall()
+        )
+        carriers = set(() if carrier_id is None else (carrier_id,))
+        if all_carriers:
+            carriers.update(
+                row[0]
+                for row in self._conn.execute(
+                    "SELECT actor_id FROM actors WHERE session_id=? AND current_scene_id=?",
+                    (sid, scene_id),
+                )
+            )
+        for carrier in sorted(carriers):
+            roots.update(
+                row[0]
+                for row in self._conn.execute(
+                    "SELECT object_id FROM objects WHERE session_id=? AND carrier_id=?",
+                    (sid, carrier),
+                )
+            )
+        rows = self.descendant_objects(sid, roots)
+        return [row for row in rows if not lights_only or self.light_state(sid, row["object_id"])]
 
+    @scoped_read(membership=("object_lights",))
+    def _has_lights(self, sid):
+        """Indexed existence, not Scene enumeration when no emitter exists."""
+        return (
+            self._conn.execute(
+                "SELECT 1 FROM object_lights WHERE session_id=? LIMIT 1", (sid,)
+            ).fetchone()
+            is not None
+        )
+
+    @scoped_read
     def item_entry(self, row):
         sid, oid = row["session_id"], row["object_id"]
         data = self.require_item_unit(row)
@@ -1149,9 +1173,8 @@ class WorldFacts:
         data["accessible"] = data["accessible"] and self.item_accessible(sid, oid, row=row)
         return {"instance_id": oid, "owner_id": placement["carrier_id"], **data}
 
-    @staticmethod
-    def require_item_unit(row):
-        data = json.loads(row["item_json"]) if row["item_json"] is not None else None
+    def require_item_unit(self, row):
+        data = self.store.memory.json(row["item_json"]) if row["item_json"] is not None else None
         if not valid_item_unit(data):
             raise StateMachineError("invalid_mechanical_state", "Portable unit metadata is invalid")
         return data
@@ -1163,18 +1186,24 @@ class WorldFacts:
                 "SELECT * FROM objects WHERE session_id=? AND item_json IS NOT NULL", (sid,)
             )
         else:
-            rows = self._conn.execute(
-                "WITH RECURSIVE owned(id) AS (SELECT object_id FROM objects WHERE session_id=? "
-                "AND carrier_id IN (SELECT value FROM json_each(?)) UNION "
-                "SELECT o.object_id FROM objects o JOIN owned c ON o.container_id=c.id "
-                "WHERE o.session_id=?) SELECT * FROM objects WHERE session_id=? "
-                "AND item_json IS NOT NULL AND (object_id IN (SELECT id FROM owned) "
-                "OR object_id IN (SELECT value FROM json_each(?))) ORDER BY object_id",
-                (sid, json.dumps(sorted(owner_ids)), sid, sid, json.dumps(tuple(instance_ids))),
-            )
+            roots = [
+                r[0]
+                for owner in sorted(owner_ids)
+                for r in self._conn.execute(
+                    "SELECT object_id FROM objects WHERE session_id=? AND carrier_id=?",
+                    (sid, owner),
+                )
+            ]
+            selected = {r["object_id"]: r for r in self.descendant_objects(sid, roots)}
+            for oid in instance_ids:
+                if (row := self.object(sid, oid)) is not None:
+                    selected[oid] = row
+            rows = [
+                selected[oid] for oid in sorted(selected) if selected[oid]["item_json"] is not None
+            ]
         for row in rows:
             identities.add(row["object_id"])
-            data = json.loads(row["item_json"])
+            data = self.store.memory.json(row["item_json"])
             # Ground metadata is validated without constructing a fictional owner.
             if not valid_item_unit(data):
                 raise StateMachineError(
@@ -1240,18 +1269,23 @@ class WorldFacts:
             "INSERT INTO world_time_bindings VALUES (?,?)", (sid, canonical_json(asdict(binding)))
         )
 
-    def time_state(self, sid):
+    @scoped_read
+    def _time_binding(self, sid):
         from .time_binding import LegacyTimeBinding, time_binding_from_data
 
         row = self._conn.execute(
-            "SELECT w.game_tick,b.binding_json FROM world_states w "
-            "LEFT JOIN world_time_bindings b USING(session_id) WHERE w.session_id=?",
+            "SELECT binding_json FROM world_time_bindings WHERE session_id=?",
             (sid,),
+        ).fetchone()
+        return time_binding_from_data(json.loads(row[0])) if row else LegacyTimeBinding()
+
+    def time_state(self, sid):
+        row = self._conn.execute(
+            "SELECT game_tick FROM world_states WHERE session_id=?", (sid,)
         ).fetchone()
         if row is None:
             raise StateMachineError("session_not_found", "Unknown clock")
-        binding = time_binding_from_data(json.loads(row[1])) if row[1] else LegacyTimeBinding()
-        return binding, row[0]
+        return self._time_binding(sid), row[0]
 
     def initialize_rule_scene(self, sid, scene):
         self.store.require_write()

@@ -1,19 +1,20 @@
 """Bounded containment; parent links own location and inventory is a projection."""
 
-import json
 from collections.abc import Mapping
 from dataclasses import asdict
 from types import MappingProxyType
 
 from .errors import StateMachineError
+from .scoped_reads import scoped_read
 from .world_commands import PutItem, TakeItem
 
 
 class ContainmentState(Mapping):
-    """One detached state, adjacency index and memo; owned by a single operation.
+    """One detached relationship candidate and its local adjacency/weight memo.
 
     Rows cannot change behind the index. relocate updates the candidate index and
-    expires all state-dependent weights. Nothing is published to a service/cache.
+    expires local weights. Session memory separately reuses derived total_weight
+    results keyed by these exact rows and their instance-configuration dependencies.
     """
 
     def __init__(self, rows):
@@ -36,6 +37,9 @@ class ContainmentState(Mapping):
 
     def contents(self, oid):
         return tuple(self._rows[i] for i in self.children.get(oid, ()))
+
+    def runtime_key(self):
+        return tuple((oid, tuple(sorted(row.items()))) for oid, row in sorted(self._rows.items()))
 
     def relocate(self, oid, **changes):
         before = self._rows[oid]
@@ -108,8 +112,11 @@ class ContainerService:
     def prepare(rows):
         return rows if isinstance(rows, ContainmentState) else ContainmentState(rows)
 
+    @scoped_read
     def total_weight(self, oid, rows, package, *, path=frozenset()):
         state = self.prepare(rows)
+        sid = state[oid]["session_id"]
+        self.h.store.memory.dependency("instance_configs", sid)
         return self._weight(oid, state, path)
 
     def _weight(self, oid, state, path):
@@ -121,7 +128,7 @@ class ContainerService:
         children = state.contents(oid)
         if children and (d is None or d.capability("container") is None):
             raise StateMachineError("unsupported_object_capability", "Parent is not a container")
-        data = json.loads(state[oid]["item_json"]) if state[oid]["item_json"] else {}
+        data = self.h.store.memory.json(state[oid]["item_json"]) if state[oid]["item_json"] else {}
         total = None if d is None or d.weight_lb is None else d.weight_lb * data.get("quantity", 1)
         for child in children:
             weight = self._weight(child["object_id"], state, path | {oid})
@@ -198,7 +205,7 @@ class ContainerService:
                         "container_rejects_item", "Content or opening policy rejects item"
                     )
                 weights.append(self.total_weight(item["object_id"], rows, package))
-                quantity = json.loads(item["item_json"])["quantity"]
+                quantity = self.h.store.memory.json(item["item_json"])["quantity"]
                 volumes.append(None if d.volume_cu_ft is None else d.volume_cu_ft * quantity)
             for limit, values in (
                 (c.capacity_weight_lb, weights),

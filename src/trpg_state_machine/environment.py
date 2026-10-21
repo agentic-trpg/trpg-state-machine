@@ -148,6 +148,10 @@ class EnvironmentService:
         self._projections.clear()
         self._cells.clear()
 
+    def release_session(self, sid):
+        self._projections.release(sid)
+        self._cells.release(sid)
+
     def bind_providers(self, sid, package, *, context):
         """Trusted host configuration; register owner dependencies atomically, not on reads."""
         with self.h._transaction(write=True):

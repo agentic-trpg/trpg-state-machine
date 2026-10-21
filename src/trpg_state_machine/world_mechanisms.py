@@ -12,6 +12,7 @@ from ._execution import _WorldEffectKind, _WorldEffectOrigin
 from ._operations import ObjectState, SetObjectState
 from .errors import StateMachineError
 from .mechanism_effects import MechanismEffectRunner
+from .scoped_reads import scoped_read
 from .world_commands import CheckMechanism, SetLightEnabled
 
 
@@ -486,6 +487,7 @@ class MechanismService:
                 )
         return events
 
+    @scoped_read(membership=("object_mechanisms",))
     def _build_index(self, sid):
         index = {}
         for oid, c in self.h.facts.instances.mechanism_configs(sid):

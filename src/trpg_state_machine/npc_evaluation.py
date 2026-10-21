@@ -9,6 +9,7 @@ from .npc_state import NPCView
 from .observation_lifecycle import RecentObservation
 from .package import canonical_json
 from .perception import EventObservation, NPCContext
+from .scoped_reads import scoped_read
 
 
 @dataclass(frozen=True, slots=True)
@@ -74,6 +75,7 @@ class NPCEvaluationRuntime:
             raise StateMachineError("unauthorized", "Task is not bound to this controller")
         return row
 
+    @scoped_read
     def _task(self, row):
         works = self._conn.execute(
             "SELECT w.work_id,w.observation_id FROM npc_evaluation_observations t "

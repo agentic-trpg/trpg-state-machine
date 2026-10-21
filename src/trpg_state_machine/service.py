@@ -1,4 +1,4 @@
-"""One SQLite authority, short transactions, detached reads, no runtime cache."""
+"""Domain-owned facts, consistent Session RAM reads and durable publication."""
 
 import json
 from pathlib import Path
@@ -47,6 +47,7 @@ from .package_effects import PackageEffects
 from .perception import PerceptionRuntime
 from .perception_queue import PerceptionQueueRuntime
 from .rules_adapter import RulesAdapter
+from .scoped_reads import scoped_read
 from .session_access import SessionAccess, _binding
 from .session_creation import SessionCreation
 from .session_runtime import SessionRuntime
@@ -196,6 +197,7 @@ class StateMachine(
             for driver in tuple(self._session_runtime.time.drivers.values()):
                 driver.close()
             self._store.close()
+            self.environment.clear_snapshots()
 
     def _ensure_open(self) -> None:
         self._store.ensure_open()
@@ -276,6 +278,7 @@ class StateMachine(
             source_command_id=source_command_id,
         )
 
+    @scoped_read
     def _snapshot(self, row, package) -> SessionSnapshot:
         sid = row["session_id"]
         world = self._conn.execute(
@@ -375,6 +378,16 @@ class StateMachine(
         with self._transaction():
             return self._snapshot(self._session(session_id, package, context), package)
 
+    def unload_session(self, session_id, package, *, context):
+        """Release loaded facts without re-instantiation or changing game state."""
+        with self._transaction():
+            self._session(session_id, package, context)
+        driver = self._session_runtime.time.drivers.get(session_id)
+        if driver is not None:
+            driver.close()
+        self._store.release_memory(session_id)
+        self.environment.release_session(session_id)
+
     def save_session(
         self, session_id: str, package: AdventurePackage, *, context: TrustedContext
     ) -> SessionSnapshot:
@@ -402,6 +415,13 @@ class StateMachine(
         self, session_id: str, package: AdventurePackage, *, context: TrustedContext
     ) -> SessionSnapshot:
         """Resume the persisted noncombat foundation, without replaying templates."""
+        if self._store.memory.paused or session_id in self._store.memory.paused_sessions:
+            driver = self._session_runtime.time.drivers.get(session_id)
+            if driver is not None:
+                driver.close()
+            self.environment.release_session(session_id)
+            with self._store.reconciliation(session_id):
+                return self.save_session(session_id, package, context=context)
         return self.save_session(session_id, package, context=context)
 
     def upgrade_instance_configs(self, session_id, package, *, context):
@@ -412,6 +432,14 @@ class StateMachine(
         """
         with self._transaction(write=True):
             row = self._session(session_id, package, context)
+            # The Store gate drains current mutations. Evict the old runtime
+            # representation; the validation below accepts the installed records.
+            driver = self._session_runtime.time.drivers.get(session_id)
+            if driver is not None:
+                driver.close()
+            self._store.memory.release(session_id)
+            self._world_facts.maps.release(session_id)
+            self.environment.release_session(session_id)
             facts = self._world_facts
             scenes = tuple(
                 r[0]

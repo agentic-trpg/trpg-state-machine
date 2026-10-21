@@ -1,8 +1,8 @@
-"""Bounded Grid runtime representations, rebuilt from transaction-visible content.
+"""Bounded Grid representations over consistent RAM/candidate fact records.
 
-SQLite remains authoritative. There is deliberately no cached "current map"
-pointer: every live lookup first reads its exact encoded record in the caller's
-transaction. Candidate/rolled-back/older-reader records cannot alias newer data.
+Exact content selects immutable maps; the runtime record reader resolves loaded
+facts without SQL. Candidate/rolled-back/older-reader inputs cannot alias newer
+data. Grid geometry remains separate from base-fact ownership and publication.
 """
 
 import json
@@ -70,6 +70,9 @@ class ReadOnlyTopology(GridTopology):
     def __delattr__(self, name):
         raise AttributeError("Prepared topology is read-only")
 
+    def __deepcopy__(self, memo):
+        return self
+
 
 @dataclass(frozen=True, slots=True)
 class PreparedGrid:
@@ -85,6 +88,9 @@ class PreparedGrid:
     def copy_data(self):
         return _thaw(self.data)
 
+    def __deepcopy__(self, memo):
+        return self
+
 
 @dataclass(frozen=True, slots=True)
 class PreparedScene:
@@ -93,6 +99,9 @@ class PreparedScene:
 
     def copy_data(self):
         return _thaw(self.data)
+
+    def __deepcopy__(self, memo):
+        return self
 
 
 class GridMaps:

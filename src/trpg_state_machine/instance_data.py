@@ -139,6 +139,7 @@ class InstanceData:
             (sid, domain, identity, canonical_json(encode(value))),
         )
 
+    @scoped_read
     def get(self, sid, domain, identity):
         row = self.conn.execute(
             "SELECT config_json FROM instance_configs WHERE session_id=? AND domain=? "
@@ -150,7 +151,7 @@ class InstanceData:
                 "incomplete_instance_config", "Explicit instance upgrade required"
             )
         try:
-            return decode(json.loads(row[0]))
+            return decode(self.facts.store.memory.json(row[0]))
         except (KeyError, TypeError, ValueError) as exc:
             raise StateMachineError(
                 "incomplete_instance_config", "Invalid instance configuration"
@@ -278,7 +279,7 @@ class InstanceData:
                 (sid, oid),
             ).fetchone()
             return decode(json.loads(row[0])) if row else None
-        data = json.loads(self.get(sid, "object", oid)["definition"])
+        data = self.facts.store.memory.json(self.get(sid, "object", oid)["definition"])
         if data is None:
             return None
         # Fill constructor-only initial fields from CURRENT facts, never templates.
@@ -410,6 +411,10 @@ class InstanceData:
 
     @scoped_read
     def scene(self, sid, scene_id):
+        return SceneConfig(self, sid, dict(self._scene_data(sid, scene_id)))
+
+    @scoped_read
+    def _scene_data(self, sid, scene_id):
         row = self.conn.execute(
             "SELECT json_remove(config_json,'$.object_ids','$.actor_ids','$.actor_initial_ids',"
             "'$.pending_objects','$.pending_actors','$.pending_definitions') FROM instance_configs "
@@ -434,7 +439,7 @@ class InstanceData:
                     "incomplete_instance_config", "Explicit instance upgrade required"
                 )
             raise StateMachineError("unknown_scene", f"Unknown scene: {scene_id}")
-        return SceneConfig(self, sid, decode(json.loads(row[0])))
+        return decode(self.facts.store.memory.json(row[0]))
 
     def scenes(self, sid):
         return tuple(self.scene(sid, scene_id) for scene_id in self.session_value(sid, "scene_ids"))
