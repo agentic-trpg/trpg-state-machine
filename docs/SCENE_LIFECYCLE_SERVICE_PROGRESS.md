@@ -1,5 +1,9 @@
 # W-01 场景生命周期切片进度
 
+## 2026-10-21 文档目标补充（未实施）
+
+Architecture Decision Status **[DECIDED]**；完整 Session 内存运行层 Implementation Status **[NOT IMPLEMENTED]**；Acceptance Status **本次未执行运行验收**。 区分首次创建、已有实例加载到 RAM、实际入场，冷加载版本一致；加载／释放不得重置位置／访问或制造入场。完整 Session 生命周期仍待实施。 统一责任与验收引用 [Session Management](SESSION_MANAGEMENT.md#session-内存运行生命周期与事实访问2026-10-21)，沿既有 C-25／C-27／A2／DS 跟踪，不另造任务体系。本轮仅修改文档，未执行本领域业务或性能测试；下述历史日期／SHA／测试数字保留原证据范围。
+
 2026-10-20：Schema39 保存实例配置；ensure_scene 新建后完成配置装配并清除未实例化预测计划，
 既有实例只读验证；旧库通过显式源校验升级。详见 [当前记录](INSTANCE_CONFIGURATION_PROGRESS.md)。
 

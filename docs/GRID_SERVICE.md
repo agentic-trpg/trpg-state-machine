@@ -1,5 +1,11 @@
 # GridService
 
+## 2026-10-21 Session 运行层接入目标
+
+Architecture Decision Status **[DECIDED]**；完整 Session 内存运行层 Implementation Status **[NOT IMPLEMENTED]**；Acceptance Status **本次未执行运行验收**。 统一事实读取、候选／持久提交／内存发布与故障规则见 [Session Management](SESSION_MANAGEMENT.md#session-内存运行生命周期与事实访问2026-10-21) 及其 MC 引用；下文带日期接口与测试仍描述各自已有能力，不改变当前 ABI。
+
+保留已有只读 GridMaps／基础拓扑、Schema40 定向占格与 local_topology，目标将地图配置、角色／对象姿态及动态贡献从统一 RAM 一致范围读取，再构建必要 GridView／Snapshot。候选几何检查读候选位置和候选索引；旧 View 不随发布／回滚／释放改变。当前 GridMaps.scene 仍读 state_json 取内容键，操作 SQL／memo 不是完整 RAM 运行层；接入后不应为有效内存地图反复读库验证。
+
 ## 稳定职责与契约
 
 GridService 负责 Scene 网格内容的读取、坐标／边界校验、当前空间事实组合及几何查询。

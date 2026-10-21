@@ -1,5 +1,51 @@
 # Session Management
 
+## Session 内存运行生命周期与事实访问（2026-10-21）
+
+Architecture Decision Status **[DECIDED]**；完整 Session 内存运行层 Implementation Status **[NOT IMPLEMENTED]**；Acceptance Status **本次未执行运行验收**。 单一领域所有权、统一 RAM 读取、SQLite 增量提交后发布与故障恢复由 [上游 MC §0.3／§2.3／§6](https://github.com/agentic-trpg/agentic-trpg/blob/docs/session-memory-runtime/docs/MODULE_CONTRACTS.md) 维护；本节细化本仓库责任，不复制另一套协议。链接指向本次配套文档分支，**不表示已合并 main**。逻辑并列工作区为 `session-memory-runtime/agentic-trpg`、`trpg-state-machine`、`trpg-rules-engine`；本地权威文档对应 `../agentic-trpg/docs/`。
+
+当前静态证据固定于 SM **`d6be5a99b12fefcf8cfc57fdebb81493c1ac4d34`**（fetch 后 origin/main，包含用户指定提交）；架构基线 `8cdfc18390d105ff1d4c19ba70712276afb3eee8`，RE main `34ce8e764c1a8b1d5be2c4465a013e322fdbbc5a`。SM 固定 Engine／SRD 仍为 `a011eba3ea2226e22d8081294ee38d3ec193b325`，Schema40；本次无代码、依赖、Schema 或公开 DTO 变更。下文带日期的批次保留原始实现、测试和版本，不作为最新状态。
+
+### 目标责任
+
+- Session 统一管理活跃角色／物品／场景实例配置／关系／机关／环境来源／效果等的内存生命周期、一致读取和最终修改顺序；WorldFacts、CharacterFacts、CombatRecords、Activity、Effects、NPC Cognition 各拥有其事实和不变量，不集中进巨型 SessionState。
+- RAM 是已提交当前事实的运行表示，SQLite 是同一事实的持久提交表示及对账／恢复依据；二者不独立接受业务写入。Facts／Records 演进为统一访问与受控修改边界，业务调用方不自行选 SQL／RAM，不直接修改共享对象或绕过协调写库。
+- 已加载且有效的事实，查询、操作检查、RE 请求、角色视图、Snapshot 和环境／光照／重量派生输入统一从同一版本 RAM 读取；已有有效派生结果直接复用。不再为同批事实重复 SQL／JSON／装配，也不通过每读查库扫描证明 RAM 有效。提交必要数据库约束、权限、版本／原值和 OCC 校验保留。
+- 固定输入不可被后续发布改变；候选中间阶段从隔离候选读取，不提前改已发布对象，不读旧 SQL 漏掉候选变化。不要求每次全 Session 拷贝或每次查询完整 Snapshot；具体组织、读范围接口、细粒度版本、锁及容量预算 OPEN。
+- 首次／冷加载与恢复只用持久实例事实并保证读取版本一致；无法补齐同一时点则重试／重建读取范围，不能混接数据或从 Package 默认值补字段。按 Session／活跃场景及真实依赖加载，明确卸载／冷访问／引用／容量和关闭释放，不让全部世界及历史常驻 RAM。
+- 每个 Session／世界唯一协调最终修改；推理和网络／只读工作可并行，最终提交有序。异步返回重验权限、版本、任务资格和前提；不在写事务或世界提交临界区等待玩家、LLM、外部 I/O 或长时间 RE。进程内协调＋SQLite 路线不变；未来 5–6 玩家不扩大当前单人 MVP，提交先后不替代争抢／先攻规则。
+
+### 现有组件—目标责任—迁移缺口（固定源码静态核对）
+
+源码路径均为 `src/trpg_state_machine/`；本次阅读测试源码，未运行这些业务测试。
+
+| 现有组件／路径 | 已有能力 | 目标责任与缺口 |
+|---|---|---|
+| `session_creation.py`／`scene_lifecycle.py` | 创建幂等、领域初始化及延迟实例化；既有实例验证，Schema40 结构验收 | 创建 COMMIT 后发布，加载／卸载与首次实例化／实际进入分离；完整活跃 RAM 生命周期未实现 |
+| `session_access.py`／`session_runtime.py` | 授权、固定绑定、指纹／回执、版本、RNG、地图准备／释放和时间协调 | 统一 RAM 元数据／版本与修改协调；当前 `publish` 在 SQL 事务内写版本／事件，不能当作提交后运行事实发布 |
+| `storage.py`／UnitOfWork | BEGIN／BEGIN IMMEDIATE、外层 COMMIT／ROLLBACK、savepoint；提交后发布 `derived_pending` | 保留短事务；增加完整事实发布门槛及 SQL 已提交而发布失败的暂停／对账／重建；目前只是派生缓存发布 |
+| `domain_facts.py`（CharacterFacts／WorldFacts／CombatRecords）、`instance_data.py`、`activity_records.py` | 领域 SQL 访问／受控写入与配置闭包，唯一事实／库存投影 | 业务统一从已加载 RAM／候选读取，再增量持久化；不再让调用方依赖具体 SQL；逐域盘点尚待实施 |
+| `service.py` 的 `_snapshot`／read/save/resume，`rules_adapter.py` 的机械 Snapshot | 读取 SQLite、解析 JSON／装配 DTO；save 只读校验已持久事实，resume 委托 save | Snapshot／角色投影／RE 组装统一读固定 RAM 版本；当前仍有重复装配，非全内存路径 |
+| `commands.py`／`rule_execution.py`／`mechanical_runtime.py` | 普通／真实 RE／合成执行，事务外 RE，写事务重验、savepoint、RNG／回执 | 保留合法失败／拒绝／冲突／pending choice；增加隔离候选与提交后发布，不无版本混用旧 SQL／新 RAM |
+| `event_capture.py`／`event_persistence.py`／感知队列 | 生产阶段冻结依据，同事务事件／Evidence／Outbox／可靠投影进度 | 阶段读取转候选，已提交来源及历史输入不可变；当前投影须等内存版本就绪，投递失败不回滚事实 |
+| `npc_evaluation.py`／`npc_results.py`／`npc_modes.py`／`npc_outputs.py` | 独立 Task、Meta、Result、模式、交接事务及稳定键／资格检查；不都经过 CommandRuntime | 这些真实写入口也统一提交／发布，不能只接玩家命令；细粒度认知版本策略 OPEN，防旧结果继续保留 |
+| `time_coordination.py`／`time_driver.py`／Activity／机关／PackageEffects | 有界时间工作、真实 Round、现有领域联动、独立可靠步骤 | 系统和后台修改统一协调并逐步发布；不创造第二时钟，不误称完整 Effects／时间消费者已接通 |
+| `scoped_reads.py`／`grid_maps.py`／`environment.py`／`world_containers.py`／`world_mechanisms.py` | 操作阶段 memo、内容键地图复用、环境版本缓存、ContainmentState、批内机关索引；Schema40 SQL 派生索引 | 保留有效资产；跨命令事实／索引／重量复用与统一版本维护需独立实施，不能由 memo 名称推定完成 |
+
+### 提交、发布和恢复的本地接入责任
+
+请求从一致 RAM 准备并固定必要输入／独立 RNG，领域在隔离候选上计算及检查中间变化；唯一协调者重验后，Facts／Records 在同一 SQLite 短事务增量写入全部实际变化、版本、RNG、必要事件／证据、Receipt、Outbox 和可靠工作。COMMIT 后运行层发布对应 RAM，维护相关索引／依赖并失效缓存；该版本就绪后才允许后续当前态操作并正常返回成功及对应投影。更新范围按变化决定，不每条命令保存／重载整个世界。
+
+完整故障矩阵只维护于 MC §6.4：提交前失败不发布候选、不推进权威 RNG／发送事件；结果未知按原 command_id／工作键对账；提交后发布前崩溃从库恢复；发布异常进程仍活着时暂停该 Session 并按库重建，不能读落后 RAM 或伪报未提交失败；响应丢失返原回执；Outbox 失败可靠重试。SQLite 与 RAM 不是跨介质 ACID，现有 Store 的缓存发布循环不证明完整故障协议已实现。
+
+恢复校验 Schema、Package／Ruleset、持久事实／RNG／回执及可靠工作后，重建活跃 RAM 与必要索引，昂贵派生按需计算。手动／定期存档是命名检查点、一致备份与受控回档，不是唯一持久化入口；复制活跃主文件不等同完整 SQLite 备份。迁移、导入、修复与维护先停用／排空相关 Session，受控修改后重载校验再开放；脚本不能绕过运行层直改活跃库。事实恢复仍不保证活跃战斗、PendingChoice／Continuation 任意阶段可续玩，当前 combat_unrestorable／绑定拒绝保持。
+
+### 后续验收边界
+
+迁移沿 [现有 C-25／C-27／A2／DS 轨道](https://github.com/agentic-trpg/agentic-trpg/blob/docs/session-memory-runtime/docs/GAME_CORE_EVOLUTION_PLAN.md#81a-session-内存运行层的依赖阶段2026-10-21)。先盘点全部读写／提交／恢复入口，再定义边界；以已支持物品转移真实切片验证加载、查询、候选、增量提交、失败、重试及重启，逐领域推广后接索引／派生，最后在正确性证据上测 5–6 玩家及适量 NPC。聚合 JSON 拆分、RE 按需机械闭包与 RAM 接入分别验收；新旧路径不独立写同一事实，同操作不无版本混读。
+
+验收同时检查 SQL、RAM 当前态、旧读取引用／固定 Snapshot、索引、缓存及恢复。至少覆盖提交失败／未知、持久成功后发布失败、丢响应、Outbox 重试、重复命令、旧 NPC 结果、并发取物及真实竞争语义；场景加载／卸载、版本一致冷补入、进程重启和派生重建；热路径不重复解析装配同批事实、局部操作不随无关实体扫描整个 Session。性能以真实调用链 SQL 行数／解析／构建／扫描、提交／发布及内存测量为准，不凭人数给吞吐承诺。
+
 ## 2026-10-20 当前更正
 
 Schema39 将已存在的实例配置读取依赖迁移至 WorldFacts.instances；配置与当前事实分离。

@@ -1,5 +1,9 @@
 # ContainerService 专项修复
 
+## 2026-10-21 文档目标补充（未实施）
+
+Architecture Decision Status **[DECIDED]**；完整 Session 内存运行层 Implementation Status **[NOT IMPLEMENTED]**；Acceptance Status **本次未执行运行验收**。 当前 ContainmentState／weights 为操作内复用；跨命令父子索引／重量复用仍 NOT IMPLEMENTED。关系／数量／有效重量读同版本 RAM／候选，按真实子树与祖先更新或失效；未知／访问／容量／循环检查保持。 统一责任与验收引用 [Session Management](SESSION_MANAGEMENT.md#session-内存运行生命周期与事实访问2026-10-21)，沿既有 C-25／C-27／A2／DS 跟踪，不另造任务体系。本轮仅修改文档，未执行本领域业务或性能测试；下述历史日期／SHA／测试数字保留原证据范围。
+
 2026-10-20 冻结规则后续：Engine／SRD 同 pin a011eba，容器 require_unbound 的规则素材读取
 共享 WorldHandler 注入的固定对象；实例字段、邻接索引与重量 memo 的权威／生命周期不变。
 回归与当前限制见 [本批记录](INSTANCE_CONFIGURATION_PROGRESS.md)。

@@ -1,5 +1,9 @@
 # MechanismService progress — 2026-10-18
 
+## 2026-10-21 文档目标补充（未实施）
+
+Architecture Decision Status **[DECIDED]**；完整 Session 内存运行层 Implementation Status **[NOT IMPLEMENTED]**；Acceptance Status **本次未执行运行验收**。 当前触发／组件索引每次或批内构建，跨命令复用仍 NOT IMPLEMENTED；目标接入同版本 RAM／候选及统一提交，维护配置／关系／损坏、加载／卸载与恢复依赖。 统一责任与验收引用 [Session Management](SESSION_MANAGEMENT.md#session-内存运行生命周期与事实访问2026-10-21)，沿既有 C-25／C-27／A2／DS 跟踪，不另造任务体系。本轮仅修改文档，未执行本领域业务或性能测试；下述历史日期／SHA／测试数字保留原证据范围。
+
 2026-10-20：能力配置和 effect 来源改取实例记录，触发索引每次从该 Session 的实际实例构建，
 不再按 Package digest 跨 Session／候选复用。规则 world-source 端口仍 unsupported。
 详见 [实例闭包与验证](INSTANCE_CONFIGURATION_PROGRESS.md)。

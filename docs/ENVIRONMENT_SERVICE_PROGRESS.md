@@ -1,5 +1,9 @@
 # EnvironmentService 实施记录
 
+## 2026-10-21 文档目标补充（未实施）
+
+Architecture Decision Status **[DECIDED]**；完整 Session 内存运行层 Implementation Status **[NOT IMPLEMENTED]**；Acceptance Status **本次未执行运行验收**。 环境双版本与按需缓存保持；统一 RAM 输入、候选依赖、提交后发布和生产提供方各自验收，不能由现有缓存宣称完整内存层。 统一责任与验收引用 [Session Management](SESSION_MANAGEMENT.md#session-内存运行生命周期与事实访问2026-10-21)，沿既有 C-25／C-27／A2／DS 跟踪，不另造任务体系。本轮仅修改文档，未执行本领域业务或性能测试；下述历史日期／SHA／测试数字保留原证据范围。
+
 ## 环境缓存权威版本管理（2026-10-19，Schema 36）
 
 基线为本分支已推送的 `382a4aeb17698a27c0966cd2a72821c039f0ecbb`；当前分支仍为

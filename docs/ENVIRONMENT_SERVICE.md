@@ -1,5 +1,11 @@
 # EnvironmentService
 
+## 2026-10-21 Session 运行层接入目标
+
+Architecture Decision Status **[DECIDED]**；完整 Session 内存运行层 Implementation Status **[NOT IMPLEMENTED]**；Acceptance Status **本次未执行运行验收**。 统一事实读取、候选／持久提交／内存发布与故障规则见 [Session Management](SESSION_MANAGEMENT.md#session-内存运行生命周期与事实访问2026-10-21) 及其 MC 引用；下文带日期接口与测试仍描述各自已有能力，不改变当前 ABI。
+
+保留来源版／防护输入版和分层环境缓存；目标让环境、光照及防护／Effects／高度／时间输入来自同版本 RAM，已有有效结果直接复用，不重复扫描 SQL 证明有效性。候选门／灯／来源变化从候选计算，提交后维护依赖并发布，旧读取结果不覆盖当前缓存。正式提供方接线和规则消费者的既有缺口独立保留。
+
 Environment 是 Scene 的独立逻辑组件。`sm.environment` 与
 `WorldHandler.environment` 为同一个实际服务；不依赖统一 SceneService 门面、
 SceneLifecycle、Grid 或 Terrain 重构。本文描述本仓库实际接口，非跨模块冻结 ABI。

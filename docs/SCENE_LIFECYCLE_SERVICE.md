@@ -1,5 +1,11 @@
 # SceneLifecycleService
 
+## 2026-10-21 Session 运行层接入目标
+
+Architecture Decision Status **[DECIDED]**；完整 Session 内存运行层 Implementation Status **[NOT IMPLEMENTED]**；Acceptance Status **本次未执行运行验收**。 统一事实读取、候选／持久提交／内存发布与故障规则见 [Session Management](SESSION_MANAGEMENT.md#session-内存运行生命周期与事实访问2026-10-21) 及其 MC 引用；下文带日期接口与测试仍描述各自已有能力，不改变当前 ABI。
+
+区分首次实例化、加载已有持久实例到 RAM、实际 Actor 入场；加载不重套 Package、不增加 visited_count 或制造入场／奖励。SceneLifecycle 与 Session 协调按真实依赖加载／卸载，冷补入保持同一读取版本，候选新建 COMMIT 后才发布当前 RAM。结构验收与 Schema40 既有成果保留，不为建索引初始化全部世界；活跃战斗恢复限制保持。
+
 2026-10-19 Session Management 后续：SessionCreation 组织首次创建，SessionRuntime 管理
 PC 场景字段与公共执行元数据；ensure_scene 增加固定 Package 和已支持实例结构检查。
 已授权抽象 NPC MoveActor 现在可在原事务中确保目标，无需玩家先进入。

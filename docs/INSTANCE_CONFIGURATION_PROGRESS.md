@@ -1,5 +1,9 @@
 # 实例配置、容器读取及冻结规则素材核对
 
+## 2026-10-21 文档目标补充（未实施）
+
+Architecture Decision Status **[DECIDED]**；完整 Session 内存运行层 Implementation Status **[NOT IMPLEMENTED]**；Acceptance Status **本次未执行运行验收**。 现有完整实例配置持久化与 Schema40 成果保持。目标将已加载实例查询／检查／Snapshot／RE 请求统一读 RAM，不重复 SQL／JSON 装配；首次／冷加载和恢复只取持久实例，不靠 Package 补字段。当前配置闭包不等于完整 RAM 运行层。 统一责任与验收引用 [Session Management](SESSION_MANAGEMENT.md#session-内存运行生命周期与事实访问2026-10-21)，沿既有 C-25／C-27／A2／DS 跟踪，不另造任务体系。本轮仅修改文档，未执行本领域业务或性能测试；下述历史日期／SHA／测试数字保留原证据范围。
+
 2026-10-20；基线 `f826cb8`；分支 `feat/frozen-ruleset-complete-instances`。
 仅修改 SM；不合并 main。当前分支已包含远端 Session Management 和 main，未重复建立协调器。
 仓库和适用祖先未发现 AGENTS.md 或 check-fast 脚本；选择 Fast 静态检查及相关 Focused／Integration。

@@ -1,5 +1,11 @@
 # MechanismService contract (2026-10-18)
 
+## 2026-10-21 Session 运行层接入目标
+
+Architecture Decision Status **[DECIDED]**；完整 Session 内存运行层 Implementation Status **[NOT IMPLEMENTED]**；Acceptance Status **本次未执行运行验收**。 统一事实读取、候选／持久提交／内存发布与故障规则见 [Session Management](SESSION_MANAGEMENT.md#session-内存运行生命周期与事实访问2026-10-21) 及其 MC 引用；下文带日期接口与测试仍描述各自已有能力，不改变当前 ABI。
+
+机关配置／当前状态／目标关系从统一 RAM 或隔离候选读取，触发与组件关联索引由实例事实维护。当前 _build_index／_batch_index 为每次／批内构建，跨命令索引复用仍 NOT IMPLEMENTED；加载／卸载、配置／损坏变化、候选回退和恢复均须维护有效性。自动／手动／重置／规则结果与跨领域连锁全部参与统一提交，保持有界联动、触发去重和真实 rules.effect unsupported 边界。
+
 Implementation baseline: SM main `9ce60cbe4fdbf91dce6ffef811969482369fb08a`.
 Architecture authority: `agentic-trpg/docs/MODULE_CONTRACTS.md`, verified main
 `98e8d36b03bdc6b9578082bcdae1ed99ccbc5997`; v0.4 cognition decisions remain binding.

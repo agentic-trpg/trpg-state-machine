@@ -1,5 +1,9 @@
 # W-01 GridService 切片进度
 
+## 2026-10-21 文档目标补充（未实施）
+
+Architecture Decision Status **[DECIDED]**；完整 Session 内存运行层 Implementation Status **[NOT IMPLEMENTED]**；Acceptance Status **本次未执行运行验收**。 既有地图／局部空间成果保持；读取输入从同版本 RAM 接入、候选空间及旧 View 隔离、版本一致冷加载仍须后续实现与验收。 统一责任与验收引用 [Session Management](SESSION_MANAGEMENT.md#session-内存运行生命周期与事实访问2026-10-21)，沿既有 C-25／C-27／A2／DS 跟踪，不另造任务体系。本轮仅修改文档，未执行本领域业务或性能测试；下述历史日期／SHA／测试数字保留原证据范围。
+
 ## 地图运行表示与查询优化（2026-10-19）
 
 在 `feat/session-management-refactor@a25c35e` 上继续，开始时工作区干净，没有重建分支、

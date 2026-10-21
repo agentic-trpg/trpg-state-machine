@@ -1,5 +1,11 @@
 # Session Management 重构进度
 
+## 2026-10-21 文档决定：Session 内存运行层待实施
+
+Architecture Decision Status **[DECIDED]**；完整 Session 内存运行层 Implementation Status **[NOT IMPLEMENTED]**；Acceptance Status **本次未执行运行验收**。 静态源码基线 `d6be5a99b12fefcf8cfc57fdebb81493c1ac4d34` 已为 fetch 后 main；原 Scoped runtime refactor 不再是未合并前提。现有 Schema40、操作 memo、GridMaps／Environment 缓存与旧验收数字保留原范围，不是完整内存事实层。
+
+本轮只更新 [Session 责任／入口／目标差距与验收](SESSION_MANAGEMENT.md) 及相关领域文档，未修改实现、测试、Schema、依赖或协议。后续按上游 C-25／C-27／A2／DS 阶段完成全部入口盘点、统一事实访问／候选／发布、真实操作切片、逐域接入、索引／缓存和正确性后的合成并发负载。热查询、Snapshot 和派生不再重复 SQL 装配同批已加载事实；故障验收同时检查持久状态、RAM 当前态、旧引用、索引、缓存和恢复。详细执行检查以本次交付记录为准，以下测试数字都是历史运行证据。
+
 ## 2026-10-20 实例配置与容器索引后续
 
 当前 Schema39；有效对象能力、Scene 配置、NPC senses 和辅助路径已保存并改读 Session；
