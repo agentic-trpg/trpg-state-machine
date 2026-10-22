@@ -1,5 +1,13 @@
 # SM-18 reliable NPC output and processing completion
 
+2026-10-22 local target lookup follow-up: combat dispatch still checks the target
+before evaluation and before applying the result. `_npc_combat_target_guard` now
+selects only the acting and target actor IDs from the same RAM/candidate scope,
+using the existing identity index. No Session actor-position directory is copied.
+Authorization, perception, existence/same-scene, fixed snapshot and OCC checks
+remain; real handoff/dispatch growth evidence and retained limits are in the
+[four-fix acceptance](reviews/RUNTIME_INSTANCE_OWNERSHIP.md#2026-10-22-four-fixes-transaction-and-local-costs).
+
 Meta main `fc41d3c`, MODULE_CONTRACTS sections 3/7/9 controls ownership and transactions. This is a local bounded NPC domain implementation, not a frozen Agent Host ABI or real LLM acceptance.
 
 ## Reliable output and independent Commands

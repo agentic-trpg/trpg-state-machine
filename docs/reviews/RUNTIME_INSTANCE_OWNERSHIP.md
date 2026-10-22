@@ -1,7 +1,239 @@
 # Runtime instance ownership — 2026-10-22
 
-Latest follow-up: [managed identity/version cache inputs](#2026-10-22-follow-up-managed-cache-inputs).
+Latest follow-up: [four transaction/local-cost fixes](#2026-10-22-four-fixes-transaction-and-local-costs).
 Earlier acceptance counts remain dated evidence for their original source.
+
+## 2026-10-22 four fixes: transaction and local costs
+
+Implementation scope: `refactor/session-memory-runtime`, starting at reviewed and
+remote HEAD `5137742d8126588047f04ff4699ee14a94d3058b`. Paired documentation uses
+the existing `docs/runtime-versioned-cache-keys` worktree, starting at
+`8b18c198a9d724c1bb5b48b25d1911b0ba338a5e`. Both were clean of tracked changes;
+SM's pre-existing untracked `.worktrees/` and text file are preserved. No new
+branch, main update, merge, RE/Pages edit, schema/DTO/pin change or parallel state
+manager is part of this delivery. Architecture remains MC §2.3a; implementation
+is the following concrete repair, not a general claim that every cost is constant.
+
+### Statement failure protocol (P1)
+
+The original CHECK-constraint reproduction was run against archived `5137742/src`:
+one UPDATE closes the first container, then gives the second an invalid state;
+catching IntegrityError and exiting the outer transaction normally published
+`get_object().open_state == closed` while independent SQLite returned `open`.
+The final regression instead returns `open / open` and records commit refusal.
+The prior section's **unresolved** finding is superseded only by this new evidence.
+
+Chosen protocol is **B: fail the current write scope until a matching rollback**.
+RuntimeConnection.execute catches statement failures; executemany also catches a
+parameter source that raises after a successful earlier item. They mark the same
+UnitOfWork failed and clear reading memo. RAM guards, write requirements and outer
+pre-COMMIT check reject `transaction_failed`, even if callers catch SQLite errors.
+No per-statement Session/cache/version checkpoint is introduced.
+Store's first persistence upgrade (BEGIN IMMEDIATE, snapshot pin and savepoint
+recreation) follows the same failure marking: it may already have ended the
+prepared SQL snapshot, so a caught upgrade error cannot reuse that candidate or
+commit it. Separate lock-acquisition and snapshot-pin faults cover this boundary.
+
+RELEASE in existing participants' finally blocks is permitted as cleanup so it
+does not mask the original storage_error. RELEASE does not reset the failed flag
+or permit subsequent reads/writes/COMMIT; a dedicated test proves that distinction.
+
+Existing SAVEPOINT stores candidate pending values, immutable version root, change
+log length and prior failure flag. A successful ROLLBACK TO restores all of them,
+clears memo/derived candidates and discards nested savepoints. Work before that
+savepoint is preserved and execution can continue. The savepoint context checks
+failure even when the inner SQL exception was swallowed, rolls back and raises.
+Without such recovery the outer scope rolls back completely. SQLite ROLLBACK may
+already destroy the entire transaction/savepoints; cleanup then skips nonexistent
+SQL controls and discards all RAM candidates. Failure never poisons later Session
+operations. ABORT, FAIL (which can retain earlier rows) and ROLLBACK are all tested,
+including trigger errors and real FK cascades. Existing unknown-COMMIT and
+post-COMMIT publication pause/reconciliation are unchanged and tested separately.
+
+Production mutations still use RuntimeConnection execute/executemany and existing
+Store/UnitOfWork. Direct native SQLite cursors/executescript are not a supported
+runtime mutation bypass; existing migration/native maintenance retains its
+explicit controlled initialization/reload boundary.
+
+### Inventory fields and one complete typed validation (P2)
+
+Actual path: StepActor → actors position UPDATE → changed/_inventory_changes →
+public read_carried_items → CharacterFacts.inventory_model. OLD/NEW identity and
+relevant fields now decide invalidation. Actor coordinates, character HP/max HP/XP
+and object-shaped mechanical actor action/equipment metadata do not change the
+current six-field InventoryEntry result. The precise source-field and consistency
+list is in [Session Management](../SESSION_MANAGEMENT.md#2026-10-22-sql-失败协议与局部元数据).
+Core carried slugs, rejection of legacy resources/effects, owner existence,
+mechanical object shape, portable item facts, old/new ancestry access, destruction
+boundary and relevant configs still invalidate. Cross-owner transfers maintain
+both owners; unattributed component changes retain the conservative shared stamp.
+
+`_validated_rule_components` caches the complete strictly validated typed result
+and remaining component projections. rule_components produces its dictionary
+output from that result; inventory_model uses the already validated owner subset.
+Filtering an existing validated unique set cannot introduce invalid scalar values
+or duplicate IDs. No strict=False or JSON scalar coercion is introduced. Portable
+facts/projection equality, owner/slug consistency and duplicate ID checks remain.
+A regression invokes both consumers cold and observes exactly one full inventory
+validation; an actual aggregate quantity/charges change also rebuilds exactly once.
+Complete public inventory outputs still copy/serialize their 11 / 101 entries.
+
+### NPC target identity and persistent version roots (P2)
+
+The real handoff → dispatch_npc_output → combat guard path queries
+`actors WHERE session_id=? AND actor_id IN (?,?)` with acting and target IDs.
+The existing RAM identity range supplies those two facts; no all-actor dictionary
+is prepared. Both before-evaluation and before-apply checks remain, as do grants,
+perception, target existence/same Scene, fixed inputs and OCC/replay handling.
+
+The existing version mappings are now private VersionMap root handles over frozen
+AVL nodes. Beginning a read/write scope, taking/rolling back a savepoint and
+accept_read/publish fork roots in O(1). Lookup/update is O(log N); an update copies
+only that key's balanced search path. Roots have no previous-root/overlay links;
+only actual old scopes/savepoints keep old nodes alive. A fixed-seed mixed
+insert/delete/fork test audits ordering, heights, balance, sizes and old roots;
+4096-key testing bounds copied nodes by the search height. Normal reads/writes/
+savepoints/commit do not enumerate version records. Candidate pending dictionaries
+are still checkpointed according to this transaction's pending work.
+
+Existing pruning now builds a new root only over retained dependencies (including
+inventory's three shared stamp components) above capacity×32. If the retained set
+exceeds capacity×16, rebuildable caches are released, leaving at least half-budget
+headroom. Otherwise at least that much new metadata must accumulate before another
+full prune. Eviction/explicit unload/recovery are lifecycle operations; there is no
+unbounded overlay chain or per-operation high-watermark full rebuild. Old roots,
+read-publish fences, memory generation, external data_version and cross-connection
+recovery remain part of the original isolation protocol.
+
+### Matched deterministic measurements
+
+Final performance fixtures run on unmodified archived `5137742/src` and delivery
+source in the same locked environment. All six old-source performance assertions
+fail as expected after legitimate successful StepActor/dispatch/transaction work.
+The separate original atomicity probe fails with the precise closed/open mismatch.
+These failures are reproduction evidence, not current regression failures.
+Previous `e776fab1` figures (298/798) are not reused as this baseline.
+
+| Production slice / counter | 5137742 before | This repair |
+|---|---|---|
+| After Step, target inventory 11 / 101: full validations; entries validated | 2 / 2; 22 / 202 | 0 / 0; 0 / 0 |
+| Same: RAM queries / rows | 26/25 ; 206/205 | 2/2 ; 2/2 |
+| Same: version checks; inventory field builds | 154 / 1324; 1 / 1 | 6 / 6; 0 / 0 |
+| Same: complete output entries | 11 / 101 | 11 / 101 retained |
+| Local box read, +0 / +100 loaded unrelated objects: version records copied | 300 / 900 | 0 / 0 |
+| Local write + savepoint rollback + write + commit: version records copied | 900 / 2700 | 0 / 0 |
+| Both local slices: full version records enumerated after repair | not claimed | 0 / 0 |
+| NPC dispatch, +0 / +100 remote actors: records returned by two target checks | 6 / 206 | 4 / 4 |
+| Same entire dispatch: RAM rows | 76 / 276 | 70 / 70 |
+
+All Step-following and local box read slices use zero SQL SELECTs/returned rows.
+Local reads retain RAM 31 calls/13 rows and 155 version checks at both sizes,
+not a claim that get_object performs only one scalar check. Local writes retain
+RAM 6/2, 2 checks, two UPDATE executions and no domain SELECT. New AVL nodes for
+that write/savepoint/rollback/commit slice are 208 / 266 in the final recorded run:
+this is bounded path copying over actual version advances, **not** zero allocation
+or constant update cost independent of N. No record enumeration/copy occurs at
+transaction startup, query, savepoint or publication. Node totals can vary with
+tree insertion order; the regression asserts structural/logarithmic bounds, not
+one hardcoded node total.
+
+Whole NPC dispatch SQL SELECTs/rows remain 28/25 at both sizes; it still validates
+one one-entry snapshot inventory and constructs one snapshot. Its target slice
+remains two checks (four records), and version checks 141 → 143 remain constant
+across growth; whole-dispatch RAM calls remain 114, accessed rows become 70 at
+both sizes. All target/local read weight/mechanism rebuilds and JSON/model
+parses are zero. These categories are instrumented separately: a cache hit or
+zero SQL alone is not used as proof. Cold data, actual dependency closure, full
+outputs/evidence, aggregate ComponentInputs preparation and aggregate SQLite
+inventory updates keep their necessary existing costs. Controlled REPLACE/table
+maintenance retains conservative invalidation. Multiplayer/sustained load and
+unsupported combat continuation recovery are not new guarantees.
+Whole-Session configuration replacement still enumerates Store-retained version
+records to select that Session's light-candidate stamps; this pre-existing broad-source
+maintenance is not part of ordinary local read/write measurements or claimed fixed
+cost. Direct REPLACE/table invalidation likewise retains its existing broad scope.
+
+SQL counters use the existing real Connection.execute / fetched-cursor wrapper,
+not trigger trace repeats or RAM row counts. Step-following/local read each has
+BEGIN×1 and PRAGMA×3 in addition to zero domain SELECTs. Local write slice has
+BEGIN×2, PRAGMA×5, SAVEPOINT×2, ROLLBACK TO×1, RELEASE×1 and UPDATE×2.
+NPC dispatch has BEGIN×8, PRAGMA×24, SAVEPOINT×2, RELEASE×1, SELECT×28,
+UPDATE×59 and INSERT×49 at both sizes. Native commit()/rollback() method calls
+are not counted as execute statements; real durable commit/failure semantics are
+verified independently. These metadata/control statements were not called zero SQL.
+
+### Validation of the four fixes
+
+Final focused acceptance: **75 passed, exit 0** in the locked environment, with
+real counts captured in `four-fixes-complete-target.log` / `.xml` and
+`four-fixes-complete-counts.json` under `.test-tmp/`. The six files are
+test_runtime_four_fixes.py, test_runtime_transaction_failures.py,
+test_version_map.py, test_versioned_runtime_inputs.py,
+test_runtime_instance_ownership.py and test_runtime_field_maintenance.py.
+Command: `uv run --locked --no-sync pytest -q -s` with those paths, unique local
+basetemp, JUnit output and `-o faulthandler_timeout=60`. The separate **35-passed**
+upgrade/RNG/publication subset is not added to the final unique count. Full union
+results follow below. New tests cover the original CHECK case, all three
+SQLite error policies with/without recovery, caught error read/write/commit,
+prior legal work, trigger/FK cascades, executemany/parameter failure, actor movement,
+HP/actions, first-persistence lock/pin failure, once-only typed validation,
+true quantity/charge change, composite
+pruning and AVL snapshots. Existing tests jointly cover transfers/access/config,
+strict negatives, other-owner growth, savepoint/outer rollback, old readers,
+unload/restart, authorization, RNG, idempotency and commit/recovery failures.
+
+The older sections below, including their independent OPEN statements, remain
+historical records for their original SHA. This section supersedes those four
+findings only in its demonstrated scope; it does not rewrite earlier acceptance.
+
+### Final complete-source acceptance
+
+**2,119 collected / 2,119 unique executed tests pass**, exit 0. Disjoint sorted-file
+partitions contain **739 / 703 / 675** cases, plus **2** separately executed original
+cases. Collection/JUnit union has no missing, unexpected, duplicate, failed,
+errored or skipped cases. All **220** Python source/test/example hashes remain
+unchanged throughout this final complete-source run, including the last
+first-persistence-upgrade failure protection. Historical migration tests are in
+the union; none is labeled passed while blocked by unavailable Git history.
+
+Actual invocations use `uv run --locked --no-sync pytest -q`, files assigned by
+sorted test filename modulo three, `-o faulthandler_timeout=60`, unique local
+basetemps and JUnit paths. The main partitions use
+`-k 'not test_live_compatibility_baseline_vs_sm_frozen_verification and not test_real_vertical_pipeline_committed_observations_fresh_process_audit'`.
+Those exact two original node IDs in test_frozen_ruleset_runtime.py and
+test_dnd_hardening.py run separately with their original assertions and timeouts,
+not skipped or weakened. Their final isolated result is **2 passed, exit 0**.
+The 75-test target and 35-test fault subset are overlapping evidence, not extra
+tests added to 2,119.
+
+Intermediate runs are retained: one concurrent corpus test died with Windows
+native access violation `0xC0000005` while Path.read_text was reading SRD files;
+one fresh-process worker exceeded its existing 30-second timeout. Neither is
+recorded as a passing intermediate run, nor as a demonstrated Python assertion
+defect. Both original cases pass in the final isolated process. The native
+failure's root cause was not assigned or repaired by this SM change; repeatable
+parallel whole-corpus stress is not an acceptance claim. Early fixture assertion
+mistakes and the superseded RELEASE-cleanup compatibility failure also remain
+intermediate evidence, not the final results.
+
+Evidence: `.test-tmp/four-fixes-complete-delivery-{0,1,2}.{log,xml}`,
+`four-fixes-complete-delivery-collection.txt`, `four-fixes-complete-isolated.*`,
+`four-fixes-complete-hashes.json`, `four-fixes-complete-audit.json` and
+`four-fixes-complete-counts.json`. Matched old source reproduction is
+`four-fixes-final-before.log` (seven expected failing new assertions); the archived
+source remains `four-fixes-baseline/src`. Intermediate native/timeout logs are
+`four-fixes-final-delivery-2-native-crash.log` and `four-fixes-final-delivery-1.log`.
+
+`uv run --locked --no-sync ruff check src tests examples` and
+`uv run --locked --no-sync ruff format --check src tests examples` both exit 0
+(220 files). Changed Markdown links/anchors/fences pass in both repositories:
+9 files / 137 local links; staged and unstaged diff whitespace checks pass.
+Only the two existing Lark deprecation warnings remain in final pytest groups.
+No dependency upgrade/synchronization, remote CI or multiplayer/sustained-load
+validation is claimed. Cold aggregate/output costs and controlled broad
+configuration maintenance remain the concrete limits documented above.
+
+## Earlier acceptance records
 
 The follow-up [mutation-maintained validity acceptance](#2026-10-22-follow-up-mutation-maintained-validity)
 below supersedes the original warm-read cost claims only within its measured scope.

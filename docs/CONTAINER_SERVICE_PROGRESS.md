@@ -1,5 +1,14 @@
 # ContainerService 专项修复
 
+## 2026-10-22 四项修复中的库存维护
+
+容器与物品的归属、item_json、祖先开合／barred／locked、损毁零 HP 边界及配置继续使
+实际拥有者库存失效；普通角色坐标、HP／行动修改不再无条件推进库存版本。严格校验结果
+在组件投影及库存模型之间复用，失效后重建只验证一次；旧模型、候选及回滚隔离保留。
+SQL 失败后的容器候选由原 UnitOfWork 失败／保存点协议保护，不能捕获异常后发布脏值。
+字段清单与具体证据见 [Session 说明](SESSION_MANAGEMENT.md#2026-10-22-sql-失败协议与局部元数据)
+和 [四项验收](reviews/RUNTIME_INSTANCE_OWNERSHIP.md#2026-10-22-four-fixes-transaction-and-local-costs)。
+
 ## 2026-10-22 库存模型与容器关联
 
 容器转移／访问变化继续维护原物品事实和库存投影；运行层沿旧／新祖先失效受影响角色

@@ -18,6 +18,7 @@ from dataclasses import replace
 from itertools import combinations
 
 from .errors import StateMachineError
+from .version_map import VersionMap
 
 
 class Rows:
@@ -201,7 +202,7 @@ class SessionMemory:
         self.dependency_shapes = {}
         self.projection_shapes = {}
         self.sizes, self.bytes = {}, 0
-        self.versions = {}
+        self.versions = VersionMap()
         self.collectors = []
         self.paused = False
         self.paused_sessions = store._coordinator.paused_sessions
@@ -281,6 +282,8 @@ class SessionMemory:
         self.generation += 1
 
     def guard(self, sid=None):
+        if self.store._scope is not None:
+            self.store._scope.check_usable()
         if self.paused or sid in self.paused_sessions:
             raise StateMachineError(
                 "session_reconciliation_required",
@@ -300,7 +303,7 @@ class SessionMemory:
                     owns = _references(key[3], sid)
             if owns:
                 self.forget(key)
-        self.versions = {dep: version for dep, version in self.versions.items() if dep[1] != sid}
+        self.versions = VersionMap((d, v) for d, v in self.versions.items() if d[1] != sid)
 
     def pause(self, scope):
         if scope.memory_sessions:
@@ -429,14 +432,54 @@ class SessionMemory:
                     versions[dep] = versions.get(dep, 0) + 1
             return
         if table in ("characters", "mechanical_actors", "actors"):
+            if old is not None and new is not None:
+                identity = ("session_id", "actor_id")
+                if table == "characters":
+                    relevant = (*identity, "inventory_json", "resources_json", "effects_json")
+                    if all(old[c] == new[c] for c in relevant):
+                        return
+                elif all(old[c] == new[c] for c in identity):
+                    # Position, HP, actions and equipment metadata are not fields
+                    # of InventoryState. Mechanical rows supply owner existence;
+                    # preserve refusal if an update changes the JSON object shape.
+                    if table == "actors" or all(
+                        r["state_json"].lstrip().startswith("{") for r in (old, new)
+                    ):
+                        return
             for row in (old, new):
                 if row is not None:
                     self._advance_field("inventory", row["session_id"], row["actor_id"])
             return
         rows = ()
         if table == "objects":
+            columns = (
+                "session_id",
+                "object_id",
+                "container_id",
+                "carrier_id",
+                "item_json",
+                "state",
+            )
+            if old is not None and new is not None and all(old[c] == new[c] for c in columns):
+                return
             rows = (old, new)
         elif table in ("object_durability", "object_openables", "door_locks"):
+            if old is not None and new is not None:
+                if (
+                    table == "object_durability"
+                    and all(old[c] == new[c] for c in ("session_id", "object_id"))
+                    and (old["current_hp"] == 0) == (new["current_hp"] == 0)
+                ):
+                    return
+                relevant = (
+                    "barred"
+                    if table == "object_openables"
+                    else "locked"
+                    if table == "door_locks"
+                    else "current_hp"
+                )
+                if all(old[c] == new[c] for c in ("session_id", "object_id", relevant)):
+                    return
             rows = tuple(
                 self._object(r["session_id"], r["object_id"]) for r in (old, new) if r is not None
             )
@@ -834,8 +877,11 @@ class SessionMemory:
                 "inventory_layout",
             )
         )
-        self.versions = {d: self.versions.get(d, 0) for d in alive}
-        if len(self.versions) > self.capacity * 32:
+        self.versions = VersionMap((d, self.versions.get(d, 0)) for d in alive)
+        # Hysteresis: leave at least half a budget of new metadata before the
+        # next full prune. Otherwise release rebuildable caches, never prune N
+        # entries again on every following operation close to the high watermark.
+        if len(self.versions) > self.capacity * 16:
             self.clear()
 
     def invalidate_table(self, table):
@@ -1071,7 +1117,7 @@ class SessionMemory:
             if isinstance(value, Range):
                 value.stage = 0
             self.remember(key, value)
-        self.versions = scope.memory_versions
+        self.versions = scope.memory_versions.fork()
         self.trim_versions()
         self.stats["publications"] += int(bool(scope.memory_changes))
 
@@ -1080,7 +1126,7 @@ class SessionMemory:
             if isinstance(value, Range):
                 value.stage = 0
             self.remember(key, value)
-        self.versions = scope.memory_versions
+        self.versions = scope.memory_versions.fork()
         self.trim_versions()
 
 
@@ -1129,6 +1175,11 @@ class RuntimeConnection:
         store = self.store
         store.ensure_open()
         operation = sql.lstrip().split(None, 1)[0].upper()
+        # Existing participants RELEASE savepoints in finally blocks. Releasing
+        # is cleanup, not recovery: keep the failed flag and refuse outer COMMIT.
+        # Blocking cleanup would mask the original SQLite/storage_error exception.
+        if store._scope is not None and operation not in {"ROLLBACK", "RELEASE"}:
+            store._scope.check_usable()
         if operation in {"BEGIN", "COMMIT", "END"} or (
             operation == "ROLLBACK" and not re.match(r"ROLLBACK\s+TO\b", sql, re.I)
         ):
@@ -1166,11 +1217,20 @@ class RuntimeConnection:
                 (
                     sql.split()[-1],
                     dict(scope.memory_pending),
-                    dict(scope.memory_versions),
+                    scope.memory_versions.fork(),
                     len(scope.memory_changes),
+                    scope.statement_failed,
                 )
             )
-        cursor = store._conn.execute(sql, parameters)
+        try:
+            cursor = store._conn.execute(sql, parameters)
+        except BaseException:
+            # SQLite ABORT, FAIL and ROLLBACK differ in what remains in SQL.
+            # Captured candidates cannot be trusted until a matching rollback.
+            if scope is not None and scope.write:
+                scope.statement_failed = True
+                scope.read_memo.clear()
+            raise
         if operation == "ROLLBACK" and " TO " in f" {sql.upper()} ":
             name = sql.split()[-1]
             i = next(
@@ -1178,11 +1238,13 @@ class RuntimeConnection:
                 for i in range(len(scope.memory_savepoints) - 1, -1, -1)
                 if scope.memory_savepoints[i][0] == name
             )
-            _, pending, versions, changes = scope.memory_savepoints[i]
-            scope.memory_pending, scope.memory_versions = dict(pending), dict(versions)
+            _, pending, versions, changes, failed = scope.memory_savepoints[i]
+            scope.memory_pending, scope.memory_versions = dict(pending), versions.fork()
+            scope.statement_failed = failed
             del scope.memory_changes[changes:]
             del scope.memory_savepoints[i + 1 :]
             scope.read_memo.clear()
+            scope.derived_pending.clear()
         elif operation == "RELEASE":
             name = sql.split()[-1]
             i = next(
@@ -1208,6 +1270,11 @@ class RuntimeConnection:
         if self.store._scope is None:
             with self.store.transaction(write=True):
                 return self.executemany(sql, parameters)
-        for values in parameters:
-            count += self.execute(sql, values).rowcount
+        try:
+            for values in parameters:
+                count += self.execute(sql, values).rowcount
+        except BaseException:
+            self.store._scope.statement_failed = True
+            self.store._scope.read_memo.clear()
+            raise
         return Rows(rowcount=count)

@@ -264,8 +264,12 @@ class CharacterFacts:
             }
         )
 
-    @scoped_read
     def rule_components(self, sid, owner_ids, *, full_audit=False):
+        inventory, values = self._validated_rule_components(sid, owner_ids, full_audit=full_audit)
+        return {"inventory_state": inventory.model_dump(mode="json"), **values}
+
+    @scoped_read
+    def _validated_rule_components(self, sid, owner_ids, *, full_audit=False):
         """Read persisted facts, then project owners; absence is never an empty component."""
         row = self._conn.execute(
             "SELECT * FROM mechanical_components WHERE session_id=?", (sid,)
@@ -311,7 +315,8 @@ class CharacterFacts:
                 values[field]
                 for field in ("inventory_json", "resources_json", "casting_json", "effects_json")
             )
-            inventory = self._inventory_model(inventory).model_dump(mode="json")
+            typed_inventory = self._inventory_model(inventory)
+            inventory = typed_inventory.model_dump(mode="json")
             resources = (
                 ResourceState.model_validate(
                     {**resources, "pools": tuple(resources["pools"])}
@@ -347,8 +352,12 @@ class CharacterFacts:
                 resources["pools"] = [v for v in resources["pools"] if v["owner_id"] in owner_ids]
             if casting is not None:
                 casting["actors"] = [v for v in casting["actors"] if v["actor_id"] in owner_ids]
-            return {
-                "inventory_state": inventory,
+            typed_inventory = typed_inventory.model_copy(
+                update={
+                    "entries": tuple(e for e in typed_inventory.entries if e.owner_id in owner_ids)
+                }
+            )
+            return typed_inventory, {
                 "resource_state": resources,
                 "casting_state": casting,
                 "effect_states": [v for v in effects if v["target_id"] in owner_ids],
@@ -415,7 +424,8 @@ class CharacterFacts:
     @instance_read("actor", None, "inventory", maintained="inventory")
     def inventory_model(self, sid, actor_id):
         """Validated owner projection; source relationships remain World facts."""
-        return self._inventory_model(self.rule_components(sid, {actor_id})["inventory_state"])
+        inventory, _ = self._validated_rule_components(sid, {actor_id}, full_audit=False)
+        return inventory
 
     @staticmethod
     def _inventory_model(value):

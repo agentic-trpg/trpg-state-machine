@@ -258,8 +258,9 @@ class SessionAccess:
         definition = WorldFacts(self.store).instances.actor(command.session_id, command.actor_id)
         locations = dict(
             self._conn.execute(
-                "SELECT actor_id,current_scene_id FROM actors WHERE session_id=?",
-                (command.session_id,),
+                "SELECT actor_id,current_scene_id FROM actors "
+                "WHERE session_id=? AND actor_id IN (?,?)",
+                (command.session_id, command.actor_id, command.payload.target_id),
             ).fetchall()
         )
         states = {a.entity_id: a for a in snapshot.character_states}

@@ -14,6 +14,7 @@ from .storage_migrations import (
     validate_environment_table,
     validate_environment_versions,
 )
+from .version_map import VersionMap
 
 
 class _Coordinator:
@@ -234,6 +235,7 @@ class SqliteStore:
         self.ensure_open()
         if self._scope is None or not self._scope.write or not self._scope.active:
             raise StateMachineError("invalid_transaction", "An active write scope is required")
+        self._scope.check_usable()
 
     @property
     def derived_read_scope(self):
@@ -294,12 +296,13 @@ class SqliteStore:
             if data_version != self._data_version:
                 self.memory.clear()
                 self._data_version = data_version
-            scope.memory_versions = dict(self.memory.versions)
+            scope.memory_versions = self.memory.versions.fork()
             scope.recovery_generations = dict(self._coordinator.recovery_generations)
             scope.recovery_generation = self._coordinator.recovery_generation
             self._scope = scope
             try:
                 yield scope
+                scope.check_usable()
                 with self._coordinator.lock:
                     try:
                         commit_started = perf_counter_ns()
@@ -392,17 +395,24 @@ class SqliteStore:
         scope = self._scope
         if scope.persisting:
             return
-        self._conn.rollback()
-        self._conn.execute("BEGIN IMMEDIATE")
-        self._conn.execute("PRAGMA schema_version").fetchone()
-        latest = self._conn.execute("PRAGMA data_version").fetchone()[0]
-        for name, *_ in scope.memory_savepoints:
-            self._conn.execute(f"SAVEPOINT {name}")
-        if latest != self._data_version:
-            self.memory.pause(scope)
-            raise StateMachineError(
-                "session_reconciliation_required", "Prepared facts changed before persistence"
-            )
+        try:
+            self._conn.rollback()
+            self._conn.execute("BEGIN IMMEDIATE")
+            self._conn.execute("PRAGMA schema_version").fetchone()
+            latest = self._conn.execute("PRAGMA data_version").fetchone()[0]
+            for name, *_ in scope.memory_savepoints:
+                self._conn.execute(f"SAVEPOINT {name}")
+            if latest != self._data_version:
+                self.memory.pause(scope)
+                raise StateMachineError(
+                    "session_reconciliation_required", "Prepared facts changed before persistence"
+                )
+        except BaseException:
+            # This upgrade may already have ended the prepared SQL snapshot.
+            # Catching a lock/pin failure cannot make its RAM scope usable again.
+            scope.statement_failed = True
+            scope.read_memo.clear()
+            raise
         scope.persisting = True
 
     @contextmanager
@@ -465,11 +475,18 @@ class UnitOfWork:
         self.read_memo = {}
         self.read_stage = -1
         self.memory_pending = {}
-        self.memory_versions = {}
+        self.memory_versions = VersionMap()
         self.memory_changes = []
         self.memory_savepoints = []
         self.memory_sessions = set()
         self.persisting = False
+        self.statement_failed = False
+
+    def check_usable(self):
+        if self.statement_failed:
+            raise StateMachineError(
+                "transaction_failed", "SQL statement failed; rollback is required before continuing"
+            )
 
     def _connection(self):
         self._store.ensure_open()
@@ -503,9 +520,12 @@ class UnitOfWork:
         connection.execute("SAVEPOINT domain_effects")
         try:
             yield self
+            self.check_usable()
         except BaseException:
-            connection.execute("ROLLBACK TO domain_effects")
+            if self._store._conn.in_transaction:
+                connection.execute("ROLLBACK TO domain_effects")
             self.read_memo.clear()
             raise
         finally:
-            connection.execute("RELEASE domain_effects")
+            if self._store._conn.in_transaction:
+                connection.execute("RELEASE domain_effects")

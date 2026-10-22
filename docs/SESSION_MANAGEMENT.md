@@ -1,5 +1,46 @@
 # Session Management
 
+## 2026-10-22 SQL 失败协议与局部元数据
+
+RuntimeConnection 的 execute／executemany（含参数源中途失败）采用失败范围协议：
+写范围任一语句抛错即设置 UnitOfWork.statement_failed，清空读取 memo；RAM guard、
+写入要求和提交边界均拒绝 transaction_failed。即使调用者捕获 SQLite 异常，也不得
+继续读取候选、写入或发布。成功 ROLLBACK TO 失败前保存点恢复原候选字段、版本根、
+change log 长度及失败标记，清除 memo／派生候选；此后可以继续，保留保存点前合法修改。
+现有保存点上下文也在退出前检查失败标记，自动回滚并抛错。SQLite ROLLBACK 已取消整个
+事务时不再 RELEASE 不存在的保存点，外层丢弃候选。没有保存点的失败必须整体回滚。
+既有参与者 finally 中的 RELEASE 允许用于清理，保留原 storage_error；它不清除失败
+标记，不属于恢复，不能放行之后的候选读写或外层提交。
+Store 首次升级到 BEGIN IMMEDIATE、固定 SQL 快照及重建保存点时若失败，也设置同一失败
+标记；升级可能已经结束原读取事务，不能捕获错误后继续使用旧候选或空提交发布。
+COMMIT 结果未知及提交后发布失败仍按原暂停／恢复协议，不能误当作未提交失败。
+
+SessionMemory.versions 与 scope.memory_versions 现在是原机制中的私有 VersionMap 根句柄。
+事务启动、保存点、回退、accept_read／publish 共享不可变 AVL 节点；单键查询／推进为
+O(log N)，根复制 O(1)，不逐次复制／遍历全表，也无事务覆盖链。保存点仍复制本事务的
+memory_pending，成本属于当前候选而非所有已加载实例。旧根只由实际旧范围／保存点持有，
+不被新根链式引用；结束后正常回收。原预算高水位为 capacity×32：显式裁剪保留活缓存
+依赖及库存组合版本；若保留量超过 capacity×16，释放可重建缓存，留下至少半预算间隔，
+避免接近高水位时每操作反复全量裁剪。卸载／恢复允许按生命周期释放必要范围。
+
+库存模型字段依赖清单（当前固定 InventoryState 的六个条目字段）：
+
+| 来源 | 失效依据及保留的一致性要求 |
+|---|---|
+| mechanical_components | 库存／资源／casting／effects 的原完整闭包；已知库存补丁按实际拥有者推进，未知聚合写入保守推进共享版本 |
+| characters | 身份、inventory_json（carried slugs）、resources_json／effects_json（拒绝非空旧来源）；HP／max HP／XP 不使库存失效 |
+| actors／mechanical_actors | 拥有者存在／身份、成员版本；坐标／HP／行动及装备元数据不属于 InventoryState 字段，mechanical JSON 从对象变为其他形状仍失效并拒绝 |
+| objects | 身份、归属、item_json（slug／数量／充能／可访问标记等）、state；只改落地坐标不失效库存 |
+| 祖先及能力状态 | 沿旧／新父子链到实际 carrier；开合、barred、locked、零 HP 损毁边界；非零 HP 变化及 jammed 不改变现有库存结果 |
+| instance_configs | 对象及祖先配置影响实际拥有者，actor 配置影响该角色，Session layout 使用共享后备版本 |
+
+跨角色转移维护两端，嵌套祖先访问变化维护实际拥有者。组合标记仍保留 aggregate、成员、
+layout 依赖，裁剪不得丢失它们。CharacterFacts._validated_rule_components 是一次完整
+严格校验的缓存结果；rule_components 由其投影字典，inventory_model 直接复用类型值。
+只对已验证条目的 owner 子集 model_copy，不绕过标量／重复 ID／投影校验，不重复验证
+同一 InventoryState。完整公开列表仍复制／序列化实际输出，权限和披露仍运行。
+当前实现、实测与限制见 [四项验收](reviews/RUNTIME_INSTANCE_OWNERSHIP.md#2026-10-22-four-fixes-transaction-and-local-costs)。
+
 ## 2026-10-22 受管理输入与角色库存模型
 
 地图、完整感知模型、Light 及角色 InventoryState 使用原 SessionMemory 实例字段，
