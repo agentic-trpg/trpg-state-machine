@@ -12,6 +12,7 @@ import json
 import re
 import sqlite3
 from collections import OrderedDict
+from contextlib import contextmanager
 from copy import deepcopy
 from dataclasses import replace
 from itertools import combinations
@@ -374,11 +375,100 @@ class SessionMemory:
         """O(1) validity; only domains with a complete change protocol opt in."""
         if domain == "capabilities":
             return self.scene_association(parameter[0][0], sid, identity)
-        if domain not in ("weight", "mechanism_index", "light_candidates"):
+        if domain not in ("weight", "mechanism_index", "light_candidates", "inventory"):
             raise ValueError("Unknown maintained field protocol")
         dependency = self.dependency(f"{domain}:{identity!r}", sid)
         self.store._scope.memory_versions.setdefault(dependency, 0)
         return dependency
+
+    @contextmanager
+    def inventory_projection_write(self, sid, owners):
+        """Attribute the domain's validated inventory patch, not a writable fact.
+
+        Only sync_inventory_change uses this synchronous capture hint. Unscoped
+        aggregate SQL/imports conservatively invalidate all loaded owner models.
+        All resulting stamps remain in the existing savepoint candidate.
+        """
+        self.store.require_write()
+        previous = getattr(self, "_inventory_targets", None)
+        self._inventory_targets = sid, frozenset(owners)
+        try:
+            yield
+        finally:
+            self._inventory_targets = previous
+
+    def _inventory_changes(self, table, old, new):
+        """Invalidate affected owners along the changed object's ancestry only.
+
+        The existing aggregate component and actor-membership versions are also
+        checked by version(); no owner list is scanned to propagate those changes.
+        """
+        if table == "mechanical_components":
+            targets = getattr(self, "_inventory_targets", None)
+            if (
+                targets is not None
+                and old is not None
+                and new is not None
+                and old["session_id"] == new["session_id"] == targets[0]
+                and all(
+                    old[c] == new[c]
+                    for c in (
+                        "schema_version",
+                        "resources_json",
+                        "casting_json",
+                        "effects_json",
+                    )
+                )
+            ):
+                for actor in targets[1]:
+                    self._advance_field("inventory", targets[0], actor)
+            else:
+                for sid in {r["session_id"] for r in (old, new) if r is not None}:
+                    dep = ("inventory_components", sid)
+                    versions = self.store._scope.memory_versions
+                    versions[dep] = versions.get(dep, 0) + 1
+            return
+        if table in ("characters", "mechanical_actors", "actors"):
+            for row in (old, new):
+                if row is not None:
+                    self._advance_field("inventory", row["session_id"], row["actor_id"])
+            return
+        rows = ()
+        if table == "objects":
+            rows = (old, new)
+        elif table in ("object_durability", "object_openables", "door_locks"):
+            rows = tuple(
+                self._object(r["session_id"], r["object_id"]) for r in (old, new) if r is not None
+            )
+        elif table == "instance_configs":
+            for r in (old, new):
+                if r is None:
+                    continue
+                sid, identity = r["session_id"], r["instance_id"]
+                if r["domain"] == "actor":
+                    self._advance_field("inventory", sid, identity)
+                elif r["domain"] == "session":
+                    dep = ("inventory_layout", sid)
+                    versions = self.store._scope.memory_versions
+                    versions[dep] = versions.get(dep, 0) + 1
+            rows = tuple(
+                self._object(r["session_id"], r["instance_id"])
+                for r in (old, new)
+                if r is not None and r["domain"] == "object"
+            )
+        owners = set()
+        for row in rows:
+            seen = set()
+            while row is not None and row["object_id"] not in seen:
+                seen.add(row["object_id"])
+                if row["carrier_id"] is not None:
+                    owners.add((row["session_id"], row["carrier_id"]))
+                    break
+                if row["container_id"] is None:
+                    break
+                row = self._object(row["session_id"], row["container_id"])
+        for sid, actor in owners:
+            self._advance_field("inventory", sid, actor)
 
     def _advance_field(self, domain, sid, identity):
         dependency = (f"{domain}:{identity!r}", sid)
@@ -626,6 +716,14 @@ class SessionMemory:
         scope = self.store._scope
         versions = scope.memory_versions if scope is not None else self.versions
         table, sid = dependency
+        if table.startswith("inventory:"):
+            return (
+                self.generation,
+                versions.get(dependency, 0),
+                versions.get(("inventory_components", sid), 0),
+                versions.get(("mechanical_actors:membership", sid), 0),
+                versions.get(("inventory_layout", sid), 0),
+            )
         return (self.generation, versions.get((table, sid), 0))
 
     def get(self, key):
@@ -724,6 +822,18 @@ class SessionMemory:
                 alive.add((tag, dict(value.predicates).get("session_id")))
             else:
                 alive.update(value[1] if key[0] == "parsed" else value[2])
+        # Inventory's scalar stamp incorporates these existing shared versions.
+        # Keep them while any retained owner (or enclosing reader) uses the stamp.
+        inventory_sessions = {sid for name, sid in alive if name.startswith("inventory:")}
+        alive.update(
+            (name, sid)
+            for sid in inventory_sessions
+            for name in (
+                "inventory_components",
+                "mechanical_actors:membership",
+                "inventory_layout",
+            )
+        )
         self.versions = {d: self.versions.get(d, 0) for d in alive}
         if len(self.versions) > self.capacity * 32:
             self.clear()
@@ -753,6 +863,18 @@ class SessionMemory:
                 and name.startswith(table + "~scene:")
                 or table in ("objects", "instance_configs", "object_durability")
                 and name.startswith("light_candidates:")
+                or table
+                in (
+                    "objects",
+                    "actors",
+                    "characters",
+                    "mechanical_actors",
+                    "instance_configs",
+                    "object_durability",
+                    "object_openables",
+                    "door_locks",
+                )
+                and name.startswith("inventory:")
             ):
                 scope.memory_versions[dependency] += 1
 
@@ -772,6 +894,7 @@ class SessionMemory:
             self._weight_changes(table, old, new)
             self._association_changes(table, old, new)
             self._light_candidate_changes(table, old, new)
+            self._inventory_changes(table, old, new)
         finally:
             self.collectors = collectors
         sessions = {

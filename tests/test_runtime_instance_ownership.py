@@ -33,6 +33,8 @@ def test_other_connection_recovery_invalidates_failed_publishers_ram(
         acquire(first, sid, package, context)
         actor = first.read_session(sid, package, context=context).pc_actor_id
         old = first.get_object(sid, actor, BOX, package, context=context)
+        old_inventory = first.read_carried_items(sid, actor, package, context=context)
+        assert CRED in {e.instance_id for e in old_inventory.entries}
         second.read_session(sid, package, context=context)
         operation = command(first, sid, package, context, PutItem(A, CRED, BOX, "0,0"), "fault")
         publish, commit = first._store.memory.publish, first._store._commit
@@ -76,6 +78,9 @@ def test_other_connection_recovery_invalidates_failed_publishers_ram(
         assert current["contents_weight_lb"] == 1
         assert old["contents"] == ()
         assert old["contents_weight_lb"] == 0
+        current_inventory = first.read_carried_items(sid, actor, package, context=context)
+        assert CRED not in {e.instance_id for e in current_inventory.entries}
+        assert CRED in {e.instance_id for e in old_inventory.entries}
         assert first.submit_command(operation, package, context=context).status == "committed"
         assert first.get_object(sid, actor, BOX, package, context=context) == current
 

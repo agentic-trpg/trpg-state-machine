@@ -296,35 +296,39 @@ class CharacterFacts:
                         is not None
                     )
 
-                row = {
-                    "schema_version": row["schema_version"],
-                    **{
-                        field: canonical_json(value)
-                        for field, value in inputs.select(owner_ids, slugs, exists).items()
-                    },
+                values = inputs.select(owner_ids, slugs, exists)
+            else:
+                values = {
+                    field: self.store.memory.json(row[field])
+                    for field in (
+                        "inventory_json",
+                        "resources_json",
+                        "casting_json",
+                        "effects_json",
+                    )
                 }
             inventory, resources, casting, effects = (
-                self.store.memory.json(row[field])
+                values[field]
                 for field in ("inventory_json", "resources_json", "casting_json", "effects_json")
             )
-            inventory = self.store.memory.model_json(
-                InventoryState, row["inventory_json"]
-            ).model_dump(mode="json")
+            inventory = self._inventory_model(inventory).model_dump(mode="json")
             resources = (
-                self.store.memory.model_json(ResourceState, row["resources_json"]).model_dump(
-                    mode="json"
-                )
+                ResourceState.model_validate(
+                    {**resources, "pools": tuple(resources["pools"])}
+                    if isinstance(resources["pools"], list)
+                    else resources
+                ).model_dump(mode="json")
                 if resources is not None
                 else None
             )
             casting = (
-                self.store.memory.model_json(CastingState, row["casting_json"]).model_dump(
+                self.store.memory.model_json(CastingState, canonical_json(casting)).model_dump(
                     mode="json"
                 )
                 if casting is not None
                 else None
             )
-            effects = self.store.memory.model_json(_EFFECTS, row["effects_json"])
+            effects = self.store.memory.model_json(_EFFECTS, canonical_json(effects))
             effects = [v.model_dump(mode="json") for v in effects]
             known = set(self.rule_actors(sid, None if full_audit else owner_ids))
             references = {v["owner_id"] for v in inventory["entries"]}
@@ -408,6 +412,21 @@ class CharacterFacts:
             )
         return identities, owners
 
+    @instance_read("actor", None, "inventory", maintained="inventory")
+    def inventory_model(self, sid, actor_id):
+        """Validated owner projection; source relationships remain World facts."""
+        return self._inventory_model(self.rule_components(sid, {actor_id})["inventory_state"])
+
+    @staticmethod
+    def _inventory_model(value):
+        # Pinned RE models are strict. JSON arrays represent tuples at this
+        # boundary; normalize only that container, never relax scalar checking.
+        entries = value["entries"]
+        return InventoryState.model_validate(
+            {**value, "entries": tuple(entries)} if isinstance(entries, list) else value
+        )
+
+    @scoped_read
     def _inventory_selection(self, sid, owners, identities):
         stored = self._conn.execute(
             "SELECT * FROM mechanical_components WHERE session_id=?", (sid,)
@@ -415,9 +434,7 @@ class CharacterFacts:
         if stored is None:
             raise StateMachineError("unsupported_mechanical_version", "Explicit inventory missing")
         selected = self._component_inputs(stored).inventory(owners, identities)
-        return self.store.memory.model_json(InventoryState, canonical_json(selected)).model_dump(
-            mode="json"
-        )
+        return self._inventory_model(selected).model_dump(mode="json")
 
     def project_item_transfer(self, sid, before, after, *, prepared=None):
         self.store.require_write()
@@ -461,23 +478,24 @@ class CharacterFacts:
         replacements = {i: e for i, e in expected.items() if i in selected and selected[i] != e}
         additions = [e for i, e in expected.items() if i not in selected]
         if remove & selected.keys() or replacements or additions:
-            self._conn.execute(
-                "UPDATE mechanical_components SET "
-                "inventory_json=json_set(inventory_json,'$.entries',"
-                "json((SELECT json_group_array(json(value)) FROM ("
-                "SELECT CASE WHEN p.key IS NULL THEN e.value ELSE p.value END AS value "
-                "FROM json_each(inventory_json,'$.entries') e LEFT JOIN json_each(?) p "
-                "ON p.key=json_extract(e.value,'$.instance_id') "
-                "WHERE json_extract(e.value,'$.instance_id') NOT IN (SELECT value FROM "
-                "json_each(?)) "
-                "UNION ALL SELECT value FROM json_each(?))))) WHERE session_id=?",
-                (
-                    canonical_json(replacements),
-                    json.dumps(sorted(remove)),
-                    canonical_json(additions),
-                    sid,
-                ),
-            )
+            with self.store.memory.inventory_projection_write(sid, owners):
+                self._conn.execute(
+                    "UPDATE mechanical_components SET "
+                    "inventory_json=json_set(inventory_json,'$.entries',"
+                    "json((SELECT json_group_array(json(value)) FROM ("
+                    "SELECT CASE WHEN p.key IS NULL THEN e.value ELSE p.value END AS value "
+                    "FROM json_each(inventory_json,'$.entries') e LEFT JOIN json_each(?) p "
+                    "ON p.key=json_extract(e.value,'$.instance_id') "
+                    "WHERE json_extract(e.value,'$.instance_id') NOT IN (SELECT value FROM "
+                    "json_each(?)) "
+                    "UNION ALL SELECT value FROM json_each(?))))) WHERE session_id=?",
+                    (
+                        canonical_json(replacements),
+                        json.dumps(sorted(remove)),
+                        canonical_json(additions),
+                        sid,
+                    ),
+                )
         entries = [e for e in old["entries"] if e["instance_id"] not in portable] + list(
             expected.values()
         )

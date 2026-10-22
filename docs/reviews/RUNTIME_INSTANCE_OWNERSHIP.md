@@ -1,5 +1,8 @@
 # Runtime instance ownership — 2026-10-22
 
+Latest follow-up: [managed identity/version cache inputs](#2026-10-22-follow-up-managed-cache-inputs).
+Earlier acceptance counts remain dated evidence for their original source.
+
 The follow-up [mutation-maintained validity acceptance](#2026-10-22-follow-up-mutation-maintained-validity)
 below supersedes the original warm-read cost claims only within its measured scope.
 All original counts and acceptance dates below retain their original meaning.
@@ -416,3 +419,176 @@ the existing two Lark deprecation warnings occur per pytest group. These are loc
 checks; GitHub Actions and sustained multiplayer load were not executed. Delivery
 uses the two original branches and separate commits/pushes; no merge or force push
 is authorized.
+
+## 2026-10-22 follow-up: managed cache inputs
+
+Start: SM `refactor/session-memory-runtime@e776fab1ede6ec8fc8ca5a46cb34410a85031de1`;
+Doc `a593a9d91b1268bba26805b48b3d2cf4b5f13942`. Fetch/ls-remote confirmed both
+reviewed heads. The Doc predecessor is not an ancestor of remote main `5619e7a`;
+new branch `docs/runtime-versioned-cache-keys` therefore starts from its latest
+head in a new worktree. SM main remains `3aacecc`; existing worktrees, untracked
+text and primary Doc files are preserved. RE, Pages, merges and main pushes are
+excluded. No Schema, lockfile, rule binding or public DTO change.
+
+### Implemented consumers and validity
+
+| Owner / actual field | Entry and identity | Source / maintenance |
+|---|---|---|
+| Scene.spatial.record, map, mechanical_map | GridMaps.scene; GridReader.prepared_scene/current_grid; Store + Session + Scene | Existing SessionMemory projection versions for mechanical_scenes state_json/spatial_enabled; actual row changes invalidate, actor/object motion does not |
+| Scene.spatial plus local blocker overlay | GridService.local_topology/base_topology/exploration_topology | PreparedGrid shares ReadOnlyTopology; Schema40 cell and Actor position indices, relevant door states and endpoint conditions supply dynamic blockers |
+| Scene.lighting.sources/geometry/cells/projection/topology | query_illumination/current_cell/current_project/current_topology | Existing actual source, mode, ancestor transmission, map, ground geometry and door dependencies; no full-map content key for managed input |
+| CharacterRuntime.inventory | CharacterFacts.inventory_model, public read_carried_items; Session + actor | Maintained inventory stamp: affected owner changes, aggregate fallback, actor membership and controlled layout version; model schema remains InventoryState |
+| CharacterFacts component/selection cache | rule_components, _inventory_selection; Session + explicit owner and item-ID sets | Existing component row/relationship dependency capture; indexed ComponentInputs selects actual closure; no inventory structure-to-JSON-to-model-cache round trip |
+| Scene.spatial.sensory | GridMaps.mechanical_grid, EventCapture._perception_geometry; Session + Scene + MechanicalGrid type | Complete MechanicalGrid validation of original prepared data on cache miss/map change; GridScene defaults do not fill missing sensory fields |
+| Event stage result | EventCapture stage evidence, signals and persisted evidence JSON | Detached full stage output from that candidate/read range; later map/model changes cannot modify old evidence |
+
+`local_topology` shares the base blocked set through an immutable membership
+overlay. Creating it visits only supplied dynamic cells; it never thaws, unions,
+sorts or re-encodes the full base map. RE algorithms still decide walls, corners,
+diagonals, bounds and cover. Existing exclusion, shared-door and multi-cell
+semantics remain. Full exploration/path consumers still read their required
+dynamic scope. Public Light retains current authorization, LOS and source
+disclosure; its visibility topology comes directly from the same prepared map.
+Full Light projection shares base topology and produces a detached output map.
+Event capture overlays projected lighting on the already validated stage topology.
+Current combat-position consumers also pass PreparedGrid; initial/fixed foundation
+maps keep their supplied content identity.
+
+Inventory mutation capture follows old/new container ancestry to actual carriers.
+Objects/quantity/unit metadata, actor/core/mechanical facts, object configuration,
+durability, bars and locks invalidate affected owners. `sync_inventory_change`
+already knows the old/new owners: its synchronous `inventory_projection_write`
+capture hint advances only their stamps for the validated inventory patch. This
+hint is not a writable fact, another directory or transaction. Other aggregate
+SQL/import/schema/resource/casting/effect changes use a conservative shared
+fallback stamp; mechanical actor membership and Session layout remain covered.
+No global inventory enumeration is added to ordinary mutation maintenance.
+Trimming retains composite stamp dependencies; controlled REPLACE compatibility
+also invalidates these fields. Unknown/malformed source changes cannot hide behind
+a previously valid model. Inventory's JSON array is normalized to a tuple only;
+strict scalar checking and duplicate-ID validation remain enabled.
+
+All fields use the existing immutable owner replacements, SessionMemory budget,
+UnitOfWork savepoints and durable-COMMIT/RAM-publication boundary. Versions come
+from the caller's scope, never a fresh DB read or payload digest. Rollback restores
+both fields and stamps, including repeated numeric candidate versions. Bounded
+legacy content pools still support explicit unversioned fixed inputs; they cannot
+select a current map on scene_id alone. Eviction, unload and recovery reconstruct
+from persisted instances. Per-connection recovery generation and old-reader
+publication fences are retained.
+
+### Comparable deterministic evidence
+
+`tests/test_versioned_runtime_inputs.py` measures actual production readers and a
+real StepActor command. Baseline source is an archived, unmodified `e776fab1/src`,
+selected explicitly by pytest pythonpath; both runs use the same locked environment
+and test fixtures. The fourteen performance cases intentionally fail their new
+assertions on that old source. Fixture correction/early implementation failures
+are intermediate evidence only.
+
+Growth 10 / 100 means that many distant static blocked cells, unrelated objects,
+remote actors and another actor's inventory entries; the local target stays fixed.
+Local/Light slices perform two repeated queries and one new local target; inventory
+and sensory slices perform two repeated queries. The larger target-inventory slice
+separately returns 11 / 101 entries (10 / 100 portable units plus one legacy entry).
+
+| Slice / counter (10 / 100) | e776fab1 before | This follow-up |
+|---|---|---|
+| Local movement input: cache-key encoded blocked records | 10 / 100 | 0 / 0 |
+| Same: full-map copies; sorted records | 1 / 1; 22 / 112 | 0 / 0; 12 / 12 local cells |
+| Public single-cell Light: encoded blocked records; full Scene copies | 30 / 300; 3 / 3 | 0 / 0; 0 / 0 |
+| Sensory map: encoded blocked records; full Scene copies | 20 / 200; 2 / 2 | 0 / 0; 0 / 0 |
+| Target inventory output: encoded inventory records | 11 / 101 | 0 / 0 |
+| Same: dependency version checks | 41 / 311 | 4 / 4 |
+| After another actor's validated transfer: target RAM calls/rows | 18 / 108 | 2 / 2 |
+| Same: target inventory records re-encoded; all version checks | 4 / 4; 33 / 33 | 0 / 0; 4 / 4 |
+| Real StepActor: internal cache-key blocked records | 40 / 400 | 0 / 0 |
+| Same: topology constructions; necessary full evidence encodings | 1 / 1; 1 / 1 | 0 / 0; 1 / 1 |
+| Same: blocked records in persisted stage evidence | 10 / 100 | 10 / 100 (retained) |
+
+Cache-lookup encoding call counts (equal at both sizes) are respectively:
+local 1 -> 0, public Light 3 -> 0, small inventory 2 -> 0, sensory 2 -> 0,
+full target inventory 1 -> 0, target after foreign transfer 5 -> 0, and movement
+4 -> 0. Movement's one additional evidence encoding remains 1 -> 1; it is
+separately classified, not removed or counted as a cache key.
+
+SQL / RAM / checks are separate: local slice SELECTs/SQL rows = 3/0 and RAM
+calls/rows = 10/2, checks 136, unchanged at both sizes; these include cold local
+occupancy for the new target. Light uses 0 SQL, RAM 6/6 -> 3/3, checks 41 -> 44.
+Sensory uses 0 SQL, RAM 2/2 -> 0/0, checks 0 -> 4. Small inventory uses 0 SQL,
+RAM 4/4 unchanged, checks 30 -> 8. Full target inventory uses 0 SQL, RAM 2/2
+unchanged. Movement SELECTs/rows = 6/2 unchanged, RAM 49/29 -> 46/26, checks
+133 -> 137. Each figure is equal in the two growth groups. All warm-reader
+slices have zero topology constructions and zero JSON-model parses before/after;
+instrumented Python InventoryState/MechanicalGrid validation is also zero on
+delivery warm reads. No-parse alone was insufficient: old encoding counts above
+remain nonzero. Legitimate output copies/serialization and cold preparations are
+not relabeled as cache lookup.
+
+Dependency-check figures count actual SessionMemory.version calls in both runs,
+not SQL or scalar CPU comparisons. The inventory token reads a fixed four
+version components plus the existing memory generation; its comparison does not
+enumerate inventory entries or a variable dependency collection.
+
+Prior field-maintenance cases still show weight 1 check, no mechanism index copies
+or rediscovery, and fixed unrelated growth. New record validity raises mechanism
+command checks 111 -> 114 (RAM 78/32 -> 76/30); four bag commands checks
+972 -> 1000 (RAM 284/180 -> 280/176), identically at both sizes. Their thresholds
+track this measured constant overhead; the original dated figures above stay
+unchanged. No work was shifted into an added full-scene scan.
+
+### Validation and retained boundaries
+
+Final targeted suite: 47 passed, exit 0, including all 22 new cases plus prior
+owner/field-maintenance tests. New cases cover distinct item/owner selection keys,
+unprojected invalid source rejection, multi-stage map/inventory changes, savepoint
+and whole rollback, repeated candidate stamps, old fixed maps, full sensory
+requirements, unload/restart, and map commit failure/unknown commit/publication
+failure with recovery on another connection. Existing four publication-failure
+modes now also assert old/current inventory model isolation. Final complete-regression
+and documentation validation results are recorded below.
+
+Remaining serialization is deliberate: persisted facts/deltas, receipts, evidence,
+protocol snapshots, idempotency fingerprints, source bindings, existing JSON
+decoders and unversioned external/fixed maps. Casting/effect selections retain the
+pinned strict JSON-model compatibility route when rule_components actually rebuilds;
+its effective outer cache still reuses valid results. Complete inventory/evidence/
+projection outputs retain proportional output work. Cold aggregate ComponentInputs
+index preparation and SQLite aggregate inventory UPDATE retain their existing
+aggregate storage cost; the measured target read after an unrelated domain patch
+does not reconstruct them. Unattributed aggregate SQL remains conservatively
+invalidating. Actual light-source/door and scene-passage dependency checks remain;
+this is not a constant-cost claim across growing relevant geometry or sources.
+
+NPC all-actor reads and transaction-wide version-dictionary copying are unchanged,
+separate tasks. The independently reported **caught SQL statement error followed
+by continued commit can diverge RAM/SQLite** issue remains **unresolved and outside
+this acceptance**. Cache/commit fault tests here do not establish its repair.
+No general map-edit command, live stack editing, multiplayer load guarantee or
+broader recovery capability is introduced.
+
+### Final managed-input acceptance
+
+Full locked-environment regression: **2,091 unique tests**, disjoint sorted-file
+partitions **665 / 757 / 669**, all exit 0. Collection/JUnit union has no missing,
+unexpected, duplicate, failed, errored or skipped cases. All 216 Python source,
+test and example hashes are unchanged during the final run. Historical migration
+tests are included; no environment-blocked case is reported as a pass. The final
+47-test targeted run also exits 0 and is not added again to the full-suite count.
+
+Actual commands use `uv run --locked --no-sync pytest -q`, repository-local unique
+basetemps, JUnit output and `-o faulthandler_timeout=60`. The focused files are
+`test_versioned_runtime_inputs.py`, `test_runtime_instance_ownership.py` and
+`test_runtime_field_maintenance.py`; the full suite assigns every sorted test file
+to exactly one of three modulo partitions. Evidence: `.test-tmp/versioned-final-target.*`,
+`versioned-delivery-{0,1,2}.*`, `versioned-delivery-collection.txt`,
+`versioned-delivery-audit.json` and `versioned-counts.json`. Old-source runs are
+`versioned-before-comparable.log` and `versioned-before-commands.log`.
+
+`uv run --locked --no-sync ruff check src tests examples` and
+`uv run --locked --no-sync ruff format --check src tests examples` pass (216 files).
+Both repositories' changed Markdown links/anchors/fences pass: 13 files, 170 local
+links; staged/unstaged whitespace checks pass. Only two existing Lark deprecation
+warnings occur per pytest group. No dependency synchronization/upgrade, remote CI
+or sustained multiplayer load was performed. The explicit independent SQL-error,
+NPC, aggregate storage and genuine dependency limits above remain open.

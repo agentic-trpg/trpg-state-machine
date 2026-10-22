@@ -1,5 +1,13 @@
 # ContainerService 专项修复
 
+## 2026-10-22 库存模型与容器关联
+
+容器转移／访问变化继续维护原物品事实和库存投影；运行层沿旧／新祖先失效受影响角色
+库存模型。sync_inventory_change 的受控补丁只推进实际拥有者版本；其他聚合写入保守
+失效。选择缓存区分拥有者和物品 ID 集，不重新编码已解析库存查模型缓存。重量、未知值、
+容量和原权限检查保留；验证与冷聚合持久化成本见
+[本次验收](reviews/RUNTIME_INSTANCE_OWNERSHIP.md#2026-10-22-follow-up-managed-cache-inputs)。
+
 ## 2026-10-22 二次性能修复：读取字段版本，修改维护祖先
 
 own_weight／contents_weight／total_weight 命中只检查对象重量版本一次，不向上层缓存传播

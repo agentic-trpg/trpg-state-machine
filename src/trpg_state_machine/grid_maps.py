@@ -7,6 +7,7 @@ data. Grid geometry remains separate from base-fact ownership and publication.
 
 import json
 from collections import ChainMap, OrderedDict
+from collections.abc import Set
 from dataclasses import dataclass
 from types import MappingProxyType
 
@@ -14,6 +15,7 @@ from dnd5e_engine.spatial import GridTopology
 from dnd5e_engine.specs import GridScene
 
 from .package import canonical_json
+from .runtime_instances import resolve_field
 
 
 def _freeze(value):
@@ -40,6 +42,31 @@ class _Wall:
     y1: float
     x2: float
     y2: float
+
+
+@dataclass(frozen=True, slots=True)
+class _BlockedOverlay(Set):
+    """Membership shares the immutable base; constructing it visits only extras."""
+
+    base: Set
+    extra: frozenset
+
+    def __contains__(self, cell):
+        return cell in self.extra or cell in self.base
+
+    def __iter__(self):
+        yield from self.base
+        yield from (cell for cell in self.extra if cell not in self.base)
+
+    def __len__(self):
+        return len(self.base) + sum(cell not in self.base for cell in self.extra)
+
+    def __bool__(self):
+        return bool(self.extra) or bool(self.base)
+
+    @classmethod
+    def _from_iterable(cls, values):
+        return frozenset(values)
 
 
 class ReadOnlyTopology(GridTopology):
@@ -81,6 +108,13 @@ class ReadOnlyTopology(GridTopology):
         object.__setattr__(
             result, "_lighting", MappingProxyType(ChainMap(_freeze(lighting), self._lighting))
         )
+        return result
+
+    def with_blocked(self, cells):
+        result = object.__new__(type(self))
+        for name, value in vars(self).items():
+            object.__setattr__(result, name, value)
+        object.__setattr__(result, "_blocked", _BlockedOverlay(self._blocked, frozenset(cells)))
         return result
 
 
@@ -159,19 +193,34 @@ class GridMaps:
         return result
 
     def for_grid(self, sid, scene_id, raw, *, source="live"):
+        if isinstance(raw, PreparedGrid):
+            return raw
         encoded = canonical_json(raw)
         return self._resolve(
             "grids", (sid, scene_id, source, encoded), lambda: PreparedGrid.build(raw)
         )
 
     def scene(self, sid, scene_id, *, spatial_only=False):
+        stored, enabled = resolve_field(
+            self.store,
+            "scene",
+            sid,
+            scene_id,
+            "spatial",
+            "record",
+            (),
+            lambda: self._scene(sid, scene_id),
+        )
+        return None if spatial_only and not enabled else stored
+
+    def _scene(self, sid, scene_id):
         row = self.store.connection.execute(
             "SELECT state_json,spatial_enabled FROM mechanical_scenes "
             "WHERE session_id=? AND scene_id=?",
             (sid, scene_id),
         ).fetchone()
-        if row is None or spatial_only and not row[1]:
-            return None
+        if row is None:
+            return None, False
         encoded = row[0]
 
         def build():
@@ -181,7 +230,32 @@ class GridMaps:
             )
             return PreparedScene(_freeze(data), grid)
 
-        return self._resolve("records", (sid, scene_id, "live", encoded), build)
+        return self._resolve("records", (sid, scene_id, "live", encoded), build), bool(row[1])
+
+    def mechanical_grid(self, sid, scene_id):
+        """Validate the complete sensory schema once per visible map dependency.
+
+        GridScene's movement defaults never supply missing sensory fields.
+        Returned models are detached by the existing instance field boundary.
+        """
+        from dnd5e_engine.evaluation_state import MechanicalGrid
+
+        def build():
+            stored = self.scene(sid, scene_id)
+            if stored is None or stored.data["scene_id"] != scene_id or stored.grid is None:
+                return None
+            return MechanicalGrid.model_validate(stored.grid.copy_data())
+
+        return resolve_field(
+            self.store,
+            "scene",
+            sid,
+            scene_id,
+            "spatial",
+            "sensory",
+            MechanicalGrid,
+            build,
+        )
 
     def template(self, sid, scene_id, encoded):
         return self._resolve(

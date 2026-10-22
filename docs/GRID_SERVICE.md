@@ -1,5 +1,14 @@
 # GridService
 
+## 2026-10-22 按实例版本复用地图输入
+
+GridMaps.scene 接入 Scene.spatial.record；prepared_scene/current_grid 共享不可变地图，
+MechanicalGrid 完整类型模型由 spatial.sensory 持有。局部动态阻挡采用共享基础集合的
+只读覆盖，不复制、合并排序或编码整图。base_topology、公开 Light 和阶段采集使用同范围
+已准备拓扑；未知版本的显式固定地图仍按自身内容处理。地图事实变更推进原投影版本，
+移动不失效基础地图；旧输入、候选、回滚、预算和恢复保持隔离。
+实际入口、计数及完整输出边界见 [本次验收](reviews/RUNTIME_INSTANCE_OWNERSHIP.md#2026-10-22-follow-up-managed-cache-inputs)。
+
 ## 2026-10-22 场景空间字段
 
 GridReader 的生产读取使用 Scene.spatial 的 map／mechanical_map、occupants、

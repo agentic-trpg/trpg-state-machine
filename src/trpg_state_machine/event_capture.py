@@ -3,8 +3,6 @@
 from dataclasses import asdict, replace
 from types import MappingProxyType
 
-from dnd5e_engine.evaluation_state import MechanicalGrid
-
 from .errors import StateMachineError
 from .events import _StagedEvent
 from .package import Signal, SignalOrigin, SignalScope, SignalStimulus, canonical_json
@@ -206,13 +204,13 @@ class EventCapture:
             ):
                 if active:
                     grid, uncertainty, light_sources = self.lights.project(
-                        sid, scene_id, package, grid
+                        sid, scene_id, package, self.world.maps.scene(sid, scene_id).grid
                     )
                 else:
                     grid, uncertainty, light_sources = self.lights.current_project(
                         sid, scene_id, package
                     )
-                topology = self.world.maps.for_grid(sid, scene_id, grid).topology
+                topology = topology.with_lighting(grid["lighting"])
             topologies[scene_id] = topology
             evidence["scenes"][scene_id] = {
                 "grid": grid,
@@ -263,15 +261,12 @@ class EventCapture:
     def _perception_geometry(self, sid, scene_id):
         """Full current mechanical geometry, independent of movement admission."""
         try:
-            stored = self.world.maps.scene(sid, scene_id)
-            if stored is None:
-                return None, None
-            scene = stored.copy_data()
-            if scene["scene_id"] != scene_id:
+            grid = self.world.maps.mechanical_grid(sid, scene_id)
+            if grid is None:
                 return None, None
             # MechanicalGrid requires every sensory field. GridScene defaults
             # must not promote a movement-only projection into sensory evidence.
-            grid = self.store.memory.model_json(MechanicalGrid, canonical_json(scene["grid"]))
+            stored = self.world.maps.scene(sid, scene_id)
             topology = stored.grid.topology
             return grid.model_dump(mode="json"), topology
         except (KeyError, TypeError, ValueError):

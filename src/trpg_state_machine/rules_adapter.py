@@ -378,7 +378,10 @@ class RulesAdapter:
         scene = self.facts.mechanical_scene(sid, combat["scene_id"])
         if not state["ended"]:
             state["actor_zone"] = self._current_cells(
-                sid, combat["scene_id"], state["initiative_ids"], scene["grid"]
+                sid,
+                combat["scene_id"],
+                state["initiative_ids"],
+                self.facts.maps.scene(sid, combat["scene_id"]).grid,
             )
         try:
             return CombatSnapshot.model_validate_json(
@@ -530,8 +533,8 @@ class RulesAdapter:
                         "SELECT scene_id,state_json FROM combats WHERE session_id=?", (sid,)
                     ).fetchone()
                     roster = json.loads(combat["state_json"])["initiative_ids"]
-                    scene = self.facts.mechanical_scene(sid, combat["scene_id"])
-                    cells = self._current_cells(sid, combat["scene_id"], roster, scene["grid"])
+                    prepared = self.facts.maps.scene(sid, combat["scene_id"]).grid
+                    cells = self._current_cells(sid, combat["scene_id"], roster, prepared)
                     self.records.freeze_positions(sid, cells)
                 self.records.update_rule_state(sid, field, value)
             elif component == "ledger":

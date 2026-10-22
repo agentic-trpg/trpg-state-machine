@@ -425,12 +425,14 @@ class GridService:
                 if with_extent
                 else topology
             )
-        grid = prepared.copy_data()
         topology = prepared.topology
         if package is not None:
-            grid, _, _ = self.h.objects.lights.current_project(sid, scene_id, package)
-            topology = self.reader.topology_for_grid(sid, scene_id, grid)
-        return (topology, (grid["width"], grid["height"])) if with_extent else topology
+            topology = self.h.objects.lights.current_topology(sid, scene_id, package)
+        return (
+            (topology, (prepared.data["width"], prepared.data["height"]))
+            if with_extent
+            else topology
+        )
 
     @_read
     def read_scene(self, sid, scene_id, package):
@@ -522,15 +524,7 @@ class GridService:
             ]
             if endpoints and passage.door_object_id and self.h._door_closed(sid, passage, package):
                 occupied.update(e.threshold_cell for e in endpoints)
-        raw = prepared.copy_data()
-        return self.reader.topology_for_grid(
-            sid,
-            scene_id,
-            {
-                **raw,
-                "blocked_cells": sorted(set(raw["blocked_cells"]) | occupied),
-            },
-        )
+        return prepared.topology.with_blocked(occupied)
 
     @_read
     @scoped_read
@@ -550,7 +544,6 @@ class GridService:
         walls. RE/Combat retains creature passage rules and all movement budgets.
         """
         prepared = self.reader.prepared_scene(sid, scene_id, package)
-        raw = prepared.copy_data()
         actors, _ = self.reader.scene_occupants(sid, scene_id, package)
         projections = self.h.objects.spatial.scene_contributions(sid, scene_id, package)
         base = prepared.topology
@@ -564,7 +557,7 @@ class GridService:
             for p in self.h.facts.instances.passages(sid, scene_id=scene_id)
             if p.door_object_id
         }
-        cells = set(raw["blocked_cells"])
+        cells = set()
         cells.update(cell for aid, cell in actors if aid != exclude_actor and cell is not None)
         cells.update(
             cell
@@ -580,4 +573,4 @@ class GridService:
                     if e.scene_id == scene_id
                     and (passage.passage_id, e.threshold_cell) not in handled_thresholds
                 )
-        return self.reader.topology_for_grid(sid, scene_id, {**raw, "blocked_cells": sorted(cells)})
+        return prepared.topology.with_blocked(cells)

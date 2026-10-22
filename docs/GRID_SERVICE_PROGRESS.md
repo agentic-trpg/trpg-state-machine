@@ -1,5 +1,13 @@
 # W-01 GridService 切片进度
 
+## 2026-10-22 运行缓存身份与版本复用
+
+Scene.spatial.record/map/mechanical_map/sensory 已接入地图、局部移动与完整阶段模型。
+10／100 个远处静态阻挡下，局部输入编码记录由 10／100 降为 0／0，完整地图复制 1→0，
+排序仅余固定的 12 个局部候选格。公开 Light、真实 StepActor 及感知阶段分别计数，
+完整必要证据保留编码。旧固定图／候选／保存点／恢复与剩余边界见
+[后续验收](reviews/RUNTIME_INSTANCE_OWNERSHIP.md#2026-10-22-follow-up-managed-cache-inputs)；历史数字不改写。
+
 ## 2026-10-22 后续：场景空间字段与格子读取
 
 已接入解析地图／机械地图、物体位置、占用格和动态阻挡字段；局部拓扑沿已有格子索引

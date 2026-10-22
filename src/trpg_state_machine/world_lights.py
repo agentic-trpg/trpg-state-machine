@@ -60,9 +60,17 @@ class LightService:
 
     @instance_read("scene", "lighting", "projection")
     def current_project(self, sid, scene, package):
-        raw = self.h.grid.reader.current_grid(sid, scene, package).copy_data()
+        raw = self.h.grid.reader.current_grid(sid, scene, package)
         geometry = self.geometry(sid, scene, package) if self.sources(sid, scene, package) else None
         return self.project(sid, scene, package, raw, geometry=geometry)
+
+    @instance_read("scene", "lighting", "topology")
+    def current_topology(self, sid, scene, package):
+        prepared = self.h.grid.reader.current_grid(sid, scene, package)
+        if not self.sources(sid, scene, package):
+            return prepared.topology
+        grid, _, _ = self.current_project(sid, scene, package)
+        return prepared.topology.with_lighting(grid["lighting"])
 
     @instance_read("scene", "lighting", "cells", capacity=128)
     def current_cell(self, sid, scene, package, cell):
@@ -114,7 +122,7 @@ class LightService:
 
     @instance_read("scene", "lighting", "geometry")
     def geometry(self, sid, scene, package):
-        raw = self.h.grid.reader.current_grid(sid, scene, package).copy_data()
+        raw = self.h.grid.reader.current_grid(sid, scene, package)
         return self._geometry(sid, scene, package, raw)
 
     @instance_read("scene", "lighting", "candidates", maintained="light_candidates")
@@ -136,20 +144,23 @@ class LightService:
                 candidates.update(
                     e.threshold_cell for e in passage.endpoints if e.scene_id == scene
                 )
-        uncertain_geometry = self.h.grid.reader.topology_for_grid(
-            sid, scene, {**raw, "blocked_cells": sorted(set(raw["blocked_cells"]) | candidates)}
-        )
+        topology = self.h.grid.reader.topology_for_grid(sid, scene, raw)
+        uncertain_geometry = topology.with_blocked(candidates)
         return frozenset(candidates), uncertain_geometry
 
     def project(self, sid, scene, package, raw, *, cells=None, geometry=None):
         """Explicit fixed-map inputs remain separate from current scene fields."""
-        grid = {**raw, "lighting": dict(raw["lighting"])}
+        from .grid_maps import PreparedGrid
+
         topology = self.h.grid.reader.topology_for_grid(sid, scene, raw)
+        supplied = raw
+        raw = raw.copy_data() if isinstance(raw, PreparedGrid) else raw
+        grid = {**raw, "lighting": dict(raw["lighting"])}
         sources = self.sources(sid, scene, package)
         if not sources:
             return grid, (), {}
         candidates, uncertain_geometry = (
-            self._geometry(sid, scene, package, raw) if geometry is None else geometry
+            self._geometry(sid, scene, package, supplied) if geometry is None else geometry
         )
         uncertain, evidence = [], {}
         selected = (
@@ -241,8 +252,8 @@ class LightService:
         with h._transaction():
             position = h._spatial_reader(sid, actor, package, context)
             h._public_scope(sid, actor, package)
-            raw = h._spatial_scene(sid, position.scene_id)["grid"]
-            topology = h.grid.reader.topology_for_grid(sid, position.scene_id, raw)
+            prepared = h.grid.reader.prepared_scene(sid, position.scene_id, package)
+            topology = prepared.topology
             try:
                 visible_cell = topology.has_line_of_sight(position.cell, cell)
             except (ValueError, TypeError) as exc:
@@ -262,5 +273,5 @@ class LightService:
                 "illumination": None if uncertain else level,
                 "status": "unknown" if uncertain else "known",
                 "contributing_sources": tuple(visible),
-                "sunlight": raw["sunlight"],
+                "sunlight": prepared.data["sunlight"],
             }

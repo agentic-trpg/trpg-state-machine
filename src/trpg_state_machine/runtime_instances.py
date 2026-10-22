@@ -102,6 +102,8 @@ class TriggerIndex(Mapping):
 
 @dataclass(frozen=True)
 class SpatialFields:
+    record: tuple = ()
+    sensory: tuple = ()
     map: tuple = ()
     mechanical_map: tuple = ()
     occupants: tuple = ()
@@ -126,6 +128,7 @@ class LightingFields:
     candidates: tuple = ()
     cells: tuple = ()
     projection: tuple = ()
+    topology: tuple = ()
 
 
 @dataclass(frozen=True)
@@ -160,6 +163,13 @@ class SceneRuntime:
 class WorldRuntime:
     session_id: str
     mechanisms: MechanismFields = field(default_factory=MechanismFields)
+
+
+@dataclass(frozen=True)
+class CharacterRuntime:
+    session_id: str
+    actor_id: str
+    inventory: tuple = ()
 
 
 def resolve_field(
@@ -207,6 +217,8 @@ def resolve_field(
                 if kind == "object"
                 else SceneRuntime(sid, identity)
                 if kind == "scene"
+                else CharacterRuntime(sid, identity)
+                if kind == "actor"
                 else WorldRuntime(sid)
             )
         )

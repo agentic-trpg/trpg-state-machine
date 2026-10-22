@@ -1,5 +1,12 @@
 # EnvironmentService 实施记录
 
+## 2026-10-22 共享地图输入后续
+
+Grid／Light 的实例地图读取改用已有相关版本，局部动态阻挡共享基础拓扑；不改变
+Environment 提供方身份、来源／防护版本、时间、高度或披露协议。完整感知模型独立验证，
+外部无可信版本输入仍保留其原入口。相关回归与实际缓存键计数见
+[本次验收](reviews/RUNTIME_INSTANCE_OWNERSHIP.md#2026-10-22-follow-up-managed-cache-inputs)。
+
 ## 2026-10-22 后续：实例来源／防护／结果字段
 
 现有 area／cell／unit／height 消费者接入 Scene.environment；区域校验用目标场景存在性

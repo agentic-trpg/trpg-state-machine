@@ -1,5 +1,15 @@
 # Session Management
 
+## 2026-10-22 受管理输入与角色库存模型
+
+地图、完整感知模型、Light 及角色 InventoryState 使用原 SessionMemory 实例字段，
+身份／版本来自调用者范围，不为查缓存编码整图或库存。CharacterRuntime.inventory 的
+版本由受影响拥有者及保守聚合后备版本组成；受控库存补丁从已有旧／新拥有者集维护，
+其他聚合 SQL 保守失效。保存点与发布继续处理同一份候选字段和版本；版本裁剪保留复合
+标记的依赖。冷加载、有界淘汰、卸载和各连接恢复代次不变。类型校验、授权／披露和
+完整固定证据仍执行。具体维护入口、计数与独立未修复问题见
+[后续验收](reviews/RUNTIME_INSTANCE_OWNERSHIP.md#2026-10-22-follow-up-managed-cache-inputs)。
+
 ## 2026-10-22 后续：修改驱动的字段有效性
 
 重量、场景机关索引及能力成员关联沿现有 SessionMemory.changed 捕获实际修改；事实、

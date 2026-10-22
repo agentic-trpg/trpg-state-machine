@@ -1,5 +1,12 @@
 # World W1–W8 implementation record
 
+2026-10-22 运行缓存身份与版本复用：局部移动及公开 Light 直接消费同范围基础拓扑；
+动态阻挡用只读覆盖，共享静态集合。单格照明不复制整图，显式完整投影及 Event 阶段
+证据保留实际输出。感知地图由 Scene.spatial.sensory 完整验证后复用，库存由角色字段
+持有，实际归属、容器可访问性及受控拥有者补丁维护版本。旧固定输入不替换成当前地图。
+完整入口／修改责任／计数和限制见
+[本次验收](reviews/RUNTIME_INSTANCE_OWNERSHIP.md#2026-10-22-follow-up-managed-cache-inputs)。
+
 2026-10-22 二次性能修复：Scene.objects.capabilities 保存 light／mechanism 成员，跨场景变化
 沿实际移动子树／角色携带关系局部维护。同场景 Put/Take 空袋子不重新发现；灯进入不透光
 容器仍由所选光源的祖先／状态／配置依赖更新贡献。lighting.candidates 的地面几何字段

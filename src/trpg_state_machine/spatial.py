@@ -6,7 +6,7 @@ must never be passed to the Engine or perception as a mechanical Grid.
 
 from dataclasses import dataclass, replace
 
-from dnd5e_engine.evaluation_state import InventoryEntry, InventoryState
+from dnd5e_engine.evaluation_state import InventoryEntry
 
 from ._execution import _execution_data
 from ._operations import (
@@ -28,7 +28,7 @@ from .errors import StateMachineError
 from .game_time import AdvanceGameTime
 from .grid import GridService, cell_in_bounds
 from .models import TrustedContext
-from .package import AdventurePackage, canonical_json
+from .package import AdventurePackage
 from .scoped_reads import scoped_read
 from .world_commands import WORLD_CAPABILITY_OPERATIONS
 
@@ -474,10 +474,7 @@ class WorldHandler:
                 raise StateMachineError(
                     "unsupported_mechanical_version", "Explicit inventory is unavailable"
                 )
-            components = self.characters.rule_components(session_id, {actor_id})
-            inventory = self.store.memory.model_json(
-                InventoryState, canonical_json(components["inventory_state"])
-            )
+            inventory = self.characters.inventory_model(session_id, actor_id)
             version = self._conn.execute(
                 "SELECT world_version FROM sessions WHERE session_id=?", (session_id,)
             ).fetchone()[0]

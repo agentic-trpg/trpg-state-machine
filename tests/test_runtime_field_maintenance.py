@@ -203,7 +203,8 @@ def test_nonmatching_mechanism_records(tmp_path, context, monkeypatch, n, family
         assert counts["represented_trigger_records"] == 0
         assert counts["index_candidate_records"] == 0
         assert counts["mechanism_index_checks"] == 1
-        assert counts["dependency_checks"] <= 112 and counts["ram_rows"] <= 32
+        # Scene record/version lookup now replaces content-key map lookup.
+        assert counts["dependency_checks"] <= 114 and counts["ram_rows"] <= 32
         key = ("instance", sid, "scene", A)
         entry = sm._store.memory.values[key][0].mechanisms.index[0]
         assert (
@@ -257,7 +258,7 @@ def test_empty_bag_does_not_rediscover_scene(tmp_path, context, monkeypatch, gro
         assert counts["compute:mechanisms.index"] == counts["compute:lighting.sources"] == 0
         assert counts["compute:lighting.candidates"] == counts["compute:lighting.geometry"] == 0
         assert counts["ram_queries"] <= 284 and counts["ram_rows"] <= 180
-        assert counts["dependency_checks"] <= 972
+        assert counts["dependency_checks"] <= 1000
 
 
 def change_weight(sm, sid, oid, weight):
