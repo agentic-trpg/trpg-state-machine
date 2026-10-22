@@ -1,5 +1,43 @@
 # World W1–W8 implementation record
 
+## 2026-10-22 shared passage association
+
+Follow-up to `9627eb0`: WorldRuntime.passages owns the shared immutable passage
+directory and door/scene/ID reverse buckets. InstanceData.passages consumers and
+Light's geometry-version maintenance use the same accessor; missing door links
+are valid empty results, and shared doors update every deduplicated endpoint scene.
+The maintained layout stamp changes on controlled passage/binding/endpoint/config
+writes, not on ordinary object state edits. First/cold preparation reads persisted
+instances once; hot reads check one field stamp without SQL, JSON or layout scans.
+Original candidate isolation, rollback, post-COMMIT publication, recovery and RAM
+budget apply. Necessary full outputs remain. Costs, tests and limits are recorded
+in [this follow-up](reviews/RUNTIME_INSTANCE_OWNERSHIP.md#2026-10-22-shared-passage-reverse-association);
+the older dated evidence below is unchanged.
+
+## 2026-10-22 Light field validity and local geometry consumers
+
+On `fix/runtime-local-query-reuse` (base `a2a2fe0`), Scene.lighting.sources uses a
+mutation-maintained source stamp; candidates/geometry use a separate geometry
+stamp. Cells, current topology and full projection use the bounded composite of
+those two stamps. resolve_field hides computation leaves from enclosing readers,
+so a hot cell or upper parsed projection does not revalidate every emitter.
+
+Object light membership/state, effective object/carrier placement and emitter
+subtrees, container transmission/open state/destruction and relevant configuration
+maintain source validity. Actual ground blocker footprints, maps and both shared
+door endpoints maintain geometry validity. Empty unrelated transfers and irrelevant
+object metadata do not invalidate all scene lighting. Source/subtree work follows
+existing identity/parent/member buckets, never Scene object discovery on each read.
+Geometry is safely shared read-only; full source output retains its real copy and
+disclosure cost. Cell retention remains 128 per owner, under the existing RAM budget.
+
+All stamps belong to the existing candidate/version root and COMMIT→RAM publication;
+savepoint, full rollback, recovery generation and unload release remain authoritative.
+Map eligibility, fixed GridView indices and protection batch inputs are described in
+[Grid](GRID_SERVICE.md) and [OSS](OBJECT_SPATIAL_SERVICE.md). New measurements and
+limits are in [this acceptance](reviews/RUNTIME_INSTANCE_OWNERSHIP.md#2026-10-22-local-query-reuse);
+the dated W1–W8 evidence below is unchanged.
+
 2026-10-22 运行缓存身份与版本复用：局部移动及公开 Light 直接消费同范围基础拓扑；
 动态阻挡用只读覆盖，共享静态集合。单格照明不复制整图，显式完整投影及 Event 阶段
 证据保留实际输出。感知地图由 Scene.spatial.sensory 完整验证后复用，库存由角色字段

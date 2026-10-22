@@ -100,6 +100,58 @@ class TriggerIndex(Mapping):
         return self
 
 
+@dataclass(frozen=True, slots=True, eq=False)
+class PassageIndex:
+    """One World layout with immutable, ordered reverse buckets.
+
+    Records are frozen PassageDefinitions from persisted instance configuration.
+    Negative lookups are complete results, shared across objects and commands.
+    """
+
+    passages: tuple
+    by_door: Mapping
+    by_scene: Mapping
+    by_id: Mapping
+    door_scenes: Mapping
+
+    @classmethod
+    def build(cls, passages):
+        doors, scenes, ids, door_scenes = {}, {}, {}, {}
+        for passage in passages:
+            ids.setdefault(passage.passage_id, []).append(passage)
+            endpoints = dict.fromkeys(e.scene_id for e in passage.endpoints)
+            for scene in endpoints:
+                scenes.setdefault(scene, []).append(passage)
+            if passage.door_object_id is not None:
+                door = passage.door_object_id
+                doors.setdefault(door, []).append(passage)
+                door_scenes.setdefault(door, {}).update(endpoints)
+
+        def freeze(buckets):
+            return MappingProxyType({key: tuple(value) for key, value in buckets.items()})
+
+        return cls(passages, freeze(doors), freeze(scenes), freeze(ids), freeze(door_scenes))
+
+    def select(self, *, scene_id=None, object_id=None, passage_id=None):
+        if passage_id is not None:
+            candidates = self.by_id.get(passage_id, ())
+        elif object_id is not None:
+            candidates = self.by_door.get(object_id, ())
+        elif scene_id is not None:
+            return self.by_scene.get(scene_id, ())
+        else:
+            return self.passages
+        return tuple(
+            p
+            for p in candidates
+            if (object_id is None or p.door_object_id == object_id)
+            and (scene_id is None or any(e.scene_id == scene_id for e in p.endpoints))
+        )
+
+    def __deepcopy__(self, memo):
+        return self
+
+
 @dataclass(frozen=True)
 class SpatialFields:
     record: tuple = ()
@@ -163,6 +215,7 @@ class SceneRuntime:
 class WorldRuntime:
     session_id: str
     mechanisms: MechanismFields = field(default_factory=MechanismFields)
+    passages: tuple = ()
 
 
 @dataclass(frozen=True)

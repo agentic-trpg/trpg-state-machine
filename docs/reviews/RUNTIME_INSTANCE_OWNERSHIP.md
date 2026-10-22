@@ -1,6 +1,342 @@
 # Runtime instance ownership — 2026-10-22
 
-Latest follow-up: [four transaction/local-cost fixes](#2026-10-22-four-fixes-transaction-and-local-costs).
+## 2026-10-22 shared passage reverse association
+
+Architecture Decision **[DECIDED]**, existing MC §2.3a (World cross-scene
+associations and mutation-maintained validity); Implementation **[IMPLEMENTED on
+fix/runtime-local-query-reuse]**. This follow-up starts at reviewed SM
+`9627eb0c9b906bb7a5d2e477539e586e7d58ac5a`, paired docs
+`docs/runtime-local-query-reuse@64cd6801ed127e02226eefc419ebc4ffc5f8c53a`.
+Fetch confirmed both remote heads unchanged. Existing SM untracked worktrees and
+text file are preserved. No main merge/push, RE/Pages edits, skill, schema or
+dependency changes. The preceding batch's measurements below remain historical.
+
+### Cause, owner and maintenance
+
+The actual public chain was SetObjectState → SessionMemory.changed →
+_light_candidate_changes → _light_door_scenes. Its filtered json_each SELECT
+expanded all persisted Session passages even for a box without any association;
+OLD/NEW also requested the same object twice. A per-object query-cache hit hid
+later repeats but did not share the negative result across different objects.
+
+Existing InstanceData.passages was already the common by-door/scene/ID entry used
+by Openable occupancy, spatial restrictions, interactions, Light and Activity/NPC
+consumers; it also filtered through json_each. No reusable passage reverse index
+existed (World.mechanisms.index is the separate mechanism component index).
+
+WorldRuntime.passages now holds one FieldValue containing immutable PassageIndex:
+the ordered frozen PassageDefinitions and read-only door/scene/passage-ID buckets,
+plus each door's ordered, deduplicated endpoint scene IDs. Buckets share the same
+records. InstanceData.passages and _light_door_scenes both use passage_index();
+the latter directly selects door_scenes, including a valid empty tuple. OLD/NEW
+object IDs are deduplicated before lookup. Ground-blocker geometry maintenance
+remains independent. There is no Light-only passage directory or writable copy.
+
+The authoritative source is instance_configs' Session passages, never Package.
+First use, related invalidation or eviction prepares the complete shared layout
+once, from one persisted projection, across subsequent objects/commands. Valid
+resolve_field reads compare only the maintained passage_index:<session> stamp
+(existing generation plus candidate counter). The immutable index's deepcopy
+returns itself; lookup never copies the directory or checks individual configs.
+By-door combined filters inspect only matching records; full/scene outputs still
+have their requested output cost. Complete navigation output/audits are retained.
+
+SessionMemory._passage_changes, in the existing TEMP change callback, compares
+OLD/NEW Session layout configuration on controlled config writes only. Passage
+addition/removal, door rebinding, endpoint/scene changes and config identity or
+row insertion/deletion advance the registered stamp. Unchanged passage metadata
+and ordinary object config/state writes do not advance it. REPLACE's existing
+invalidate_table fallback also covers this stamp when SQLite omits delete hooks.
+Controlled layout replacement retains the existing affected Light-field
+invalidation. No object mutation enumerates Session passages to maintain validity.
+
+Index values and stamps use the same UnitOfWork pending owner/version root as
+facts. Savepoint/full rollback restore them together, including repeated numeric
+counter values; old index references retain old bindings/endpoints. Unload,
+budget eviction and recovery use existing release/generation handling. No new
+cache lifetime: the field is charged to the existing entry/32 MiB payload budget.
+COMMIT→publish failure/unknown outcome still pauses current access; another
+connection's recovery fences both contexts before serving persisted new relations.
+
+### New deterministic measurements
+
+Before editing production, the real public-command test reproduced the reviewed
+query's **39 / 79 / 439 SQLite VM steps** with +0/+10/+100 unrelated passages;
+the true door measured **58 / 98 / 458**. These are helper-query opcodes, not
+SELECTs/rows. Baseline reproduction tests intentionally failed the new zero-scan
+assertion. Subsequent warm operations below use two different ordinary boxes and
+a real shared door, closing and opening each via public commands. Ambient bright
+keeps reopening authorization independent of the closed threshold's LOS.
+
+| Work inside the candidate helper, +0 / +10 / +100 unrelated passages | Before | After |
+|---|---|---|
+| First ordinary box close, SQLite VM steps | 39 / 79 / 439 | 0 / 0 / 0 |
+| First shared door close, SQLite VM steps | 58 / 98 / 458 | 0 / 0 / 0 |
+| OLD/NEW door-association lookups per changed object | 2 | 1 |
+
+After shared preparation, all public box/door close/open operations have zero
+passage JSON parses, PassageDefinition decodes, full-layout record visits and
+index builds. Each helper uses one passage-version check. Whole-command counts
+(including command construction, authorization, evidence and persistence) are
+identical at all three growth sizes:
+
+| Operation in sequence | SQL SELECTs / rows | Total SQL VM steps | RAM queries / consumed rows | All version checks / passage checks |
+|---|---|---:|---|---|
+| First box close | 20 / 3 | 1559 | 96 / 55 | 199 / 8 |
+| Different box close | 7 / 2 | 1393 | 68 / 52 | 194 / 8 |
+| Each box open | 6 / 2 | 1394 | 64 / 49 | 195 / 8 |
+| Shared door close | 21 / 3 | 1595 | 101 / 59 | 202 / 7 |
+| Shared door open | 6 / 2 | 1394 | 66 / 52 | 173 / 5 |
+
+These still persist each command (UPDATE×3, INSERT×7); zero helper SQL does not
+mean zero command SQL. The counts also include BEGIN×5, PRAGMA×16, SAVEPOINT×2
+and RELEASE×1, unchanged across the growth sizes. No admission checks removed.
+
+Separate cold preparation after unload: +0/+10/+100 means 2/12/102 total passage
+records, **one SELECT / one row, one JSON parse, one index build**, decoding and
+visiting exactly **2 / 12 / 102** records. Returned JSON bytes are **723 / 4223 /
+36003**. Total cold SQL VM steps are 45 each, including BEGIN×1/PRAGMA×3; this
+does NOT make SQLite's internal JSON extraction or Python decoding constant cost.
+Three later different bucket/helper requests together use three scalar passage
+version checks, zero SELECT/rows, parsing, layout visits or builds. Outside an
+existing scope they still open three read scopes (81 VM steps including their
+BEGIN/PRAGMA); the public mutation helper runs inside its existing scope (0).
+
+### Executed checks and limits
+
+- `uv run --locked --no-sync ruff check src tests examples` and
+  `ruff format --check src tests examples`: exit 0, 223 formatted files.
+- Runtime selection: test_runtime_passage_index, test_runtime_local_query_reuse,
+  test_runtime_local_query_correctness, test_runtime_field_maintenance,
+  test_runtime_instance_ownership, test_runtime_transaction_failures,
+  test_runtime_four_fixes, test_session_memory_runtime,
+  test_session_memory_rng_failures and test_scoped_runtime_validation:
+  first run **136 passed / 2 failed** (exit 1). The two old placement/step tests
+  counted cold complete-layout bytes as local action bytes. They now explicitly
+  prepare the shared association before measuring the local action; their byte,
+  row, query, construction and no-audit assertions remain. New cold tests above
+  independently measure the complete preparation instead of hiding its cost.
+- Final new tests plus those two cases: **18 passed**, exit 0; separately the
+  final counter run is **16 passed**. Covers empty/negative results, multiple
+  passages/three scenes, light uncertainty and reopening, immutable old results,
+  binding/endpoint edits, add/delete/REPLACE, unchanged metadata, rollback with
+  repeated numeric stamp, unload/eviction/restart and cross-connection recovery
+  after failed publication/unknown commit.
+- test_world_lights, test_lockable_passages, test_spatial_world,
+  test_world_spatial, test_object_spatial_service, test_navigation_activities,
+  test_navigation_boundaries, test_navigation_faults and
+  test_instance_config_migration: **153 passed**, exit 0. The real historical
+  Schema38 migration test ran and passed; no environment-blocked migration here.
+- Latest-result JUnit union: **292 distinct selected tests, all passed**;
+  this is not a full-suite or remote CI claim. Reused lifecycle cases include
+  partial/completed publication failure, old-reader fencing, permissions,
+  disclosure, idempotency, RNG and SQL persistence. No unrelated full suite run.
+- Both repositories' `git diff --check` and the changed Markdown link/anchor/fence
+  check passed (7 files, 117 local links); no unverified remote CI claim.
+
+Remaining costs: first/cold/invalidated layout preparation and its budget charge
+are O(layout size); controlled layout replacement may inspect its full persisted
+configuration. An index evicted or too large for the existing budget needs cold
+preparation again. Necessary scene/full output and checking actual related doors
+or scenes retain their real scope cost. No public map-edit API, general navigation
+redesign, multiplayer or unbounded-layout retention was added or verified.
+
+## 2026-10-22 local query reuse
+
+Architecture Decision **[DECIDED]**, MC §2.3a. Implementation **[IMPLEMENTED in
+fix/runtime-local-query-reuse]**; Acceptance below covers these five consumer
+groups, not every runtime scan. Starting SM/refetch/source HEAD:
+`a2a2fe00d5f051978a6f4738df25fc81d838361e` on
+`origin/refactor/session-memory-runtime`. Paired documentation starts at
+`6b0cb55320aec840e57d71d686d696b5773f49e8` on
+`origin/docs/runtime-versioned-cache-keys`, in a new
+`docs/runtime-local-query-reuse` worktree. Neither source had later remote
+commits. Existing untracked SM `.worktrees/` and text file, and documentation
+`.worktrees/` / `FIRST_BLUSH_MVP_REQUIREMENTS.md`, remain untouched. No main
+merge/push, RE/Pages edit, reset, dependency/schema upgrade or parallel authority.
+
+### Actual consumers and maintenance
+
+1. Public get_illumination → Light.current_cell → sources used resolve_field's
+   generic dependency leaves, despite zero recomputation. Sources now use a
+   mutation-maintained source stamp; candidates/geometry use a geometry stamp;
+   cell/topology/projection depend on their constant-size composite. Computation
+   leaves do not escape to upper parsed readers. Both child stamps are registered
+   even for zero enabled sources (ambient map lighting still matters), and retained
+   when a composite survives version pruning. Geometry shares a safely immutable
+   value; full source lists still return detached copies and disclose each source.
+2. Public PlaceObject query/commit → _validate_placement now obtains actors from
+   target cell_occupants, backed by existing RAM/SQLite position indices. It no
+   longer obtains unused whole-scene object/actor lists. Existing local_topology,
+   actor-at-destination refusal, reach, shared doors and candidate checks remain.
+3. GridView prepares read-only Cell→occupant ordinal and (kind,ID)→cells maps once.
+   occupied sorts only matched ordinals, preserving directory order and mult-cell
+   deduplication; entity_cells directly selects the ID. Movement uses an immutable
+   blocked overlay. Cover precomputes the maximum per-cell independent source;
+   max-across-sources commutes with RE's max-along-ray. Optional creature half cover
+   has its own prepared layer and an O(1) target override, preserving endpoint
+   exclusion and real target-cell object cover. The RE ray/step/cover algorithms
+   remain unchanged. Hidden preparation is outside the five DTO/asdict fields;
+   deep copies retain the same fixed read-only preparation.
+4. RepositionObject → validate_placement → check_candidate → _check_shape reads
+   grid_edge_walls from the prepared topology, avoiding scene_grid/copy/format
+   loops. Preparation checks all static walls once; unsupported integer/axis
+   qualification still refuses. A bounding hierarchy selects inclusive ray/edge
+   wall candidates, then invokes pinned RE's exact algorithm, including touches,
+   diagonal/fractional/degenerate cases. Candidate cells, reserved ports, bounds,
+   rigid internal edges and blockers remain checked locally.
+5. prepare_scene_protection → _protection_input now shares fixed width/height per
+   needed Scene in one existing read scope. _project_protection_input consumes
+   these dimensions, not per-object grid JSON. Explicitly empty rain/precipitation
+   AND wind properties are recognized before map access; unsupported pose/door
+   checks retain precedence. None, partial unconfigured, unsupported and explicit
+   none remain distinct. Registered provider identity/version/time and unknown
+   provider opt-out are unchanged; different directions use the same fixed batch.
+
+Source validity follows actual emitter state/membership, moved roots and carried
+subtrees, relevant ancestor transmission/open/destruction and light/container
+configuration. Existing member/parent buckets identify actual contributors;
+negative empty-root tests use two indexed buckets, not Scene discovery. Geometry
+validity follows real ground blocking footprints, maps and both shared-door
+endpoints. Quantity/irrelevant object metadata, nonblocking unrelated motion and
+empty unrelated transfers do not expire all lighting. Configuration source and
+geometry effects are separate. Controlled Session layout replacement still
+invalidates loaded relevant field metadata; ordinary object updates never do that.
+
+Every stamp is maintained inside the same existing TEMP change callback/candidate
+version root as its facts and associations. A callback-only point-read memo shares
+unchanged ancestor objects between its maintenance passes; nested callbacks have
+their own memo and it is discarded before any later statement. This is not a
+cross-statement cache or transaction checkpoint. Savepoint/full rollback discard
+candidate facts and stamps together. Existing COMMIT→publish failure pause,
+unknown commit reconciliation, cross-connection generation fencing, unload and
+eviction remain in force; old Views/inputs keep their own fixed data. No new
+writable position, capability or map facts are introduced.
+
+### Same-fixture deterministic before/after
+
+The new test file was first executed against archived, unmodified `a2a2fe0/src`.
+Baseline performance assertions fail as expected; these failures are reproduction
+evidence, not passing validation. Earlier independent review numbers retain their
+original meaning. Measurements below are newly run with test-side instrumentation:
+SQL execution/fetched rows, SessionMemory.select/version and actual occupant
+iteration, PreparedGrid.copy_data, the old protection-input encoder, map parses,
+RE segment tests, wall qualification coordinates, field/model/topology builds.
+No production test switches or removed admission checks.
+
+| Fixed target / growing irrelevant input | Baseline | Repaired |
+|---|---:|---:|
+| Public same-cell dark light, +10/+100 disabled emitters: version checks | 43 / 313 | 9 / 9 |
+| Same public light: field builds | 0 / 0 | 0 / 0 |
+| PlaceObject, +0/+100 far actors: actors copied from scene directory | 2 / 102 | 0 / 0 |
+| Same placement: unused object directory records | 5 / 5 | 0 / 0 |
+| Fixed View occupied + entity_cells together: occupant visits | 13 / 213 | 0 / 0 |
+| View can_step, 8×8 / 64×64: copied static blockers | 24 / 3776 | 0 / 0 |
+| View cover_between, same maps: copied static blockers | 24 / 3776 | 0 / 0 |
+| Each View geometry query: exact wall segment tests | 16 / 3712 | 0 / 0 |
+| Public RepositionObject same maps: copied static blockers | 24 / 3776 | 0 / 0 |
+| Same shape query: wall qualification coordinate checks | 64 / 14848 | 0 / 0 |
+| Protection batch +10/+100 empty contributors: map copies / encodings | 14 / 104 each | 0 / 0 each |
+| Same batch followed by two directions: map parses | 28 / 208 | 0 / 0 |
+
+The View point row is **two calls together**; it does not relabel the earlier
+independent occupied-only 7/107 observation. Both geometries still use their own
+fixed snapshot, not a current scene lookup. The map fixtures place irrelevant
+static blockers at y≥5 and wall segments at y≥6, leaving the requested local
+geometry unchanged. Cold hierarchy/index preparation is outside hot-query rows.
+
+| Repaired operation (sizes small / large) | SQL SELECTs / fetched rows | RAM calls / rows | Version checks | Field builds |
+|---|---|---|---|---|
+| Public hot light | 0/0 at both sizes | 1/1 at both | 9 / 9 | 0 / 0 |
+| Public different dark cell | 0/0 at both sizes | 1/1 at both | 11 / 11 | 1 / 1 |
+| Public hot placement query | 0/0 at both sizes | 7/4 at both | 65 / 65 | 0 / 0 |
+| Fixed View point/geometry | 0/0 at both sizes | 0/0 at both | 0 / 0 | 0 / 0 |
+| Public hot shape query | 0/0 at both sizes | 3/2 at both | 22 / 22 | 0 / 0 |
+| Cold protection input batch, two directions | 15/15; 105/105 | 15/0; 105/0 | 106 / 736 | 0 / 0 |
+
+Cold protection still reads every actual object/provider/pose and explicit
+unsupported shared door; its linear work was not hidden as a cache hit. Only
+redundant map transfer was removed. The batch now has BEGIN×1 / PRAGMA×3 rather
+than 75/525 BEGINs from independent out-of-scope leaf calls. Public read rows also
+have BEGIN×1 and PRAGMA×3; zero SELECT is not zero SQL. View-only methods open no
+scope. SQL row counts are distinct from RAM returned rows and copied directories.
+
+Environment's registered-provider fixture separately records first preparation,
+real provider-version invalidation, four directions from a detached prepared batch
+after provider mutation, and hot hit: map copy/encode/parse all zero. Cold phase
+has 24 SELECTs/20 rows, 27 RAM calls/20 rows, 64 version checks and 14 field builds;
+rebuild has 0 SELECTs, 4 RAM calls/5 rows, 35 checks and 3 builds; hot has 0 SELECTs,
+2 RAM calls/3 rows and no checks/builds; fixed directions read no facts. These
+registered-provider numbers are a separate fixture, not the +10/+100 batch.
+
+The existing four real PutItem/TakeItem empty-bag operations with +0/+100 unrelated
+objects still pass their original bounds: RAM calls 280/280, rows 168/168, version
+checks 844/844, source/geometry/index rediscovery or recomputation zero. Required
+container/weight facts, evidence and SQLite persistence remain; SQL has 36 SELECTs
+/16 rows at both sizes. No existing assertion was relaxed for the new protocol.
+
+### Validation and limits
+
+The 99-file collection contains **2147 unique cases**. Disjoint whole-repository
+groups executed 703, 713 and 729 cases; the two excluded real compatibility/fresh
+process cases ran separately and passed with their original assertions/timeouts.
+Group 0 initially had 701 passes and two AttributeErrors because the now-unused
+world_spatial.canonical_json import had also been removed. Its two existing map
+update fixtures use that module export. Restoring the explicit compatibility
+re-export fixed both: the complete environment file plus new correctness/counters
+and existing field-maintenance tests then passed **68/68** on final source.
+Group 1 passed 713/713, group 2 passed 729/729, isolated passed 2/2. The earlier
+group-0 exit 1/log is retained, not relabeled as an original all-pass run. No
+unresolved failure, skipped case, missing case or duplicate exists in the final
+coverage audit; supplementary reruns are not added to the unique count.
+
+Between the first two groups and final source, the only Python byte difference
+was that one compatibility import line. Removing it reproduces the earlier file's
+exact SHA256; runtime function bodies and the other 221 Python files are identical.
+Final 222-file hashes remain unchanged through the final focused/isolated/group-2
+runs. This qualifies revision attribution rather than silently claiming the first
+two groups started on the later import revision. The unused export performs no
+protection map encoding. An earlier sandboxed broad attempt was interrupted while
+stalled in asynchronous NPC setup and is excluded; the isolated NPC regression
+passed 2/2 and the executed complete groups used the approved local environment.
+
+Commands use the locked existing environment: `uv run --locked --no-sync pytest
+-q` with selected file groups, `-o faulthandler_timeout=60`, repository-local
+basetemp and JUnit; the final 68-case run also used `-s` for actual counters.
+`uv run --locked --no-sync ruff check src tests examples` and `ruff format --check
+src tests examples` both exit 0 (222 files). Both repositories' diff checks and
+13 changed Markdown files / 186 relative links, anchors and fences pass. Historical
+Git migration cases were actually executed within the complete groups; no missing
+commit/environment case is labeled passed. No remote CI or multiplayer run.
+
+Evidence under ignored `.test-tmp/`: local-reuse-baseline-evidence.log/xml;
+local-reuse-complete-{0,1}.log/xml; local-reuse-acceptance-2.log/xml;
+local-reuse-isolated.log/xml; local-reuse-final-focused.log/xml;
+local-reuse-counts.json; local-reuse-audit.json; local-reuse-acceptance-hashes.json;
+local-reuse-doc-check.json. They retain baseline failures, the two intermediate
+compatibility failures, recovered final outcomes and revision checks separately.
+Wall-index counters also verify one hierarchy node / zero leaf records in each
+fixed local View geometry sample, rather than moving work to another whole scan.
+New correctness covers ambient map changes with zero emitters, shading candidate
+savepoint/full rollback, irrelevant object motion, config blocker changes, both
+shared-door endpoints, unsupported wall qualification rollback, map replacement,
+unload/restart, fixed DTO/deepcopy, independent/creature cover equivalence and
+post-COMMIT publication / unknown-commit recovery through another connection.
+
+Necessary remaining work: cold Scene source discovery, provider/object qualification,
+full GridView preparation and requested complete outputs, new-cell illumination
+against actual emitters, and the RE ray's relevant geometry. The BVH is a candidate
+filter; heavily overlapping wall bounds can still yield many candidates. Nonfinite
+legacy walls retain original RE fallback; they do not acquire shape qualification.
+The adapter calls pinned RE's private _step_is_legal/_in_bounds and existing backing
+fields; a future dependency upgrade must recheck this narrow compatibility seam.
+GridView.entities_within_range retains its prior entity-footprint algorithm; this
+batch changes occupied/entity_cells and fixed movement/cover, not all range/path
+algorithms. Explicit Full Audit still performs its declared full work. Unsupported
+dynamic vision, mechanical integration and external-provider boundaries are not
+expanded; no multiplayer load or remote CI claim is made.
+
+Latest follow-up: [local query reuse](#2026-10-22-local-query-reuse).
 Earlier acceptance counts remain dated evidence for their original source.
 
 ## 2026-10-22 four fixes: transaction and local costs

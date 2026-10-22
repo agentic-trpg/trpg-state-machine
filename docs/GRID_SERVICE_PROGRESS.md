@@ -1,5 +1,14 @@
 # W-01 GridService 切片进度
 
+## 2026-10-22 GridView 与 PlaceObject 定向读取
+
+本批基线 `a2a2fe0`，分支 `fix/runtime-local-query-reuse`。公开 PlaceObject 的目标占用
+检查改用既有格子索引；固定 View 持有自己的双向占用索引、移动／掩体准备，旧 View
+不随发布改变。8×8／64×64 固定地图的热 can_step、cover_between 不再复制 24／3776 条
+静态阻挡；相关墙段由地图版本绑定的索引过滤，再调用原 RE 精确几何。首次建 View、
+显式完整输出及索引准备单列，未重做 StepActor 的 local_topology。
+实测口径、正确性、回滚／恢复及限制见[本批验收](reviews/RUNTIME_INSTANCE_OWNERSHIP.md#2026-10-22-local-query-reuse)。
+
 ## 2026-10-22 运行缓存身份与版本复用
 
 Scene.spatial.record/map/mechanical_map/sensory 已接入地图、局部移动与完整阶段模型。

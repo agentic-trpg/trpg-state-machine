@@ -1,5 +1,27 @@
 # GridService
 
+## 2026-10-22 固定视图与局部查询补齐
+
+`fix/runtime-local-query-reuse` 从 `a2a2fe0` 修复 GridView 的实际消费者：准备 View 时建立
+只读 Cell→occupant 序号和 (kind, ID)→cells 索引；occupied 只合并命中序号并按原目录顺序
+返回，多格实体去重，未知 ID 仍拒绝。索引随该 View 固定，不访问当前 Scene 的可变关系。
+五个 DTO 字段、构造参数、asdict 和深复制兼容，内部准备不进入 wire 数据。
+
+View 准备一次共享基础拓扑的移动覆盖层、独立来源掩体最高等级及可选角色掩体层。
+can_step 不再逐次复制／排序／比较整图；cover_between 不再逐对象重建拓扑。RE 沿射线取
+最高等级与先逐来源再取最高等级等价；角色在起点／终点不自行提供掩体，目标格真实物体
+掩体仍保留。动态视觉遮挡仍明确 unsupported。实际几何继续调用固定 RE，不修改 RE。
+
+ReadOnlyTopology 在地图准备时建立不可变墙段包围层次索引；局部边／射线仅交给 RE 必要
+包围盒内的墙段，保留相交、端点接触、分数坐标和退化墙段语义。非有限旧输入保留 RE
+原查询路径，不作“全部墙型均已局部化”的声明。地图池的原容量／释放规则保留，View
+持有自身输入；不预计算所有坐标对。首次 View 准备与完整目录／阻挡列表输出仍有真实成本。
+适配层新增对固定 RE `_step_is_legal`／`_in_bounds` 的窄调用，并继续依赖其 backing fields；
+升级 RE 时须重新核对。下文“无新增私有方法依赖”保留为此前批次的历史范围。
+
+PlaceObject 改用目标格 cell_occupants；保留 local_topology 的触及、切角、共享门和实际
+候选检查。详见[本次验收](reviews/RUNTIME_INSTANCE_OWNERSHIP.md#2026-10-22-local-query-reuse)。
+
 ## 2026-10-22 按实例版本复用地图输入
 
 GridMaps.scene 接入 Scene.spatial.record；prepared_scene/current_grid 共享不可变地图，

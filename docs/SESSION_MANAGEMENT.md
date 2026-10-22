@@ -1,5 +1,41 @@
 # Session Management
 
+## 2026-10-22 World 通路反向关联
+
+WorldRuntime.passages 在原 SessionMemory 中持有只读 PassageIndex；InstanceData.passages
+按门／场景／通路 ID 取对应桶，光照维护使用同一索引的 door_scenes。无关联对象直接得到
+有效空结果，不查询 SQLite，不展开 Session 通路配置；OLD/NEW 同一物体只查一次。
+普通地面阻挡与通路门的几何维护分别保留，多通路共用门更新去重后的全部端点场景。
+
+首次／失效／卸载或淘汰后从持久 Session 配置一次准备共享索引，不回查 Package。
+_passage_changes 在受控配置写入时维护字段 stamp，覆盖通路增删、绑定、端点／场景及
+配置行替换；REPLACE 沿用 invalidate_table 兜底。普通对象修改不扫描通路，未改变通路
+的配置元数据更新不使该字段过期。有效读取仅检查原 generation／候选版本计数。
+
+索引、关系有效性和事实沿同一 UnitOfWork 候选、保存点、提交后发布及恢复栅栏处理；
+旧关系不可变，重复数值版本不复用已回退候选。沿用原预算和卸载机制，不另建缓存生命期。
+冷准备／配置替换及必要完整输出仍有实际范围成本；详细失效规则、实测与测试边界见
+[本次验收](reviews/RUNTIME_INSTANCE_OWNERSHIP.md#2026-10-22-shared-passage-reverse-association)。
+
+## 2026-10-22 Light 字段与固定查询准备
+
+Scene.lighting 的 sources 和 candidates/geometry 分别采用同一 SessionMemory 中的维护版；
+cells/projection/topology 依赖二者的常数大小组合。读取命中不展开光源叶子，外层 parsed
+消费者也只继承字段版。即使没有开启光源，结果仍登记地图／几何子版本，防止基础照明
+改变后误复用；版本清理保留被组合 stamp 使用的子版本。字段值只标记计算开始时对应版，
+后续变化不能将旧计算冒充新版本。
+
+源成员／开关／模式、移动子树及携带者、容器透光／开合／摧毁与相关配置按旧／新实际
+Scene 维护源版；实际阻挡形状、地图和共享门端点维护几何版。无关空袋归属和无关非阻挡
+物体位置不扩大失效。必要维护沿原父子／能力桶；一次同步 TEMP change callback 内共享
+不可变对象点读取，callback 结束即丢弃，嵌套触发器另有临时读取 memo。这不是跨语句候选
+缓存，也不是新的事务、实例目录或事实来源。
+
+这些字段随原 UnitOfWork 候选版本根处理回退、COMMIT 后发布和故障恢复；旧固定读取输入
+不被更新，跨连接恢复仍使用已有 generation 栅栏，卸载／淘汰后从持久实例准备。GridView
+的索引／覆盖层和地图资格随各自固定输入保留，不依赖后来当前 Scene 指针。
+范围、真实计数和验证见[本批验收](reviews/RUNTIME_INSTANCE_OWNERSHIP.md#2026-10-22-local-query-reuse)。
+
 ## 2026-10-22 SQL 失败协议与局部元数据
 
 RuntimeConnection 的 execute／executemany（含参数源中途失败）采用失败范围协议：

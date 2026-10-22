@@ -1,5 +1,15 @@
 # Session Management 重构进度
 
+## 2026-10-22 通路反向关联修复
+
+基线 `9627eb0` 中 SetObjectState → changed → _light_candidate_changes →
+_light_door_scenes 对普通箱子也展开全 Session 通路。现由 WorldRuntime.passages 保存
+统一只读关联，InstanceData 与光照维护共用；配置修改维护单字段版本，原候选／回滚／
+发布／恢复及预算继续管理。无关通路 +0/+10/+100 时 helper VM 步数 39/79/439→0/0/0。
+冷准备的 2/12/102 条记录成本另行计数；292 个定向测试的最终结果均通过，初次两条
+旧冷／热边界断言的调整与复跑也如实保留。见[实施与验收](reviews/RUNTIME_INSTANCE_OWNERSHIP.md#2026-10-22-shared-passage-reverse-association)。
+下述历史批次数字及状态保留原口径，不作为本次的新证据。
+
 ## 2026-10-22 四项修复：失败范围、库存、NPC 目标与版本根
 
 基线 5137742 的捕获 SQL 语句错误后提交 RAM／SQLite 分歧已经真实复现并修复：当前写入

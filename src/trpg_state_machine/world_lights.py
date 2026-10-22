@@ -1,6 +1,6 @@
 """Ordinary scenario emitters; no fuel, magic, sunlight or effect lifecycle."""
 
-from dataclasses import asdict
+from dataclasses import asdict, dataclass
 
 from ._execution import _execution_data
 from .errors import StateMachineError
@@ -8,6 +8,19 @@ from .runtime_instances import instance_read
 from .world_commands import SetLightEnabled
 
 _RANK = {"dark": 0, "dim": 1, "bright": 2}
+
+
+@dataclass(frozen=True, slots=True)
+class LightGeometry:
+    candidates: frozenset
+    topology: object
+
+    def __iter__(self):
+        yield self.candidates
+        yield self.topology
+
+    def __deepcopy__(self, memo):
+        return self
 
 
 class LightService:
@@ -18,7 +31,7 @@ class LightService:
         d = self.h.facts.object_definition(sid, oid)
         return d.capability("light") if d else None
 
-    @instance_read("scene", "lighting", "sources")
+    @instance_read("scene", "lighting", "sources", maintained="light_sources")
     def sources(self, sid, scene, package):
         result = []
         for oid in self.h.facts.scene_capability_ids(sid, scene, "object_lights"):
@@ -58,13 +71,13 @@ class LightService:
             )
         return result
 
-    @instance_read("scene", "lighting", "projection")
+    @instance_read("scene", "lighting", "projection", maintained="light_result")
     def current_project(self, sid, scene, package):
         raw = self.h.grid.reader.current_grid(sid, scene, package)
         geometry = self.geometry(sid, scene, package) if self.sources(sid, scene, package) else None
         return self.project(sid, scene, package, raw, geometry=geometry)
 
-    @instance_read("scene", "lighting", "topology")
+    @instance_read("scene", "lighting", "topology", maintained="light_result")
     def current_topology(self, sid, scene, package):
         prepared = self.h.grid.reader.current_grid(sid, scene, package)
         if not self.sources(sid, scene, package):
@@ -72,7 +85,7 @@ class LightService:
         grid, _, _ = self.current_project(sid, scene, package)
         return prepared.topology.with_lighting(grid["lighting"])
 
-    @instance_read("scene", "lighting", "cells", capacity=128)
+    @instance_read("scene", "lighting", "cells", capacity=128, maintained="light_result")
     def current_cell(self, sid, scene, package, cell):
         prepared = self.h.grid.reader.current_grid(sid, scene, package)
         sources = self.sources(sid, scene, package)
@@ -120,7 +133,7 @@ class LightService:
             contributions.append(source["object_id"])
         return level, unknown, tuple(contributions)
 
-    @instance_read("scene", "lighting", "geometry")
+    @instance_read("scene", "lighting", "geometry", maintained="light_candidates")
     def geometry(self, sid, scene, package):
         raw = self.h.grid.reader.current_grid(sid, scene, package)
         return self._geometry(sid, scene, package, raw)
@@ -146,7 +159,7 @@ class LightService:
                 )
         topology = self.h.grid.reader.topology_for_grid(sid, scene, raw)
         uncertain_geometry = topology.with_blocked(candidates)
-        return frozenset(candidates), uncertain_geometry
+        return LightGeometry(frozenset(candidates), uncertain_geometry)
 
     def project(self, sid, scene, package, raw, *, cells=None, geometry=None):
         """Explicit fixed-map inputs remain separate from current scene fields."""
