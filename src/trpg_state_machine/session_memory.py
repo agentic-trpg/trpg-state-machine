@@ -385,6 +385,7 @@ class SessionMemory:
             "light_sources",
             "light_result",
             "inventory",
+            "passage_index",
         ):
             raise ValueError("Unknown maintained field protocol")
         dependency = self.dependency(f"{domain}:{identity!r}", sid)
@@ -622,17 +623,24 @@ class SessionMemory:
         )
 
     def _light_door_scenes(self, sid, oid):
-        return tuple(
-            r[0]
-            for r in self.select(
-                "SELECT DISTINCT json_extract(e.value,'$.fields.scene_id') "
-                "FROM instance_configs i JOIN json_each(i.config_json,'$.passages.tuple') p "
-                "JOIN json_each(p.value,'$.fields.endpoints.tuple') e "
-                "WHERE i.session_id=? AND i.domain='session' AND i.instance_id=? "
-                "AND json_extract(p.value,'$.fields.door_object_id')=?",
-                (sid, sid, oid),
-            )
+        from .instance_data import passage_index
+
+        return passage_index(self.store, sid).door_scenes.get(oid, ())
+
+    def _passage_changes(self, table, old, new):
+        if table != "instance_configs":
+            return
+        # Only controlled layout writes inspect OLD/NEW persisted configuration.
+        # Ordinary object writes do no parsing, hashing or passage enumeration.
+        layouts = tuple(
+            (r["session_id"], r["instance_id"], self.json(r["config_json"]).get("passages"))
+            if r is not None and r["domain"] == "session"
+            else None
+            for r in (old, new)
         )
+        if layouts[0] != layouts[1]:
+            for sid in {layout[0] for layout in layouts if layout is not None}:
+                self._advance_field("passage_index", sid, sid)
 
     def _light_candidate_changes(self, table, old, new):
         """Mutation-maintained source and geometry stamps, in the existing UoW.
@@ -758,11 +766,11 @@ class SessionMemory:
                 if row is not None and row["scene_id"] is not None:
                     self._advance_field("light_candidates", row["session_id"], row["scene_id"])
         if profiles[0][1] != profiles[1][1]:
-            for row in rows:
-                if row is not None:
-                    sid = row["session_id"]
-                    for scene in self._light_door_scenes(sid, row["object_id"]):
-                        self._advance_field("light_candidates", sid, scene)
+            for sid, oid in {
+                (row["session_id"], row["object_id"]) for row in rows if row is not None
+            }:
+                for scene in self._light_door_scenes(sid, oid):
+                    self._advance_field("light_candidates", sid, scene)
 
     def _object(self, sid, oid):
         memo = getattr(self, "_change_objects", None)
@@ -1113,6 +1121,8 @@ class SessionMemory:
                 and name.startswith(("object_lights~scene:", "object_mechanisms~scene:"))
                 or table in ("objects", "instance_configs")
                 and name.startswith("weight:")
+                or table == "instance_configs"
+                and name.startswith("passage_index:")
                 or table in ("objects", "actors", "instance_configs", "object_mechanisms")
                 and name.startswith("mechanism_index:")
                 or table in ("object_lights", "object_mechanisms")
@@ -1163,6 +1173,7 @@ class SessionMemory:
         # statement or candidate stage. Nested trigger callbacks get their own memo.
         self._change_objects = {}
         try:
+            self._passage_changes(table, old, new)
             self._weight_changes(table, old, new)
             self._association_changes(table, old, new)
             self._light_candidate_changes(table, old, new)

@@ -238,6 +238,10 @@ def test_public_placement_scope_is_independent_of_unrelated_growth(
         )
         sm._world_facts.maps.clear()
         sm._store.release_memory()
+        # World passage association preparation is shared cold-layout work,
+        # measured separately in test_runtime_passage_index. This assertion
+        # isolates the local action, with the common association already valid.
+        sm._world_facts.instances.passages(sid, object_id=OBSTACLE)
         calls.clear()
         with measure(sm) as (small, _):
             assert sm.query_world_action(sid, actor, op, package, context=gm).status == "available"
@@ -246,6 +250,7 @@ def test_public_placement_scope_is_independent_of_unrelated_growth(
         grow_scenes(sm, sid, 20)
         sm._world_facts.maps.clear()
         sm._store.release_memory()
+        sm._world_facts.instances.passages(sid, object_id=OBSTACLE)
         calls.clear()
         with measure(sm) as (large, sql):
             assert sm.query_world_action(sid, actor, op, package, context=gm).status == "available"

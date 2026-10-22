@@ -1,5 +1,22 @@
 # Session Management
 
+## 2026-10-22 World 通路反向关联
+
+WorldRuntime.passages 在原 SessionMemory 中持有只读 PassageIndex；InstanceData.passages
+按门／场景／通路 ID 取对应桶，光照维护使用同一索引的 door_scenes。无关联对象直接得到
+有效空结果，不查询 SQLite，不展开 Session 通路配置；OLD/NEW 同一物体只查一次。
+普通地面阻挡与通路门的几何维护分别保留，多通路共用门更新去重后的全部端点场景。
+
+首次／失效／卸载或淘汰后从持久 Session 配置一次准备共享索引，不回查 Package。
+_passage_changes 在受控配置写入时维护字段 stamp，覆盖通路增删、绑定、端点／场景及
+配置行替换；REPLACE 沿用 invalidate_table 兜底。普通对象修改不扫描通路，未改变通路
+的配置元数据更新不使该字段过期。有效读取仅检查原 generation／候选版本计数。
+
+索引、关系有效性和事实沿同一 UnitOfWork 候选、保存点、提交后发布及恢复栅栏处理；
+旧关系不可变，重复数值版本不复用已回退候选。沿用原预算和卸载机制，不另建缓存生命期。
+冷准备／配置替换及必要完整输出仍有实际范围成本；详细失效规则、实测与测试边界见
+[本次验收](reviews/RUNTIME_INSTANCE_OWNERSHIP.md#2026-10-22-shared-passage-reverse-association)。
+
 ## 2026-10-22 Light 字段与固定查询准备
 
 Scene.lighting 的 sources 和 candidates/geometry 分别采用同一 SessionMemory 中的维护版；

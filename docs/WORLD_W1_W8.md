@@ -1,5 +1,19 @@
 # World W1–W8 implementation record
 
+## 2026-10-22 shared passage association
+
+Follow-up to `9627eb0`: WorldRuntime.passages owns the shared immutable passage
+directory and door/scene/ID reverse buckets. InstanceData.passages consumers and
+Light's geometry-version maintenance use the same accessor; missing door links
+are valid empty results, and shared doors update every deduplicated endpoint scene.
+The maintained layout stamp changes on controlled passage/binding/endpoint/config
+writes, not on ordinary object state edits. First/cold preparation reads persisted
+instances once; hot reads check one field stamp without SQL, JSON or layout scans.
+Original candidate isolation, rollback, post-COMMIT publication, recovery and RAM
+budget apply. Necessary full outputs remain. Costs, tests and limits are recorded
+in [this follow-up](reviews/RUNTIME_INSTANCE_OWNERSHIP.md#2026-10-22-shared-passage-reverse-association);
+the older dated evidence below is unchanged.
+
 ## 2026-10-22 Light field validity and local geometry consumers
 
 On `fix/runtime-local-query-reuse` (base `a2a2fe0`), Scene.lighting.sources uses a

@@ -12,7 +12,7 @@ from types import SimpleNamespace
 
 from .errors import StateMachineError
 from .package import canonical_json
-from .runtime_instances import instance_read
+from .runtime_instances import PassageIndex, instance_read, resolve_field
 from .scoped_reads import scoped_read
 
 
@@ -59,6 +59,24 @@ def decode(value):
     if isinstance(value, list):
         return [decode(v) for v in value]
     return value
+
+
+def passage_index(store, sid):
+    """Shared World association; config mutations maintain its one validity stamp."""
+
+    def prepare():
+        row = store.connection.execute(
+            "SELECT json_extract(config_json,'$.passages') FROM instance_configs "
+            "WHERE session_id=? AND domain='session' AND instance_id=?",
+            (sid, sid),
+        ).fetchone()
+        if row is None or row[0] is None:
+            raise StateMachineError("incomplete_instance_config", "Missing Session passages")
+        return PassageIndex.build(decode(json.loads(row[0])))
+
+    return resolve_field(
+        store, "world", sid, sid, None, "passages", (), prepare, maintained="passage_index"
+    )
 
 
 class SceneConfig(SimpleNamespace):
@@ -387,28 +405,11 @@ class InstanceData:
             is not None
         )
 
-    @scoped_read
     def passages(self, sid, *, scene_id=None, object_id=None, passage_id=None):
-        """Decode only the declared ports needed by this dependency scope.
-
-        Unfiltered access is reserved for explicitly complete navigation layouts.
-        The immutable Session JSON remains authoritative; SQL filters before DTOs.
-        """
-        rows = self.conn.execute(
-            "SELECT p.value FROM instance_configs i LEFT JOIN "
-            "json_each(i.config_json,'$.passages.tuple') p ON "
-            "(? IS NULL OR json_extract(p.value,'$.fields.door_object_id')=?) "
-            "AND (? IS NULL OR json_extract(p.value,'$.fields.passage_id')=?) "
-            "AND (? IS NULL OR EXISTS (SELECT 1 FROM "
-            "json_each(p.value,'$.fields.endpoints.tuple') e "
-            "WHERE json_extract(e.value,'$.fields.scene_id')=?)) "
-            "WHERE i.session_id=? AND i.domain='session' AND i.instance_id=? "
-            "ORDER BY CAST(p.key AS INTEGER)",
-            (object_id, object_id, passage_id, passage_id, scene_id, scene_id, sid, sid),
-        ).fetchall()
-        if not rows:
-            raise StateMachineError("incomplete_instance_config", "Missing Session configuration")
-        return tuple(decode(json.loads(r[0])) for r in rows if r[0] is not None)
+        """Select only the requested bucket; unfiltered output remains explicit."""
+        return passage_index(self.facts.store, sid).select(
+            scene_id=scene_id, object_id=object_id, passage_id=passage_id
+        )
 
     @scoped_read
     def scene(self, sid, scene_id):

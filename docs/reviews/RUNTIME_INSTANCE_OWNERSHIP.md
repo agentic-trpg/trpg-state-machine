@@ -1,5 +1,146 @@
 # Runtime instance ownership — 2026-10-22
 
+## 2026-10-22 shared passage reverse association
+
+Architecture Decision **[DECIDED]**, existing MC §2.3a (World cross-scene
+associations and mutation-maintained validity); Implementation **[IMPLEMENTED on
+fix/runtime-local-query-reuse]**. This follow-up starts at reviewed SM
+`9627eb0c9b906bb7a5d2e477539e586e7d58ac5a`, paired docs
+`docs/runtime-local-query-reuse@64cd6801ed127e02226eefc419ebc4ffc5f8c53a`.
+Fetch confirmed both remote heads unchanged. Existing SM untracked worktrees and
+text file are preserved. No main merge/push, RE/Pages edits, skill, schema or
+dependency changes. The preceding batch's measurements below remain historical.
+
+### Cause, owner and maintenance
+
+The actual public chain was SetObjectState → SessionMemory.changed →
+_light_candidate_changes → _light_door_scenes. Its filtered json_each SELECT
+expanded all persisted Session passages even for a box without any association;
+OLD/NEW also requested the same object twice. A per-object query-cache hit hid
+later repeats but did not share the negative result across different objects.
+
+Existing InstanceData.passages was already the common by-door/scene/ID entry used
+by Openable occupancy, spatial restrictions, interactions, Light and Activity/NPC
+consumers; it also filtered through json_each. No reusable passage reverse index
+existed (World.mechanisms.index is the separate mechanism component index).
+
+WorldRuntime.passages now holds one FieldValue containing immutable PassageIndex:
+the ordered frozen PassageDefinitions and read-only door/scene/passage-ID buckets,
+plus each door's ordered, deduplicated endpoint scene IDs. Buckets share the same
+records. InstanceData.passages and _light_door_scenes both use passage_index();
+the latter directly selects door_scenes, including a valid empty tuple. OLD/NEW
+object IDs are deduplicated before lookup. Ground-blocker geometry maintenance
+remains independent. There is no Light-only passage directory or writable copy.
+
+The authoritative source is instance_configs' Session passages, never Package.
+First use, related invalidation or eviction prepares the complete shared layout
+once, from one persisted projection, across subsequent objects/commands. Valid
+resolve_field reads compare only the maintained passage_index:<session> stamp
+(existing generation plus candidate counter). The immutable index's deepcopy
+returns itself; lookup never copies the directory or checks individual configs.
+By-door combined filters inspect only matching records; full/scene outputs still
+have their requested output cost. Complete navigation output/audits are retained.
+
+SessionMemory._passage_changes, in the existing TEMP change callback, compares
+OLD/NEW Session layout configuration on controlled config writes only. Passage
+addition/removal, door rebinding, endpoint/scene changes and config identity or
+row insertion/deletion advance the registered stamp. Unchanged passage metadata
+and ordinary object config/state writes do not advance it. REPLACE's existing
+invalidate_table fallback also covers this stamp when SQLite omits delete hooks.
+Controlled layout replacement retains the existing affected Light-field
+invalidation. No object mutation enumerates Session passages to maintain validity.
+
+Index values and stamps use the same UnitOfWork pending owner/version root as
+facts. Savepoint/full rollback restore them together, including repeated numeric
+counter values; old index references retain old bindings/endpoints. Unload,
+budget eviction and recovery use existing release/generation handling. No new
+cache lifetime: the field is charged to the existing entry/32 MiB payload budget.
+COMMIT→publish failure/unknown outcome still pauses current access; another
+connection's recovery fences both contexts before serving persisted new relations.
+
+### New deterministic measurements
+
+Before editing production, the real public-command test reproduced the reviewed
+query's **39 / 79 / 439 SQLite VM steps** with +0/+10/+100 unrelated passages;
+the true door measured **58 / 98 / 458**. These are helper-query opcodes, not
+SELECTs/rows. Baseline reproduction tests intentionally failed the new zero-scan
+assertion. Subsequent warm operations below use two different ordinary boxes and
+a real shared door, closing and opening each via public commands. Ambient bright
+keeps reopening authorization independent of the closed threshold's LOS.
+
+| Work inside the candidate helper, +0 / +10 / +100 unrelated passages | Before | After |
+|---|---|---|
+| First ordinary box close, SQLite VM steps | 39 / 79 / 439 | 0 / 0 / 0 |
+| First shared door close, SQLite VM steps | 58 / 98 / 458 | 0 / 0 / 0 |
+| OLD/NEW door-association lookups per changed object | 2 | 1 |
+
+After shared preparation, all public box/door close/open operations have zero
+passage JSON parses, PassageDefinition decodes, full-layout record visits and
+index builds. Each helper uses one passage-version check. Whole-command counts
+(including command construction, authorization, evidence and persistence) are
+identical at all three growth sizes:
+
+| Operation in sequence | SQL SELECTs / rows | Total SQL VM steps | RAM queries / consumed rows | All version checks / passage checks |
+|---|---|---:|---|---|
+| First box close | 20 / 3 | 1559 | 96 / 55 | 199 / 8 |
+| Different box close | 7 / 2 | 1393 | 68 / 52 | 194 / 8 |
+| Each box open | 6 / 2 | 1394 | 64 / 49 | 195 / 8 |
+| Shared door close | 21 / 3 | 1595 | 101 / 59 | 202 / 7 |
+| Shared door open | 6 / 2 | 1394 | 66 / 52 | 173 / 5 |
+
+These still persist each command (UPDATE×3, INSERT×7); zero helper SQL does not
+mean zero command SQL. The counts also include BEGIN×5, PRAGMA×16, SAVEPOINT×2
+and RELEASE×1, unchanged across the growth sizes. No admission checks removed.
+
+Separate cold preparation after unload: +0/+10/+100 means 2/12/102 total passage
+records, **one SELECT / one row, one JSON parse, one index build**, decoding and
+visiting exactly **2 / 12 / 102** records. Returned JSON bytes are **723 / 4223 /
+36003**. Total cold SQL VM steps are 45 each, including BEGIN×1/PRAGMA×3; this
+does NOT make SQLite's internal JSON extraction or Python decoding constant cost.
+Three later different bucket/helper requests together use three scalar passage
+version checks, zero SELECT/rows, parsing, layout visits or builds. Outside an
+existing scope they still open three read scopes (81 VM steps including their
+BEGIN/PRAGMA); the public mutation helper runs inside its existing scope (0).
+
+### Executed checks and limits
+
+- `uv run --locked --no-sync ruff check src tests examples` and
+  `ruff format --check src tests examples`: exit 0, 223 formatted files.
+- Runtime selection: test_runtime_passage_index, test_runtime_local_query_reuse,
+  test_runtime_local_query_correctness, test_runtime_field_maintenance,
+  test_runtime_instance_ownership, test_runtime_transaction_failures,
+  test_runtime_four_fixes, test_session_memory_runtime,
+  test_session_memory_rng_failures and test_scoped_runtime_validation:
+  first run **136 passed / 2 failed** (exit 1). The two old placement/step tests
+  counted cold complete-layout bytes as local action bytes. They now explicitly
+  prepare the shared association before measuring the local action; their byte,
+  row, query, construction and no-audit assertions remain. New cold tests above
+  independently measure the complete preparation instead of hiding its cost.
+- Final new tests plus those two cases: **18 passed**, exit 0; separately the
+  final counter run is **16 passed**. Covers empty/negative results, multiple
+  passages/three scenes, light uncertainty and reopening, immutable old results,
+  binding/endpoint edits, add/delete/REPLACE, unchanged metadata, rollback with
+  repeated numeric stamp, unload/eviction/restart and cross-connection recovery
+  after failed publication/unknown commit.
+- test_world_lights, test_lockable_passages, test_spatial_world,
+  test_world_spatial, test_object_spatial_service, test_navigation_activities,
+  test_navigation_boundaries, test_navigation_faults and
+  test_instance_config_migration: **153 passed**, exit 0. The real historical
+  Schema38 migration test ran and passed; no environment-blocked migration here.
+- Latest-result JUnit union: **292 distinct selected tests, all passed**;
+  this is not a full-suite or remote CI claim. Reused lifecycle cases include
+  partial/completed publication failure, old-reader fencing, permissions,
+  disclosure, idempotency, RNG and SQL persistence. No unrelated full suite run.
+- Both repositories' `git diff --check` and the changed Markdown link/anchor/fence
+  check passed (7 files, 117 local links); no unverified remote CI claim.
+
+Remaining costs: first/cold/invalidated layout preparation and its budget charge
+are O(layout size); controlled layout replacement may inspect its full persisted
+configuration. An index evicted or too large for the existing budget needs cold
+preparation again. Necessary scene/full output and checking actual related doors
+or scenes retain their real scope cost. No public map-edit API, general navigation
+redesign, multiplayer or unbounded-layout retention was added or verified.
+
 ## 2026-10-22 local query reuse
 
 Architecture Decision **[DECIDED]**, MC §2.3a. Implementation **[IMPLEMENTED in
