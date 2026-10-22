@@ -366,7 +366,7 @@ def test_loaded_cell_fields_ignore_unrelated_growth(tmp_path, context, monkeypat
         assert counts["sql_rows"] < 20
 
 
-def test_object_list_prepares_light_once_and_does_not_materialize_remote_objects(
+def test_object_list_reuses_light_and_does_not_materialize_remote_objects(
     tmp_path, context, monkeypatch
 ):
     sm, sid, package, _ = setup(tmp_path, context, lighting_data())
@@ -391,7 +391,9 @@ def test_object_list_prepares_light_once_and_does_not_materialize_remote_objects
             instance_read("scene", "lighting", "sources")(counted),
         )
         views = sm.list_scene_objects(sid, actor, package, context=context)
-        assert builds["light_preparations"] == 1
+        # Adding capability-free objects leaves the already prepared light
+        # association and sources valid, including through the public list path.
+        assert builds["light_preparations"] == 0
         assert not {v["object_id"] for v in views} & {
             f"object.unrelated_{i}" for i in range(0, 30, 2)
         }

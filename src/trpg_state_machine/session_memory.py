@@ -13,6 +13,7 @@ import re
 import sqlite3
 from collections import OrderedDict
 from copy import deepcopy
+from dataclasses import replace
 from itertools import combinations
 
 from .errors import StateMachineError
@@ -223,6 +224,10 @@ class SessionMemory:
             "model_parses": 0,
             "instance_hits": 0,
             "instance_builds": 0,
+            "weight_invalidations": 0,
+            "mechanism_invalidations": 0,
+            "capability_nodes": 0,
+            "capability_patches": 0,
         }
         self.install()
 
@@ -244,6 +249,8 @@ class SessionMemory:
             )
             # TEMP triggers have connection lifetime, never alter the saved schema,
             # and also observe writes performed by persistent integrity triggers.
+            # Object removal captures subtree contributions before capability
+            # removal; all changes still share the caller's rollback/publication.
             for kind in ("INSERT", "UPDATE", "DELETE"):
                 args = [f"'{table}'", f"'{kind}'"]
                 for prefix in ("OLD", "NEW"):
@@ -256,7 +263,8 @@ class SessionMemory:
                     )
                 conn.execute(
                     f'CREATE TEMP TRIGGER IF NOT EXISTS "ram_{table}_{kind}" '
-                    f'AFTER {kind} ON main."{table}" BEGIN '
+                    f"{'BEFORE' if table == 'objects' and kind == 'DELETE' else 'AFTER'} "
+                    f'{kind} ON main."{table}" BEGIN '
                     f"SELECT session_memory_change({','.join(args)}); END"
                 )
 
@@ -362,6 +370,167 @@ class SessionMemory:
         self.store._scope.memory_versions.setdefault(dependency, 0)
         return dependency
 
+    def maintained_dependency(self, domain, sid, identity, parameter):
+        """O(1) validity; only domains with a complete change protocol opt in."""
+        if domain == "capabilities":
+            return self.scene_association(parameter[0][0], sid, identity)
+        if domain not in ("weight", "mechanism_index", "light_candidates"):
+            raise ValueError("Unknown maintained field protocol")
+        dependency = self.dependency(f"{domain}:{identity!r}", sid)
+        self.store._scope.memory_versions.setdefault(dependency, 0)
+        return dependency
+
+    def _advance_field(self, domain, sid, identity):
+        dependency = (f"{domain}:{identity!r}", sid)
+        versions = self.store._scope.memory_versions
+        if dependency in versions:
+            versions[dependency] += 1
+            if domain in ("weight", "mechanism_index"):
+                self.stats[
+                    "weight_invalidations" if domain == "weight" else "mechanism_invalidations"
+                ] += 1
+
+    def _light_candidate_changes(self, table, old, new):
+        """Local ground geometry only; source/door/map dependencies stay separate.
+
+        The candidate field collapses negative spatial/config probes for all
+        ground objects. Quantity or a transfer between nonground locations has
+        no effect. Session layout replacement is controlled configuration work.
+        """
+        rows = ()
+        if table == "objects":
+            columns = ("session_id", "object_id", "scene_id", "cell", "orientation", "state")
+            if old is not None and new is not None and all(old[c] == new[c] for c in columns):
+                return
+            rows = (old, new)
+        elif table == "object_durability":
+            rows = tuple(
+                self._object(r["session_id"], r["object_id"]) for r in (old, new) if r is not None
+            )
+        elif table == "scene_instances":
+            for row in (old, new):
+                if row is not None:
+                    self._advance_field("light_candidates", row["session_id"], row["scene_id"])
+            return
+        elif table == "instance_configs":
+            for r in (old, new):
+                if r is None:
+                    continue
+                sid, identity = r["session_id"], r["instance_id"]
+                if r["domain"] == "object":
+                    obj = self._object(sid, identity)
+                    if obj is not None and obj["scene_id"] is not None:
+                        self._advance_field("light_candidates", sid, obj["scene_id"])
+                elif r["domain"] == "scene":
+                    self._advance_field("light_candidates", sid, identity)
+                elif r["domain"] == "session":
+                    for dep in self.store._scope.memory_versions:
+                        if dep[1] == sid and dep[0].startswith("light_candidates:"):
+                            self.store._scope.memory_versions[dep] += 1
+            return
+        for sid, scene in {
+            (r["session_id"], r["scene_id"])
+            for r in rows
+            if r is not None and r["scene_id"] is not None
+        }:
+            self._advance_field("light_candidates", sid, scene)
+
+    def _object(self, sid, oid):
+        return self.select(
+            "SELECT * FROM objects WHERE session_id=? AND object_id=?", (sid, oid)
+        ).fetchone()
+
+    def _weight_changes(self, table, old, new):
+        roots = []
+        if table == "objects":
+            relevant = ("object_id", "session_id", "container_id", "item_json")
+            if old is not None and new is not None and all(old[c] == new[c] for c in relevant):
+                return
+            roots = [r for r in (old, new) if r is not None]
+        elif table == "instance_configs":
+            roots = [
+                self._object(r["session_id"], r["instance_id"])
+                for r in (old, new)
+                if r is not None and r["domain"] == "object"
+            ]
+        seen = set()
+        for row in roots:
+            while row is not None:
+                sid, oid = row["session_id"], row["object_id"]
+                if (sid, oid) in seen:
+                    # The two roots can share ancestors but have different parents.
+                    break
+                seen.add((sid, oid))
+                self._advance_field("weight", sid, oid)
+                row = self._object(sid, row["container_id"]) if row["container_id"] else None
+        # A relocation's old/new root has the same ID, but both ancestor chains
+        # must be invalidated. Start the new parent independently.
+        if table == "objects" and new is not None and new["container_id"] is not None:
+            row = self._object(new["session_id"], new["container_id"])
+            while row is not None and (row["session_id"], row["object_id"]) not in seen:
+                sid, oid = row["session_id"], row["object_id"]
+                seen.add((sid, oid))
+                self._advance_field("weight", sid, oid)
+                row = self._object(sid, row["container_id"]) if row["container_id"] else None
+
+    def _subtree_capabilities(self, sid, oid):
+        """Only the moving subtree, through parent/member buckets; no Scene walk.
+
+        These are derived contributions, not a second writable location record.
+        BEFORE object deletion captures them before cascaded capability deletion.
+        """
+        found = {"object_lights": set(), "object_mechanisms": set()}
+        seen, pending = set(), [oid]
+        while pending:
+            current = pending.pop()
+            if current in seen:
+                continue
+            seen.add(current)
+            self.stats["capability_nodes"] += 1
+            for table, members in found.items():
+                if self.select(
+                    f"SELECT object_id FROM {table} WHERE session_id=? AND object_id=?",
+                    (sid, current),
+                ).fetchone():
+                    members.add(current)
+            pending.extend(
+                r[0]
+                for r in self.select(
+                    "SELECT object_id FROM objects WHERE session_id=? AND container_id=?",
+                    (sid, current),
+                )
+            )
+        return found
+
+    def _patch_scene_members(self, table, sid, scene, added=(), removed=()):
+        """Patch a loaded association and its stamp in the same sparse candidate.
+
+        A missing/evicted field stays cold. Never turn an invalid old field into a
+        valid one. Other fields of the owner and all old references stay intact.
+        """
+        if scene is None:
+            return
+        dependency = (f"{table}~scene:{scene!r}", sid)
+        versions = self.store._scope.memory_versions
+        before = self.version(dependency)
+        if dependency in versions:
+            versions[dependency] += 1
+        key = ("instance", sid, "scene", scene)
+        cached = self.get(key)
+        if cached:
+            owner = cached[0]
+            entries = []
+            for entry in owner.objects.capabilities:
+                if entry.parameter == ((table,), ()) and entry.stamps == (before,):
+                    value = tuple(sorted((set(entry.value) - set(removed)) | set(added)))
+                    entry = replace(entry, value=value, stamps=(self.version(dependency),))
+                    self.stats["capability_patches"] += 1
+                entries.append(entry)
+            owner = replace(owner, objects=replace(owner.objects, capabilities=tuple(entries)))
+            self.put(key, (owner, *cached[1:]))
+        if table == "object_mechanisms":
+            self._advance_field("mechanism_index", sid, scene)
+
     def _scene_for(self, row):
         """Resolve only a changed row's position chain; no JSON or entity scan."""
         if row is None:
@@ -388,18 +557,19 @@ class SessionMemory:
         return None
 
     def _association_changes(self, table, old, new):
-        impacted = set()
         if table == "objects":
             columns = ("scene_id", "container_id", "carrier_id", "object_id")
             if old is not None and new is not None and all(old[c] == new[c] for c in columns):
                 return
-            for row in (old, new):
-                scene = self._scene_for(row)
-                if scene is not None:
-                    impacted.update(
-                        (t, row["session_id"], scene)
-                        for t in ("object_lights", "object_mechanisms")
-                    )
+            sid = (new if new is not None else old)["session_id"]
+            before, after = self._scene_for(old), self._scene_for(new)
+            if before == after:
+                return  # Pose/shading consumers track actual selected facts.
+            row = new if new is not None else old
+            for capability, members in self._subtree_capabilities(sid, row["object_id"]).items():
+                if members:
+                    self._patch_scene_members(capability, sid, before, removed=members)
+                    self._patch_scene_members(capability, sid, after, added=members)
         elif table == "actors":
             if (
                 old is not None
@@ -407,29 +577,50 @@ class SessionMemory:
                 and old["current_scene_id"] == new["current_scene_id"]
             ):
                 return
-            for row in (old, new):
-                if row is not None:
-                    impacted.update(
-                        (t, row["session_id"], row["current_scene_id"])
-                        for t in ("object_lights", "object_mechanisms")
-                    )
+            row = new if new is not None else old
+            sid = row["session_id"]
+            for carried in self.select(
+                "SELECT object_id FROM objects WHERE session_id=? AND carrier_id=?",
+                (sid, row["actor_id"]),
+            ):
+                for capability, members in self._subtree_capabilities(sid, carried[0]).items():
+                    if members:
+                        self._patch_scene_members(
+                            capability,
+                            sid,
+                            old["current_scene_id"] if old else None,
+                            removed=members,
+                        )
+                        self._patch_scene_members(
+                            capability, sid, new["current_scene_id"] if new else None, added=members
+                        )
         elif table in ("object_lights", "object_mechanisms"):
             if old is not None and new is not None and old["object_id"] == new["object_id"]:
                 return
             for row in (old, new):
                 if row is not None:
-                    obj = self.select(
-                        "SELECT * FROM objects WHERE session_id=? AND object_id=?",
-                        (row["session_id"], row["object_id"]),
-                    ).fetchone()
+                    obj = self._object(row["session_id"], row["object_id"])
                     scene = self._scene_for(obj)
                     if scene is not None:
-                        impacted.add((table, row["session_id"], scene))
-        scope = self.store._scope
-        for capability, sid, scene in impacted:
-            dependency = (f"{capability}~scene:{scene!r}", sid)
-            if dependency in scope.memory_versions:
-                scope.memory_versions[dependency] += 1
+                        self._patch_scene_members(
+                            table,
+                            row["session_id"],
+                            scene,
+                            added=(row["object_id"],) if row is new else (),
+                            removed=(row["object_id"],) if row is old else (),
+                        )
+        elif table == "instance_configs":
+            for row in (old, new):
+                if row is not None and row["domain"] == "object":
+                    sid, oid = row["session_id"], row["instance_id"]
+                    if self.select(
+                        "SELECT object_id FROM object_mechanisms "
+                        "WHERE session_id=? AND object_id=?",
+                        (sid, oid),
+                    ).fetchone():
+                        scene = self._scene_for(self._object(sid, oid))
+                        if scene is not None:
+                            self._advance_field("mechanism_index", sid, scene)
 
     def version(self, dependency):
         scope = self.store._scope
@@ -491,7 +682,12 @@ class SessionMemory:
 
     def remember(self, key, value):
         # Bound both entry count and scalar payload; no world/history preload.
-        size = value.size if isinstance(value, Range) else len(repr(value).encode("utf-8"))
+        if key[0] == "instance":
+            from .runtime_instances import retained_size
+
+            size = retained_size(value[0])
+        else:
+            size = value.size if isinstance(value, Range) else len(repr(value).encode("utf-8"))
         size += len(repr(key).encode("utf-8"))
         if key in self.values:
             self.forget(key)
@@ -549,6 +745,14 @@ class SessionMemory:
                 or name.startswith((table + "#", table + ":", table + "@"))
                 or table in ("objects", "actors")
                 and name.startswith(("object_lights~scene:", "object_mechanisms~scene:"))
+                or table in ("objects", "instance_configs")
+                and name.startswith("weight:")
+                or table in ("objects", "actors", "instance_configs", "object_mechanisms")
+                and name.startswith("mechanism_index:")
+                or table in ("object_lights", "object_mechanisms")
+                and name.startswith(table + "~scene:")
+                or table in ("objects", "instance_configs", "object_durability")
+                and name.startswith("light_candidates:")
             ):
                 scope.memory_versions[dependency] += 1
 
@@ -563,7 +767,13 @@ class SessionMemory:
         new = None if kind == "DELETE" else Record(self.columns[table], values[count:])
         if kind == "UPDATE" and values[:count] == values[count:]:
             return 0
-        self._association_changes(table, old, new)
+        collectors, self.collectors = self.collectors, []
+        try:
+            self._weight_changes(table, old, new)
+            self._association_changes(table, old, new)
+            self._light_candidate_changes(table, old, new)
+        finally:
+            self.collectors = collectors
         sessions = {
             row["session_id"] if "session_id" in self.columns[table] else None
             for row in (old, new)

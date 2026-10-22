@@ -1,5 +1,15 @@
 # ContainerService 专项修复
 
+## 2026-10-22 二次性能修复：读取字段版本，修改维护祖先
+
+own_weight／contents_weight／total_weight 命中只检查对象重量版本一次，不向上层缓存传播
+逐内容物依赖。实际归属、数量／重量／实例配置变化在原 change capture 中使对象及旧／新
+祖先失效；失效后沿当前候选计算并保存实际计算版本。None、原销毁 shell、候选容量及
+完整必要闭包检查保留。事实、父子关联及失效状态原子发布，保存点／整体回滚不污染旧字段。
+10／100 件内容物标量命中实测从 31／301 个版本检查降至 1／1，无 SQL／RAM 查询或重算；
+公开 get/list 上层复用、数量／未知／嵌套／回滚／卸载和恢复证据见
+[后续验收](reviews/RUNTIME_INSTANCE_OWNERSHIP.md#2026-10-22-follow-up-mutation-maintained-validity)。完整内容输出仍有输出成本。
+
 ## 2026-10-22 后续：实例重量字段与无全候选键
 
 本批替代下节“绑定完整候选行”的通用重量缓存：公开 get/list 从 Object.container 的

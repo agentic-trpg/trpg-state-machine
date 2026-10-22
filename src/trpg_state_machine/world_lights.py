@@ -117,7 +117,9 @@ class LightService:
         raw = self.h.grid.reader.current_grid(sid, scene, package).copy_data()
         return self._geometry(sid, scene, package, raw)
 
-    def _geometry(self, sid, scene, package, raw):
+    @instance_read("scene", "lighting", "candidates", maintained="light_candidates")
+    def _candidates(self, sid, scene, package):
+        """Ground-object uncertainty, maintained separately from source membership."""
         candidates = self.h.objects.spatial.movement_cells(sid, scene, package)
         actual = self.h.grid.reader.scene_object_occupants(sid, scene, package)
         candidates.update(
@@ -125,6 +127,10 @@ class LightService:
             for oid, cell in actual
             if cell is not None and self.h.facts.instances.legacy_object(sid, oid).blocks_passage
         )
+        return frozenset(candidates)
+
+    def _geometry(self, sid, scene, package, raw):
+        candidates = set(self._candidates(sid, scene, package))
         for passage in self.h.facts.instances.passages(sid, scene_id=scene):
             if passage.door_object_id and self.h._door_closed(sid, passage, package):
                 candidates.update(

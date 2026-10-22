@@ -1,5 +1,13 @@
 # World W1–W8 implementation record
 
+2026-10-22 二次性能修复：Scene.objects.capabilities 保存 light／mechanism 成员，跨场景变化
+沿实际移动子树／角色携带关系局部维护。同场景 Put/Take 空袋子不重新发现；灯进入不透光
+容器仍由所选光源的祖先／状态／配置依赖更新贡献。lighting.candidates 的地面几何字段
+由相关修改版本维护，避免 projection／visible_cells 命中时展开无关物体的负向能力检查。
+嵌套移动、遮光、成员增减、回滚和恢复及独立成本见
+[后续验收](reviews/RUNTIME_INSTANCE_OWNERSHIP.md#2026-10-22-follow-up-mutation-maintained-validity)。
+下文数字保留历史含义；冷几何／完整地图证据仍有其必要范围成本。
+
 2026-10-22 后续：Object.container 持有直接内容物、自身重量、内容物重量和含后代总重量；
 公开 view/list 直接使用这些字段，不构建 ContainmentState 或全候选键。隔离候选容量仍检查
 移动子树及两端必要祖先。Scene.lighting 的 sources／geometry／cells／projection 已接入

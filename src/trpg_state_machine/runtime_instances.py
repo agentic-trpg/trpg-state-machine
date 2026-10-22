@@ -5,9 +5,11 @@ They contain values or stable IDs, never a second writable copy of domain facts.
 No validity key enumerates entities or serializes a candidate/snapshot.
 """
 
+from collections.abc import Mapping
 from copy import deepcopy
 from dataclasses import dataclass, field, fields, is_dataclass, replace
 from functools import wraps
+from types import MappingProxyType
 
 
 @dataclass(frozen=True)
@@ -16,6 +18,40 @@ class FieldValue:
     value: object
     dependencies: tuple
     stamps: tuple
+    retained_bytes: int = field(init=False, repr=False)
+
+    def __post_init__(self):
+        # Charge the actual value once, when it is produced/replaced. Unrelated
+        # fields on the same owner must not re-serialize every retained value.
+        # Dependencies are charged twice to cover the owner's retention metadata.
+        size = len(repr((self.parameter, self.value, self.dependencies, self.stamps)).encode())
+        size += len(repr(self.dependencies).encode()) + 256
+        object.__setattr__(self, "retained_bytes", size)
+
+
+@dataclass(frozen=True)
+class DependencyGroups:
+    """Retention metadata sharing immutable dependency tuples, not copying leaves."""
+
+    groups: tuple
+
+    def __iter__(self):
+        for group in self.groups:
+            yield from group
+
+
+def retained_size(owner):
+    """Conservative scalar-payload charge; never walk a cached value's records."""
+    size = 256
+    for descriptor in fields(owner):
+        value = getattr(owner, descriptor.name)
+        if is_dataclass(value):
+            size += retained_size(value)
+        elif isinstance(value, tuple):
+            size += 128 + sum(entry.retained_bytes for entry in value)
+        else:
+            size += 64 + len(repr(value).encode())
+    return size
 
 
 @dataclass(frozen=True)
@@ -36,6 +72,32 @@ class MechanismFields:
 class MechanismLinks:
     triggers: tuple
     components: tuple
+
+
+@dataclass(frozen=True, slots=True, eq=False)
+class TriggerIndex(Mapping):
+    """Scene-owned immutable buckets of frozen MechanismTrigger records.
+
+    Sharing a lookup result cannot mutate an old scope or a candidate index.
+    Only index construction copies the supplied mapping, never a lookup.
+    """
+
+    _entries: Mapping
+
+    def __post_init__(self):
+        object.__setattr__(self, "_entries", MappingProxyType(dict(self._entries)))
+
+    def __getitem__(self, key):
+        return self._entries[key]
+
+    def __iter__(self):
+        return iter(self._entries)
+
+    def __len__(self):
+        return len(self._entries)
+
+    def __deepcopy__(self, memo):
+        return self
 
 
 @dataclass(frozen=True)
@@ -61,6 +123,7 @@ class EnvironmentFields:
 class LightingFields:
     sources: tuple = ()
     geometry: tuple = ()
+    candidates: tuple = ()
     cells: tuple = ()
     projection: tuple = ()
 
@@ -69,6 +132,7 @@ class LightingFields:
 class ObjectDirectory:
     direct: tuple = ()
     contributors: tuple = ()
+    capabilities: tuple = ()
 
 
 @dataclass(frozen=True)
@@ -110,6 +174,7 @@ def resolve_field(
     *,
     capacity=1,
     versioned_parameters=False,
+    maintained=None,
 ):
     """Resolve one explicit owner field in the caller's consistent candidate scope."""
     if store._scope is None:
@@ -125,6 +190,7 @@ def resolve_field(
                 compute,
                 capacity=capacity,
                 versioned_parameters=versioned_parameters,
+                maintained=maintained,
             )
     memory = store.memory
     memory.guard(sid)
@@ -148,6 +214,12 @@ def resolve_field(
     current = owner()
     group = getattr(current, component) if component else current
     entries = getattr(group, name)
+    # These fields have an explicit mutation protocol in SessionMemory.changed.
+    # Hide their computation's raw dependencies from enclosing field/parsed reads:
+    # those consumers depend on the maintained field version, not every leaf.
+    dependency = (
+        memory.maintained_dependency(maintained, sid, identity, parameter) if maintained else None
+    )
     for entry in entries:
         if entry.parameter == parameter and entry.stamps == tuple(
             memory.version(d) for d in entry.dependencies
@@ -157,18 +229,32 @@ def resolve_field(
             memory.stats["instance_hits"] += 1
             return deepcopy(entry.value)
     dependencies = set()
+    collectors = memory.collectors
+    if maintained:
+        memory.collectors = []
     memory.collectors.append(dependencies)
+    stamp = memory.version(dependency) if maintained else None
     try:
         memory.stats["instance_builds"] += 1
         value = compute()
     finally:
         memory.collectors.pop()
+        memory.collectors = collectors
     # Environment's registered provider/source/protection protocol already owns
     # complete validity. Incidental decoder reads must not replace that protocol
     # with broader invalidation (e.g. lock metadata is not rain protection).
-    dependencies = () if versioned_parameters else tuple(sorted(dependencies, key=repr))
+    dependencies = (
+        (dependency,)
+        if maintained
+        else ()
+        if versioned_parameters
+        else tuple(sorted(dependencies, key=repr))
+    )
     entry = FieldValue(
-        parameter, value, dependencies, tuple(memory.version(d) for d in dependencies)
+        parameter,
+        value,
+        dependencies,
+        (stamp,) if maintained else tuple(memory.version(d) for d in dependencies),
     )
     # Nested computations may have filled other fields of this same owner.
     current = owner()
@@ -186,14 +272,14 @@ def resolve_field(
             elif isinstance(value, tuple):
                 for entry in value:
                     if isinstance(entry, FieldValue):
-                        yield from entry.dependencies
+                        yield entry.dependencies
 
-    retained = set(retained_dependencies(current))
-    memory.put(key, (current, None, tuple(retained), ()))
+    retained = DependencyGroups(tuple(retained_dependencies(current)))
+    memory.put(key, (current, None, retained, ()))
     return deepcopy(value)
 
 
-def instance_read(kind, component, name, *, capacity=1):
+def instance_read(kind, component, name, *, capacity=1, maintained=None):
     """Methods take (session_id, instance_id, ...); parameters are bounded scalars.
 
     A bound Package is immutable and belongs to the Session's existing binding;
@@ -217,6 +303,8 @@ def instance_read(kind, component, name, *, capacity=1):
                 ),
                 tuple(sorted(kwargs.items())),
             )
+            if maintained == "capabilities" and not args and set(kwargs) == {"table"}:
+                parameters = ((kwargs["table"],), ())
             return resolve_field(
                 store,
                 kind,
@@ -227,6 +315,7 @@ def instance_read(kind, component, name, *, capacity=1):
                 parameters,
                 lambda: method(self, sid, identity, *args, **kwargs),
                 capacity=capacity,
+                maintained=maintained,
             )
 
         return read

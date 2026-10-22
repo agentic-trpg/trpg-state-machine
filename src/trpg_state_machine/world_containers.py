@@ -132,7 +132,7 @@ class ContainerService:
         state = self.prepare(rows)
         return self._weight(oid, state, path)
 
-    @instance_read("object", "container", "own_weight")
+    @instance_read("object", "container", "own_weight", maintained="weight")
     def own_weight(self, sid, oid):
         encoded = self.facts.instances.get(sid, "object", oid)["definition"]
         definition = self.h.store.memory.json(encoded)
@@ -145,7 +145,7 @@ class ContainerService:
         weight = definition["fields"]["weight_lb"] if definition else None
         return None if weight is None else weight * data.get("quantity", 1)
 
-    @instance_read("object", "container", "total_weight", capacity=4)
+    @instance_read("object", "container", "total_weight", capacity=4, maintained="weight")
     def current_weight(self, sid, oid, *, path=frozenset()):
         if oid in path:
             raise StateMachineError("container_cycle", "Invalid parent relation")
@@ -165,7 +165,7 @@ class ContainerService:
             total = None if total is None or weight is None else total + weight
         return total
 
-    @instance_read("object", "container", "contents_weight")
+    @instance_read("object", "container", "contents_weight", maintained="weight")
     def contents_weight(self, sid, oid):
         total = 0
         for child in self.facts.contents(sid, oid):

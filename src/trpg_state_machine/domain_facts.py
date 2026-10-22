@@ -1173,11 +1173,13 @@ class WorldFacts:
             )
         )
 
+    @instance_read("scene", "objects", "capabilities", capacity=2, maintained="capabilities")
     def scene_capability_ids(self, sid, scene_id, table):
-        """Cold association construction through existing position/parent indices.
+        """Scene-owned members, patched by the same candidate change capture.
 
-        Only identities are read before capability filtering. No unrelated config,
-        JSON or capability state is hydrated. Callers retain the resulting links.
+        Missing/evicted fields are cold-constructed through position/parent
+        indices; ordinary member/ownership edits patch the loaded association.
+        Only identities are read before filtering, never unrelated configuration.
         """
         if table not in ("object_lights", "object_mechanisms"):
             raise ValueError("Unsupported capability relation")

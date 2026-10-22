@@ -73,7 +73,9 @@ def test_other_connection_recovery_invalidates_failed_publishers_ram(
         second.resume_session(sid, package, context=context)
         current = first.get_object(sid, actor, BOX, package, context=context)
         assert current["contents"] == (CRED,)
+        assert current["contents_weight_lb"] == 1
         assert old["contents"] == ()
+        assert old["contents_weight_lb"] == 0
         assert first.submit_command(operation, package, context=context).status == "committed"
         assert first.get_object(sid, actor, BOX, package, context=context) == current
 

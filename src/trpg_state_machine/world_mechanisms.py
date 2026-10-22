@@ -12,7 +12,7 @@ from ._execution import _WorldEffectKind, _WorldEffectOrigin
 from ._operations import ObjectState, SetObjectState
 from .errors import StateMachineError
 from .mechanism_effects import MechanismEffectRunner
-from .runtime_instances import MechanismLinks, instance_read, world_read
+from .runtime_instances import MechanismLinks, TriggerIndex, instance_read, world_read
 from .world_commands import CheckMechanism, SetLightEnabled
 
 
@@ -43,7 +43,7 @@ class MechanismService:
                     )
         return None
 
-    @instance_read("scene", "mechanisms", "index")
+    @instance_read("scene", "mechanisms", "index", maintained="mechanism_index")
     def _scene_index(self, sid, scene):
         index = {}
         for oid in self.h.facts.scene_capability_ids(sid, scene, "object_mechanisms"):
@@ -52,9 +52,17 @@ class MechanismService:
                 raise StateMachineError("incomplete_instance_config", "Missing mechanism config")
             for number, trigger in enumerate(config.triggers):
                 if trigger.scene_id == scene:
-                    key = (trigger.kind, scene, trigger.target_object_id)
-                    index.setdefault(key, []).append((oid, number, trigger))
-        return {key: tuple(sorted(entries)) for key, entries in index.items()}
+                    targets = (
+                        tuple(dict.fromkeys(trigger.cells))
+                        if trigger.kind == "enter_region"
+                        else (trigger.target_object_id,)
+                    )
+                    kind = (
+                        trigger.event_type if trigger.kind == "object_operation" else trigger.kind
+                    )
+                    for target in targets:
+                        index.setdefault((kind, scene, target), []).append((oid, number, trigger))
+        return TriggerIndex({key: tuple(sorted(entries)) for key, entries in index.items()})
 
     def qualify_link(self, sid, origin, target, kind, value, package):
         if (
@@ -632,7 +640,7 @@ class MechanismService:
             if motion is None:
                 return derived
             scene, actor = motion.to_scene_id, motion.actor_id
-            candidates = index.get(("enter_region", scene, None), ())
+            candidates = index.get(("enter_region", scene, motion.to_cell), ())
             target_kind = "enter_region"
         elif kind == "rules.check_rolled":
             adjudication = payload.get("adjudication", {})
@@ -649,7 +657,7 @@ class MechanismService:
             if kind == "item.container_transferred" and payload.get("phase") != "after":
                 return []
             target = payload.get("object_id", payload.get("instance_id"))
-            candidates = index.get(("object_operation", scene, target), ())
+            candidates = index.get((kind, scene, target), ())
             target_kind = "object_operation"
         events, fired = derived, set()
         for oid, _, trigger in candidates:

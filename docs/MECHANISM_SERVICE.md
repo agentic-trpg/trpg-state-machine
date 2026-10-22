@@ -1,5 +1,18 @@
 # MechanismService contract (2026-10-18)
 
+## 2026-10-22 后续：只读索引按条目查询
+
+进入区域按目标格子定位，对象操作按具体事件类型和目标 ID 定位；相同事件类别但目标
+不同也直接得到空桶。多格区域保留实际格子关联成本，桶内原触发条件／顺序不变。
+
+Scene.mechanisms.index 使用由成员／有效场景／实例配置修改推进的字段版本；命中不逐项
+检查全部配置。TriggerIndex 的私有只读映射包含 tuple 桶与 frozen trigger；automatic 按
+事件类型／场景／目标直接查询，不 deepcopy 全表。配置或成员相关变化才按需重建，旧读取
+和候选值保持隔离。状态、资格、次数、触发条件、排序及去重继续对实际匹配项校验。
+Scene.objects.capabilities 按真实父子／携带及能力成员事实补丁更新；同场景普通转移不重新
+发现所有机关。冷准备、跨场景子树维护与完整测试／计数见
+[后续验收](reviews/RUNTIME_INSTANCE_OWNERSHIP.md#2026-10-22-follow-up-mutation-maintained-validity)。
+
 ## 2026-10-22 实例触发与联动关联
 
 自动事件先过滤，再读取 Scene.mechanisms.index。对象机制字段保存静态实例触发器／组件

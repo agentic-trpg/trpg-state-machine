@@ -1,5 +1,9 @@
 # Runtime instance ownership — 2026-10-22
 
+The follow-up [mutation-maintained validity acceptance](#2026-10-22-follow-up-mutation-maintained-validity)
+below supersedes the original warm-read cost claims only within its measured scope.
+All original counts and acceptance dates below retain their original meaning.
+
 Start: `refactor/session-memory-runtime@16c305999e5ac17ef4194a3113eeb60b9ed36902`;
 `origin/main@3aaceccf1b1b492f8dd99e3bec16b9379ac6dc77`. The untracked user text
 file is excluded. Architecture baseline: `agentic-trpg@5619e7a`; its isolated
@@ -231,3 +235,184 @@ remain unstaged. The docs worktree remains under
 `.worktrees/runtime-instance-ownership/agentic-trpg` for review. Final commit IDs
 and normal push verification are supplied in the delivery response; neither main
 branch is merged or pushed by this task.
+## 2026-10-22 follow-up: mutation-maintained validity
+
+Start/review baseline: `refactor/session-memory-runtime@c64f9d7975cad55e536e0e4ea7a056fed79bd384`.
+Paired docs baseline: `docs/runtime-instance-ownership@80bd39c551dd62cb53bfd2d4a18f4c4c3a00182a`.
+Both existing branches matched their remote refs after fetch. Original untracked
+user text and nested worktrees are preserved. No new branch, main integration,
+RE change, Pages edit, schema/DTO/dependency/rule change is part of this follow-up.
+
+### Actual maintenance and isolation
+
+- **Weight:** the three Object.container scalar fields use one object weight
+  version. `SessionMemory.changed` invalidates the changed item's fields and the
+  old/new ancestor chains for parent membership, item JSON (including quantity),
+  creation/removal and persisted object configuration changes. Valid reads check
+  that field version once; computation collects its leaves privately, so enclosing
+  get/list, capacity and parsed caches inherit the field version rather than all
+  descendants. Missing/stale fields compute from their actual candidate stage and
+  retain that stage's stamp. Unknown remains `None`. Destruction still retains the
+  supported shell/contents semantics; actual relocations/configuration changes,
+  rather than the word "destroyed", determine weight effects.
+- **Mechanisms:** Scene.mechanisms.index uses a maintained scene index version.
+  Membership/effective-scene and mechanism configuration changes invalidate it;
+  arming/status/uses and eligibility are still checked on the selected mechanism.
+  `TriggerIndex` wraps a private read-only mapping of tuple buckets and frozen
+  trigger records. `automatic` gets the event/target bucket directly. Sharing an
+  index never copies its records or exposes writable nested state. A relevant
+  change may rebuild the actual scene mechanism index lazily; ordinary hits do
+  not validate every configuration. The World component reverse index keeps its
+  existing separate dependency/isolation contract.
+  Region buckets are keyed by destination cell, and object-operation buckets by
+  the concrete event type and object ID. An event of the same category at another
+  target therefore selects zero records too; matching entry order/conditions stay
+  unchanged. Region preparation/storage costs the configured region-cell links.
+- **Capability associations:** Scene.objects.capabilities holds the two immutable
+  light/mechanism ID tuples. They derive solely from objects' authoritative
+  parent/carrier/scene facts, actors' scenes and capability membership tables.
+  Cold construction follows existing root/carrier/parent indexes. Normal cross-scene
+  movement follows only the moving subtree (or an actor's carried subtrees), checks
+  their capability member buckets and patches loaded old/new scene associations.
+  No scene scan decides whether a moved bag has relevant descendants. Same-scene
+  transfer does not change membership. Selected source/ancestor/configuration,
+  enabled/mode/HP and carrier dependencies still invalidate light contributions
+  when their position, shading or accessibility actually changes. Capability
+  insertion/removal patches only its effective scene. No independently writable
+  membership truth or new Session/transaction manager is introduced.
+- **Indirect light costs:** lighting.candidates separately holds ground-object
+  uncertainty. Its version changes with ground pose/state, object configuration,
+  durability, scene acceptance lifecycle and controlled layout configuration.
+  Nonground-to-nonground empty-bag transfer does not change it. This removes the
+  negative spatial/configuration dependency expansion through cached light
+  geometry, projection and visible_cells. Door, map, source and shading inputs
+  keep their original separate checks; no geometry/rule behavior is removed.
+- **Retention cost:** each immutable FieldValue computes its conservative scalar
+  payload charge when produced/replaced. Owner budget accounting sums those
+  charges without formatting retained values again. DependencyGroups shares the
+  fields' immutable dependency tuples without flattening every leaf on each
+  owner replacement; trimming still retains the actual dependencies. The existing
+  entry/byte limits remain, with an assertion that the trigger payload is charged,
+  rather than hiding it behind a short repr. This removes a separately reproduced
+  10/100-record budget repr traversal even after index deepcopy was eliminated.
+
+Facts, parent buckets, association patches and invalidation versions all use the
+existing sparse UnitOfWork, savepoint restoration and post-COMMIT publication.
+Object DELETE capture runs before removal so necessary position/contribution facts
+are available; failure still rolls back the same candidate. Published owners are
+immutable replacements. Missing/evicted fields stay cold; patching never stamps
+an already-invalid association as valid. Controlled REPLACE conservatively
+invalidates affected loaded protocols because SQLite may omit victim DELETE
+callbacks; this is a maintenance compatibility path, not a normal command scan.
+Unload, restart and all-context recovery discard/rebuild these derived fields
+from persisted instances. The prior shared recovery generations, paused Sessions,
+old-read publication fence and driver invalidation remain intact.
+
+### Matched deterministic measurements
+
+`tests/test_runtime_field_maintenance.py` counts real `memory.version` calls,
+RAM query calls/visited rows, SQL SELECTs/fetched rows, resolver compute bodies,
+association discoveries and copied trigger records independently. All are
+production paths; wrappers observe work without replacing results. Baseline source
+was loaded from a read-only `git archive c64f9d7 src` in the same locked environment.
+The eight new performance cases fail on that baseline as expected; the original
+baseline reproduction without the new assertions passed all six cases.
+
+RAM calls mean the SessionMemory.select interface (including cold requests that
+also execute SQL); visited RAM rows and fetched SQL rows are separate counters.
+Copied records mean scene trigger-index records, not necessary complete-map or
+event-output copies. Trigger __repr__ calls separately detect record traversal
+during retention accounting.
+
+| Scope / count | Before small / large | After small / large |
+|---|---:|---:|
+| One warm weight, 10 / 100 contents: dependency probes | 31 / 301 | 1 / 1 |
+| Same weight: SQL SELECTs, fetched rows, RAM queries, computations | all 0 / 0 | all 0 / 0 |
+| Real nonmatching StepActor, 10 / 100 mechanisms: copied trigger records | 10 / 100 | 0 / 0 |
+| Same StepActor: trigger records formatted for budget accounting | 10 / 100 | 0 / 0 |
+| Same-category region event outside all configured cells: selected candidates | 10 / 100 | 0 / 0 |
+| Same StepActor: all dependency probes | 121 / 211 | 111 / 111 |
+| Same StepActor: scene-index probes / index rebuilds | per-member dependencies / 0 | 1 / 0 in both |
+| Same StepActor: SQL SELECTs / fetched rows | 26 / 5 in both | 26 / 5 in both |
+| Same StepActor: RAM calls / rows | 78 / 32 in both | 78 / 32 in both |
+| Four empty-bag Put/Take commands, growth 0 / 100: association discoveries | 8 / 8 | 0 / 0 |
+| Same commands: RAM calls | 350 / 750 | 284 / 284 |
+| Same commands: RAM rows | 202 / 202 | 180 / 180 |
+| Same commands: all dependency probes | 1,902 / 6,302 | 972 / 972 |
+| Same commands: scene mechanism index / light source rebuilds | 4 / 4 in both | 0 / 0 in both |
+| Same commands: SQL SELECTs / fetched rows | 36 / 16 in both | 36 / 16 in both |
+| Same commands: all instance computations | 28 / 28 | 16 / 16 |
+
+Growth adds 100 unrelated objects (50 in this scene) **and 100 remote actors**.
+The light, target operation and actual target contents remain fixed. Both groups
+warm two Put/Take cycles. Subsequent commands use receipt versions; a separately
+requested complete SessionView is outside this measured ordinary-command scope.
+StepActor fixtures use one legal nonmatching trigger on each of 10/100 mechanisms,
+testing both a different event type and a same-category different destination cell,
+respecting the sixteen-trigger-per-mechanism limit. Weight repeats also prove
+three reads perform exactly three probes and no computation; warmed public get/list
+checks prevent upper-layer dependency expansion while allowing complete contents
+output. The 16 remaining command computations are necessary facts/configuration,
+direct contents and candidate weight work; there is no zero-work/zero-SQL write
+claim. SessionMemory content JSON/model decoding and its fixed Snapshot wrapper
+construction counters are zero in these hot measurements. New event JSON work is
+retained and is not counted as zero by this table. Full event evidence/persistence
+and required admission remain.
+
+The historical 15/115 RAM-query discovery reproduction, 31/301 dependency counts,
+10/100 copied records and earlier 2,059-test/SQL measurements keep their original
+scope/time. They are not retroactively relabeled as this acceptance.
+
+### Validation and remaining scope
+
+Final executed tests and checks are recorded at delivery below. New regressions
+cover nested quantity/mass changes, unknown weights, multiple mutation stages,
+candidate relocation, savepoint/outer rollback, unload/restart; nested light and
+mechanism carrier scene changes, opaque-container shading, capability membership
+remove/add and fixed old indices/inputs. Existing cross-connection publication
+failure tests now also assert old/current weights. Existing public capacity,
+matching trigger qualification/order/uses, destruction, authorization/disclosure,
+idempotency, RNG, commit failure and recovery tests remain in acceptance.
+Final candidate tests also cover positional/keyword capability-query identity and
+retained payload charging. The earlier full 2,067-test run preceded the last
+retention-cost fix and is intermediate evidence; final acceptance is rerun against
+the frozen final sources, not inferred from that run.
+
+Cold association preparation and invalidated whole-map geometry have their actual
+directory/map cost. Cross-scene maintenance traverses the moved subtree, not an
+unrelated scene; association tuple replacement and changed mechanism index rebuilds
+cost their actual capability members/triggers. Ground geometry invalidation is
+conservative for ground-object configuration/state and scene-instance metadata changes. Full lists, complete
+mechanical/evidence maps and necessary aggregate admission remain output/dependency
+sized. No public partial-stack transfer, general live capability editor or standalone
+scene unload API is added. These are bounded local counters, not multiplayer/SLO
+evidence or a complete Python heap bound.
+
+### Final follow-up acceptance
+
+Final fixed sources/tests/examples pass **2,069 unique tests in 93 files**:
+three disjoint sorted-file groups of **650 / 725 / 694**, each exit 0. Collection
+versus JUnit union has zero missing/unexpected/duplicate/failed/errored/skipped
+nodes. All **215 Python source/test/example hashes** are unchanged across this
+final run. Historical migration cases are included with no environment-blocked or
+skipped cases. The separately executed final mechanism/field/recovery slice passes
+60 tests (exit 0); it is not added again to the full-suite total. Earlier runs,
+including the superseded interrupted run, are not final acceptance evidence.
+
+Executed with the existing locked environment and repo-local basetemps:
+`uv run --locked --no-sync pytest -q` over each sorted test-file partition with
+`-o faulthandler_timeout=60` and separate JUnit outputs. The eight old-source
+performance cases intentionally fail the new assertions, while their final
+production-path counterparts pass. Reproduction and counter definitions live in
+the [production-path regressions](../../tests/test_runtime_field_maintenance.py).
+SQL, RAM interface/rows, version probes, copied/formatted trigger records,
+candidate selection, discovery/rebuild and compute-body counters are separate.
+
+`uv run --locked --no-sync ruff check src tests examples` and
+`uv run --locked --no-sync ruff format --check src tests examples` both exit 0
+(215 files). Both repos' modified Markdown links/anchors/fences (12 files / 148
+local links) and staged/unstaged `git diff --check` pass. Only
+the existing two Lark deprecation warnings occur per pytest group. These are local
+checks; GitHub Actions and sustained multiplayer load were not executed. Delivery
+uses the two original branches and separate commits/pushes; no merge or force push
+is authorized.
