@@ -1,5 +1,17 @@
 # EnvironmentService
 
+## 2026-10-22 防护批准备的共享输入
+
+OSS 防护输入改为同范围只读地图的固定尺寸；同一批按 Scene 懒准备一次，不再为每个
+物体复制地图、canonical_json 编码，再在投影阶段 json.loads。明确空的降水及风贡献在
+取地图前识别；None、部分未知及共享门／非地面 unsupported 仍分别输出。已有登记
+提供方身份、双版本、时间、方向、高度及披露规则保持；未知提供方不能因此跨查询复用。
+
+这修复的是首次建立／真实失效重建防护时的重复输入准备。有效环境热命中原本就不会
+逐物体重建。冷批仍需读取实际 Scene 防护输入，完整来源输出和真实投影有相应成本。
+首次、重建、不同方向消费固定输入及热命中分别计数，见
+[本批验收](reviews/RUNTIME_INSTANCE_OWNERSHIP.md#2026-10-22-local-query-reuse)。
+
 ## 2026-10-22 场景环境字段与区域校验
 
 现有 public cell／area／unit／height 与内部投影接入 Scene.environment 的 facts、

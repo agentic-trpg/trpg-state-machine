@@ -1,5 +1,23 @@
 # ObjectSpatialService 总体说明
 
+## 2026-10-22 地图资格与防护输入复用
+
+普通 RepositionObject → validate_placement → check_candidate → _check_shape 读取同范围
+已准备拓扑的 grid_edge_walls 资格。整数／轴对齐资格在地图构建时计算；候选仍逐必要
+占格检查真实边界、保留格、刚体内部边和冲突对象。不支持墙型仍拒绝；地图替换、保存点、
+回滚及恢复按各自准备值选择，不能依赖“上游一定已经验过”。墙边查询使用 GridMaps 的
+包围索引与固定 RE 精确相交，不扫描无关墙段来重复校验候选。
+
+ObjectProtectionInput 内部传递固定 `(width,height)`，不再传递完整 grid_json。
+prepare_scene_protection 在一个既有读取范围内，按实际需要的 Scene 懒取尺寸一次，供
+整批输入共享；同批不同风向投影继续消费这批固定输入。明确空贡献在取地图前识别；
+共享门／非地面姿态的 unsupported 优先级、None/unconfigured、部分缺失属性与明确 none
+分别保留，不能把未知当作空贡献。单物体内部输入结构不是公开 DTO／持久 Schema。
+
+Environment 的登记提供方身份／版本／时间协议不变，未登记外部 reader 仍不跨查询缓存。
+真实 cold／rebuild／direction／hit 成本及公开查询／提交证据见
+[本批验收](reviews/RUNTIME_INSTANCE_OWNERSHIP.md#2026-10-22-local-query-reuse)。
+
 ## 2026-10-22 当前运行层
 
 现有空间事实／候选统一由 Session RAM 范围供给，Schema40 派生索引仍由原事实和事务触发器

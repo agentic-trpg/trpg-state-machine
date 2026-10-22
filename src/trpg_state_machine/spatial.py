@@ -313,8 +313,8 @@ class WorldHandler:
             raise StateMachineError(
                 "movement_unavailable", "Object must move by a legal adjacent step"
             )
-        actors, _ = self.grid.reader.scene_occupants(sid, position.scene_id, package)
-        if any(cell == operation.to_cell for _, cell in actors):
+        actors, _ = self.grid.reader.cell_occupants(sid, position.scene_id, operation.to_cell)
+        if actors:
             raise StateMachineError("movement_unavailable", "Object destination is occupied")
         self.objects.spatial.check_candidate(
             sid,

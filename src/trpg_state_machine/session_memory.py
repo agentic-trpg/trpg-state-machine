@@ -378,10 +378,20 @@ class SessionMemory:
         """O(1) validity; only domains with a complete change protocol opt in."""
         if domain == "capabilities":
             return self.scene_association(parameter[0][0], sid, identity)
-        if domain not in ("weight", "mechanism_index", "light_candidates", "inventory"):
+        if domain not in (
+            "weight",
+            "mechanism_index",
+            "light_candidates",
+            "light_sources",
+            "light_result",
+            "inventory",
+        ):
             raise ValueError("Unknown maintained field protocol")
         dependency = self.dependency(f"{domain}:{identity!r}", sid)
         self.store._scope.memory_versions.setdefault(dependency, 0)
+        if domain == "light_result":
+            for source in ("light_sources", "light_candidates"):
+                self.store._scope.memory_versions.setdefault((f"{source}:{identity!r}", sid), 0)
         return dependency
 
     @contextmanager
@@ -523,55 +533,247 @@ class SessionMemory:
                     "weight_invalidations" if domain == "weight" else "mechanism_invalidations"
                 ] += 1
 
-    def _light_candidate_changes(self, table, old, new):
-        """Local ground geometry only; source/door/map dependencies stay separate.
+    def _light_profile(self, row, config=None, hp=None):
+        """Only the changed object's static inputs, never a Scene catalogue."""
+        if row is None:
+            return None, None
+        sid, oid = row["session_id"], row["object_id"]
+        if config is None:
+            config = self.select(
+                "SELECT config_json FROM instance_configs "
+                "WHERE session_id=? AND domain='object' AND instance_id=?",
+                (sid, oid),
+            ).fetchone()
+            config = self.json(config[0]) if config else {}
+        definition = self.json(config["definition"]) if config.get("definition") else None
+        capabilities = {
+            c["type"]: c["fields"]
+            for c in (definition["fields"]["capabilities"]["tuple"] if definition else ())
+        }
+        spatial = capabilities.get("SpatialObject")
+        blocked = row["state"] == "closed"
+        if spatial is not None:
+            if hp is None:
+                durability = self.select(
+                    "SELECT current_hp FROM object_durability WHERE session_id=? AND object_id=?",
+                    (sid, oid),
+                ).fetchone()
+                hp = durability[0] if durability else None
+            destroyed = hp == 0 and any(
+                c.get("destruction_policy_ref") == "disable_spatial_policy"
+                for c in capabilities.values()
+            )
+            state = "destroyed" if destroyed else "open" if row["state"] == "open" else "closed"
+            blocked = spatial[state + "_blocks_movement"]
+        ground = None
+        if row["scene_id"] is not None and (config.get("blocks_passage") or spatial and blocked):
+            footprint = spatial["footprint"] if spatial and blocked else None
+            ground = (
+                row["scene_id"],
+                row["cell"],
+                row["orientation"] if footprint else None,
+                footprint,
+            )
+        return ground, blocked
 
-        The candidate field collapses negative spatial/config probes for all
-        ground objects. Quantity or a transfer between nonground locations has
-        no effect. Session layout replacement is controlled configuration work.
+    def _light_source_config(self, config):
+        definition = self.json(config["definition"]) if config.get("definition") else None
+        return tuple(
+            (
+                c["type"],
+                c["fields"]
+                if c["type"] == "LightEmitter"
+                else (
+                    c["fields"]["light_transmission_open"],
+                    c["fields"]["light_transmission_closed"],
+                ),
+            )
+            for c in (definition["fields"]["capabilities"]["tuple"] if definition else ())
+            if c["type"] in ("LightEmitter", "Container")
+        )
+
+    def _light_source_changes(self, rows):
+        rows = [row for row in rows if row is not None]
+        checked, contributors = set(), set()
+        for row in rows:
+            sid, oid = row["session_id"], row["object_id"]
+            if (sid, oid) not in checked:
+                checked.add((sid, oid))
+                if self._has_subtree_light(sid, oid):
+                    contributors.add(sid)
+        if contributors:
+            for sid, scene in {(r["session_id"], self._scene_for(r)) for r in rows}:
+                if sid in contributors and scene is not None:
+                    self._advance_field("light_sources", sid, scene)
+
+    def _has_subtree_light(self, sid, oid):
+        # Negative empty-container checks use two indexed buckets; do not start
+        # a subtree walk or inspect any Scene members to rediscover no emitter.
+        if self.select(
+            "SELECT object_id FROM object_lights WHERE session_id=? AND object_id=?", (sid, oid)
+        ).fetchone():
+            return True
+        if not self.select(
+            "SELECT object_id FROM objects WHERE session_id=? AND container_id=?", (sid, oid)
+        ).fetchone():
+            return False
+        return bool(
+            self._subtree_capabilities(sid, oid, tables=("object_lights",))["object_lights"]
+        )
+
+    def _light_door_scenes(self, sid, oid):
+        return tuple(
+            r[0]
+            for r in self.select(
+                "SELECT DISTINCT json_extract(e.value,'$.fields.scene_id') "
+                "FROM instance_configs i JOIN json_each(i.config_json,'$.passages.tuple') p "
+                "JOIN json_each(p.value,'$.fields.endpoints.tuple') e "
+                "WHERE i.session_id=? AND i.domain='session' AND i.instance_id=? "
+                "AND json_extract(p.value,'$.fields.door_object_id')=?",
+                (sid, sid, oid),
+            )
+        )
+
+    def _light_candidate_changes(self, table, old, new):
+        """Mutation-maintained source and geometry stamps, in the existing UoW.
+
+        Sources follow moved subtrees/carriers and shading ancestors. Geometry
+        follows actual ground blockers and both shared-door endpoints. No read
+        validates the collected source/config leaves again.
         """
-        rows = ()
+        if table in ("mechanical_scenes", "scene_instances"):
+            if (
+                table == "mechanical_scenes"
+                and old is not None
+                and new is not None
+                and old["spatial_enabled"] == new["spatial_enabled"]
+                and (
+                    self.json(old["state_json"]).get("grid")
+                    == self.json(new["state_json"]).get("grid")
+                )
+            ):
+                return
+            for row in (old, new):
+                if row is not None:
+                    self._advance_field("light_candidates", row["session_id"], row["scene_id"])
+                    if table == "scene_instances":
+                        self._advance_field("light_sources", row["session_id"], row["scene_id"])
+            return
+        if table == "object_lights":
+            for row in (old, new):
+                if row is not None:
+                    sid = row["session_id"]
+                    scene = self._scene_for(self._object(sid, row["object_id"]))
+                    if scene is not None:
+                        self._advance_field("light_sources", sid, scene)
+            return
+        if table == "actors":
+            columns = ("session_id", "actor_id", "current_scene_id", "cell")
+            if old is not None and new is not None and all(old[c] == new[c] for c in columns):
+                return
+            row = new if new is not None else old
+            sid = row["session_id"]
+            scenes = {r["current_scene_id"] for r in (old, new) if r is not None}
+            if not any(
+                (f"light_sources:{s!r}", sid) in self.store._scope.memory_versions for s in scenes
+            ):
+                return
+            for carried in self.select(
+                "SELECT object_id FROM objects WHERE session_id=? AND carrier_id=?",
+                (sid, row["actor_id"]),
+            ):
+                if self._has_subtree_light(sid, carried[0]):
+                    for scene in scenes:
+                        self._advance_field("light_sources", sid, scene)
+            return
+        configs = (None, None)
+        hp = (None, None)
         if table == "objects":
-            columns = ("session_id", "object_id", "scene_id", "cell", "orientation", "state")
+            columns = (
+                "session_id",
+                "object_id",
+                "scene_id",
+                "carrier_id",
+                "container_id",
+                "cell",
+                "orientation",
+                "state",
+            )
             if old is not None and new is not None and all(old[c] == new[c] for c in columns):
                 return
             rows = (old, new)
         elif table == "object_durability":
+            if (
+                old is not None
+                and new is not None
+                and (old["current_hp"] == 0) == (new["current_hp"] == 0)
+            ):
+                return
             rows = tuple(
-                self._object(r["session_id"], r["object_id"]) for r in (old, new) if r is not None
+                self._object(r["session_id"], r["object_id"]) if r else None for r in (old, new)
             )
-        elif table == "scene_instances":
-            for row in (old, new):
-                if row is not None:
-                    self._advance_field("light_candidates", row["session_id"], row["scene_id"])
-            return
+            hp = tuple(r["current_hp"] if r else None for r in (old, new))
         elif table == "instance_configs":
             for r in (old, new):
-                if r is None:
-                    continue
-                sid, identity = r["session_id"], r["instance_id"]
-                if r["domain"] == "object":
-                    obj = self._object(sid, identity)
-                    if obj is not None and obj["scene_id"] is not None:
-                        self._advance_field("light_candidates", sid, obj["scene_id"])
-                elif r["domain"] == "scene":
-                    self._advance_field("light_candidates", sid, identity)
-                elif r["domain"] == "session":
-                    for dep in self.store._scope.memory_versions:
-                        if dep[1] == sid and dep[0].startswith("light_candidates:"):
-                            self.store._scope.memory_versions[dep] += 1
+                if r is not None and r["domain"] in ("session", "scene"):
+                    sid = r["session_id"]
+                    if r["domain"] == "scene":
+                        self._advance_field("light_candidates", sid, r["instance_id"])
+                        self._advance_field("light_sources", sid, r["instance_id"])
+                    else:
+                        # Controlled layout replacement; ordinary object updates
+                        # never enumerate Session field metadata or Scene objects.
+                        for dep in self.store._scope.memory_versions:
+                            if dep[1] == sid and dep[0].startswith(
+                                ("light_candidates:", "light_sources:")
+                            ):
+                                self.store._scope.memory_versions[dep] += 1
+            row = new if new is not None else old
+            if row["domain"] != "object":
+                return
+            obj = self._object(row["session_id"], row["instance_id"])
+            rows = (obj, obj)
+            configs = tuple(self.json(r["config_json"]) if r else {} for r in (old, new))
+        else:
             return
-        for sid, scene in {
-            (r["session_id"], r["scene_id"])
-            for r in rows
-            if r is not None and r["scene_id"] is not None
-        }:
-            self._advance_field("light_candidates", sid, scene)
+        if table != "instance_configs" or self._light_source_config(
+            configs[0]
+        ) != self._light_source_config(configs[1]):
+            self._light_source_changes(rows)
+        if (
+            table == "objects"
+            and old is not None
+            and new is not None
+            and all(
+                old[c] == new[c]
+                for c in ("session_id", "object_id", "scene_id", "cell", "orientation", "state")
+            )
+        ):
+            return  # Nonground ownership changes cannot change ground/door geometry.
+        profiles = tuple(
+            self._light_profile(r, c, h) for r, c, h in zip(rows, configs, hp, strict=True)
+        )
+        if profiles[0][0] != profiles[1][0]:
+            for row in rows:
+                if row is not None and row["scene_id"] is not None:
+                    self._advance_field("light_candidates", row["session_id"], row["scene_id"])
+        if profiles[0][1] != profiles[1][1]:
+            for row in rows:
+                if row is not None:
+                    sid = row["session_id"]
+                    for scene in self._light_door_scenes(sid, row["object_id"]):
+                        self._advance_field("light_candidates", sid, scene)
 
     def _object(self, sid, oid):
-        return self.select(
+        memo = getattr(self, "_change_objects", None)
+        if memo is not None and (sid, oid) in memo:
+            return memo[sid, oid]
+        row = self.select(
             "SELECT * FROM objects WHERE session_id=? AND object_id=?", (sid, oid)
         ).fetchone()
+        if memo is not None:
+            memo[sid, oid] = row
+        return row
 
     def _weight_changes(self, table, old, new):
         roots = []
@@ -606,13 +808,13 @@ class SessionMemory:
                 self._advance_field("weight", sid, oid)
                 row = self._object(sid, row["container_id"]) if row["container_id"] else None
 
-    def _subtree_capabilities(self, sid, oid):
+    def _subtree_capabilities(self, sid, oid, *, tables=("object_lights", "object_mechanisms")):
         """Only the moving subtree, through parent/member buckets; no Scene walk.
 
         These are derived contributions, not a second writable location record.
         BEFORE object deletion captures them before cascaded capability deletion.
         """
-        found = {"object_lights": set(), "object_mechanisms": set()}
+        found = {table: set() for table in tables}
         seen, pending = set(), [oid]
         while pending:
             current = pending.pop()
@@ -679,14 +881,7 @@ class SessionMemory:
                     (sid, row["carrier_id"]),
                 ).fetchone()
                 return actor[0] if actor else None
-            row = (
-                self.select(
-                    "SELECT * FROM objects WHERE session_id=? AND object_id=?",
-                    (sid, row["container_id"]),
-                ).fetchone()
-                if row["container_id"]
-                else None
-            )
+            row = self._object(sid, row["container_id"]) if row["container_id"] else None
         return None
 
     def _association_changes(self, table, old, new):
@@ -759,6 +954,13 @@ class SessionMemory:
         scope = self.store._scope
         versions = scope.memory_versions if scope is not None else self.versions
         table, sid = dependency
+        if table.startswith("light_result:"):
+            identity = table.partition(":")[2]
+            return (
+                self.generation,
+                versions.get(("light_sources:" + identity, sid), 0),
+                versions.get(("light_candidates:" + identity, sid), 0),
+            )
         if table.startswith("inventory:"):
             return (
                 self.generation,
@@ -868,6 +1070,14 @@ class SessionMemory:
         # Inventory's scalar stamp incorporates these existing shared versions.
         # Keep them while any retained owner (or enclosing reader) uses the stamp.
         inventory_sessions = {sid for name, sid in alive if name.startswith("inventory:")}
+        light_fields = [
+            (name.partition(":")[2], sid) for name, sid in alive if name.startswith("light_result:")
+        ]
+        alive.update(
+            (source + ":" + identity, sid)
+            for identity, sid in light_fields
+            for source in ("light_sources", "light_candidates")
+        )
         alive.update(
             (name, sid)
             for sid in inventory_sessions
@@ -913,6 +1123,17 @@ class SessionMemory:
                 in (
                     "objects",
                     "actors",
+                    "object_lights",
+                    "object_durability",
+                    "instance_configs",
+                    "mechanical_scenes",
+                    "scene_instances",
+                )
+                and name.startswith(("light_sources:", "light_candidates:", "light_result:"))
+                or table
+                in (
+                    "objects",
+                    "actors",
                     "characters",
                     "mechanical_actors",
                     "instance_configs",
@@ -936,6 +1157,11 @@ class SessionMemory:
         if kind == "UPDATE" and values[:count] == values[count:]:
             return 0
         collectors, self.collectors = self.collectors, []
+        previous_objects = getattr(self, "_change_objects", None)
+        # The synchronous callback does no domain writes. Share immutable point
+        # reads between its source/ancestor maintenance passes, never across a
+        # statement or candidate stage. Nested trigger callbacks get their own memo.
+        self._change_objects = {}
         try:
             self._weight_changes(table, old, new)
             self._association_changes(table, old, new)
@@ -943,6 +1169,7 @@ class SessionMemory:
             self._inventory_changes(table, old, new)
         finally:
             self.collectors = collectors
+            self._change_objects = previous_objects
         sessions = {
             row["session_id"] if "session_id" in self.columns[table] else None
             for row in (old, new)

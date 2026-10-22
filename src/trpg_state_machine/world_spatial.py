@@ -14,6 +14,7 @@ from dnd5e_engine.spatial import canonical_cell_id
 from .errors import StateMachineError
 from .object_protection import (
     ORIENTATIONS,
+    PRECIPITATION_KINDS,
     CurrentProtectionProperties,
     CurrentProtectionProvider,
     Direction,
@@ -24,7 +25,7 @@ from .object_protection import (
 from .object_protection import (
     project_protection as _project_protection,
 )
-from .package import canonical_json
+from .package import canonical_json as canonical_json  # Existing internal import compatibility.
 from .runtime_instances import instance_read
 from .scoped_reads import scoped_read
 
@@ -58,7 +59,7 @@ class ObjectProtectionInput:
     state: ObjectSpatialState
     properties: CurrentProtectionProperties | None
     reason: str | None = None
-    grid_json: str | None = None
+    extent: tuple[int, int] | None = None
 
     def explicitly_empty(self):
         """Whether removing this source preserves BOTH complete protection results."""
@@ -181,7 +182,7 @@ class ObjectSpatialService:
         prepared = self._protection_input(sid, oid, package, candidate, properties)
         return self._project_protection_input(prepared, wind_from)
 
-    def _protection_input(self, sid, oid, package, candidate=None, properties=None):
+    def _protection_input(self, sid, oid, package, candidate=None, properties=None, *, extent=None):
         if properties is not None and type(properties) is not CurrentProtectionProperties:
             raise ValueError("Expected typed current protection properties")
         state = candidate if candidate is not None else self.state(sid, oid, package)
@@ -207,18 +208,23 @@ class ObjectSpatialService:
             return ObjectProtectionInput(oid, state, None)
         if type(properties) is not CurrentProtectionProperties:
             raise ValueError("Provider must return typed current properties or None")
+        prepared = ObjectProtectionInput(oid, state, properties)
+        if prepared.explicitly_empty():
+            return prepared  # No geometric input can change a declared empty contribution.
         try:
-            grid = self.h.grid.reader.scene_grid(sid, state.scene_id, package)
+            if extent is None:
+                grid = self.h.grid.reader.prepared_scene(sid, state.scene_id, package)
+                size = (grid.data["width"], grid.data["height"])
+            else:
+                size = extent(state.scene_id)
         except StateMachineError as exc:
             if exc.code != "spatial_unconfigured":
                 raise
             return ObjectProtectionInput(oid, state, properties, "scene_grid_required")
-        return ObjectProtectionInput(oid, state, properties, grid_json=canonical_json(grid))
+        return replace(prepared, extent=size)
 
     @staticmethod
     def _project_protection_input(prepared, wind_from):
-        import json
-
         oid, state = prepared.object_id, prepared.state
         if prepared.reason:
             return ObjectProtectionProjection(
@@ -232,13 +238,30 @@ class ObjectSpatialService:
             )
         if prepared.properties is None:
             return ObjectProtectionProjection(oid, state.scene_id, wind_from)
-        grid = json.loads(prepared.grid_json)
-        return _project_protection(
-            oid, state, prepared.properties, wind_from, grid["width"], grid["height"]
-        )
+        if prepared.explicitly_empty():
+            return ObjectProtectionProjection(
+                oid,
+                state.scene_id,
+                wind_from,
+                "none",
+                "none",
+                precipitation_statuses=tuple((kind, "none") for kind in PRECIPITATION_KINDS),
+            )
+        return _project_protection(oid, state, prepared.properties, wind_from, *prepared.extent)
 
     def prepare_scene_protection(self, sid, scene_id, package, *, properties=None):
         """Read every current input once; subsequent directions use this exact read set."""
+        if self.h.store._scope is None:
+            with self.h.store.transaction():
+                return self.prepare_scene_protection(sid, scene_id, package, properties=properties)
+        extents = {}
+
+        def extent(scene):
+            if scene not in extents:
+                grid = self.h.grid.reader.prepared_scene(sid, scene, package)
+                extents[scene] = (grid.data["width"], grid.data["height"])
+            return extents[scene]
+
         objects = self.h.grid.reader.scene_object_occupants(sid, scene_id, package)
         doors = {
             p.door_object_id
@@ -253,6 +276,7 @@ class ObjectSpatialService:
                     oid,
                     package,
                     properties=properties.get(oid) if properties is not None else None,
+                    extent=extent,
                 )
                 for oid in sorted({oid for oid, _ in objects} | doors)
             ),
@@ -525,12 +549,7 @@ class ObjectSpatialService:
             if any(not base.is_valid_cell(c) for c in cells):
                 raise StateMachineError(error_code, "Invalid object location")
             return
-        walls = self.h.grid.reader.scene_grid(sid, state.scene_id, package)["wall_segments"]
-        if any(
-            not all(float(w[k]).is_integer() for k in ("x1", "y1", "x2", "y2"))
-            or (w["x1"] != w["x2"] and w["y1"] != w["y2"])
-            for w in walls
-        ):
+        if not base.grid_edge_walls:
             raise StateMachineError(
                 "unsupported_object_geometry", "Object shapes require grid-edge walls"
             )

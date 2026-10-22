@@ -7,8 +7,9 @@ data. Grid geometry remains separate from base-fact ownership and publication.
 
 import json
 from collections import ChainMap, OrderedDict
-from collections.abc import Set
+from collections.abc import Mapping, Set
 from dataclasses import dataclass
+from math import isfinite
 from types import MappingProxyType
 
 from dnd5e_engine.spatial import GridTopology
@@ -45,6 +46,52 @@ class _Wall:
 
 
 @dataclass(frozen=True, slots=True)
+class _WallIndex:
+    """Immutable bounding hierarchy; candidates still use pinned RE geometry.
+
+    Inclusive bounds retain endpoint touches and degenerate/fractional walls.
+    No raster expansion of long walls, or all-coordinate-pair result cache.
+    """
+
+    bounds: tuple
+    walls: tuple = ()
+    children: tuple = ()
+
+    @classmethod
+    def build(cls, walls):
+        if not walls:
+            return None
+        bounds = (
+            min(min(w.x1, w.x2) for w in walls),
+            min(min(w.y1, w.y2) for w in walls),
+            max(max(w.x1, w.x2) for w in walls),
+            max(max(w.y1, w.y2) for w in walls),
+        )
+        if len(walls) <= 8:
+            return cls(bounds, tuple(walls))
+        axis = bounds[2] - bounds[0] >= bounds[3] - bounds[1]
+        ordered = sorted(walls, key=lambda w: w.x1 + w.x2 if axis else w.y1 + w.y2)
+        middle = len(ordered) // 2
+        return cls(bounds, children=(cls.build(ordered[:middle]), cls.build(ordered[middle:])))
+
+    def query(self, bounds):
+        x1, y1, x2, y2 = bounds
+        a, b, c, d = self.bounds
+        if c < x1 or x2 < a or d < y1 or y2 < b:
+            return
+        for wall in self.walls:
+            if not (
+                max(wall.x1, wall.x2) < x1
+                or min(wall.x1, wall.x2) > x2
+                or max(wall.y1, wall.y2) < y1
+                or min(wall.y1, wall.y2) > y2
+            ):
+                yield wall
+        for child in self.children:
+            yield from child.query(bounds)
+
+
+@dataclass(frozen=True, slots=True)
 class _BlockedOverlay(Set):
     """Membership shares the immutable base; constructing it visits only extras."""
 
@@ -69,6 +116,24 @@ class _BlockedOverlay(Set):
         return frozenset(values)
 
 
+@dataclass(frozen=True, slots=True)
+class _CoverEndpoint(Mapping):
+    base: Mapping
+    cell: str
+    degree: str
+
+    def __getitem__(self, key):
+        return self.degree if key == self.cell else self.base[key]
+
+    def __iter__(self):
+        yield from self.base
+        if self.cell not in self.base:
+            yield self.cell
+
+    def __len__(self):
+        return len(self.base) + int(self.cell not in self.base)
+
+
 class ReadOnlyTopology(GridTopology):
     """Pinned RE algorithms with detached, recursively read-only backing inputs.
 
@@ -79,6 +144,16 @@ class ReadOnlyTopology(GridTopology):
     def __init__(self, scene):
         super().__init__(scene)
         self._walls = tuple(_Wall(w.x1, w.y1, w.x2, w.y2) for w in self._walls)
+        self._wall_index = (
+            _WallIndex.build(self._walls)
+            if all(isfinite(v) for w in self._walls for v in (w.x1, w.y1, w.x2, w.y2))
+            else None  # Preserve pinned RE behavior for nonfinite legacy input.
+        )
+        self.grid_edge_walls = all(
+            all(float(v).is_integer() for v in (w.x1, w.y1, w.x2, w.y2))
+            and (w.x1 == w.x2 or w.y1 == w.y2)
+            for w in self._walls
+        )
         for name, value in tuple(vars(self).items()):
             object.__setattr__(self, name, _freeze(value))
         object.__setattr__(self, "_readonly", True)
@@ -116,6 +191,45 @@ class ReadOnlyTopology(GridTopology):
             object.__setattr__(result, name, value)
         object.__setattr__(result, "_blocked", _BlockedOverlay(self._blocked, frozenset(cells)))
         return result
+
+    def with_cover(self, cells):
+        """Replace only the cover channel; callers prepare independent-source maxima."""
+        result = object.__new__(type(self))
+        for name, value in vars(self).items():
+            object.__setattr__(result, name, value)
+        object.__setattr__(result, "_cover_cells", MappingProxyType(dict(cells)))
+        return result
+
+    def with_cover_at(self, cell, degree):
+        result = object.__new__(type(self))
+        for name, value in vars(self).items():
+            object.__setattr__(result, name, value)
+        object.__setattr__(result, "_cover_cells", _CoverEndpoint(self._cover_cells, cell, degree))
+        return result
+
+    def _ray_topology(self, a, b):
+        if self._wall_index is None:
+            return self
+        ax, ay = map(int, a.split(","))
+        bx, by = map(int, b.split(","))
+        walls = tuple(
+            self._wall_index.query(
+                (min(ax, bx) + 0.5, min(ay, by) + 0.5, max(ax, bx) + 0.5, max(ay, by) + 0.5)
+            )
+        )
+        result = object.__new__(type(self))
+        for name, value in vars(self).items():
+            object.__setattr__(result, name, value)
+        object.__setattr__(result, "_walls", walls)
+        return result
+
+    def _step_is_legal(self, a, b):
+        return GridTopology._step_is_legal(self._ray_topology(a, b), a, b)
+
+    def has_line_of_sight(self, a, b):
+        if not self._in_bounds(a) or not self._in_bounds(b):
+            return False
+        return GridTopology.has_line_of_sight(self._ray_topology(a, b), a, b)
 
 
 @dataclass(frozen=True, slots=True)

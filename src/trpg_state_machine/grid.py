@@ -7,15 +7,17 @@ static geometry, vision and cover, and must not be supplied as a combat Grid.
 
 import json
 from contextlib import contextmanager
+from copy import deepcopy
 from dataclasses import InitVar, dataclass
 from functools import wraps
 from math import isfinite
+from types import MappingProxyType
 
 from dnd5e_engine.spatial import GridTopology, canonical_cell_id
 from dnd5e_engine.specs import GridScene
 
 from .errors import StateMachineError
-from .grid_maps import PreparedGrid, ReadOnlyTopology
+from .grid_maps import PreparedGrid
 from .runtime_instances import instance_read
 from .scoped_reads import scoped_read
 from .world_spatial import ObjectSpatialProjection
@@ -51,7 +53,15 @@ class GridOccupant:
 
 class _GridSnapshot:
     # Keep prepared implementation data out of dataclass fields/asdict/wire data.
-    __slots__ = ("_map",)
+    __slots__ = (
+        "_map",
+        "_by_cell",
+        "_by_entity",
+        "_movement",
+        "_cover",
+        "_creature_cover",
+        "_vision",
+    )
 
 
 @dataclass(frozen=True, slots=True)
@@ -63,11 +73,51 @@ class GridView(_GridSnapshot):
     objects: tuple[tuple[str, ObjectSpatialProjection], ...]
     _prepared: InitVar[PreparedGrid | None] = None
 
+    def __deepcopy__(self, memo):
+        # Hidden read-only preparations need no reconstruction for a detached DTO.
+        result = object.__new__(type(self))
+        memo[id(self)] = result
+        for name in ("scene_id", "world_version", "grid_json", "occupants", "objects"):
+            object.__setattr__(result, name, deepcopy(getattr(self, name), memo))
+        for name in _GridSnapshot.__slots__:
+            object.__setattr__(result, name, getattr(self, name))
+        return result
+
     def __post_init__(self, _prepared):
         prepared = _prepared
         if prepared is None or prepared.grid_json != self.grid_json:
             prepared = PreparedGrid.build(json.loads(self.grid_json))
         object.__setattr__(self, "_map", prepared)
+        cells, entities = {}, {}
+        for index, occupant in enumerate(self.occupants):
+            entities.setdefault((occupant.kind, occupant.entity_id), occupant.cells)
+            for cell in occupant.cells:
+                cells.setdefault(cell, set()).add(index)
+        object.__setattr__(
+            self, "_by_cell", MappingProxyType({c: tuple(v) for c, v in cells.items()})
+        )
+        object.__setattr__(self, "_by_entity", MappingProxyType(entities))
+        object.__setattr__(
+            self,
+            "_movement",
+            prepared.topology.with_blocked(
+                c for _, p in self.objects for c in p.movement_blocking_cells
+            ),
+        )
+        rank = ("none", "half", "three_quarters", "total").index
+        cover = dict(prepared.data["cover_cells"])
+        for _, projection in self.objects:
+            for cell, degree in projection.cover_cells:
+                if rank(degree) > rank(cover.get(cell, "none")):
+                    cover[cell] = degree
+        object.__setattr__(self, "_cover", prepared.topology.with_cover(cover))
+        for occupant in self.occupants:
+            if occupant.kind == "actor":
+                for cell in occupant.cells:
+                    if rank(cover.get(cell, "none")) < rank("half"):
+                        cover[cell] = "half"
+        object.__setattr__(self, "_creature_cover", prepared.topology.with_cover(cover))
+        object.__setattr__(self, "_vision", any(p.vision_occlusion_cells for _, p in self.objects))
 
     @property
     def width(self):
@@ -98,13 +148,14 @@ class GridView(_GridSnapshot):
     def occupied(self, cells):
         """Entities intersecting a bounded set of cells, preserving kinds and footprints."""
         selected = {self.normalize_cell(c) for c in cells}
-        return tuple(o for o in self.occupants if selected.intersection(o.cells))
+        indices = {i for c in selected for i in self._by_cell.get(c, ())}
+        return tuple(self.occupants[i] for i in sorted(indices))
 
     def entity_cells(self, kind, entity_id):
-        for occupant in self.occupants:
-            if (occupant.kind, occupant.entity_id) == (kind, entity_id):
-                return occupant.cells
-        raise StateMachineError("invalid_target", "Entity has no local grid placement")
+        try:
+            return self._by_entity[kind, entity_id]
+        except KeyError as exc:
+            raise StateMachineError("invalid_target", "Entity has no local grid placement") from exc
 
     def distance_ft(self, a, b):
         """Geometric distance; neither path length nor movement cost."""
@@ -182,19 +233,13 @@ class GridView(_GridSnapshot):
     def can_step(self, a, b):
         """Basic passage geometry, without creature-passage rules or movement payment."""
         a, b = self.normalize_cell(a), self.normalize_cell(b)
-        raw = self._map.copy_data()
-        raw["blocked_cells"] = list(self.movement_blocking_cells())
-        topology = (
-            self._base()
-            if set(raw["blocked_cells"]) == set(self._map.data["blocked_cells"])
-            else ReadOnlyTopology(GridScene(**raw))
-        )
+        topology = self._movement
         return topology.is_valid_cell(a) and topology.edge_distance(a, b) is not None
 
     def has_line_of_sight(self, a, b):
         """Geometric occlusion only; no lighting, senses or perception authorization."""
         a, b = self.normalize_cell(a), self.normalize_cell(b)
-        if any(p.vision_occlusion_cells for _, p in self.objects):
+        if self._vision:
             raise StateMachineError(
                 "unsupported_grid_vision", "RE has no independent dynamic vision channel"
             )
@@ -205,21 +250,18 @@ class GridView(_GridSnapshot):
         base = self._base()
         if not base.has_line_of_sight(a, b):
             return "total"
-        raw = self._map.copy_data()
-        occupied = (
-            tuple(c for o in self.occupants if o.kind == "actor" for c in o.cells)
-            if creature_cover
-            else ()
-        )
-        degrees = [base.cover_between(a, b, occupied_cells=occupied)]
-        # Each object is an independent cover source; RE computes its ray contribution.
-        for _, projection in self.objects:
-            if projection.cover_cells:
-                topology = GridTopology(
-                    GridScene(**{**raw, "cover_cells": dict(projection.cover_cells)})
-                )
-                degrees.append(topology.cover_between(a, b))
-        return max(degrees, key=("none", "half", "three_quarters", "total").index)
+        # Max across independent sources commutes with RE's max along the ray.
+        # Creature endpoints must still be excluded, unlike explicit object cover.
+        degree = self._cover.cover_between(a, b)
+        if creature_cover:
+            endpoint = self._creature_cover.with_cover_at(
+                b, self._cover._cover_cells.get(b, "none")
+            )
+            degree = max(
+                (degree, endpoint.cover_between(a, b)),
+                key=("none", "half", "three_quarters", "total").index,
+            )
+        return degree
 
     def cells_in_template(self, origin, shape, size_ft, *, direction=None, width_ft=None):
         """RE's 2D raster template only, including its origin convention; no effect/LoS filter."""
