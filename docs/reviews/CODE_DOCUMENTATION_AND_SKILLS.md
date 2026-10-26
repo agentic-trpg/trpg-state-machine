@@ -62,3 +62,68 @@ Final static checks also include the installed verifier's Ruff lint/format. All 
 changed/new Markdown files across the coordinated batch pass local path/anchor, table
 and fence checks. Working/staged `git diff --check` is the commit gate. These are local
 results; actual automatic Skill triggering and remote CI remain unverified.
+
+## 2026-10-27 follow-up: precise scopes and system overview
+
+Starting HEAD: `a7b0804d5635e185a79ff3c1d1fa6241c2b858fe`, existing branch
+`docs/source-docstrings-and-skills`, same worktree. After fetch, origin's task branch
+matches, with no later commit; origin/main remains `b9ae704`. The task worktree started
+clean. No branch creation/merge, unrelated work, experiment or Pages changes.
+
+### Two corrected docstrings
+
+- `world_mechanisms.py::MechanismService.automatic` handles **one source event**.
+  `events, fired = derived, set()` creates per-call deduplication; matching candidates
+  can cause at most one operation per mechanism for that source event. Another event
+  can trigger the same mechanism if lifecycle/frequency/cooldown and other checks allow.
+  This path calls the maintained `_scene_index(sid, scene)` directly. Although
+  PackageEffects passes `prepared=mechanism_index`, automatic does not consume it;
+  `_batch_index` is used by the separate component-destruction path. Index sharing
+  and activation deduplication are distinct. The corrected explanation preserves
+  command/source-event identities and the caller's bounded expansion/shared transaction.
+- `grid_maps.py::_WallIndex.query` selects candidate walls by **bounding-box overlap**,
+  including boundary touches; a candidate segment need not intersect the query region.
+  ReadOnlyTopology._ray_topology supplies candidates to `_step_is_legal` and
+  `has_line_of_sight`. Both downstream GridTopology methods retain exact
+  `_segments_intersect` checks, verified in sibling source and SM's fixed RE
+  `a011eba3ea2226e22d8081294ee38d3ec193b325`. No geometry algorithm/check was changed.
+
+The previous descriptions overstated deduplication and geometric precision. Only these
+two docstring values changed; no trigger logic, deduplication range, signature,
+expression or control flow changed.
+
+### Overview and maintenance
+
+Added [docs/SYSTEM_OVERVIEW.md](../SYSTEM_OVERVIEW.md), 150 lines: public entrypoints,
+creation/load/unload, commands and queries, domain collaboration, version/idempotency,
+fixed rule inputs and adoption, event/reliable work and NPC paths. State tables distinguish
+SQLite facts, consistent active RAM, owner fields/indices, fixed views and candidates.
+COMMIT precedes controlled RAM publication; unknown commit/publication failure and
+supported reconciliation are separate from rollback. Full recovery/multiplayer and other
+unaccepted goals remain explicitly limited.
+
+Changed files: `AGENTS.md`, `README.md`, `docs/SOURCE_DOCUMENTATION.md`,
+`docs/SYSTEM_OVERVIEW.md`, the two production files above, this report,
+`.agents/skills/trpg-runtime-change/SKILL.md`, and
+`.agents/skills/trpg-code-documentation/SKILL.md`.
+The entrypoints route structural changes through the overview and relevant authority;
+local function prose does not require rereading every architecture document or editing
+an unrelated overview. Runtime Skill changes only add an ownership/flow synchronization
+checkpoint; the documentation workflow remains identical to RE's copy.
+
+### Executed checks and limits
+
+| Check | Result |
+| --- | --- |
+| `uv run --locked --no-sync ruff check src tests examples` | exit 0 |
+| `uv run --locked --no-sync ruff format --check src tests examples` | exit 0 |
+| `verify_docstrings.py --base a7b0804d5635e185a79ff3c1d1fa6241c2b858fe` | exit 0; all 83 production files compile; stripped AST equal; exactly two files changed |
+| Overview source navigation | 107 file/symbol references across all three overviews verified |
+| Markdown | 20 changed files across the batch pass path/anchor, table and fence checks |
+| Skill metadata and shared copy | six installations validate; SM/RE common workflow identical |
+| Working/staged whitespace | `git diff --check` and `git diff --cached --check`, exit 0 |
+
+No Mermaid is used; diagrams need no rendering validation. No game suite or new runtime/
+fault/performance acceptance was run for this explanation-only continuation. Prior test
+counts above remain dated historical evidence, not new results. Automatic Skill triggering
+and GitHub Actions are unverified. No business defect was opportunistically fixed.

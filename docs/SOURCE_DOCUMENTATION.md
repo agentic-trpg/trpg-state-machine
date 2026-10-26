@@ -21,3 +21,8 @@ flow after removing only real docstrings. Semantic review and `__doc__` consumer
 remain necessary. Do not run unrelated full game suites just for prose.
 
 See [2026-10-27 scope and evidence](reviews/CODE_DOCUMENTATION_AND_SKILLS.md).
+
+Read [the system overview](SYSTEM_OVERVIEW.md) for repository/module relationships and
+state/interface changes. Function details belong in function docstrings, module context
+in module docstrings, and repository structure in that overview. A local prose correction
+does not by itself require an overview update.

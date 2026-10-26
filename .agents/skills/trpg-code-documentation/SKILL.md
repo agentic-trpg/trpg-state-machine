@@ -37,3 +37,9 @@ architecture specification.
 Deliver coverage/exclusions, reused/rewritten summaries, exact base and validation
 commands/outcomes, omissions and uncertainty. Check relevant DOC/Progress; record
 implementation defects without silently fixing them or expanding authorization.
+
+Keep explanation levels distinct: function behavior in function docstrings, module
+background in module docstrings, and repository relationships in `docs/SYSTEM_OVERVIEW.md`.
+For structural, ownership or interface changes consult that overview and the relevant
+contracts/source, updating it when those relationships change. A local function or prose
+correction does not require rewriting the overview or reading every architecture document.

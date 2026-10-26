@@ -80,7 +80,11 @@ class _WallIndex:
         return cls(bounds, children=(cls.build(ordered[:middle]), cls.build(ordered[middle:])))
 
     def query(self, bounds):
-        """Select wall segments intersecting the requested bounds."""
+        """Yield candidate walls whose bounding boxes overlap the query bounds.
+
+        A wall segment need not intersect the query region itself. Consumers perform
+        the precise geometry checks after this bounding-box candidate selection.
+        """
         x1, y1, x2, y2 = bounds
         a, b, c, d = self.bounds
         if c < x1 or x2 < a or d < y1 or y2 < b:

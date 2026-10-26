@@ -1,5 +1,8 @@
 # Agentic TRPG — State Machine Foundation
 
+Start with the [system and interface overview](docs/SYSTEM_OVERVIEW.md) for repository
+responsibilities, current public paths, state ownership and task-based source navigation.
+
 ## Source explanations and development workflows — 2026-10-27
 
 [Source documentation maintenance](docs/SOURCE_DOCUMENTATION.md) is mandatory for

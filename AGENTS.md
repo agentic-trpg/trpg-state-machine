@@ -10,7 +10,9 @@ logical parallel workspace. -->
 
 This repository is part of the Agentic TRPG project.
 
-Before analyzing, designing, or modifying code, read the authoritative project documents located in the sibling repository:
+For architecture, responsibility, state-ownership or cross-repository interface changes,
+read [the system overview](docs/SYSTEM_OVERVIEW.md) first, then consult the relevant
+authoritative project documents in the logical sibling repository:
 
 - `../agentic-trpg/docs/MODULE_CONTRACTS.md`
 - `../agentic-trpg/docs/STATE_MACHINE_ARCHITECTURE.md`
@@ -74,3 +76,12 @@ Requirements:
   Read each matching SKILL.md explicitly when needed; these mandatory requirements do
   not depend on automatic triggering. Resolve sibling DOC paths from the logical workspace
   root. Keep the SM/RE documentation workflow copies consistent with the one shared standard.
+
+## System overview navigation
+
+For changes to system structure, cross-module responsibilities, state ownership or
+cross-repository interfaces, first read [this repository's system overview](docs/SYSTEM_OVERVIEW.md),
+then the relevant authoritative contracts and current source. Update the overview when
+those relationships change. Local function/docstring edits require the relevant source
+and necessary context; they do not require rereading all architecture documents or
+mechanically changing the overview.

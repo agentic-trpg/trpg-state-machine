@@ -27,3 +27,7 @@ Choose public-path behavior, failure and fixed-target/growing-unrelated-data cou
 for the actual risk. Inspect SQL, RAM, old references, versions, indices and caches.
 Update affected docstrings and evidence-backed DOC/Progress. Deliver owner/writer/
 consumer coverage, validity and failure boundaries, reproducible checks and explicit gaps.
+
+When the change affects state ownership or a representative processing flow, read
+`docs/SYSTEM_OVERVIEW.md` and check whether that overview needs updating. Retain detailed
+invariants in the authoritative contracts rather than copying them into the overview.

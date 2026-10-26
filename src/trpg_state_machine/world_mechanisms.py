@@ -586,13 +586,18 @@ class MechanismService:
         return prepared[sid]
 
     def automatic(self, row, package, event, command_id, source_seq, *, prepared=None):
-        """Resolve automatic mechanisms associated with this fixed event batch.
+        """Resolve automatic mechanism consequences for one source event.
 
-        Use prepared trigger/target indices to select candidates, then recheck actual
-        pose, arming and lifecycle eligibility against the current candidate.
-        Deduplicate activation per instance within the batch and preserve source
-        event/command association. Return ordered consequences for the existing bounded
-        event expansion and shared transaction.
+        Select candidates through the existing scene mechanism index, then recheck
+        placement, lifecycle, frequency, cooldown and other eligibility. The local
+        fired set permits at most one matching operation per mechanism for this event;
+        a different source event may trigger it again if still eligible.
+
+        This path uses _scene_index directly; the accepted prepared parameter does
+        not provide a batch index or cross-event activation deduplication here. Index
+        reuse and activation deduplication have separate scopes. Preserve command and
+        source-event identities when activating, and return ordered consequences for
+        the caller's bounded event expansion within its shared transaction.
         """
         sid, payload, kind = row["session_id"], event.payload, event.event_type
         if kind not in {
