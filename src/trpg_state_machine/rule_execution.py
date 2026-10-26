@@ -17,7 +17,10 @@ from .world_commands import OPENABLE_CHECK_OPERATIONS, CheckMechanism, PickLock
 
 
 class RuleExecution:
+    """Coordinate fixed-input evaluation outside SQL and guarded transactional adoption."""
+
     def __init__(self, owner):
+        """Bind rule submission runtime and cooperating domain interfaces."""
         self.runtime = owner.runtime
         self.store = owner.store
         self.sessions = owner.sessions
@@ -29,9 +32,20 @@ class RuleExecution:
 
     @property
     def _conn(self):
+        """Return the shared rule-execution connection."""
         return self.store.connection
 
     async def submit(self, command, package, context, fingerprint):
+        """Evaluate fixed rules inputs, then revalidate and adopt their guarded result.
+
+        Preparation authorizes the actor, bindings, target and optional domain check in
+        a read scope; RE evaluation runs outside the write transaction. Adoption
+        rechecks authorization, replay identity, world version, snapshot/RNG and domain
+        prerequisites. Allowed Delta, RNG, events and receipt share the existing write
+        scope. Domain failure uses the effects savepoint; transaction/publication
+        failures remain governed by the Store rather than being converted to an ordinary
+        rules rejection.
+        """
         command = self.runtime.prepare_timed_command(command, package, context, fingerprint)
         object_check = type(command.payload) in OPENABLE_CHECK_OPERATIONS
         mechanism_check = type(command.payload) is CheckMechanism
@@ -42,6 +56,9 @@ class RuleExecution:
         plan, prepare_error, rule_command = None, None, command
 
         def build_snapshot(value):
+            """Build the required mechanical snapshot for the command and current combat
+            state.
+            """
             if domain_check and self.world._active_combat(command.session_id):
                 # Preserve a durable rejected receipt without pretending a combat
                 # snapshot is a noncombat check or relaxing any capability guard.

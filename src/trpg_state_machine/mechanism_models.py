@@ -11,6 +11,8 @@ from .mechanism_effects import RuleEffectAction, RuleEffectDefinition
 
 @dataclass(frozen=True, slots=True)
 class MechanismAction:
+    """Define one configured domain action in a mechanism activation."""
+
     kind: Literal["set_open_state", "set_light_enabled"]
     target_object_id: str
     value: Literal["open", "closed"] | bool
@@ -18,6 +20,8 @@ class MechanismAction:
 
 @dataclass(frozen=True, slots=True)
 class MechanismOperation:
+    """Group actions and activation parameters under a stable operation identity."""
+
     operation_id: str
     actions: tuple[MechanismAction | RuleEffectAction, ...]
     consume_on_noop: bool
@@ -25,6 +29,8 @@ class MechanismOperation:
 
 @dataclass(frozen=True, slots=True)
 class MechanismTrigger:
+    """Describe an event and target condition that may activate a mechanism."""
+
     kind: Literal["enter_region", "object_operation", "check_result"]
     scene_id: str
     operation_id: str
@@ -37,6 +43,8 @@ class MechanismTrigger:
 
 @dataclass(frozen=True, slots=True)
 class MechanismMethod:
+    """Define a service method and its supported check/consequence inputs."""
+
     method_id: str
     operation: Literal["disarm", "block", "unblock", "prepare", "reset"]
     required_tool: str | None = None
@@ -48,6 +56,8 @@ class MechanismMethod:
 
 @dataclass(frozen=True, slots=True)
 class Mechanism:
+    """Group mechanism triggers, operations, components and lifecycle configuration."""
+
     trigger_kind: Literal["manual", "configured"]
     trigger_conditions: Literal["actor_adjacent", "configured"]
     initial_status: Literal["armed", "unprepared"]
@@ -67,6 +77,7 @@ class Mechanism:
     rule_effects: tuple[RuleEffectDefinition, ...] = ()
 
     def operation(self, identity):
+        """Select a named operation or the supported compatibility activation."""
         if self.schema_version == "mechanism/1" and identity == "activate":
             return MechanismOperation("activate", self.actions, True)
         value = next((op for op in self.operations if op.operation_id == identity), None)
@@ -75,11 +86,14 @@ class Mechanism:
         return value
 
     def all_actions(self):
+        """Collect direct mechanism actions and actions belonging to operations."""
         return self.actions + tuple(a for op in self.operations for a in op.actions)
 
 
 @dataclass(frozen=True, slots=True)
 class MechanismState:
+    """Represent persisted arming, activation and reset lifecycle state."""
+
     status: Literal["armed", "spent", "unprepared", "blocked", "disarmed", "broken"]
     remaining_uses: int | None
     activation_count: int
@@ -89,6 +103,13 @@ class MechanismState:
 
 def parse_mechanism(config, objects, scenes, *, enabled):
     # Local import avoids the Package validator's definition import cycle.
+    """Parse a supported mechanism configuration into its typed definition.
+
+    Validate operation/trigger/method identities, component references and action
+    shapes, including bounded rule effect definitions and the explicit compatibility
+    form. Configuration admission does not execute actions or establish that an effect
+    port is available in the current runtime.
+    """
     from .package import _fail, _list, _mapping, _reference, _text, _unique
 
     p = "world_objects.mechanism"

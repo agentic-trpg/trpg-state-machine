@@ -1,5 +1,12 @@
 # Session Management 重构进度
 
+## 2026-10-27 source explanations and workflows
+
+Added production source explanations and repository workflows without changing runtime
+logic, interfaces, dependencies or persistence. See [the documentation batch evidence](reviews/CODE_DOCUMENTATION_AND_SKILLS.md).
+Existing runtime measurements below retain their original dates and scope.
+
+
 ## 2026-10-22 通路反向关联修复
 
 基线 `9627eb0` 中 SetObjectState → changed → _light_candidate_changes →

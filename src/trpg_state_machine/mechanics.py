@@ -13,6 +13,8 @@ from .package import SYNTHETIC_EVALUATION_RULESET, RulesetBinding, canonical_jso
 
 @dataclass(frozen=True, slots=True)
 class RuleOperation:
+    """Carry the supported synthetic check operation and its inputs."""
+
     operation_kind: str
     target_actor_id: str
     resource_id: str
@@ -24,6 +26,8 @@ class RuleOperation:
 
 @dataclass(frozen=True, slots=True)
 class NonCombatSnapshot:
+    """Carry detached synthetic mechanical inputs at a fixed world version."""
+
     session_id: str
     world_version: int
     current_scene_id: str
@@ -34,6 +38,7 @@ class NonCombatSnapshot:
 
 
 def snapshot_of(session):
+    """Build synthetic noncombat mechanical input from a Session snapshot."""
     return NonCombatSnapshot(
         session.session_id,
         session.world_version,
@@ -46,11 +51,14 @@ def snapshot_of(session):
 
 
 def snapshot_digest(snapshot):
+    """Hash canonical fixed mechanical snapshot content."""
     return hashlib.sha256(canonical_json(asdict(snapshot)).encode()).hexdigest()
 
 
 @dataclass(frozen=True, slots=True)
 class RuleEvaluationRequest:
+    """Associate synthetic rule input, operation and RNG with a command identity."""
+
     request_id: str
     session_id: str
     command_id: str
@@ -67,6 +75,8 @@ class RuleEvaluationRequest:
 
 @dataclass(frozen=True, slots=True)
 class HPChange:
+    """Propose an actor hit-point transition with its original value."""
+
     actor_id: str
     before: int
     after: int
@@ -74,6 +84,8 @@ class HPChange:
 
 @dataclass(frozen=True, slots=True)
 class ResourceSpend:
+    """Propose a resource debit with its original balance."""
+
     actor_id: str
     resource_id: str
     before: int
@@ -82,11 +94,15 @@ class ResourceSpend:
 
 @dataclass(frozen=True, slots=True)
 class StateDelta:
+    """Group synthetic rule changes for later authoritative validation and adoption."""
+
     operations: tuple[HPChange | ResourceSpend | SetSceneFlag, ...]
 
 
 @dataclass(frozen=True, slots=True)
 class RNGTransition:
+    """Describe the synthetic RNG before/after transition without committing it."""
+
     before: RNGState
     after: RNGState
     draws: int
@@ -94,18 +110,24 @@ class RNGTransition:
 
 @dataclass(frozen=True, slots=True)
 class ProposedEvent:
+    """Carry uncommitted synthetic event content for later stage capture."""
+
     event_type: str
     payload: dict
 
 
 @dataclass(frozen=True, slots=True)
 class RuleError:
+    """Carry a structured synthetic rules failure."""
+
     code: str
     message: str
 
 
 @dataclass(frozen=True, slots=True)
 class RuleEvaluationResult:
+    """Return synthetic status, changes, proposed events and RNG transition."""
+
     request_id: str
     session_id: str
     command_id: str
@@ -127,6 +149,9 @@ class SyntheticEvaluator:
     ruleset_binding = SYNTHETIC_EVALUATION_RULESET
 
     def evaluate(self, request: RuleEvaluationRequest) -> RuleEvaluationResult:
+        """Evaluate a supported synthetic check, returning uncommitted changes and
+        deterministic RNG successor.
+        """
         op = request.operation
         status, error, choice = "accepted", None, None
         delta, transition, events = None, None, ()

@@ -10,12 +10,16 @@ from .time_binding import integer
 
 @dataclass(frozen=True, slots=True)
 class TimeWaitReference:
+    """Bind a wait identity to the domain version expected by a reply."""
+
     wait_id: str
     version: int
 
 
 @dataclass(frozen=True, slots=True)
 class DomainTimeWait:
+    """Describe a domain-owned blocking time wait."""
+
     wait_id: str
     version: int
     status: str = "waiting"
@@ -23,6 +27,8 @@ class DomainTimeWait:
 
 @dataclass(frozen=True, slots=True)
 class TimeWaitResolution:
+    """Return the domain consequence of resolving a wait."""
+
     outcome: str  # continue / waiting / interrupt / cancel
     events: tuple = ()
 
@@ -38,14 +44,21 @@ class TimeWaitConsumer(Protocol):
     unchanged detached prepare/evaluate/adopt path before this finalizer.
     """
 
-    def read_time_wait(self, sid, wait_id, package) -> DomainTimeWait | None: ...
+    def read_time_wait(self, sid, wait_id, package) -> DomainTimeWait | None:
+        """Read domain wait state."""
+        ...
 
-    def authorize_time_wait_command(self, row, package, command, context, wait): ...
+    def authorize_time_wait_command(self, row, package, command, context, wait):
+        """Authorize a reply command against domain wait state."""
+        ...
 
-    def resolve_time_wait(self, row, package, command, wait, *, events) -> TimeWaitResolution: ...
+    def resolve_time_wait(self, row, package, command, wait, *, events) -> TimeWaitResolution:
+        """Resolve the domain wait and return its result."""
+        ...
 
 
 def validate_wait_reference(ref):
+    """Validate wait identity and domain-version reference."""
     if (
         type(ref) is not TimeWaitReference
         or type(ref.wait_id) is not str
@@ -57,23 +70,30 @@ def validate_wait_reference(ref):
 
 
 class TimeWaits:
+    """Persist unified wait coordination while delegating domain authority to consumers."""
+
     def __init__(self, time):
+        """Bind waits to the unified time coordinator."""
         self.time = time
 
     @property
     def db(self):
+        """Return the wait persistence connection."""
         return self.time.db
 
     def active(self, sid):
+        """Read the Session's active wait, or return None."""
         return self.db.execute(
             "SELECT * FROM session_time_waits WHERE session_id=? AND status='waiting'", (sid,)
         ).fetchone()
 
     def reference(self, sid):
+        """Build a stable wait identity and domain-version reference."""
         wait = self.active(sid)
         return None if wait is None else TimeWaitReference(wait["wait_id"], wait["domain_version"])
 
     def _consumer(self, name):
+        """Require the domain consumer to implement the complete wait protocol."""
         port = self.time.consumers.get(name)
         if port is None or any(
             not callable(getattr(port, method, None))
@@ -83,6 +103,7 @@ class TimeWaits:
         return port
 
     def open(self, row, package, consumer, domain, command_id):
+        """Check domain wait state and persist the unified time wait in the write scope."""
         self.time.store.require_write()
         if type(domain) is not DomainTimeWait or domain.status != "waiting":
             raise StateMachineError("invalid_time_wait", "Domain must identify an open wait")
@@ -107,6 +128,7 @@ class TimeWaits:
         )
 
     def authorize(self, row, package, command, context):
+        """Match the reply command to the persisted wait and delegate domain authorization."""
         if command.time_wait is None:
             return None
         ref = command.time_wait
@@ -126,6 +148,9 @@ class TimeWaits:
         return wait
 
     def validate(self, row, package, command):
+        """Revalidate wait state, domain version and current time advancement
+        prerequisites.
+        """
         ref = command.time_wait
         wait = self.db.execute(
             "SELECT * FROM session_time_waits WHERE session_id=? AND wait_id=?",
@@ -149,6 +174,7 @@ class TimeWaits:
         return wait
 
     def finish(self, row, package, command, events=()):
+        """Delegate domain resolution and atomically update unified wait state."""
         if command.time_wait is None:
             return []
         self.time.store.require_write()

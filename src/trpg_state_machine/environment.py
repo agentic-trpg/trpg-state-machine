@@ -37,6 +37,8 @@ from .runtime_instances import SceneFieldCache, resolve_field
 
 @dataclass(frozen=True, slots=True)
 class ConditionContribution:
+    """Attribute a condition value to its source, exposure and observability."""
+
     source_ref: str
     value: Temperature | Wind | Precipitation | Obscurant
     exposure: str
@@ -45,18 +47,24 @@ class ConditionContribution:
 
 @dataclass(frozen=True, slots=True)
 class ResolvedCondition:
+    """Represent resolved condition status with its contributing evidence."""
+
     status: str
     contributions: tuple[ConditionContribution, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
 class ProtectionBand:
+    """Associate a protection source with its vertical interval."""
+
     source_ref: str
     heights: HeightInterval
 
 
 @dataclass(frozen=True, slots=True)
 class CellProtection:
+    """Collect wind and precipitation protection evidence, preserving unknown statuses."""
+
     rain_status: str
     rain_sources: tuple[str, ...]
     wind_status: str
@@ -64,6 +72,7 @@ class CellProtection:
     precipitation: tuple[tuple[str, str, tuple[str, ...]], ...] = ()
 
     def for_precipitation(self, kind):
+        """Select the protection state and sources for the precipitation kind."""
         if kind == "rain":
             return self.rain_status, self.rain_sources
         return next(
@@ -73,6 +82,8 @@ class CellProtection:
 
 @dataclass(frozen=True, slots=True)
 class CellEnvironment:
+    """Hold one cell/height's composed environment and exposure result."""
+
     scene_id: str
     cell: str
     height_ft: float | None
@@ -88,17 +99,22 @@ class CellEnvironment:
 
 @dataclass(frozen=True, slots=True)
 class EnvironmentHeightSegment:
+    """Associate a vertical interval with its composed environment."""
+
     heights: HeightInterval
     environment: CellEnvironment
 
 
 @dataclass(frozen=True, slots=True)
 class UnitEnvironment:
+    """Represent unit exposure readiness and its resolved height segments."""
+
     status: str
     segments: tuple[EnvironmentHeightSegment, ...] = ()
 
 
 def _value_status(value):
+    """Classify an environment value as known, absent or unknown."""
     if type(value) is Temperature:
         return "unknown" if value.celsius is None else "ready"
     if type(value) is Wind:
@@ -113,6 +129,7 @@ def _value_status(value):
 
 
 def _resolve(candidates, *, layers=False):
+    """Resolve contributions by priority while preserving unknown and unsupported states."""
     if not candidates:
         return ResolvedCondition("unconfigured")
     if not layers:
@@ -127,6 +144,8 @@ def _resolve(candidates, *, layers=False):
 
 
 class EnvironmentService:
+    """Compose scoped environment fields from world facts and versioned providers."""
+
     def __init__(
         self,
         handler,
@@ -135,6 +154,7 @@ class EnvironmentService:
         effects_provider: EnvironmentEffectsProvider | None = None,
         unit_height_provider: UnitHeightProvider | None = None,
     ):
+        """Bind environment providers, dual input versions and bounded field caches."""
         self.h = handler
         self.command_submitter = command_submitter
         self.effects_provider = effects_provider
@@ -149,6 +169,7 @@ class EnvironmentService:
         self._cells.clear()
 
     def release_session(self, sid):
+        """Release retained environment fields for the Session."""
         self._projections.release(sid)
         self._cells.release(sid)
 
@@ -167,6 +188,9 @@ class EnvironmentService:
                         self.versions.bind(sid, scene.scene_id, package, provider, role)
 
     def _query_cache(self, sid, scene, package):
+        """Determine cache eligibility from bindings, provider identity and
+        source/protection versions.
+        """
         versions = self.versions.current(sid, scene)
         cacheable, providers = self.versions.cacheable(
             sid, scene, self.effects_provider, self.h.objects.spatial.protection_provider
@@ -188,6 +212,9 @@ class EnvironmentService:
         }
 
     def _prepared_protection(self, sid, scene, package, cache):
+        """Prepare scene protection once per batch, omitting explicitly empty
+        contributions.
+        """
         if "inputs" not in cache:
             prepared = self.h.objects.spatial.prepare_scene_protection(sid, scene, package)
             cache["inputs"] = replace(
@@ -196,6 +223,7 @@ class EnvironmentService:
         return cache["inputs"]
 
     def _environment_inputs(self, sid, scene, package, cache, public):
+        """Reuse scoped environment inputs and apply disclosure policy for public requests."""
         if "environment" not in cache:
             cache["environment"] = (
                 self._inputs(sid, scene, package)
@@ -244,6 +272,9 @@ class EnvironmentService:
         )
 
     def _area(self, sid, scene_id, area, package, *, query=False):
+        """Validate scene/area bounds, enumerating cells only for an explicit full-scene
+        request.
+        """
         if type(area) is not EnvironmentArea:
             invalid("Expected typed area")
         if not self.h.facts.instances.has_scene(sid, scene_id):
@@ -261,6 +292,7 @@ class EnvironmentService:
         return ()
 
     def _validate_facts(self, sid, scene, facts, package):
+        """Validate the areas referenced by environment sources."""
         self._area(sid, scene, EnvironmentArea(), package)
         for source in facts.sources:
             self._area(sid, scene, source.area, package)
@@ -386,6 +418,7 @@ class EnvironmentService:
             return self.h.facts.environment(sid, scene_id)
 
     def _inputs(self, sid, scene, package):
+        """Combine persisted environment facts, Effects sources and provider status."""
         facts = self.h.facts.environment(sid, scene) or EnvironmentSceneFacts()
         effects = (
             self.effects_provider.environment_sources(sid, scene, package)
@@ -401,6 +434,7 @@ class EnvironmentService:
 
     @staticmethod
     def _conditions(facts, effects, cell, height):
+        """Collect and prioritize conditions at the requested cell and height."""
         candidates = {k: [] for k in CONDITION_TYPES}
         if facts.base is not None:
             for k in candidates:
@@ -438,6 +472,7 @@ class EnvironmentService:
 
     def _protection(self, sid, scene, cell, package, facts, direction, cache):
         # A placeholder cardinal direction selects ONLY rain when actual wind is unknown.
+        """Combine wind/precipitation protection while preserving unknown provider state."""
         key = direction or "north"
         if "identity" not in cache:
             cache.update(self._query_cache(sid, scene, package))
@@ -473,6 +508,7 @@ class EnvironmentService:
             invalid("Protection query exceeds 4096 source bands")
 
         def completeness(static, statuses):
+            """Classify protection input completeness as known or unknown."""
             if static is None or any(s != "none" and s != "ready" for s in statuses):
                 return "unknown"
             return "none"
@@ -519,6 +555,7 @@ class EnvironmentService:
 
     @staticmethod
     def _exposure(condition, protection_status, covered, *, wind=False, protection=None):
+        """Derive effective wind and precipitation from protection and exposure semantics."""
         if condition.status not in ("ready", "none"):
             return condition
         result, uncertain = [], False
@@ -543,10 +580,16 @@ class EnvironmentService:
     def _cell(
         self, sid, scene, cell, package, height, inputs, cache, *, public=False, validated=False
     ):
+        """Reuse environment composition for the scene, cell and height in a consistent
+        scope.
+        """
         if "identity" not in cache:
             cache.update(self._query_cache(sid, scene, package))
 
         def compute():
+            """Validate the area, obtain inputs and compose the appropriately disclosed
+            cell result.
+            """
             if not validated:
                 self._area(sid, scene, EnvironmentArea((cell,)), package)
             current, hidden = self._environment_inputs(sid, scene, package, cache, public)
@@ -561,6 +604,7 @@ class EnvironmentService:
         )
 
     def _compose_cell(self, sid, scene, cell, package, height, inputs, cache):
+        """Compose one cell's conditions, precipitation and wind exposure."""
         facts, effects, effects_status = inputs
         conditions = self._conditions(facts, effects, cell, height)
         wind = conditions["wind"]
@@ -601,6 +645,7 @@ class EnvironmentService:
             return self._cell(sid, scene_id, cell, package, height_ft, None, {})
 
     def _range(self, sid, scene, cell, package, heights, inputs, cache):
+        """Split the height range at source boundaries and compose each interval."""
         if type(heights) is not HeightInterval:
             invalid("Expected scene-datum height interval")
         self._area(sid, scene, EnvironmentArea((cell,)), package)
@@ -626,12 +671,16 @@ class EnvironmentService:
         )
 
     def _cached_range(self, sid, scene, cell, heights, package, *, public=False):
+        """Reuse height-segmented environment by versions, interval and public/private
+        scope.
+        """
         if type(heights) is not HeightInterval:
             invalid("Expected scene-datum height interval")
         EnvironmentArea((cell,))
         cache = self._query_cache(sid, scene, package)
 
         def compute():
+            """Compose height segments and merge equal adjacent public results."""
             inputs, hidden = self._environment_inputs(sid, scene, package, cache, public)
             segments = self._range(sid, scene, cell, package, heights, inputs, cache)
             if not public:
@@ -691,7 +740,12 @@ class EnvironmentService:
 
     @staticmethod
     def _public(result, hidden_fields):
+        """Redact hidden fields and protection sources from the public environment result."""
+
         def redact(condition):
+            """Remove source identities and exposure details from one condition
+            contribution.
+            """
             return replace(
                 condition,
                 contributions=tuple(
@@ -727,6 +781,9 @@ class EnvironmentService:
         )
 
     def query_area(self, sid, actor_id, scene_id, area, package, *, context, height_ft=None):
+        """Authorize scene access and cell visibility before returning the requested public
+        environment.
+        """
         if height_ft is not None:
             finite(height_ft)
         if type(area) is not EnvironmentArea or area.heights is not None:
@@ -765,6 +822,7 @@ class EnvironmentService:
             )
 
     def query_cell(self, sid, actor_id, scene_id, cell, package, *, context, height_ft=None):
+        """Delegate a one-cell public query to the area query and return its first result."""
         return self.query_area(
             sid,
             actor_id,
@@ -776,6 +834,9 @@ class EnvironmentService:
         )[0]
 
     def query_height_range(self, sid, actor_id, scene_id, cell, heights, package, *, context):
+        """Authorize position/visibility before reading public environment over a height
+        interval.
+        """
         with self.h._transaction():
             position = self.h._spatial_reader(sid, actor_id, package, context)
             if position.scene_id != scene_id:
@@ -784,9 +845,13 @@ class EnvironmentService:
             return self._public_range(sid, scene_id, cell, heights, package)
 
     def _public_range(self, sid, scene, cell, heights, package):
+        """Read cached height-interval results through the public disclosure policy."""
         return self._cached_range(sid, scene, cell, heights, package, public=True)
 
     def query_unit(self, sid, actor_id, package, *, context):
+        """Read unit height exposure, returning explicit missing input when height is
+        unavailable.
+        """
         with self.h._transaction():
             position = self.h._spatial_reader(sid, actor_id, package, context)
             self.h._visible_target(sid, actor_id, position.cell, package)

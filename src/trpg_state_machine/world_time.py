@@ -9,6 +9,8 @@ from .time_binding import LegacyTimeBinding, TimeBinding, integer
 
 @dataclass(frozen=True, slots=True)
 class TimeDuration:
+    """Represent ticks with the selected binding's supported unit conversions."""
+
     ticks: int
     seconds: int | None
     minutes: Fraction | None
@@ -18,18 +20,24 @@ class TimeDuration:
 
 @dataclass(frozen=True, slots=True)
 class TimeBoundary:
+    """Identify a calendar/day-phase boundary on the authoritative clock."""
+
     tick: int
     kinds: tuple[str, ...]
 
 
 @dataclass(frozen=True, slots=True)
 class BoundaryPage:
+    """Return a bounded page of time boundaries and continuation information."""
+
     boundaries: tuple[TimeBoundary, ...]
     next_cursor: int | None
 
 
 @dataclass(frozen=True, slots=True)
 class WorldTimeSnapshot:
+    """Expose the sole world tick with derived calendar/day-phase context."""
+
     binding: TimeBinding | LegacyTimeBinding
     game_tick: int
     elapsed: TimeDuration
@@ -41,10 +49,14 @@ class WorldTimeSnapshot:
 
 
 class WorldTimeService:
+    """Read and convert authoritative time without owning another clock."""
+
     def __init__(self, store, sessions, facts):
+        """Bind world time to shared facts and Session authorization."""
         self.store, self.sessions, self.facts = store, sessions, facts
 
     def initialize(self, sid, binding):
+        """Initialize a supported time binding without introducing another clock."""
         self.store.require_write()
         if binding is not None:
             if type(binding) is not TimeBinding:
@@ -53,6 +65,7 @@ class WorldTimeService:
 
     @staticmethod
     def _duration(ticks, binding):
+        """Build a duration carrying the binding's conversion information."""
         if type(binding) is LegacyTimeBinding:
             return TimeDuration(ticks, None, None, None, None)
         return TimeDuration(
@@ -66,10 +79,12 @@ class WorldTimeService:
     @staticmethod
     def _next(binding, tick, offset):
         # Strictly after tick, including when tick is exactly on a boundary.
+        """Compute the next tick at the selected within-day offset."""
         return tick + (offset - binding.start_day_tick - tick - 1) % binding.day_length + 1
 
     @classmethod
     def _phase(cls, binding, tick):
+        """Select the next boundary from day phase and offset."""
         if binding.cycle == "none":
             return None, None
         tod = (binding.start_day_tick + tick) % binding.day_length
@@ -87,6 +102,7 @@ class WorldTimeService:
         return phase, TimeBoundary(next_tick, (kind,))
 
     def read(self, session_id, package, *, context):
+        """Authorize reading the sole game tick and derive calendar/day-phase views."""
         with self.store.transaction():
             self.sessions._session(session_id, package, context)
             binding, tick = self.facts.time_state(session_id)
@@ -107,6 +123,7 @@ class WorldTimeService:
             )
 
     def elapsed(self, session_id, package, *, context, since_tick=0):
+        """Compute elapsed duration from the supplied past tick to now."""
         integer(since_tick, "since_tick")
         current = self.read(session_id, package, context=context)
         if since_tick > current.game_tick:
@@ -114,15 +131,18 @@ class WorldTimeService:
         return self._duration(current.game_tick - since_tick, current.binding)
 
     def remaining(self, session_id, target_tick, package, *, context):
+        """Compute the nonnegative duration until the target tick."""
         integer(target_tick, "target_tick")
         current = self.read(session_id, package, context=context)
         return self._duration(max(0, target_tick - current.game_tick), current.binding)
 
     def reached(self, session_id, target_tick, package, *, context):
+        """Return whether the authoritative world tick has reached the target."""
         integer(target_tick, "target_tick")
         return self.read(session_id, package, context=context).game_tick >= target_tick
 
     def to_ticks(self, session_id, amount, unit, package, *, context):
+        """Convert the supplied unit to ticks using the explicit time binding."""
         integer(amount, "amount")
         current = self.read(session_id, package, context=context)
         if type(current.binding) is LegacyTimeBinding:

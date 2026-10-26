@@ -15,10 +15,12 @@ MAX_BATCH = 16
 
 
 def invalid(message):
+    """Raise an environment input validation error."""
     raise StateMachineError("invalid_environment", message)
 
 
 def identity(value):
+    """Validate an environment identity's type, length and encoding."""
     if type(value) is not str or not value.strip() or len(value) > 128:
         invalid("Expected bounded environment identity")
     try:
@@ -28,16 +30,20 @@ def identity(value):
 
 
 def finite(value):
+    """Require a finite numeric value."""
     if type(value) not in (int, float) or not isfinite(value):
         invalid("Expected finite numeric value, never bool")
 
 
 @dataclass(frozen=True, slots=True)
 class HeightInterval:
+    """Validated vertical extent in feet with an optional unbounded upper limit."""
+
     lower_ft: float
     upper_ft: float
 
     def __post_init__(self):
+        """Validate height bounds and their ordering."""
         finite(self.lower_ft)
         finite(self.upper_ft)
         if self.lower_ft >= self.upper_ft:
@@ -52,6 +58,7 @@ class EnvironmentArea:
     heights: HeightInterval | None = None
 
     def __post_init__(self):
+        """Validate area cells/count and normalize the immutable representation."""
         if type(self.cells) is not tuple or len(self.cells) > MAX_CELLS:
             invalid("Area requires at most 256 immutable cells")
         for cell in self.cells:
@@ -71,9 +78,12 @@ class EnvironmentArea:
 
 @dataclass(frozen=True, slots=True)
 class Temperature:
+    """Represent a temperature in Celsius, including an explicitly unknown value."""
+
     celsius: float | None = None  # None explicitly unknown, not safe.
 
     def __post_init__(self):
+        """Validate temperature value and representation status."""
         if self.celsius is not None:
             finite(self.celsius)
             if self.celsius < -273.15:
@@ -82,10 +92,13 @@ class Temperature:
 
 @dataclass(frozen=True, slots=True)
 class Wind:
+    """Represent wind speed/direction and its supported exposure semantics."""
+
     speed_mph: float | None = None
     wind_from: Direction | None = None
 
     def __post_init__(self):
+        """Validate wind speed, direction and supported semantics."""
         if self.wind_from is not None and self.wind_from not in ORIENTATIONS:
             invalid("Wind requires cardinal incoming direction")
         if self.speed_mph is not None:
@@ -98,10 +111,13 @@ class Wind:
 
 @dataclass(frozen=True, slots=True)
 class Precipitation:
+    """Represent precipitation kind and intensity, preserving none/unknown distinctions."""
+
     kind: Literal["unknown", "none", "rain", "snow", "sleet", "hail"] = "unknown"
     intensity: Literal["unknown", "none", "light", "moderate", "heavy"] = "unknown"
 
     def __post_init__(self):
+        """Validate precipitation kind and intensity."""
         if self.kind not in ("unknown", "none", "rain", "snow", "sleet", "hail"):
             invalid("Unknown precipitation kind")
         if self.intensity not in ("unknown", "none", "light", "moderate", "heavy"):
@@ -112,10 +128,13 @@ class Precipitation:
 
 @dataclass(frozen=True, slots=True)
 class Obscurant:
+    """Represent an obscuring medium and density, preserving unknown input."""
+
     kind: Literal["unknown", "none", "fog", "smoke"] = "unknown"
     density: Literal["unknown", "none", "thin", "dense"] = "unknown"
 
     def __post_init__(self):
+        """Validate obscuring medium input."""
         if self.kind not in ("unknown", "none", "fog", "smoke"):
             invalid("Unknown fog/smoke kind")
         if self.density not in ("unknown", "none", "thin", "dense"):
@@ -134,6 +153,7 @@ class EnvironmentConditions:
     obscurant: Obscurant | None = None
 
     def __post_init__(self):
+        """Require each environment condition to use its corresponding value type."""
         for field, cls in CONDITION_TYPES.items():
             if getattr(self, field) is not None and type(getattr(self, field)) is not cls:
                 invalid("Expected typed environment condition")
@@ -149,6 +169,8 @@ CONDITION_TYPES = {
 
 @dataclass(frozen=True, slots=True)
 class EnvironmentSource:
+    """Define a prioritized, scoped and optionally observable condition source."""
+
     source_id: str
     conditions: EnvironmentConditions
     area: EnvironmentArea = EnvironmentArea()
@@ -157,6 +179,7 @@ class EnvironmentSource:
     observable: bool = False
 
     def __post_init__(self):
+        """Validate environment source identity, extent, priority and observability."""
         identity(self.source_id)
         if self.source_id == "base":
             invalid("base is reserved")
@@ -173,11 +196,14 @@ class EnvironmentSource:
 
 @dataclass(frozen=True, slots=True)
 class StaticWindProtection:
+    """Define directional wind protection over a static area."""
+
     cell: str
     wind_from: Direction
     heights: HeightInterval
 
     def __post_init__(self):
+        """Validate static wind protection area and directions."""
         EnvironmentArea((self.cell,))
         if self.wind_from not in ORIENTATIONS or type(self.heights) is not HeightInterval:
             invalid("Expected directional static wind protection with explicit heights")
@@ -185,10 +211,13 @@ class StaticWindProtection:
 
 @dataclass(frozen=True, slots=True)
 class StaticPrecipitationProtection:
+    """Define static area protection for selected precipitation kinds."""
+
     cells: tuple[str, ...]
     kinds: tuple[str, ...]
 
     def __post_init__(self):
+        """Validate precipitation protection kinds and normalize stable order."""
         area = EnvironmentArea(self.cells)
         object.__setattr__(self, "cells", area.cells)
         try:
@@ -207,6 +236,7 @@ class SceneEnvironmentProtection:
     precipitation: tuple[StaticPrecipitationProtection, ...] | None = None
 
     def __post_init__(self):
+        """Validate scene protection collection types, sizes and ordering."""
         if self.precipitation is not None:
             if (
                 type(self.precipitation) is not tuple
@@ -243,11 +273,14 @@ class SceneEnvironmentProtection:
 
 @dataclass(frozen=True, slots=True)
 class EnvironmentSceneFacts:
+    """Group a scene's base conditions, sources and static protection."""
+
     base: EnvironmentConditions | None = None
     sources: tuple[EnvironmentSource, ...] = ()
     protection: SceneEnvironmentProtection = SceneEnvironmentProtection()
 
     def __post_init__(self):
+        """Validate base scene conditions and source collections."""
         if self.base is not None and type(self.base) is not EnvironmentConditions:
             invalid("Expected typed base conditions")
         validate_sources(self.sources)
@@ -257,6 +290,7 @@ class EnvironmentSceneFacts:
 
 
 def validate_sources(sources):
+    """Validate source count, type and identity uniqueness."""
     if (
         type(sources) is not tuple
         or len(sources) > MAX_SOURCES
@@ -274,12 +308,14 @@ class EnvironmentEffectsProvider(Protocol):
     unavailable; () explicitly reports no active contributions. Not a spell adapter.
     """
 
-    def environment_sources(
-        self, sid, scene_id, package
-    ) -> tuple[EnvironmentSource, ...] | None: ...
+    def environment_sources(self, sid, scene_id, package) -> tuple[EnvironmentSource, ...] | None:
+        """Provide environment Effects sources for the requested context."""
+        ...
 
 
 class UnitHeightProvider(Protocol):
     """Character/position owner supplies actual scene-datum body interval, never size labels."""
 
-    def environment_heights(self, sid, actor_id, package, *, position) -> HeightInterval | None: ...
+    def environment_heights(self, sid, actor_id, package, *, position) -> HeightInterval | None:
+        """Provide the unit's environment height intervals."""
+        ...

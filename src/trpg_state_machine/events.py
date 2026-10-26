@@ -8,6 +8,8 @@ from .package import Signal
 
 @dataclass(frozen=True, slots=True)
 class CommittedWorldEvent:
+    """Represent a committed world event with its fixed evidence and sequence identity."""
+
     event_id: str
     event_seq: int
     source_command_id: str
@@ -19,6 +21,8 @@ class CommittedWorldEvent:
 
 @dataclass(frozen=True, slots=True)
 class _ActorMotion:
+    """Carry actor movement context used when capturing event-stage evidence."""
+
     actor_id: str
     from_scene_id: str
     from_cell: str | None
@@ -39,9 +43,12 @@ class _StagedEvent:
 
 
 class EventRuntime:
+    """Expose authorized event reading and reliable delivery coordination."""
+
     def _capture_event(
         self, sid, package, event_type, payload, *, phase, source_actor_id=None, unresolved=False
     ):
+        """Delegate construction of an event to the stage capture service."""
         return self._event_capture._capture_event(
             sid,
             package,
@@ -53,12 +60,15 @@ class EventRuntime:
         )
 
     def _expand_events(self, row, package, events, command_id):
+        """Delegate event-chain expansion to the Package effect expander."""
         return self._package_effects._expand_events(row, package, events, command_id)
 
     def _read_event(self, session_id, seq):
+        """Delegate reconstruction of a committed event to the persistence service."""
         return self._event_persistence._read_event(session_id, seq)
 
     def read_events(self, session_id, package, *, context, after_seq=0):
+        """Authorize access and read formal Session events in order."""
         if type(after_seq) is not int or after_seq < 0:
             raise StateMachineError("invalid_cursor", "Expected nonnegative event cursor")
         with self._transaction():
@@ -71,6 +81,7 @@ class EventRuntime:
             return tuple(self._read_event(session_id, row[0]) for row in seqs.fetchall())
 
     def _complete_work(self, session_id, seq, consumer):
+        """Mark reliable work completed."""
         self._conn.execute(
             "UPDATE event_outbox SET done=1, last_error=NULL "
             "WHERE session_id=? AND event_seq=? AND consumer=?",
@@ -93,6 +104,7 @@ class EventRuntime:
         )
 
     def delivery_cursor(self, session_id, package, *, context):
+        """Authorize access to the named consumer's delivery cursor."""
         with self._transaction():
             self._session(session_id, package, context)
             row = self._conn.execute(

@@ -10,6 +10,8 @@ from .scoped_reads import scoped_read
 
 @dataclass(frozen=True, slots=True)
 class _NavigationExecution:
+    """Private navigation authority tied to issuer, transaction, activity and version."""
+
     issuer: object
     transaction: object
     session_id: str
@@ -20,20 +22,26 @@ class _NavigationExecution:
 
 
 class ActivityRecords:
+    """Persist navigation progress and coordinate NPC activity claims through one Store."""
+
     def __init__(self, store):
+        """Bind the shared Store and a private execution-credential issuer."""
         self.store = store
         self._issuer = object()
 
     @property
     def _conn(self):
+        """Return the Store-managed connection."""
         return self.store.connection
 
     def get(self, sid, aid):
+        """Read a navigation row by Session and activity identity, or return None."""
         return self._conn.execute(
             "SELECT * FROM navigation_activities WHERE session_id=? AND activity_id=?", (sid, aid)
         ).fetchone()
 
     def active(self, sid, actor):
+        """Read the actor's active navigation row, or return None."""
         return self._conn.execute(
             "SELECT * FROM navigation_activities WHERE session_id=? "
             "AND actor_id=? AND status='active'",
@@ -42,6 +50,9 @@ class ActivityRecords:
 
     @scoped_read
     def snapshot(self, record, world_version):
+        """Decode durable plan/results into an activity snapshot at the supplied world
+        version.
+        """
         plan = tuple(self.store.memory.json(record["plan_json"]))
         return NavigationActivity(
             record["session_id"],
@@ -61,6 +72,7 @@ class ActivityRecords:
         )
 
     def create(self, sid, actor, operation, plan, command_id, controller):
+        """Create an activity in the write scope and claim its NPC activity marker."""
         self.store.require_write()
         self._conn.execute(
             "INSERT INTO navigation_activities VALUES (?,?,?,?,?,'active',1,0,?,?,?,?,?)",
@@ -82,6 +94,7 @@ class ActivityRecords:
         return record
 
     def transition(self, record, status, cursor, result, command_id):
+        """Update progress with version checking and reconcile the NPC activity claim."""
         self.store.require_write()
         if status not in {"active", "blocked", "completed", "cancelled"}:
             raise StateMachineError("invalid_activity", "Unknown navigation state")
@@ -111,15 +124,18 @@ class ActivityRecords:
 
     @staticmethod
     def marker(record):
+        """Return the NPC activity marker for this navigation record."""
         return "navigation:" + record["activity_id"]
 
     def _runtime(self, record):
+        """Read the NPC runtime row associated with the activity, or return None."""
         return self._conn.execute(
             "SELECT runtime_json FROM npc_states WHERE session_id=? AND npc_id=?",
             (record["session_id"], record["actor_id"]),
         ).fetchone()
 
     def _claim(self, record):
+        """Claim the NPC activity slot, rejecting an existing activity."""
         self.store.require_write()
         npc = self._runtime(record)
         if npc and npc[0]:
@@ -130,6 +146,7 @@ class ActivityRecords:
             self._write_runtime(record, data)
 
     def _release(self, record):
+        """Release the NPC slot only if it still names this activity."""
         self.store.require_write()
         npc = self._runtime(record)
         if npc and npc[0]:
@@ -139,6 +156,7 @@ class ActivityRecords:
                 self._write_runtime(record, data)
 
     def _write_runtime(self, record, data):
+        """Persist NPC runtime, increment its version and cancel running evaluation tasks."""
         self.store.require_write()
         self._conn.execute(
             "UPDATE npc_states SET runtime_json=?,npc_state_version=npc_state_version+1 "
@@ -152,6 +170,9 @@ class ActivityRecords:
         )
 
     def execution(self, record, operation):
+        """Issue an internal navigation credential bound to the current write scope and
+        version.
+        """
         self.store.require_write()
         return _NavigationExecution(
             self._issuer,
@@ -164,6 +185,9 @@ class ActivityRecords:
         )
 
     def qualifies(self, scope, sid, actor, operation=None):
+        """Return whether credential, transaction, activity version and NPC claim still
+        match.
+        """
         if type(scope) is not _NavigationExecution or scope.issuer is not self._issuer:
             return False
         self.store.require_write()

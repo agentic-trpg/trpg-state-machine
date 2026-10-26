@@ -25,20 +25,25 @@ class Rows:
     """Detached cursor interface. SQL cursors never outlive their reading scope."""
 
     def __init__(self, rows=(), *, rowcount=-1, lastrowid=None, description=None):
+        """Retain detached row iteration and cursor metadata."""
         self.rows = iter(rows)
         self.rowcount, self.lastrowid, self.description = rowcount, lastrowid, description
         self.arraysize = 1
 
     def __iter__(self):
+        """Return this row iterator."""
         return self.rows
 
     def fetchone(self):
+        """Read the next row, returning None at exhaustion."""
         return next(self.rows, None)
 
     def fetchall(self):
+        """Read all remaining rows."""
         return list(self.rows)
 
     def fetchmany(self, size=None):
+        """Read up to the requested number of following rows."""
         result = []
         for _ in range(self.arraysize if size is None else size):
             row = self.fetchone()
@@ -48,6 +53,7 @@ class Rows:
         return result
 
     def close(self):
+        """Discard the remaining row iterator."""
         self.rows = iter(())
 
 
@@ -57,30 +63,38 @@ class Record:
     __slots__ = ("_names", "_values")
 
     def __init__(self, names, values):
+        """Freeze column names and scalar row values."""
         object.__setattr__(self, "_names", tuple(names))
         object.__setattr__(self, "_values", tuple(values))
 
     def __setattr__(self, name, value):
+        """Reject changes to immutable record attributes."""
         raise AttributeError("Runtime records are immutable")
 
     def __delattr__(self, name):
+        """Reject deletion of immutable record attributes."""
         raise AttributeError("Runtime records are immutable")
 
     def __getitem__(self, key):
+        """Read a record value by column name or numeric position."""
         if isinstance(key, str):
             key = self._names.index(key)
         return self._values[key]
 
     def __iter__(self):
+        """Iterate record values."""
         return iter(self._values)
 
     def __len__(self):
+        """Return the record column count."""
         return len(self._values)
 
     def keys(self):
+        """Return record column names."""
         return self._names
 
     def __deepcopy__(self, memo):
+        """Share the immutable record when deep-copied."""
         return self
 
 
@@ -92,6 +106,7 @@ class Range:
     """
 
     def __init__(self, table, predicates, rows, primary, stage=0):
+        """Initialize a fact range with primary-key and attribute indices."""
         self.table, self.predicates, self.primary, self.stage = table, predicates, primary, stage
         self.rows, self.indices = {}, {}
         self.size = 0
@@ -99,12 +114,15 @@ class Range:
             self.apply(None, row)
 
     def matches(self, row):
+        """Return whether the row matches the fixed range predicate."""
         return all(row[name] == value for name, value in self.predicates)
 
     def identity(self, row):
+        """Extract the row's composite primary key."""
         return tuple(row[name] for name in self.primary)
 
     def apply(self, old, new):
+        """Apply old/new row changes to the range and its indices."""
         if old is not None:
             identity = self.identity(old)
             before = self.rows.pop(identity, None)
@@ -124,6 +142,7 @@ class Range:
                     self.indices.setdefault(name, {}).setdefault(new[name], set()).add(identity)
 
     def read(self, predicates, changes, stats):
+        """Read facts through range indices and candidate changes, recording work counters."""
         buckets = [
             self.indices[name].get(value, set())
             for name, value in predicates
@@ -192,7 +211,10 @@ def _simple(sql, parameters, columns):
 
 
 class SessionMemory:
+    """Manage bounded fact ranges, candidates and derived owner publication for one Store."""
+
     def __init__(self, store, *, capacity=2048, byte_limit=32 * 1024 * 1024):
+        """Initialize bounded facts, parsed values, versions and candidate change capture."""
         self.store = store
         self.capacity, self.byte_limit = capacity, byte_limit
         self.columns, self.primary = {}, {}
@@ -234,6 +256,9 @@ class SessionMemory:
         self.install()
 
     def install(self):
+        """Register controlled columns/keys and install TEMP change-capture callbacks and
+        triggers.
+        """
         conn = self.store._conn
         tables = conn.execute(
             "SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'"
@@ -271,6 +296,7 @@ class SessionMemory:
                 )
 
     def clear(self):
+        """Discard rebuildable caches/version structures and advance their generation."""
         self.values.clear()
         self.range_keys.clear()
         self.range_shapes.clear()
@@ -282,6 +308,9 @@ class SessionMemory:
         self.generation += 1
 
     def guard(self, sid=None):
+        """Check transaction usability and Session pause state before serving current
+        facts.
+        """
         if self.store._scope is not None:
             self.store._scope.check_usable()
         if self.paused or sid in self.paused_sessions:
@@ -291,6 +320,7 @@ class SessionMemory:
             )
 
     def release(self, sid):
+        """Release the Session's facts, fields, parsed values and versions."""
         for key, item in tuple(self.values.items()):
             if isinstance(item, Range):
                 owns = dict(item.predicates).get("session_id") in (sid, None)
@@ -306,6 +336,7 @@ class SessionMemory:
         self.versions = VersionMap((d, v) for d, v in self.versions.items() if d[1] != sid)
 
     def pause(self, scope):
+        """Pause affected Sessions and advance the cross-connection recovery generation."""
         if scope.memory_sessions:
             self.paused_sessions.update(scope.memory_sessions)
             coordinator = self.store._coordinator
@@ -341,6 +372,7 @@ class SessionMemory:
                 self.recovery_generations[sid] = generation
 
     def dependency(self, table, sid):
+        """Register a table dependency for the current read scope."""
         self.guard(sid)
         if sid is not None and self.store._scope is not None:
             self.store._scope.memory_sessions.add(sid)
@@ -350,6 +382,7 @@ class SessionMemory:
         return dependency
 
     def range_dependency(self, table, predicates):
+        """Register a local dependency on the specified relationship predicate."""
         sid = dict(predicates).get("session_id")
         shape = tuple(name for name, _ in predicates)
         self.dependency_shapes.setdefault(table, set()).add(shape)
@@ -370,6 +403,7 @@ class SessionMemory:
         return dependency
 
     def scene_association(self, table, sid, scene):
+        """Read and register the maintained scene-association version."""
         dependency = self.dependency(f"{table}~scene:{scene!r}", sid)
         self.store._scope.memory_versions.setdefault(dependency, 0)
         return dependency
@@ -525,6 +559,7 @@ class SessionMemory:
             self._advance_field("inventory", sid, actor)
 
     def _advance_field(self, domain, sid, identity):
+        """Advance the named instance field's version in the current candidate."""
         dependency = (f"{domain}:{identity!r}", sid)
         versions = self.store._scope.memory_versions
         if dependency in versions:
@@ -578,6 +613,7 @@ class SessionMemory:
         return ground, blocked
 
     def _light_source_config(self, config):
+        """Select configuration fields affecting light-source contributions."""
         definition = self.json(config["definition"]) if config.get("definition") else None
         return tuple(
             (
@@ -594,6 +630,7 @@ class SessionMemory:
         )
 
     def _light_source_changes(self, rows):
+        """Maintain source-collection versions for affected light contributions and scenes."""
         rows = [row for row in rows if row is not None]
         checked, contributors = set(), set()
         for row in rows:
@@ -610,6 +647,7 @@ class SessionMemory:
     def _has_subtree_light(self, sid, oid):
         # Negative empty-container checks use two indexed buckets; do not start
         # a subtree walk or inspect any Scene members to rediscover no emitter.
+        """Check object/subtree capability indices for a light source."""
         if self.select(
             "SELECT object_id FROM object_lights WHERE session_id=? AND object_id=?", (sid, oid)
         ).fetchone():
@@ -623,11 +661,17 @@ class SessionMemory:
         )
 
     def _light_door_scenes(self, sid, oid):
+        """Read door scenes from the shared passage reverse index, including a valid empty
+        result.
+        """
         from .instance_data import passage_index
 
         return passage_index(self.store, sid).door_scenes.get(oid, ())
 
     def _passage_changes(self, table, old, new):
+        """Compare Session passage configuration and advance its association version on
+        relevant changes.
+        """
         if table != "instance_configs":
             return
         # Only controlled layout writes inspect OLD/NEW persisted configuration.
@@ -773,6 +817,7 @@ class SessionMemory:
                     self._advance_field("light_candidates", sid, scene)
 
     def _object(self, sid, oid):
+        """Reuse an object row within one captured change."""
         memo = getattr(self, "_change_objects", None)
         if memo is not None and (sid, oid) in memo:
             return memo[sid, oid]
@@ -784,6 +829,9 @@ class SessionMemory:
         return row
 
     def _weight_changes(self, table, old, new):
+        """Invalidate object and old/new ancestor weights after weight, quantity or
+        ownership changes.
+        """
         roots = []
         if table == "objects":
             relevant = ("object_id", "session_id", "container_id", "item_json")
@@ -893,6 +941,7 @@ class SessionMemory:
         return None
 
     def _association_changes(self, table, old, new):
+        """Maintain scene membership after object, carrier or capability changes."""
         if table == "objects":
             columns = ("scene_id", "container_id", "carrier_id", "object_id")
             if old is not None and new is not None and all(old[c] == new[c] for c in columns):
@@ -959,6 +1008,7 @@ class SessionMemory:
                             self._advance_field("mechanism_index", sid, scene)
 
     def version(self, dependency):
+        """Read the current generation and relevant composite dependency version."""
         scope = self.store._scope
         versions = scope.memory_versions if scope is not None else self.versions
         table, sid = dependency
@@ -980,6 +1030,7 @@ class SessionMemory:
         return (self.generation, versions.get((table, sid), 0))
 
     def get(self, key):
+        """Read candidate pending values first, then the bounded published cache."""
         scope = self.store._scope
         if key in scope.memory_pending:
             return scope.memory_pending[key]
@@ -989,6 +1040,7 @@ class SessionMemory:
         return None
 
     def put(self, key, value):
+        """Place a value in the current candidate's pending publication set."""
         self.store._scope.memory_pending[key] = value
 
     def json(self, encoded):
@@ -1033,6 +1085,7 @@ class SessionMemory:
 
     def remember(self, key, value):
         # Bound both entry count and scalar payload; no world/history preload.
+        """Retain a cache entry subject to payload and entry-count eviction budgets."""
         if key[0] == "instance":
             from .runtime_instances import retained_size
 
@@ -1054,6 +1107,7 @@ class SessionMemory:
             self.forget(next(iter(self.values)))
 
     def forget(self, key):
+        """Remove an entry and update budget and relationship-shape accounting."""
         self.values.pop(key)
         self.bytes -= self.sizes.pop(key)
         if key[0] == "range":
@@ -1066,6 +1120,7 @@ class SessionMemory:
                 del self.range_shapes[key[1]][shape]
 
     def trim_versions(self):
+        """Trim version records without live dependencies when the threshold is reached."""
         if len(self.versions) <= self.capacity * 32:
             return
         alive = set()
@@ -1156,6 +1211,9 @@ class SessionMemory:
                 scope.memory_versions[dependency] += 1
 
     def changed(self, table, kind, *values):
+        """Capture OLD/NEW rows and maintain candidate versions, weights, inventory, lights
+        and associations.
+        """
         scope = self.store._scope
         if scope is None:
             # Raw private connection maintenance cannot leave apparently valid RAM.
@@ -1230,6 +1288,13 @@ class SessionMemory:
         return 0
 
     def select(self, sql, parameters):
+        """Serve a recognized query from the scope's fixed RAM facts when possible.
+
+        Register the actual table/range dependencies, apply isolated pending changes and
+        cold-load a missing range consistently with the pinned SQLite read. Unsupported
+        query shapes retain their SQL path. This does not bypass the public caller's
+        authorization or turn a loaded historical range into current published state.
+        """
         self.guard(_session_parameter(sql, parameters))
         simple = _simple(
             sql, parameters, {t: c for t, c in self.columns.items() if self.primary[t]}
@@ -1291,6 +1356,9 @@ class SessionMemory:
         tables = set()
 
         def authorize(action, table, column, database, trigger):
+            """Restrict readable tables and capture actual query dependencies through
+            SQLite authorization.
+            """
             if action in (sqlite3.SQLITE_INSERT, sqlite3.SQLITE_UPDATE, sqlite3.SQLITE_DELETE):
                 return sqlite3.SQLITE_DENY
             if action == sqlite3.SQLITE_READ and table in self.columns:
@@ -1360,6 +1428,7 @@ class SessionMemory:
         self.stats["publications"] += int(bool(scope.memory_changes))
 
     def accept_read(self, scope):
+        """Accept cache values and version roots from a valid fixed read scope."""
         for key, value in scope.memory_pending.items():
             if isinstance(value, Range):
                 value.stage = 0
@@ -1369,6 +1438,7 @@ class SessionMemory:
 
 
 def _session_parameter(sql, parameters):
+    """Locate the Session identity in query parameters."""
     match = re.search(r"\bsession_id\s*=\s*\?", sql, re.I)
     if match is None or not isinstance(parameters, (tuple, list)):
         return None
@@ -1377,6 +1447,7 @@ def _session_parameter(sql, parameters):
 
 
 def _references(value, sid):
+    """Recursively test whether a parsed value references the Session."""
     if isinstance(value, (tuple, frozenset)):
         return any(_references(v, sid) for v in value)
     return value == sid
@@ -1404,12 +1475,23 @@ class RuntimeConnection:
     """Internal record access, including all legacy domain callers and writes."""
 
     def __init__(self, store):
+        """Bind the controlled connection to its sole Store."""
         self.store = store
 
     def __getattr__(self, name):
+        """Delegate supported attributes to the underlying connection."""
         return getattr(self.store._conn, name)
 
     def execute(self, sql, parameters=()):
+        """Execute SQL through the Store's controlled scope and mutation tracking.
+
+        Recognized reads may use consistent RAM ranges. Writes enter incremental
+        persistence and invalidate stage-local memoization. Savepoint rollback restores
+        matching sparse facts, owner fields and version roots; a statement failure marks
+        the scope unusable until the enclosing rollback restores it. Direct transaction
+        control remains with the Store, including unknown-COMMIT and postcommit-
+        publication handling.
+        """
         store = self.store
         store.ensure_open()
         operation = sql.lstrip().split(None, 1)[0].upper()
@@ -1498,12 +1580,17 @@ class RuntimeConnection:
         return cursor
 
     def commit(self):
+        """Reject independent commit; the outer Store owns transaction completion."""
         raise StateMachineError("invalid_transaction", "Commit belongs to the outer scope")
 
     def rollback(self):
+        """Reject independent rollback; the outer Store owns transaction completion."""
         raise StateMachineError("invalid_transaction", "Rollback belongs to the outer scope")
 
     def executemany(self, sql, parameters):
+        """Execute each statement in the shared write scope, retaining failures and
+        clearing memoized reads.
+        """
         count = 0
         if self.store._scope is None:
             with self.store.transaction(write=True):

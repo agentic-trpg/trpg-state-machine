@@ -6,15 +6,22 @@ from .package import RulesetBinding
 
 
 class _QueueMigration:
+    """Reconstruct missing reliable perception work at a schema migration boundary."""
+
     _read_event = EventPersistence._read_event
 
     def __init__(self, connection):
+        """Bind the migration connection."""
         self._conn = connection
 
     def _enqueue_perception(self, sid, seq, binding):
+        """Rebuild reliable perception work from persisted event evidence."""
         return _enqueue_perception_proof(self._conn, self._read_event, sid, seq, binding)
 
     def _migrate_perception_queues(self):
+        """Enumerate persisted Sessions/events at migration time to restore missing queue
+        work.
+        """
         for session in self._conn.execute("SELECT * FROM sessions").fetchall():
             binding = RulesetBinding(
                 session["ruleset_id"], session["data_revision"], session["evaluator_version"]
@@ -27,21 +34,25 @@ class _QueueMigration:
 
 
 def migrate_perception_queues(connection):
+    """Run the explicit perception-queue migration coordinator."""
     _QueueMigration(connection)._migrate_perception_queues()
 
 
 def _layout(connection, table):
     # Only bundled constant table names are passed by this module.
+    """Read table columns for schema lineage identification."""
     return tuple(
         (r[1], r[2].upper(), r[3], r[5]) for r in connection.execute(f"PRAGMA table_info({table})")
     )
 
 
 def _foreign_keys(connection, table):
+    """Read the table's foreign-key constraint set."""
     return {(r[2], r[3], r[4]) for r in connection.execute(f"PRAGMA foreign_key_list({table})")}
 
 
 def _unknown_lineage():
+    """Reject an unknown historical schema lineage."""
     raise StateMachineError(
         "unsupported_storage_schema", "Unrecognized environment/mechanism schema"
     )
@@ -82,6 +93,7 @@ def validate_environment_table(connection, *, required=False):
 
 
 def validate_environment_versions(connection, *, required):
+    """Verify environment version tables, foreign keys and trigger structure."""
     import json
 
     versions = _layout(connection, "scene_environment_versions")

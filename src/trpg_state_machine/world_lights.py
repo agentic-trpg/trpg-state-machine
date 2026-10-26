@@ -12,27 +12,38 @@ _RANK = {"dark": 0, "dim": 1, "bright": 2}
 
 @dataclass(frozen=True, slots=True)
 class LightGeometry:
+    """Share prepared immutable light blockers and uncertain topology inputs."""
+
     candidates: frozenset
     topology: object
 
     def __iter__(self):
+        """Iterate the immutable light geometry's candidate and topology inputs."""
         yield self.candidates
         yield self.topology
 
     def __deepcopy__(self, memo):
+        """Share immutable light geometry when deep-copied."""
         return self
 
 
 class LightService:
+    """Resolve scoped light contributions and coordinate controlled light mutations."""
+
     def __init__(self, handler):
+        """Bind the light service to World."""
         self.h = handler
 
     def config(self, sid, oid):
+        """Read the object's current light-source capability."""
         d = self.h.facts.object_definition(sid, oid)
         return d.capability("light") if d else None
 
     @instance_read("scene", "lighting", "sources", maintained="light_sources")
     def sources(self, sid, scene, package):
+        """Resolve actual scene lights, accounting for mode, damage and enclosing-container
+        transmission.
+        """
         result = []
         for oid in self.h.facts.scene_capability_ids(sid, scene, "object_lights"):
             light = self.h.facts.light_state(sid, oid)
@@ -73,12 +84,16 @@ class LightService:
 
     @instance_read("scene", "lighting", "projection", maintained="light_result")
     def current_project(self, sid, scene, package):
+        """Build the full illumination projection from current map, light sources and
+        geometry.
+        """
         raw = self.h.grid.reader.current_grid(sid, scene, package)
         geometry = self.geometry(sid, scene, package) if self.sources(sid, scene, package) else None
         return self.project(sid, scene, package, raw, geometry=geometry)
 
     @instance_read("scene", "lighting", "topology", maintained="light_result")
     def current_topology(self, sid, scene, package):
+        """Reuse base topology with current illumination overlaid."""
         prepared = self.h.grid.reader.current_grid(sid, scene, package)
         if not self.sources(sid, scene, package):
             return prepared.topology
@@ -87,6 +102,9 @@ class LightService:
 
     @instance_read("scene", "lighting", "cells", capacity=128, maintained="light_result")
     def current_cell(self, sid, scene, package, cell):
+        """Compute illumination for the requested cell, using base light directly when no
+        sources contribute.
+        """
         prepared = self.h.grid.reader.current_grid(sid, scene, package)
         sources = self.sources(sid, scene, package)
         if not sources:
@@ -135,6 +153,7 @@ class LightService:
 
     @instance_read("scene", "lighting", "geometry", maintained="light_candidates")
     def geometry(self, sid, scene, package):
+        """Prepare light-blocking geometry from the current map."""
         raw = self.h.grid.reader.current_grid(sid, scene, package)
         return self._geometry(sid, scene, package, raw)
 
@@ -151,6 +170,7 @@ class LightService:
         return frozenset(candidates)
 
     def _geometry(self, sid, scene, package, raw):
+        """Combine ground/shared-door blockers into uncertain light geometry topology."""
         candidates = set(self._candidates(sid, scene, package))
         for passage in self.h.facts.instances.passages(sid, scene_id=scene):
             if passage.door_object_id and self.h._door_closed(sid, passage, package):
@@ -193,6 +213,7 @@ class LightService:
         return grid, tuple(uncertain), evidence
 
     def validate(self, row, actor, op, package):
+        """Validate actor, placement and capability for manual light operations."""
         h, sid = self.h, row["session_id"]
         h._world_operation_capability(row, op)
         h._world_actor_ready(sid, actor)
@@ -211,6 +232,7 @@ class LightService:
             raise StateMachineError("unsupported_light_mode", "Undeclared light mode")
 
     def operate(self, row, actor, op, package, *, origin=None):
+        """Apply admitted light enabled/mode changes and capture their events."""
         h, sid = self.h, row["session_id"]
         if origin is None:
             self.validate(row, actor, op, package)
@@ -259,6 +281,9 @@ class LightService:
         return events
 
     def query_illumination(self, sid, actor, cell, package, *, context):
+        """Authorize visible cell access and source disclosure, returning known or unknown
+        illumination.
+        """
         if type(cell) is not str or not 0 < len(cell) <= 128:
             raise StateMachineError("invalid_query", "Cell must be a bounded coordinate string")
         h = self.h

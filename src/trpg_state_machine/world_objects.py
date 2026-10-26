@@ -28,7 +28,10 @@ from .world_spatial import ObjectSpatialService
 
 
 class WorldObjectService:
+    """Route object capability admission, mutation and authorized view construction."""
+
     def __init__(self, handler):
+        """Assemble container, spatial, light, mechanism and opening capability services."""
         self.handler = handler
         self.facts = handler.facts
         self.containers = ContainerService(handler)
@@ -38,6 +41,7 @@ class WorldObjectService:
         self.openable = OpenableService(handler)
 
     def validate(self, row, actor_id, operation, package):
+        """Dispatch admission and rules availability checks by object operation kind."""
         if type(operation) in OPENABLE_CHECK_OPERATIONS:
             return self.openable.check_availability(row, actor_id, operation, package)
         if type(operation) is CheckMechanism:
@@ -61,6 +65,9 @@ class WorldObjectService:
         return self.openable.validate_bar(row, actor_id, operation, package)
 
     def query(self, sid, actor_id, operation, package, *, context):
+        """Authorize/query object operation eligibility and return a disclosed structured
+        result.
+        """
         from .commands import OPERATIONS, TypedCommand, validate_command
         from .spatial import WorldActionAvailability
 
@@ -82,6 +89,9 @@ class WorldObjectService:
             return WorldActionAvailability("available", reason, row["world_version"])
 
     def operate(self, row, actor_id, operation, package, *, source_command_id=None):
+        """Dispatch object operation execution to its owning capability within the original
+        write scope.
+        """
         if type(operation) in OPENABLE_CHECK_OPERATIONS:
             raise StateMachineError(
                 "invalid_execution_origin", "Object checks require shared rule execution"
@@ -101,6 +111,7 @@ class WorldObjectService:
         return self.openable.operate_bar(row, actor_id, operation, package)
 
     def _visible(self, sid, actor_id, oid, package):
+        """Check actual object placement and visible/touchable eligibility."""
         h = self.handler
         h._public_scope(sid, actor_id, package)
         obj = self.facts.object(sid, oid)
@@ -120,11 +131,15 @@ class WorldObjectService:
 
     @scoped_read
     def _view_inputs(self, sid, actor_id):
+        """Prepare actor position and world version once for object views."""
         return self.handler._actor_position(sid, actor_id), self.handler._conn.execute(
             "SELECT * FROM sessions WHERE session_id=?", (sid,)
         ).fetchone()
 
     def view(self, sid, actor_id, oid, package, *, containment=None):
+        """Combine instance capabilities/current state into an authorized contents-aware
+        object view.
+        """
         obj = self._visible(sid, actor_id, oid, package)
         definition = self.facts.object_definition(sid, oid)
         config = (
@@ -216,6 +231,7 @@ class WorldObjectService:
         }
 
     def get_object(self, sid, actor_id, oid, package, *, context):
+        """Authorize reading the selected object's view."""
         if type(oid) is not str or not 0 < len(oid) <= 256:
             raise StateMachineError("invalid_query", "Object identity must be a bounded string")
         h = self.handler
@@ -224,6 +240,7 @@ class WorldObjectService:
             return self.view(sid, actor_id, oid, package)
 
     def list_objects(self, sid, actor_id, package, *, context):
+        """List actual visible scene/door-associated objects using shared read inputs."""
         h = self.handler
         with h._transaction():
             h._spatial_reader(sid, actor_id, package, context)

@@ -18,6 +18,7 @@ from .scoped_reads import scoped_read
 
 @lru_cache(maxsize=1)
 def _types():
+    """Collect dataclass types permitted in instance configuration decoding."""
     from . import mechanism_effects, mechanism_models, navigation_models, package, world_package
 
     return {
@@ -35,6 +36,7 @@ def _types():
 
 
 def encode(value):
+    """Recursively encode dataclasses, tuples and mappings with type markers."""
     if dataclasses.is_dataclass(value):
         return {
             "type": type(value).__name__,
@@ -50,6 +52,7 @@ def encode(value):
 
 
 def decode(value):
+    """Recursively decode supported typed instance configuration."""
     if isinstance(value, dict):
         if set(value) == {"type", "fields"}:
             return _types()[value["type"]](**{k: decode(v) for k, v in value["fields"].items()})
@@ -65,6 +68,7 @@ def passage_index(store, sid):
     """Shared World association; config mutations maintain its one validity stamp."""
 
     def prepare():
+        """Build the shared passage index from persisted Session passage configuration."""
         row = store.connection.execute(
             "SELECT json_extract(config_json,'$.passages') FROM instance_configs "
             "WHERE session_id=? AND domain='session' AND instance_id=?",
@@ -83,11 +87,13 @@ class SceneConfig(SimpleNamespace):
     """Read projection; metadata reads never enumerate objects or sample a map."""
 
     def __init__(self, instances, sid, data):
+        """Retain scene instance context and its pending map."""
         planned_grid = data.pop("grid_json")
         super().__init__(**data)
         self._instances, self._sid, self._planned_grid = instances, sid, planned_grid
 
     def _collection(self, field):
+        """Read the requested scene collection field on demand."""
         row = self._instances.conn.execute(
             "SELECT json_extract(config_json,?) FROM instance_configs WHERE session_id=? "
             "AND domain='scene' AND instance_id=?",
@@ -97,26 +103,32 @@ class SceneConfig(SimpleNamespace):
 
     @property
     def object_ids(self):
+        """Return scene object identities."""
         return self._collection("object_ids")
 
     @property
     def actor_initial_ids(self):
+        """Return the scene's initial actor identities."""
         return self._collection("actor_initial_ids")
 
     @property
     def actor_ids(self):
+        """Return the scene's actor identities."""
         return self._collection("actor_ids")
 
     @property
     def pending_objects(self):
+        """Return pending object creation plans."""
         return self._collection("pending_objects")
 
     @property
     def pending_actors(self):
+        """Return pending actor creation plans."""
         return self._collection("pending_actors")
 
     @property
     def objects(self):
+        """Combine instantiated scene objects with compatibility spatial data."""
         instances = self._instances
         pending = {o.object_id: o for o in self.pending_objects}
         result = []
@@ -129,6 +141,7 @@ class SceneConfig(SimpleNamespace):
 
     @property
     def grid_json(self):
+        """Read the persisted mechanical grid, rejecting an incomplete required instance."""
         if not self.has_grid:
             return None
         facts, sid = self._instances.facts, self._sid
@@ -143,14 +156,19 @@ class SceneConfig(SimpleNamespace):
 
 
 class InstanceData:
+    """Read/write typed instance configuration without substituting Package defaults."""
+
     def __init__(self, facts):
+        """Bind instance configuration access to WorldFacts."""
         self.facts = facts
 
     @property
     def conn(self):
+        """Return the shared facts connection."""
         return self.facts._conn
 
     def put(self, sid, domain, identity, value):
+        """Encode and persist instance configuration inside the write scope."""
         self.facts.store.require_write()
         self.conn.execute(
             "INSERT INTO instance_configs VALUES (?,?,?,?) "
@@ -160,6 +178,7 @@ class InstanceData:
 
     @scoped_read
     def get(self, sid, domain, identity):
+        """Read and decode configuration by domain/identity, rejecting missing instances."""
         row = self.conn.execute(
             "SELECT config_json FROM instance_configs WHERE session_id=? AND domain=? "
             "AND instance_id=?",
@@ -178,6 +197,7 @@ class InstanceData:
 
     @scoped_read
     def session_value(self, sid, field):
+        """Read and restore one typed Session configuration field."""
         row = self.conn.execute(
             "SELECT json_extract(config_json,?) FROM instance_configs WHERE session_id=? "
             "AND domain='session' AND instance_id=?",
@@ -193,6 +213,7 @@ class InstanceData:
         )
 
     def initialize_world(self, sid, package):
+        """Materialize world creation references as Session instance configuration."""
         self.put(
             sid,
             "session",
@@ -247,6 +268,9 @@ class InstanceData:
             )
 
     def initialize_scene(self, sid, scene_id, package):
+        """Materialize scene references and declared capabilities as instance
+        configuration.
+        """
         definitions = {d.object_id: d for d in package.world_objects}
         portable = {i.instance_id: i.policy for i in package.portable_items}
         for obj in package.scene(scene_id).objects:
@@ -289,6 +313,9 @@ class InstanceData:
 
     @instance_read("object", None, "definition")
     def object_definition(self, sid, oid):
+        """Combine persisted instance definition and current capabilities without Package
+        fallback.
+        """
         if self.facts.object(sid, oid) is None:
             row = self.conn.execute(
                 "SELECT d.value FROM instance_configs i, "
@@ -347,6 +374,7 @@ class InstanceData:
         return definition
 
     def pending_object(self, sid, oid):
+        """Read a pending object creation definition and its containing scene."""
         row = self.conn.execute(
             "SELECT i.instance_id,p.value FROM instance_configs i, "
             "json_each(i.config_json,'$.pending_objects.tuple') p "
@@ -359,6 +387,7 @@ class InstanceData:
         return row[0], decode(json.loads(row[1]))
 
     def objects(self, sid):
+        """Explicitly read all object definitions in the Session."""
         return tuple(
             d
             for r in self.conn.execute(
@@ -383,6 +412,7 @@ class InstanceData:
             yield row[0], decode(data)
 
     def legacy_object(self, sid, oid):
+        """Combine compatibility object configuration with current placement."""
         data = self.get(sid, "object", oid)
         obj = self.facts.object(sid, oid)
         return SimpleNamespace(
@@ -396,6 +426,7 @@ class InstanceData:
 
     @scoped_read
     def has_scene(self, sid, scene_id):
+        """Return whether the scene instance configuration exists."""
         return (
             self.conn.execute(
                 "SELECT 1 FROM instance_configs WHERE session_id=? AND domain='scene' "
@@ -413,10 +444,14 @@ class InstanceData:
 
     @scoped_read
     def scene(self, sid, scene_id):
+        """Construct a configuration view for the selected scene."""
         return SceneConfig(self, sid, dict(self._scene_data(sid, scene_id)))
 
     @scoped_read
     def _scene_data(self, sid, scene_id):
+        """Read core scene configuration, distinguishing unknown scenes from incomplete
+        instances.
+        """
         row = self.conn.execute(
             "SELECT json_remove(config_json,'$.object_ids','$.actor_ids','$.actor_initial_ids',"
             "'$.pending_objects','$.pending_actors','$.pending_definitions') FROM instance_configs "
@@ -444,9 +479,11 @@ class InstanceData:
         return decode(self.facts.store.memory.json(row[0]))
 
     def scenes(self, sid):
+        """Explicitly read configurations for the Session's scene identities."""
         return tuple(self.scene(sid, scene_id) for scene_id in self.session_value(sid, "scene_ids"))
 
     def legacy_locks(self, sid):
+        """Read compatibility lock object identities."""
         return tuple(
             SimpleNamespace(object_id=oid) for oid in self.session_value(sid, "legacy_lock_ids")
         )
@@ -471,6 +508,7 @@ class InstanceData:
         )
 
     def is_portable(self, sid, oid):
+        """Return whether the object has an admitted ordinary portable-item policy."""
         obj = self.facts.object(sid, oid)
         return bool(
             obj is not None
@@ -479,6 +517,7 @@ class InstanceData:
         )
 
     def has_portable(self, sid):
+        """Return whether the Session contains portable items."""
         return (
             self.conn.execute(
                 "SELECT 1 FROM objects WHERE session_id=? AND item_json IS NOT NULL LIMIT 1", (sid,)
@@ -487,6 +526,7 @@ class InstanceData:
         )
 
     def actor(self, sid, actor_id):
+        """Read actor kind and persisted instance configuration."""
         row = self.conn.execute(
             "SELECT kind FROM actors WHERE session_id=? AND actor_id=?", (sid, actor_id)
         ).fetchone()

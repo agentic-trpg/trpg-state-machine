@@ -9,9 +9,12 @@ from .grid_maps import _freeze, _thaw
 
 
 class ComponentInputs:
+    """Frozen mechanical component inputs with owner and inventory lookup indices."""
+
     __slots__ = ("data", "indices")
 
     def __init__(self, values):
+        """Freeze mechanical components and build owner, instance and item lookup indices."""
         object.__setattr__(self, "data", _freeze(values))
         indices = {}
         for field, path, identity in (
@@ -34,15 +37,19 @@ class ComponentInputs:
         object.__setattr__(self, "indices", _freeze(indices))
 
     def __setattr__(self, name, value):
+        """Reject reassignment of frozen component inputs."""
         raise AttributeError("Component inputs are immutable")
 
     def __deepcopy__(self, memo):
+        """Share this immutable component input when deep-copied."""
         return self
 
     def __repr__(self):
+        """Return a diagnostic representation of component data and indices."""
         return f"ComponentInputs({self.data!r}, {self.indices!r})"
 
     def inventory(self, owners, identities):
+        """Select inventory by owner/instance scope and return detached dictionaries."""
         raw = self.data["inventory_json"]
         by_owner, by_id, _ = self.indices["inventory_json"]
         selected = {n for owner in owners for n in by_owner.get(owner, ())}
@@ -53,6 +60,7 @@ class ComponentInputs:
         }
 
     def select(self, owners, slugs, owner_exists):
+        """Select resources, casting, effects and inventory for the required owner closure."""
         result = {}
         for field, path in (
             ("inventory_json", "entries"),

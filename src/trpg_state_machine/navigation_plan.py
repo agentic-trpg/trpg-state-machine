@@ -9,6 +9,7 @@ from .grid import GridService, cell_in_bounds
 
 
 def granted_layout(row, actor, package, *, instances=None):
+    """Resolve usable scenes/passages from persisted knowledge and actor grants."""
     knowledge = (
         package.navigation
         if instances is None
@@ -30,6 +31,7 @@ def granted_layout(row, actor, package, *, instances=None):
 
 
 def plan_navigation(row, actor, position, operation, package, *, grid=None):
+    """Plan primitive steps along authorized static maps and passages only."""
     instances = grid.h.facts.instances if grid is not None else None
     scenes, passage_ids = granted_layout(row, actor, package, instances=instances)
     if position.scene_id not in scenes or operation.target_scene_id not in scenes:

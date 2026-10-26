@@ -32,6 +32,8 @@ class GameViewContext:
 
 @dataclass(frozen=True, slots=True)
 class GameSceneView:
+    """Expose an authorized game scene view with explicit environment support status."""
+
     schema_version: str
     role: str
     session_id: str
@@ -56,12 +58,16 @@ class NPCContext:
 
 @dataclass(frozen=True, slots=True)
 class PerceivedSignal:
+    """Carry a signal admitted into an observer's perception result."""
+
     channel: str
     content: str
 
 
 @dataclass(frozen=True, slots=True)
 class EventObservation:
+    """Bind an NPC observation to committed event evidence and perceived signals."""
+
     observation_id: str
     observer_id: str
     perceived_signals: tuple[PerceivedSignal, ...]
@@ -69,6 +75,8 @@ class EventObservation:
 
 @dataclass(frozen=True, slots=True)
 class CurrentPerceptualView:
+    """Expose the observer's currently authorized scene perception projection."""
+
     observer_id: str
     scene_id: str
     status: str
@@ -79,6 +87,8 @@ class CurrentPerceptualView:
 
 @dataclass(frozen=True, slots=True)
 class JudgmentRequest:
+    """Bundle fixed evidence for a perception judgment request."""
+
     observer_id: str
     event_ref: str
     scene_id: str
@@ -89,12 +99,16 @@ class JudgmentRequest:
 
 @dataclass(frozen=True, slots=True)
 class SignalJudgment:
+    """Record a judgment for one observer/signal pair."""
+
     signal_id: str
     perceived: bool
 
 
 @dataclass(frozen=True, slots=True)
 class JudgmentResult:
+    """Group perception decisions for the fixed judgment request."""
+
     judgments: tuple[SignalJudgment, ...]
 
 
@@ -124,6 +138,7 @@ def _judge(request, judgment):
 
 
 def _valid_scene_evidence(scene, schema):
+    """Validate the version and shape of fixed scene perception evidence."""
     basic = {"grid", "unsupported_effects"}
     extended = basic | {"light_uncertain_cells", "lighting_sources"}
     if set(scene) == basic:
@@ -147,6 +162,12 @@ def _valid_scene_evidence(scene, schema):
 
 
 def _evidence_v4(evidence, event, binding):
+    """Return whether event-stage evidence has a supported complete, consistent shape.
+
+    Check schema-specific actor/object/source references, candidate identities and fixed
+    scene evidence. Malformed or incomplete evidence returns False rather than deriving
+    perception from current world state or filling missing historical facts.
+    """
     if not isinstance(evidence, dict) or set(evidence) != {
         "schema",
         "world_version",
@@ -277,7 +298,10 @@ def _evidence_v4(evidence, event, binding):
 
 
 class PerceptionRuntime:
+    """Authorize scene/perception views and manage observation-related access."""
+
     def grant_npc_access(self, session_id, observer_id, principal_id, package, *, context):
+        """Authorize setting the NPC access-subject mapping."""
         if type(principal_id) is not str or not principal_id.strip() or len(principal_id) > 256:
             raise StateMachineError("invalid_context", "Expected authenticated NPC principal")
         with self._transaction(write=True):
@@ -299,9 +323,11 @@ class PerceptionRuntime:
             )
 
     def _npc_authorized(self, session_id, package, context):
+        """Delegate NPC access identity validation to SessionAccess."""
         return self._sessions._npc_authorized(session_id, package, context)
 
     def perception_cursor(self, session_id, package, *, context):
+        """Authorize reading the perception consumer cursor."""
         with self._transaction():
             self._session(session_id, package, context)
             row = self._conn.execute(
@@ -324,6 +350,7 @@ class PerceptionRuntime:
         )
 
     def _projection_authorized(self, sid, package, context, npc):
+        """Check Session, time and observer permissions required by the projection."""
         if npc is None:
             self._session(sid, package, context)
             self._sessions.require_legacy_npc_time(sid)
@@ -622,6 +649,9 @@ class PerceptionRuntime:
             )
 
     def get_scene_view(self, session_id, package, *, context):
+        """Read an authorized scene view, filtering NPC access through its perception
+        scope.
+        """
         from .models import TrustedContext
 
         if type(context) is TrustedContext:
@@ -698,6 +728,9 @@ class PerceptionRuntime:
         return True
 
     def _game_scene_view(self, sid, package, context):
+        """Build the authorized game view, preserving unknown unsupported environment
+        inputs.
+        """
         if (
             context.session_id != sid
             or context.role not in ("gm", "player", "narrator")

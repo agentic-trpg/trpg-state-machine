@@ -15,7 +15,12 @@ from .navigation_plan import granted_layout, plan_navigation
 
 
 class ActivityHandler:
+    """Coordinate navigation lifecycle and world primitives through shared domain
+    interfaces.
+    """
+
     def __init__(self, store, records, characters, world, capture):
+        """Bind the records, character and world interfaces used by navigation operations."""
         self.store = store
         self.records = records
         self.characters = characters
@@ -23,6 +28,7 @@ class ActivityHandler:
         self.capture = capture
 
     def _controller(self, row, actor):
+        """Resolve the actor's controller, rejecting missing or ineligible control."""
         if actor == row["pc_actor_id"]:
             return None
         grant = self.store.connection.execute(
@@ -36,6 +42,7 @@ class ActivityHandler:
         return grant[0]
 
     def _event(self, record, package, result):
+        """Capture navigation lifecycle events from the activity record."""
         return self.capture._capture_event(
             record["session_id"],
             package,
@@ -54,12 +61,14 @@ class ActivityHandler:
         )
 
     def _finish(self, record, package, status, result, command_id, *, cursor=None):
+        """Transition to a terminal activity state and return its lifecycle event."""
         updated = self.records.transition(
             record, status, record["cursor"] if cursor is None else cursor, result, command_id
         )
         return [self._event(updated, package, result)]
 
     def _ready(self, row, actor, package):
+        """Require noncombat readiness and an available public position."""
         if self.world._active_combat(row["session_id"]):
             raise StateMachineError(
                 "unsupported_combat_world_operation", "Navigation is noncombat only"
@@ -68,6 +77,9 @@ class ActivityHandler:
         self.world._public_scope(row["session_id"], actor, package)
 
     def operate(self, row, package, operation, *, actor_id, command_id):
+        """Start, continue or stop navigation within the caller's transaction, returning
+        events.
+        """
         self.store.require_write()
         sid = row["session_id"]
         if type(operation) is StartNavigation:
@@ -156,6 +168,7 @@ class ActivityHandler:
             return self._finish(record, package, "blocked", NavigationResult(code), command_id)
 
     def _check_plan_position(self, record, package, row):
+        """Reject a plan step inconsistent with the actor's current scene and cell."""
         scenes, passages = granted_layout(
             row, record["actor_id"], package, instances=self.world.facts.instances
         )
@@ -178,6 +191,7 @@ class ActivityHandler:
             raise StateMachineError("position_conflict", "Plan position precondition changed")
 
     def _next_primitive(self, record, step, package):
+        """Translate the next plan step into a move, opening or passage primitive."""
         data = {k: v for k, v in step.items() if k != "kind"}
         if step["kind"] == "step":
             return StepActor(**data), True
@@ -197,6 +211,7 @@ class ActivityHandler:
         return TraversePassage(**data), True
 
     def read(self, session_id, actor_id, activity_id, package, *, context):
+        """Authorize activity access and return a detached snapshot at the current version."""
         with self.store.transaction():
             self.world._spatial_reader(session_id, actor_id, package, context)
             record = self.records.get(session_id, activity_id)

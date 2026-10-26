@@ -14,6 +14,7 @@ from .package import _fail, _identifier, _list, _mapping, _reference, _text, _un
 
 
 def _bounded_list(value, path, limit=100):
+    """Validate list type and maximum length."""
     items = _list(value, path)
     if len(items) > limit:
         _fail("schema_error", path, f"Maximum {limit} entries")
@@ -21,22 +22,26 @@ def _bounded_list(value, path, limit=100):
 
 
 def _integer(value, path, maximum=1_000_000):
+    """Validate integer type and bounds."""
     if type(value) is not int or not 0 <= value <= maximum:
         _fail("schema_error", path, f"Expected integer 0..{maximum}")
     return value
 
 
 def _enum(value, allowed, path):
+    """Validate a closed enumeration value."""
     if type(value) is not str or value not in allowed:
         _fail("schema_error", path, f"Expected one of {sorted(allowed)}")
     return value
 
 
 def _texts(value, path):
+    """Validate and convert a bounded text list."""
     return tuple(_text(v, path) for v in _bounded_list(value, path, 16))
 
 
 def parse_world_facts(raw, npc_ids):
+    """Parse world facts and referenced identities."""
     facts = []
     for i, value in enumerate(_bounded_list(raw, "world.world_facts")):
         path = f"world.world_facts[{i}]"
@@ -63,6 +68,12 @@ def parse_world_facts(raw, npc_ids):
 
 
 def parse_npc_state(raw, npc_id, npc_ids, scene_ids, facts):
+    """Restore configured NPC profile, knowledge, cognition and schedule inputs.
+
+    Validate closed records, bounded text/collections, source references and versioned
+    goal/plan relationships, rejecting cycles in the cognition reference graph. Return
+    NPCInitialState for creation; this does not authorize adopting a later model result.
+    """
     path = f"actors.{npc_id}.npc_state"
     data = _mapping(
         raw,
@@ -188,6 +199,7 @@ def parse_npc_state(raw, npc_id, npc_ids, scene_ids, facts):
     visiting, visited = set(), set()
 
     def visit(key):
+        """Detect cycles in the cognition reference graph."""
         if key in visiting:
             _fail("invalid_reference", path, "Circular memory provenance is unsupported")
         if key in visited:

@@ -9,6 +9,8 @@ from .package import _fail, _identifier, _initial_cell, _list, _mapping, _refere
 
 @dataclass(frozen=True, slots=True)
 class PortableItem:
+    """Define initial portable item identity, quantity and placement policy."""
+
     instance_id: str
     item_slug: str
     initial_owner_id: str | None
@@ -18,6 +20,7 @@ class PortableItem:
 
 
 def validate_items(raw, scenes, foundation, definitions, *, world=False):
+    """Validate Package item definitions, references, quantities and initial placement."""
     path = "item_transfers"
     if foundation is None:
         _fail("unsupported_mechanism", path, "Portable items require complete noncombat facts")

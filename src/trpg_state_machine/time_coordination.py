@@ -12,6 +12,8 @@ from .time_waits import DomainTimeWait, TimeWaitReference, TimeWaits
 
 @dataclass(frozen=True, slots=True)
 class AdvanceSessionTime:
+    """Request bounded advancement through unified time coordination."""
+
     target_tick: int
     source: str = "manual"
     generation: int | None = None
@@ -21,12 +23,15 @@ class AdvanceSessionTime:
 
 @dataclass(frozen=True, slots=True)
 class SetTimeRunning:
+    """Request explicit time mode/rate control."""
+
     action: str
     rate_numerator: int | None = None
     rate_denominator: int | None = None
 
 
 def validate_time_operation(op):
+    """Validate supported time operations and integer parameters."""
     if type(op) is AdvanceSessionTime:
         integer(op.target_tick, "target_tick", code="invalid_operation")
         integer(op.budget, "budget", minimum=1, maximum=16, code="invalid_operation")
@@ -54,6 +59,8 @@ def validate_time_operation(op):
 
 @dataclass(frozen=True, slots=True)
 class DueResult:
+    """Return one consumer's settled boundary events and progress outcome."""
+
     events: tuple = ()
     status: str = "continue"  # waiting / interrupted end this short transaction
     reason: str | None = None
@@ -68,13 +75,19 @@ class TimeBoundaryConsumer(Protocol):
     Persist external work in this transaction; resume with another time command.
     """
 
-    def next_boundary(self, session_id, package) -> int | None: ...
+    def next_boundary(self, session_id, package) -> int | None:
+        """Return the consumer's next time boundary."""
+        ...
 
-    def settle_one(self, row, package, command_id) -> DueResult: ...
+    def settle_one(self, row, package, command_id) -> DueResult:
+        """Settle one bounded consumer time boundary."""
+        ...
 
 
 @dataclass(frozen=True, slots=True)
 class TimeSync:
+    """Expose current time mode, progress and pending synchronization work."""
+
     committed_tick: int
     estimated_target_tick: int
     display_base_tick: int
@@ -93,7 +106,10 @@ class TimeSync:
 
 
 class SessionTime:
+    """Coordinate the sole world clock, bounded consumers, waits and attached drivers."""
+
     def __init__(self, runtime, world, effects):
+        """Bind unified time coordination, consumers, waits and driver registry."""
         self.runtime, self.world, self.effects = runtime, world, effects
         self.store = runtime.store
         self.consumers = {"mechanisms": world.objects.mechanisms}
@@ -104,9 +120,11 @@ class SessionTime:
 
     @property
     def db(self):
+        """Return the unified time connection."""
         return self.store.connection
 
     def run(self, sid):
+        """Read persisted time mode, defaulting to paused when absent."""
         row = self.db.execute(
             "SELECT * FROM session_time_runs WHERE session_id=?", (sid,)
         ).fetchone()
@@ -123,11 +141,13 @@ class SessionTime:
         )
 
     def progress(self, sid):
+        """Read persisted time advancement progress."""
         return self.db.execute(
             "SELECT * FROM session_time_progress WHERE session_id=?", (sid,)
         ).fetchone()
 
     def initialize(self, sid):
+        """Initialize time runtime and progress records."""
         self.store.require_write()
         self.db.execute(
             "INSERT INTO session_time_runs(session_id,mode) VALUES (?,'paused') "
@@ -136,7 +156,7 @@ class SessionTime:
         )
 
     def invalidate(self, sid, *, remainder="0"):
-
+        """Invalidate time runtime generation and progress."""
         self.initialize(sid)
         self.db.execute(
             "UPDATE session_time_runs SET generation=generation+1,remainder=? WHERE session_id=?",
@@ -144,6 +164,7 @@ class SessionTime:
         )
 
     def boundaries(self, sid, package):
+        """Collect the next valid time boundary from each consumer."""
         result = [
             (name, tick)
             for name, port in self.consumers.items()
@@ -154,6 +175,9 @@ class SessionTime:
         return result
 
     def _advance(self, row, package, target, command_id, source, budget):
+        """Advance the sole world tick within bounded write work, settling consumers and
+        waits.
+        """
         self.store.require_write()
         sid = row["session_id"]
         if self.waits.active(sid) is not None:
@@ -244,6 +268,7 @@ class SessionTime:
         return events
 
     def advance(self, row, op, package, command_id):
+        """Check combat/mode prerequisites and advance time, returning resulting events."""
         sid = row["session_id"]
         if self.world._active_combat(sid):
             raise StateMachineError("unsupported_combat_world_operation", "Combat owns time")
@@ -281,6 +306,9 @@ class SessionTime:
         return events
 
     def control(self, row, op, package, command_id):
+        """Change realtime/manual/paused mode through controlled persistence and driver
+        coordination.
+        """
         sid, events = row["session_id"], []
         remainder = Fraction(self.run(sid)["remainder"])
         if type(self.world.facts.time_state(sid)[0]) is not TimeBinding:

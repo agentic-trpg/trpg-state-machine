@@ -34,6 +34,7 @@ class CombatHandler:
         effects,
         persistence,
     ):
+        """Bind combat domain interfaces and their shared Store."""
         self.runtime = world.runtime
         self.store = store
         self.sessions = sessions
@@ -48,9 +49,11 @@ class CombatHandler:
 
     @property
     def _conn(self):
+        """Return the shared Store connection."""
         return self.store.connection
 
     def _initialize_noncombat(self, row, package):
+        """Validate and initialize noncombat actor, component and scene foundations."""
         self.store.require_write()
         initial = _remap(
             json.loads(package.noncombat_foundation_json), row["pc_template_id"], row["pc_actor_id"]
@@ -67,6 +70,9 @@ class CombatHandler:
         self.runtime.select_rule_rng(row["session_id"], canonical_json(initial["rng_state"]))
 
     def _initialize_combat(self, row, package, prepared):
+        """Check world geometry and initialize combat records/mechanics, returning captured
+        events.
+        """
         self.store.require_write()
         sid = row["session_id"]
         if self._conn.execute("SELECT 1 FROM combats WHERE session_id=?", (sid,)).fetchone():
@@ -146,6 +152,7 @@ class CombatHandler:
         ]
 
     def read_noncombat_snapshot(self, session_id, package, *, context):
+        """Authorize access and verify bindings before constructing a noncombat snapshot."""
         with self.store.transaction():
             row = self.sessions._session(session_id, package, context)
             self.rules._verify_dnd_binding(package, row)
@@ -160,6 +167,7 @@ class CombatHandler:
             return self.rules._combat_snapshot(row)
 
     def read_rng_context(self, session_id, package, *, context):
+        """Authorize access and return the RNG context for the fixed ruleset binding."""
         with self.store.transaction():
             row = self.sessions._session(session_id, package, context)
             if not package.legacy_audit_only:
@@ -192,11 +200,15 @@ class CombatHandler:
         return await self._submit_dnd(command, package, context, fingerprint)
 
     async def _submit_dnd(self, command, package, context, fingerprint):
+        """Delegate command execution to the rule execution coordinator."""
         from .rule_execution import RuleExecution
 
         return await RuleExecution(self).submit(command, package, context, fingerprint)
 
     def query_action_availability(self, session_id, actor_id, payload, package, *, context):
+        """Authorize and build the required snapshot for a read-only rules availability
+        query.
+        """
         if type(payload) is not CombatIntentPayload or type(actor_id) is not str or not actor_id:
             raise StateMachineError("invalid_query", "Expected a typed intent and Actor identity")
         with self.store.transaction():

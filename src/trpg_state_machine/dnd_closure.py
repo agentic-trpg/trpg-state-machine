@@ -7,7 +7,10 @@ from .errors import StateMachineError
 
 
 def closure_changes(request, result):
+    """Validate combat closure consistency and return the corresponding state changes."""
+
     def require(condition, message):
+        """Raise a descriptive error when a required closure invariant fails."""
         if not condition:
             raise StateMachineError("invalid_rule_result", message)
 

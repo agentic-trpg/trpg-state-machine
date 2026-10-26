@@ -26,6 +26,8 @@ _PENDING_PERCEPTION_SQL = (
 
 @dataclass(frozen=True, slots=True)
 class NPCPerceptionEvent:
+    """Represent reliable perception work associated with a committed event."""
+
     event_seq: int
     signal_ids: tuple[str, ...]
     complete: bool
@@ -33,7 +35,10 @@ class NPCPerceptionEvent:
 
 
 class PerceptionQueueRuntime:
+    """Manage reliable perception queue reads and enqueue delegation."""
+
     def _enqueue_perception(self, sid, seq, binding):
+        """Delegate reliable perception work creation to event persistence."""
         return self._event_persistence._enqueue_perception(sid, seq, binding)
 
     def _npc_perception_cursor(self, sid, npc):
@@ -80,6 +85,7 @@ class PerceptionQueueRuntime:
             )
 
     def _perception_queue_items(self, sql, parameters):
+        """Restore typed perception queue items from persisted rows."""
         return tuple(
             NPCPerceptionEvent(
                 r["event_seq"],

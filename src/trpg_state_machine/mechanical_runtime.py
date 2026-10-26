@@ -22,7 +22,16 @@ from .package import SYNTHETIC_EVALUATION_RULESET, canonical_json
 
 
 def validate_result(request, result):
+    """Reject a synthetic result inconsistent with its original fixed request.
+
+    Check envelope identity, schema/binding, snapshot/version, status-specific fields,
+    RNG successor and guarded Delta values. Raise invalid_rule_result on failure; a
+    valid accepted result remains uncommitted until the synthetic command path adopts
+    it.
+    """
+
     def invalid():
+        """Raise a structured rule-result validation error."""
         raise StateMachineError("invalid_rule_result", "Evaluator returned an invalid envelope")
 
     if type(result) is not RuleEvaluationResult:
@@ -118,8 +127,13 @@ def validate_result(request, result):
 
 
 class MechanicalRuntime:
+    """Coordinate the isolated synthetic rules command path and its shared commit."""
+
     def _submit_mechanical(self, command, package, context, fingerprint):
         # Read/replay before evaluation prevents reroll after a committed lost response.
+        """Authorize, replay, evaluate and adopt a synthetic command with its receipt in
+        one transaction.
+        """
         with self._transaction():
             row = self._session(command.session_id, package, context)
             self._authorize_command(row, command.actor_id, command.payload, context)
@@ -237,6 +251,7 @@ class MechanicalRuntime:
         return receipt
 
     def _validate_delta(self, request, delta):
+        """Validate allowed synthetic Delta fields, original values, targets and resources."""
         pc = request.snapshot.characters[0]
         op = request.operation
         seen = set()
@@ -278,6 +293,7 @@ class MechanicalRuntime:
             seen.add(key)
 
     def _apply_delta(self, row, package, delta, command_id):
+        """Apply Delta through domain fact interfaces and collect events/change markers."""
         events, changed = ([], False)
         for change in delta.operations:
             if type(change) is HPChange:

@@ -5,6 +5,8 @@ from dataclasses import dataclass
 
 @dataclass(frozen=True, slots=True)
 class BarObject:
+    """Request a bar state change through opening capability admission."""
+
     scene_id: str
     object_id: str
     expected_cell: str
@@ -12,6 +14,8 @@ class BarObject:
 
 @dataclass(frozen=True, slots=True)
 class UnbarObject:
+    """Request removal of a bar through opening capability admission."""
+
     scene_id: str
     object_id: str
     expected_cell: str
@@ -19,6 +23,8 @@ class UnbarObject:
 
 @dataclass(frozen=True, slots=True)
 class LockObject:
+    """Request an instance lock operation with credential/placement prerequisites."""
+
     scene_id: str
     object_id: str
     lock_id: str
@@ -28,6 +34,8 @@ class LockObject:
 
 @dataclass(frozen=True, slots=True)
 class UnlockObject:
+    """Request an instance unlock operation with credential/placement prerequisites."""
+
     scene_id: str
     object_id: str
     lock_id: str
@@ -37,6 +45,8 @@ class UnlockObject:
 
 @dataclass(frozen=True, slots=True)
 class PutItem:
+    """Request transfer of a portable instance into a container."""
+
     scene_id: str
     instance_id: str
     container_id: str
@@ -45,6 +55,8 @@ class PutItem:
 
 @dataclass(frozen=True, slots=True)
 class TakeItem:
+    """Request removal of a portable instance from a container."""
+
     scene_id: str
     instance_id: str
     container_id: str
@@ -53,6 +65,8 @@ class TakeItem:
 
 @dataclass(frozen=True, slots=True)
 class RepositionObject:
+    """Request privileged object placement or facing adjustment."""
+
     scene_id: str
     object_id: str
     expected_cell: str
@@ -63,6 +77,8 @@ class RepositionObject:
 
 @dataclass(frozen=True, slots=True)
 class SetLightEnabled:
+    """Request changing a light instance's enabled state."""
+
     scene_id: str
     object_id: str
     expected_cell: str
@@ -71,6 +87,8 @@ class SetLightEnabled:
 
 @dataclass(frozen=True, slots=True)
 class SwitchLightMode:
+    """Request selection of a configured light mode."""
+
     scene_id: str
     object_id: str
     expected_cell: str
@@ -79,6 +97,8 @@ class SwitchLightMode:
 
 @dataclass(frozen=True, slots=True)
 class ActivateMechanism:
+    """Request a configured manual mechanism operation."""
+
     scene_id: str
     object_id: str
     expected_cell: str
@@ -87,6 +107,8 @@ class ActivateMechanism:
 
 @dataclass(frozen=True, slots=True)
 class ServiceMechanism:
+    """Request a supported mechanism service method."""
+
     scene_id: str
     object_id: str
     expected_cell: str
@@ -101,6 +123,8 @@ class CheckMechanism(ServiceMechanism):
 
 @dataclass(frozen=True, slots=True)
 class PickLock:
+    """Request a rules-backed lock-picking check."""
+
     scene_id: str
     object_id: str
     lock_id: str
@@ -110,6 +134,8 @@ class PickLock:
 
 @dataclass(frozen=True, slots=True)
 class ForceOpen:
+    """Request a rules-backed forced opening check."""
+
     scene_id: str
     object_id: str
     method_id: str
@@ -119,6 +145,8 @@ class ForceOpen:
 
 @dataclass(frozen=True, slots=True)
 class ClearJam:
+    """Request a rules-backed jam-clearing check."""
+
     scene_id: str
     object_id: str
     method_id: str

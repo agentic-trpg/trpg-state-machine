@@ -85,6 +85,7 @@ class StateMachine(
         object_protection_provider=None,
         environment_unit_height_provider=None,
     ) -> None:
+        """Assemble one Store, fixed ruleset, domain services and Session coordinators."""
         from dnd5e_engine.evaluation_ruleset import freeze_ruleset, get_default_ruleset
 
         # Select the final effective corpus once, before opening the store. All
@@ -173,9 +174,11 @@ class StateMachine(
         return self._store.connection
 
     def read_time_sync(self, session_id, package, *, context):
+        """Delegate reading time synchronization status to the unified time service."""
         return self._session_runtime.time.sync(session_id, package, context=context)
 
     def attach_time_driver(self, session_id, package, *, context, **options):
+        """Create a unified time driver for the selected Session."""
         from .time_driver import TimeDriver
 
         return TimeDriver(
@@ -183,16 +186,20 @@ class StateMachine(
         )
 
     def read_navigation_activity(self, session_id, actor_id, activity_id, package, *, context):
+        """Delegate navigation activity reading to its handler."""
         return self._activities.read(session_id, actor_id, activity_id, package, context=context)
 
     def __enter__(self):
+        """Check that storage is open and enter the context."""
         self._ensure_open()
         return self
 
     def __exit__(self, exc_type, exc, traceback):
+        """Close the state machine on context exit."""
         self.close()
 
     def close(self) -> None:
+        """Close drivers and Store and release rebuildable environment snapshots."""
         if not self._store._closed:
             for driver in tuple(self._session_runtime.time.drivers.values()):
                 driver.close()
@@ -200,15 +207,19 @@ class StateMachine(
             self.environment.clear_snapshots()
 
     def _ensure_open(self) -> None:
+        """Delegate open/thread eligibility checks to the Store."""
         self._store.ensure_open()
 
     def _transaction(self, *, write: bool = False):
+        """Delegate shared transaction scope management to the Store."""
         return self._store.transaction(write=write)
 
     def _session(self, session_id: str, package: AdventurePackage, context: TrustedContext):
+        """Delegate authorized Session record reading to SessionAccess."""
         return self._sessions._session(session_id, package, context)
 
     def _check_package_pin(self, row, package):
+        """Delegate fixed Package binding checks."""
         return self._sessions._check_package_pin(row, package)
 
     def create_session(
@@ -218,6 +229,7 @@ class StateMachine(
         return self._creation.create(request, package, context=context)
 
     def _initialize_scene(self, session_id: str, scene_id: str, package: AdventurePackage) -> None:
+        """Delegate creation/loading of required scene instances to scene lifecycle."""
         return self.scene_lifecycle.ensure_scene(session_id, scene_id, package)
 
     def _append_events(
@@ -229,6 +241,7 @@ class StateMachine(
         source_command_id: str,
         package: AdventurePackage,
     ) -> None:
+        """Delegate persistence of captured events to the event interface."""
         return self._event_persistence._append_events(
             session_id, version, events, source_command_id=source_command_id, package=package
         )
@@ -269,6 +282,7 @@ class StateMachine(
         effect_origin=None,
         source_command_id=None,
     ):
+        """Delegate controlled world operation execution to its handler."""
         return self._world._operate(
             row,
             package,
@@ -280,6 +294,7 @@ class StateMachine(
 
     @scoped_read
     def _snapshot(self, row, package) -> SessionSnapshot:
+        """Build a complete detached Session snapshot from consistent facts."""
         sid = row["session_id"]
         world = self._conn.execute(
             "SELECT flags_json,game_tick FROM world_states WHERE session_id = ?", (sid,)
@@ -369,6 +384,7 @@ class StateMachine(
         )
 
     def _active_combat(self, session_id):
+        """Read the currently active combat record."""
         return self._combat_records.active(session_id)
 
     def read_session(
@@ -468,59 +484,77 @@ class StateMachine(
             return self._snapshot(row, package)
 
     def query_world_action(self, session_id, actor_id, operation, package, *, context):
+        """Delegate world action availability querying."""
         return self._world.query_world_action(
             session_id, actor_id, operation, package, context=context
         )
 
     def get_spatial_view(self, session_id, actor_id, package, *, context):
+        """Delegate authorized spatial view querying."""
         return self._world.get_spatial_view(session_id, actor_id, package, context=context)
 
     def read_actor_position(self, session_id, actor_id, package, *, context):
+        """Delegate reading the actor's own position."""
         return self._world.read_actor_position(session_id, actor_id, package, context=context)
 
     def get_illumination(self, session_id, actor_id, cell, package, *, context):
+        """Delegate authorized cell illumination querying to the light service."""
         return self._objects.lights.query_illumination(
             session_id, actor_id, cell, package, context=context
         )
 
     def get_object(self, session_id, actor_id, object_id, package, *, context):
+        """Delegate reading a visible object to the object service."""
         return self._objects.get_object(session_id, actor_id, object_id, package, context=context)
 
     def list_scene_objects(self, session_id, actor_id, package, *, context):
+        """Delegate listing visible objects in the current scene."""
         return self._objects.list_objects(session_id, actor_id, package, context=context)
 
     def read_carried_items(self, session_id, actor_id, package, *, context):
+        """Delegate reading authorized carried items."""
         return self._world.read_carried_items(session_id, actor_id, package, context=context)
 
     def _assert_spatial_consistency(self, sid, package):
+        """Delegate an explicit complete spatial consistency audit."""
         return self._world._assert_spatial_consistency(sid, package)
 
     async def submit_command_async(self, command, package, *, context):
+        """Delegate supported asynchronous rule command submission."""
         return await self._combat.submit_command_async(command, package, context=context)
 
     async def _submit_dnd(self, command, package, context, fingerprint):
+        """Delegate rules submission coordination to the combat handler."""
         return await self._combat._submit_dnd(command, package, context, fingerprint)
 
     def _initialize_noncombat(self, row, package):
+        """Delegate noncombat mechanical foundation initialization."""
         return self._combat._initialize_noncombat(row, package)
 
     def read_noncombat_snapshot(self, session_id, package, *, context):
+        """Delegate authorized noncombat mechanical snapshot reading."""
         return self._combat.read_noncombat_snapshot(session_id, package, context=context)
 
     def _verify_dnd_binding(self, package):
+        """Delegate rules binding checks to the adapter."""
         return self._rules._verify_dnd_binding(package)
 
     def _prepare_combat(self, row, package):
+        """Delegate preparation of initial combat snapshot and RNG."""
         return self._rules._prepare_combat(row, package)
 
     def _initialize_combat(self, row, package, prepared):
+        """Delegate combat-record initialization."""
         return self._combat._initialize_combat(row, package, prepared)
 
     def read_combat_snapshot(self, session_id, package, *, context):
+        """Delegate trusted combat snapshot reading."""
         return self._combat.read_combat_snapshot(session_id, package, context=context)
 
     def read_rng_context(self, session_id, package, *, context):
+        """Delegate fixed RNG context reading."""
         return self._combat.read_rng_context(session_id, package, context=context)
 
     def _require_noncombat_save(self, row):
+        """Delegate supported noncombat save-boundary checks."""
         return self._combat_records.require_noncombat_save(row)

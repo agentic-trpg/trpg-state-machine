@@ -11,7 +11,10 @@ from .session_access import _binding
 
 
 class EventCapture:
+    """Capture fixed event-stage actor, spatial and signal evidence."""
+
     def __init__(self, store, characters, world):
+        """Bind event-stage capture dependencies."""
         self.store, self.characters, self.world = store, characters, world
         self._event_package = None
         self._event_index = None
@@ -34,9 +37,13 @@ class EventCapture:
 
     @property
     def _conn(self):
+        """Return the shared event-capture connection."""
         return self.store.connection
 
     def _event_signals(self, package, event_type, payload, source_actor_id):
+        """Derive source-attributed perception signals from known events and Package
+        definitions.
+        """
         scene_id = payload.get("scene_id", payload.get("to_scene_id"))
         descriptions = {
             "scene.entered": "Someone enters the scene.",

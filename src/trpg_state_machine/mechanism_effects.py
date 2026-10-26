@@ -28,6 +28,8 @@ CONFIG = ConfigDict(extra="forbid", strict=True)
 
 @dataclass(frozen=True, config=CONFIG)
 class AttackRequirement:
+    """Describe attack qualification required by a mechanism rule effect."""
+
     bonus: Annotated[int, Field(ge=-100, le=100)]
     mode: Literal["melee", "ranged"]
     range_feet: Annotated[int, Field(gt=0, le=10000)]
@@ -35,6 +37,8 @@ class AttackRequirement:
 
 @dataclass(frozen=True, config=CONFIG)
 class SaveRequirement:
+    """Describe saving-throw inputs required by a mechanism rule effect."""
+
     ability: Ability
     dc: Annotated[int, Field(ge=0, le=100)]
     on_success: Literal["none", "half_damage"]
@@ -42,6 +46,8 @@ class SaveRequirement:
 
 @dataclass(frozen=True, config=CONFIG)
 class DamageRequirement:
+    """Describe configured damage inputs for a mechanism rule effect."""
+
     dice: Annotated[str, Field(pattern=r"^[1-9][0-9]{0,2}d(4|6|8|10|12|20|100)$")]
     bonus: Annotated[int, Field(ge=-10000, le=10000)]
     damage_type: Literal[
@@ -63,6 +69,8 @@ class DamageRequirement:
 
 @dataclass(frozen=True, config=CONFIG)
 class StatusRequirement:
+    """Describe the status consequence requested by a mechanism rule effect."""
+
     condition: Literal[
         "blinded",
         "charmed",
@@ -86,6 +94,8 @@ class StatusRequirement:
 
 @dataclass(frozen=True, config=CONFIG)
 class RuleEffectDefinition:
+    """Validate the admitted mechanism effect configuration and requirement combination."""
+
     effect_ref: Identity
     schema_version: Literal["mechanism-effect-definition/1"]
     attack: AttackRequirement | None
@@ -95,6 +105,7 @@ class RuleEffectDefinition:
     magical: bool
 
     def __post_init__(self):
+        """Validate the mechanism rule effect definition's semantics."""
         if self.damage is None and self.status is None:
             raise ValueError("An effect must declare damage or status")
         if self.attack is not None and self.save is not None:
@@ -115,6 +126,8 @@ class RuleEffectDefinition:
 
 @dataclass(frozen=True, config=CONFIG)
 class TargetSelector:
+    """Define a bounded actor target selection for a mechanism effect."""
+
     scope: Literal["trigger_actor", "area"]
     cells: Annotated[tuple[str, ...], Field(max_length=256)]
     actor_kind: Literal["all", "pc", "npc"]
@@ -123,6 +136,7 @@ class TargetSelector:
     selection_time: Literal["before_consequence"]
 
     def __post_init__(self):
+        """Validate target selector shape and identity uniqueness."""
         if bool(self.cells) != (self.scope == "area") or len(set(self.cells)) != len(self.cells):
             raise ValueError("Only area selectors require unique cells")
         if self.scope == "trigger_actor" and self.exclude_trigger_actor:
@@ -131,18 +145,24 @@ class TargetSelector:
 
 @dataclass(frozen=True, config=CONFIG)
 class RuleEffectAction:
+    """Associate a typed rule effect definition with its target selector."""
+
     kind: Literal["rule_effect"]
     effect_ref: Identity
     targets: TargetSelector
 
 
 class PortModel(BaseModel):
+    """Provide strict, closed validation for mechanism effect port messages."""
+
     model_config = ConfigDict(
         extra="forbid", strict=True, frozen=True, revalidate_instances="always"
     )
 
 
 class MechanismSource(PortModel):
+    """Identify the admitted mechanism and operation that sourced an effect."""
+
     kind: Literal["mechanism"]
     object_id: Identity
     definition_ref: Identity
@@ -155,12 +175,16 @@ class MechanismSource(PortModel):
 
 
 class ActorPose(PortModel):
+    """Carry fixed actor placement for effect scope validation."""
+
     actor_id: Identity
     scene_id: Identity
     cell: Identity
 
 
 class ObjectContribution(PortModel):
+    """Carry the object spatial contribution included in an effect request."""
+
     object_id: Identity
     spatial: ObjectSpatialProjection
 
@@ -177,6 +201,8 @@ class WorldDependencies(PortModel):
 
 
 class MechanismEffectRequest(PortModel):
+    """Bind mechanism effect input, targets and fixed mechanical read scope."""
+
     schema_version: Literal["mechanism-effect/1"]
     operation_kind: Literal["rules.effect"]
     session_id: Identity
@@ -192,6 +218,7 @@ class MechanismEffectRequest(PortModel):
 
     @model_validator(mode="after")
     def validate_scope(self):
+        """Validate effect request targets and read scope."""
         snapshot = self.state_snapshot
         ids = {a.entity_id for a in snapshot.character_states}
         if (
@@ -206,6 +233,7 @@ class MechanismEffectRequest(PortModel):
         return self
 
     def digest(self):
+        """Hash canonical mechanism effect request content."""
         return (
             "sha256:"
             + hashlib.sha256(
@@ -218,6 +246,8 @@ MechanicalDelta = Annotated[HPDelta | TempHPSet | DeathStateUpdate, Field(discri
 
 
 class MechanismAudit(PortModel):
+    """Carry validated audit evidence associated with an effect result."""
+
     kind: Literal["attack", "save", "damage", "status"]
     target_id: Identity
     succeeded: bool | None
@@ -226,6 +256,7 @@ class MechanismAudit(PortModel):
 
     @model_validator(mode="after")
     def audit_shape(self):
+        """Validate mechanism audit shape."""
         if self.kind in ("attack", "save"):
             valid = self.succeeded is not None and self.roll is not None and self.amount is None
         elif self.kind == "damage":
@@ -238,6 +269,8 @@ class MechanismAudit(PortModel):
 
 
 class MechanismEffectResult(PortModel):
+    """Return uncommitted mechanism effect status, changes and audit evidence."""
+
     schema_version: Literal["mechanism-effect/1"]
     session_id: Identity
     command_id: Identity
@@ -257,6 +290,7 @@ class MechanismEffectResult(PortModel):
 
     @model_validator(mode="after")
     def validate_status(self):
+        """Check effect result status and the content required for that status."""
         if self.status == "accepted":
             valid = self.state_delta is not None and self.rng_transition is not None
             valid &= self.error is None and self.choice is None
@@ -299,14 +333,20 @@ class MechanismEffectPort(Protocol):
     transaction. The production implementation below never calls an evaluator.
     """
 
-    def evaluate(self, request: MechanismEffectRequest) -> MechanismEffectResult: ...
+    def evaluate(self, request: MechanismEffectRequest) -> MechanismEffectResult:
+        """Evaluate a mechanism rule effect through the supplied port."""
+        ...
 
 
 class UnsupportedMechanismEffects:
+    """Explicit unavailable-port behavior; never synthesizes a supported rules result."""
+
     def available(self):
+        """Report that the default mechanism rules port is unavailable."""
         return False
 
     def evaluate(self, request):
+        """Return an explicit unsupported mechanism effect result."""
         return MechanismEffectResult(
             **result_envelope(request),
             status="unsupported",
@@ -361,6 +401,7 @@ def validate_mechanism_result(request, value):
         changes, seen = [], set()
 
         def edit(target, field, expected, value):
+            """Validate one edit's target/field and accumulate its candidate change."""
             key = (target, field)
             if key in seen or actors[target][field] != expected:
                 _invalid("Duplicate mechanism delta or incorrect pre-value")
@@ -402,17 +443,26 @@ def validate_mechanism_result(request, value):
 
 
 class MechanismEffectRunner:
+    """Build effect requests and validate/adopt port results through shared domain writes."""
+
     def __init__(self, handler):
+        """Bind the effect runner, selecting explicit unsupported behavior when no port is
+        provided.
+        """
         self.h = handler
         self.port: MechanismEffectPort = UnsupportedMechanismEffects()
 
     def available(self):
         # No test evaluator is selected by any public command or Package field.
+        """Return whether an actual mechanism rules port is installed."""
         return not isinstance(self.port, UnsupportedMechanismEffects)
 
     def request(
         self, row, package, oid, actor, activation, consequence, source_seq, command_id, action
     ):
+        """Build an effect request from consistent mechanics, mechanism configuration and
+        positions.
+        """
         rules = self.h.objects.openable.rules
         rules._verify_dnd_binding(package, row)
         snapshot = rules._noncombat_snapshot(row, package)
@@ -505,6 +555,9 @@ class MechanismEffectRunner:
     def apply(
         self, row, package, oid, actor, activation, consequence, source_seq, command_id, action
     ):
+        """Evaluate and validate the effect response before applying allowed changes in the
+        original transaction.
+        """
         request = self.request(
             row, package, oid, actor, activation, consequence, source_seq, command_id, action
         )

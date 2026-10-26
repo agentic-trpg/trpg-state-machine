@@ -18,7 +18,10 @@ from .version_map import VersionMap
 
 
 class _Coordinator:
+    """Share commit gating and recovery fencing across Stores for the same database."""
+
     def __init__(self):
+        """Initialize the database-wide commit gate, pause set and recovery generation."""
         self.lock = RLock()
         self.paused_sessions = set()
         self.recovery_generations = {}
@@ -50,7 +53,12 @@ def _migration_statements(script: str) -> tuple[str, ...]:
 
 
 class SqliteStore:
+    """Own the SQLite connection, transaction scopes and bounded SessionMemory lifecycle."""
+
     def __init__(self, database: str | Path):
+        """Open a thread-owned SQLite Store with migrations, unified RAM and coordination
+        structures.
+        """
         if str(database) == ":memory:":
             raise StateMachineError(
                 "unsupported_storage", "A local file database with WAL is required"
@@ -121,6 +129,9 @@ class SqliteStore:
         self._data_version = self._conn.execute("PRAGMA data_version").fetchone()[0]
 
     def _migrate(self):
+        """Apply registered schema upgrades and integrity preparation at the migration
+        boundary.
+        """
         scripts = [Path(__file__).with_name("_schema.sql")] + [
             Path(__file__).with_name(f"_migration_{v}.sql") for v in range(2, 41)
         ]
@@ -222,16 +233,19 @@ class SqliteStore:
 
     @property
     def connection(self):
+        """Check Store validity and return its controlled connection."""
         self.ensure_open()
         return self._runtime_connection
 
     def ensure_open(self):
+        """Require an open Store on its owning thread."""
         if self._closed:
             raise StateMachineError("closed", "SQLite store is closed")
         if get_ident() != self._thread:
             raise StateMachineError("invalid_transaction", "Connection belongs to another thread")
 
     def require_write(self):
+        """Require an active write scope that has not failed."""
         self.ensure_open()
         if self._scope is None or not self._scope.write or not self._scope.active:
             raise StateMachineError("invalid_transaction", "An active write scope is required")
@@ -245,6 +259,9 @@ class SqliteStore:
         return scope if scope is not None and scope.active and not scope.write else None
 
     def close(self):
+        """Reject closing an active scope and release the connection and rebuildable
+        memory.
+        """
         self.ensure_open()
         if self._scope is not None:
             raise StateMachineError("invalid_transaction", "Cannot close an active transaction")
@@ -255,6 +272,7 @@ class SqliteStore:
         self._closed = True
 
     def savepoint(self):
+        """Delegate savepoint creation to the current write scope."""
         self.require_write()
         return self._scope.savepoint()
 
@@ -262,6 +280,7 @@ class SqliteStore:
     def transaction(self, *, write=False):
         # Readers acquire the gate when fixing their current version. Existing
         # read scopes may finish against the explicitly pinned older snapshot.
+        """Coordinate shared locking for fixed reads and the write commit critical section."""
         gate = self._coordinator.lock
         gate.acquire()
         held = True
@@ -277,6 +296,16 @@ class SqliteStore:
 
     @contextmanager
     def _transaction_scope(self, *, write=False):
+        """Manage one fixed SQL/RAM scope and publish only after durable commit.
+
+        Nested transactions are rejected; domain code must use savepoints. A failed
+        precommit scope rolls back SQL and discards its candidate/pending values. A
+        write whose COMMIT outcome is unknown pauses access and raises
+        commit_outcome_unknown. Once SQL has committed, any publication failure pauses
+        reconciliation and raises committed_publication_pending; it cannot be reported
+        as an uncommitted rollback. An older read may retain its fixed result but cannot
+        publish stale cache roots.
+        """
         self.ensure_open()
         if self._scope is not None:
             raise StateMachineError("invalid_transaction", "Use a savepoint within a transaction")
@@ -450,6 +479,7 @@ class SqliteStore:
                 raise
 
     def release_memory(self, sid=None):
+        """Release all or one Session's RAM/maps when no transaction is active."""
         self.ensure_open()
         if self._scope is not None:
             raise StateMachineError("invalid_transaction", "Cannot release an active scope")
@@ -468,6 +498,9 @@ class UnitOfWork:
     """A scope handle expires on exit; it never owns a second connection."""
 
     def __init__(self, store, write):
+        """Initialize one transaction scope with sparse candidates, version roots and
+        failure state.
+        """
         self._store = store
         self.write = write
         self.active = True
@@ -483,12 +516,14 @@ class UnitOfWork:
         self.statement_failed = False
 
     def check_usable(self):
+        """Reject an SQL-failed scope until its failure has been recovered."""
         if self.statement_failed:
             raise StateMachineError(
                 "transaction_failed", "SQL statement failed; rollback is required before continuing"
             )
 
     def _connection(self):
+        """Require the scope to remain active and belong to this Store."""
         self._store.ensure_open()
         if not self.active or self._store._scope is not self:
             raise StateMachineError("invalid_transaction", "Transaction scope has ended")
@@ -514,6 +549,9 @@ class UnitOfWork:
 
     @contextmanager
     def savepoint(self):
+        """Create a domain savepoint, restoring facts/memo on failure and checking
+        usability before release.
+        """
         connection = self._connection()
         self._store.require_write()
         # SQLite nests savepoints bearing the same name; RELEASE targets the latest.

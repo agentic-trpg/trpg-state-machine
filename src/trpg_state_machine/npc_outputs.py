@@ -32,6 +32,7 @@ from .npc_results import (
 
 
 def _handoff_command(row):
+    """Restore a supported typed action command from the persisted handoff."""
     data = json.loads(row["payload_json"])
     if "intent_type" in data:
         discriminator = data.pop("intent_type")
@@ -94,6 +95,8 @@ def _handoff_command(row):
 
 @dataclass(frozen=True, slots=True)
 class NPCOutputDelivery:
+    """Represent handoff delivery status and the associated durable command receipt."""
+
     ordinal: int
     kind: str
     command_id: str | None
@@ -104,7 +107,10 @@ class NPCOutputDelivery:
 
 
 class NPCOutputRuntime:
+    """Authorize output dispatch and maintain reliable completion cursors."""
+
     def _npc_completed_cursor(self, sid, npc):
+        """Find the largest contiguous completed prefix in event order."""
         end = self._npc_perception_cursor(sid, npc)
         pending = self._conn.execute(
             "SELECT MIN(o.event_seq) FROM npc_observation_work w "
@@ -117,6 +123,7 @@ class NPCOutputRuntime:
     def _refresh_npc_completion(self, sid, npc):
         # Retain the legacy cognition checkpoint on that NPC's completion writes.
         # Reads derive the current prefix; an unrelated event needs no checkpoint write.
+        """Persist the NPC completion cursor."""
         self._conn.execute(
             "INSERT INTO npc_completion_cursors VALUES (?,?,?) "
             "ON CONFLICT(session_id,npc_id) DO UPDATE SET "
@@ -125,6 +132,7 @@ class NPCOutputRuntime:
         )
 
     def _complete_npc_evaluation_work(self, row):
+        """Complete task observation work and refresh the processed prefix."""
         self._conn.execute(
             "UPDATE npc_observation_work SET status='completed',disposition='evaluation' "
             "WHERE status='pending' AND work_id IN "
@@ -140,6 +148,7 @@ class NPCOutputRuntime:
             return self._npc_completed_cursor(session_id, npc)
 
     def _output_delivery(self, row):
+        """Restore output delivery state from its handoff record and receipt."""
         receipt = self._conn.execute(
             "SELECT receipt_json FROM command_receipts WHERE session_id=? AND command_id=?",
             (row["session_id"], row["command_id"]),
@@ -155,6 +164,7 @@ class NPCOutputRuntime:
         )
 
     def get_npc_output_status(self, evaluation_id, package, *, context):
+        """Authorize reading the status of each task output."""
         with self._transaction():
             task = self._evaluation_row(evaluation_id, package, context)
             return tuple(
@@ -168,6 +178,7 @@ class NPCOutputRuntime:
             )
 
     def _dispatch_authorized(self, evaluation_id, ordinal, package, context):
+        """Check output dispatch authority and task ownership."""
         if type(context) is not TrustedContext:
             raise StateMachineError("unauthorized", "Dispatch requires trusted command control")
         if type(evaluation_id) is not str or type(ordinal) is not int or not 0 <= ordinal <= 100:
@@ -198,6 +209,7 @@ class NPCOutputRuntime:
         return row, session
 
     def _npc_handoff_command_guard(self, command):
+        """Delegate NPC handoff command eligibility checks to SessionAccess."""
         return self._sessions._npc_handoff_command_guard(command)
 
     def dispatch_npc_output(self, evaluation_id, ordinal, package, *, context):
@@ -229,9 +241,11 @@ class NPCOutputRuntime:
             return self._output_delivery(updated)
 
     def _npc_combat_target_guard(self, command, package, snapshot):
+        """Delegate NPC combat target authorization to SessionAccess."""
         return self._sessions._npc_combat_target_guard(command, package, snapshot)
 
     def _publish_npc_dialogue(self, row, session, package):
+        """Publish authorized NPC dialogue and complete its handoff record."""
         data = json.loads(row["payload_json"])
         data["audience_ids"] = tuple(data["audience_ids"])
         data["source_observation_ids"] = tuple(data["source_observation_ids"])

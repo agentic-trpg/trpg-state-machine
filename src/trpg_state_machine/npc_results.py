@@ -16,6 +16,8 @@ from .package import canonical_json
 
 @dataclass(frozen=True, slots=True)
 class NPCActionIntent:
+    """Propose an NPC mechanical action without supplying authoritative rule results."""
+
     operation: str
     destination_scene_id: str
     expected_world_version: int
@@ -51,6 +53,8 @@ class NPCNavigationIntent:
 
 @dataclass(frozen=True, slots=True)
 class NPCPickupIntent:
+    """Propose a portable-item pickup for controlled command handoff."""
+
     instance_id: str
     scene_id: str
     expected_cell: str
@@ -59,6 +63,8 @@ class NPCPickupIntent:
 
 @dataclass(frozen=True, slots=True)
 class NPCDropIntent:
+    """Propose a portable-item drop for controlled command handoff."""
+
     instance_id: str
     scene_id: str
     to_cell: str
@@ -67,6 +73,8 @@ class NPCDropIntent:
 
 @dataclass(frozen=True, slots=True)
 class NPCUnlockIntent:
+    """Propose a credential-based unlock for controlled command handoff."""
+
     scene_id: str
     object_id: str
     credential_instance_id: str
@@ -76,6 +84,8 @@ class NPCUnlockIntent:
 
 @dataclass(frozen=True, slots=True)
 class NPCLockIntent:
+    """Propose a credential-based lock for controlled command handoff."""
+
     scene_id: str
     object_id: str
     credential_instance_id: str
@@ -84,6 +94,7 @@ class NPCLockIntent:
 
 
 def _output_data(output):
+    """Convert an NPC output into its closed durable representation."""
     data = asdict(output)
     if type(output) in (NPCUnlockIntent, NPCLockIntent):
         data["intent_type"] = "door_unlock" if type(output) is NPCUnlockIntent else "door_lock"
@@ -96,6 +107,8 @@ def _output_data(output):
 
 @dataclass(frozen=True, slots=True)
 class NPCDialogue:
+    """Propose NPC dialogue and its permitted audience/association."""
+
     text: str
     audience_ids: tuple[str, ...]
     visibility: str
@@ -104,6 +117,8 @@ class NPCDialogue:
 
 @dataclass(frozen=True, slots=True)
 class NPCEvaluationResult:
+    """Group proposed cognition changes and outputs for authoritative adoption."""
+
     dialogue: NPCDialogue | None = None
     memory_updates: tuple = ()
     belief_updates: tuple = ()
@@ -115,6 +130,8 @@ class NPCEvaluationResult:
 
 @dataclass(frozen=True, slots=True)
 class NPCOutputHandoff:
+    """Identify durable output work created by an adopted evaluation."""
+
     ordinal: int
     kind: str
     command_id: str | None
@@ -124,6 +141,8 @@ class NPCOutputHandoff:
 
 @dataclass(frozen=True, slots=True)
 class EvaluationReceipt:
+    """Record the durable evaluation outcome and its output handoffs for retries."""
+
     evaluation_id: str
     status: str
     npc_state_version: int
@@ -131,21 +150,25 @@ class EvaluationReceipt:
 
 
 def _receipt(raw):
+    """Decode an evaluation receipt and its output handoffs."""
     data = json.loads(raw)
     data["outputs"] = tuple(NPCOutputHandoff(**item) for item in data["outputs"])
     return EvaluationReceipt(**data)
 
 
 def _invalid(message):
+    """Raise an NPC result validation error."""
     raise StateMachineError("invalid_npc_result", message)
 
 
 def _bounded_text(value):
+    """Validate bounded result text."""
     if type(value) is not str or not value.strip() or len(value) > 4096:
         _invalid("Expected nonempty text of at most 4096 characters")
 
 
 def _identifier(value, kind):
+    """Validate an identity with the required prefix."""
     if (
         type(value) is not str
         or len(value) > 128
@@ -155,11 +178,13 @@ def _identifier(value, kind):
 
 
 def _positive(value):
+    """Require a positive integer result value."""
     if type(value) is not int or not 1 <= value <= 1_000_000:
         _invalid("Positive bounded integer version required")
 
 
 def _result_json(result):
+    """Validate and canonically encode an NPC result, preserving action intent shape."""
     if type(result) is not NPCEvaluationResult:
         _invalid("Expected the seven-field local NPCEvaluationResult")
     for field in ("memory", "belief", "relationship", "goal", "plan", "action_intents"):
@@ -187,7 +212,17 @@ def _result_json(result):
 
 
 class NPCResultRuntime:
+    """Validate/adopt NPC cognition proposals and create reliable output handoffs."""
+
     def _validate_meta(self, row, result):
+        """Return approved cognition changes after validating the whole proposed Meta
+        batch.
+
+        Check record identity/version relationships, bounded text and task-authorized
+        source observations against current persisted records. Reject invalid references
+        and duplicate changes before appending records; this routine does not itself
+        publish model outputs.
+        """
         sid, npc = row["session_id"], row["npc_id"]
         observations = self._meta_observation_scope(row)
         approved = []
@@ -296,6 +331,13 @@ class NPCResultRuntime:
         return approved
 
     def _output_candidates(self, row, result, package):
+        """Validate and normalize proposed NPC dialogue/action output candidates.
+
+        Enforce bounded collections/text, supported intent shapes, task actor
+        associations and target/audience restrictions before creating durable handoffs.
+        Return candidate output data; validation does not execute an action or publish
+        dialogue.
+        """
         outputs = []
         if result.dialogue is not None:
             dialogue = result.dialogue
@@ -431,6 +473,7 @@ class NPCResultRuntime:
         return outputs
 
     def _record_evaluation_failure(self, row, code):
+        """Persist evaluation failure and attempt state."""
         self._conn.execute(
             "UPDATE npc_evaluation_tasks SET attempts=attempts+1,last_error=?,"
             "status=CASE WHEN attempts+1>=attempt_limit THEN 'failed' ELSE 'running' END "
@@ -511,6 +554,7 @@ class NPCResultRuntime:
         return receipt
 
     def _append_npc_records(self, row, records, version):
+        """Append NPC cognition records and their source references."""
         sid, npc, eid = row["session_id"], row["npc_id"], row["evaluation_id"]
         for kind, record in records:
             self._conn.execute(
@@ -558,6 +602,7 @@ class NPCResultRuntime:
             )
 
     def get_npc_evaluation_receipt(self, evaluation_id, package, *, context):
+        """Authorize reading the persisted evaluation receipt."""
         with self._transaction():
             self._evaluation_row(evaluation_id, package, context)
             row = self._conn.execute(

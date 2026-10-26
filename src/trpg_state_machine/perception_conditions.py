@@ -26,6 +26,8 @@ from .package import (
 
 
 class PerceptionOutcome(StrEnum):
+    """Distinguish positive, negative and unresolved perception outcomes."""
+
     POSITIVE = "positive"
     NEGATIVE = "negative"
     UNRESOLVED = "unresolved"
@@ -33,16 +35,20 @@ class PerceptionOutcome(StrEnum):
 
 @dataclass(frozen=True, slots=True)
 class PerceptionDecision:
+    """Carry a sensory decision with its support/completeness reason."""
+
     outcome: PerceptionOutcome
     reason: str
     judgment_allowed: bool = False
 
 
 def _unknown(reason, *, judgment=False):
+    """Construct an unresolved perception judgment with its reason."""
     return PerceptionDecision(PerceptionOutcome.UNRESOLVED, reason, judgment)
 
 
 def _negative(reason):
+    """Construct a definite negative perception judgment."""
     return PerceptionDecision(PerceptionOutcome.NEGATIVE, reason)
 
 
@@ -97,6 +103,7 @@ def signal_environment(signal, evidence):
 
 
 def _admission(signal, observer, environment):
+    """Check stimulus, source, observer and sense eligibility."""
     if type(signal.origin) is not SignalOrigin or type(signal.stimulus) is not SignalStimulus:
         return _unknown("missing_origin_or_stimulus")
     if signal.origin.scene_id != signal.scope.scene_id:
@@ -156,6 +163,7 @@ def _admission(signal, observer, environment):
 
 
 def judge_visual(signal: Signal, observer: dict, environment: dict | None):
+    """Judge vision from fixed mechanical inputs, preserving unknown/unsupported outcomes."""
     if (
         signal.channel != "visual"
         or signal.stimulus is not None
@@ -219,6 +227,7 @@ def judge_visual(signal: Signal, observer: dict, environment: dict | None):
 
 
 def judge_auditory(signal: Signal, observer: dict, environment: dict | None):
+    """Judge auditory eligibility from fixed conditions."""
     if (
         signal.channel != "auditory"
         or signal.stimulus is not None
@@ -238,6 +247,7 @@ def judge_auditory(signal: Signal, observer: dict, environment: dict | None):
 
 
 def judge_signal(signal, observer, environment):
+    """Dispatch the signal to visual or auditory judgment."""
     if signal.channel == "visual":
         return judge_visual(signal, observer, environment)
     if signal.channel == "auditory":

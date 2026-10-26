@@ -7,11 +7,15 @@ from .package import canonical_json
 
 
 class NPCBootstrap:
+    """Coordinate creation of configured NPC cognition/runtime facts."""
+
     def __init__(self, store):
+        """Bind NPC initialization facts to the Store."""
         self.store = store
 
     @property
     def _conn(self):
+        """Return the shared NPC initialization connection."""
         return self.store.connection
 
     def initialize(self, sid, actor):

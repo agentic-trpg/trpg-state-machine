@@ -7,7 +7,10 @@ from .errors import StateMachineError
 
 
 class PackageEffects:
+    """Expand configured effects through shared world, capture and time interfaces."""
+
     def __init__(self, store, world, capture):
+        """Bind Package effects, stage capture and the unified time interface."""
         self.store, self.world, self.capture = store, world, capture
         from .time_coordination import SessionTime
 
@@ -18,6 +21,7 @@ class PackageEffects:
 
     @property
     def _conn(self):
+        """Return the shared Store connection."""
         return self.store.connection
 
     def _expand_events(self, row, package, events, command_id):

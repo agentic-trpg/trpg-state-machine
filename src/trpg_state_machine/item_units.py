@@ -4,6 +4,7 @@ import re
 
 
 def valid_item_unit(data):
+    """Check the item record's closed fields, identity, quantity and charge constraints."""
     return (
         type(data) is dict
         and set(data) == {"item_slug", "quantity", "charges_remaining_per_unit", "accessible"}

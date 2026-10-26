@@ -14,6 +14,8 @@ from types import MappingProxyType
 
 @dataclass(frozen=True)
 class FieldValue:
+    """Pair a derived field with dependency stamps and retained-payload accounting."""
+
     parameter: object
     value: object
     dependencies: tuple
@@ -24,6 +26,7 @@ class FieldValue:
         # Charge the actual value once, when it is produced/replaced. Unrelated
         # fields on the same owner must not re-serialize every retained value.
         # Dependencies are charged twice to cover the owner's retention metadata.
+        """Compute field dependency and retained-size metadata."""
         size = len(repr((self.parameter, self.value, self.dependencies, self.stamps)).encode())
         size += len(repr(self.dependencies).encode()) + 256
         object.__setattr__(self, "retained_bytes", size)
@@ -36,6 +39,7 @@ class DependencyGroups:
     groups: tuple
 
     def __iter__(self):
+        """Iterate structurally shared dependency groups."""
         for group in self.groups:
             yield from group
 
@@ -56,6 +60,8 @@ def retained_size(owner):
 
 @dataclass(frozen=True)
 class ContainerFields:
+    """Retain immutable contents/weight fields on the existing runtime owner."""
+
     contents: tuple = ()
     own_weight: tuple = ()
     total_weight: tuple = ()
@@ -64,12 +70,16 @@ class ContainerFields:
 
 @dataclass(frozen=True)
 class MechanismFields:
+    """Retain immutable mechanism configuration and index fields."""
+
     configuration: tuple = ()
     index: tuple = ()
 
 
 @dataclass(frozen=True)
 class MechanismLinks:
+    """Pair immutable trigger and component associations."""
+
     triggers: tuple
     components: tuple
 
@@ -85,18 +95,23 @@ class TriggerIndex(Mapping):
     _entries: Mapping
 
     def __post_init__(self):
+        """Expose mechanism event buckets through a read-only mapping."""
         object.__setattr__(self, "_entries", MappingProxyType(dict(self._entries)))
 
     def __getitem__(self, key):
+        """Read a mechanism index bucket by key."""
         return self._entries[key]
 
     def __iter__(self):
+        """Iterate mechanism index keys."""
         return iter(self._entries)
 
     def __len__(self):
+        """Return the mechanism bucket count."""
         return len(self._entries)
 
     def __deepcopy__(self, memo):
+        """Share this immutable mechanism index when deep-copied."""
         return self
 
 
@@ -116,6 +131,7 @@ class PassageIndex:
 
     @classmethod
     def build(cls, passages):
+        """Build shared passage identity, door, scene and endpoint reverse associations."""
         doors, scenes, ids, door_scenes = {}, {}, {}, {}
         for passage in passages:
             ids.setdefault(passage.passage_id, []).append(passage)
@@ -128,11 +144,15 @@ class PassageIndex:
                 door_scenes.setdefault(door, {}).update(endpoints)
 
         def freeze(buckets):
+            """Freeze association buckets as read-only mappings of tuples."""
             return MappingProxyType({key: tuple(value) for key, value in buckets.items()})
 
         return cls(passages, freeze(doors), freeze(scenes), freeze(ids), freeze(door_scenes))
 
     def select(self, *, scene_id=None, object_id=None, passage_id=None):
+        """Select the passage/door/scene bucket, applying combined filters within that
+        scope.
+        """
         if passage_id is not None:
             candidates = self.by_id.get(passage_id, ())
         elif object_id is not None:
@@ -149,11 +169,14 @@ class PassageIndex:
         )
 
     def __deepcopy__(self, memo):
+        """Share this immutable passage index when deep-copied."""
         return self
 
 
 @dataclass(frozen=True)
 class SpatialFields:
+    """Retain prepared spatial records, maps, occupancy and blocker fields."""
+
     record: tuple = ()
     sensory: tuple = ()
     map: tuple = ()
@@ -166,6 +189,8 @@ class SpatialFields:
 
 @dataclass(frozen=True)
 class EnvironmentFields:
+    """Retain environment facts, prepared inputs and composed cell/range fields."""
+
     facts: tuple = ()
     inputs: tuple = ()
     protection: tuple = ()
@@ -175,6 +200,8 @@ class EnvironmentFields:
 
 @dataclass(frozen=True)
 class LightingFields:
+    """Retain light sources, geometry and illumination result fields."""
+
     sources: tuple = ()
     geometry: tuple = ()
     candidates: tuple = ()
@@ -185,6 +212,8 @@ class LightingFields:
 
 @dataclass(frozen=True)
 class ObjectDirectory:
+    """Retain direct-object, contributor and capability association fields."""
+
     direct: tuple = ()
     contributors: tuple = ()
     capabilities: tuple = ()
@@ -192,6 +221,8 @@ class ObjectDirectory:
 
 @dataclass(frozen=True)
 class ObjectRuntime:
+    """Own immutable object fact/definition and capability fields within SessionMemory."""
+
     session_id: str
     object_id: str
     facts: tuple = ()
@@ -202,6 +233,8 @@ class ObjectRuntime:
 
 @dataclass(frozen=True)
 class SceneRuntime:
+    """Own immutable scene spatial/environment/light and object-association fields."""
+
     session_id: str
     scene_id: str
     spatial: SpatialFields = field(default_factory=SpatialFields)
@@ -213,6 +246,8 @@ class SceneRuntime:
 
 @dataclass(frozen=True)
 class WorldRuntime:
+    """Own Session-wide mechanism and passage associations through shared publication."""
+
     session_id: str
     mechanisms: MechanismFields = field(default_factory=MechanismFields)
     passages: tuple = ()
@@ -220,6 +255,8 @@ class WorldRuntime:
 
 @dataclass(frozen=True)
 class CharacterRuntime:
+    """Own the actor's retained inventory projection field."""
+
     session_id: str
     actor_id: str
     inventory: tuple = ()
@@ -261,6 +298,7 @@ def resolve_field(
     key = ("instance", sid, kind, identity)
 
     def owner():
+        """Resolve the runtime owner from an existing field or instance kind."""
         cached = memory.get(key)
         return (
             cached[0]
@@ -330,6 +368,7 @@ def resolve_field(
 
     # Keep dependency metadata alive under the same byte/entry budget as facts.
     def retained_dependencies(group):
+        """Collect dependency version groups retained by the field structure."""
         for descriptor in fields(group):
             value = getattr(group, descriptor.name)
             if is_dataclass(value):
@@ -352,8 +391,13 @@ def instance_read(kind, component, name, *, capacity=1, maintained=None):
     """
 
     def decorate(method):
+        """Wrap the instance method with runtime field resolution."""
+
         @wraps(method)
         def read(self, sid, identity, *args, **kwargs):
+            """Read or compute the instance field using identity, arguments and maintained
+            versions.
+            """
             store = (
                 self.h.store
                 if hasattr(self, "h")
@@ -392,8 +436,11 @@ def world_read(component, name):
     """World-owned cross-scene relationships, not independent Scene facts."""
 
     def decorate(method):
+        """Wrap the World method with shared field resolution."""
+
         @wraps(method)
         def read(self, sid):
+            """Resolve cross-scene associations through the Session's World field owner."""
             return resolve_field(
                 self.h.store, "world", sid, sid, component, name, (), lambda: method(self, sid)
             )
@@ -411,17 +458,21 @@ class SceneFieldCache:
     """
 
     def __init__(self, store, name, capacity):
+        """Initialize the scene field cache's name, capacity and generation."""
         self.store, self.name, self.capacity = store, name, capacity
         self.generation = 0
         self.session_generations = {}
 
     def clear(self):
+        """Advance the cache generation to invalidate existing values."""
         self.generation += 1
 
     def release(self, sid):
+        """Advance the Session field-cache generation."""
         self.session_generations[sid] = self.session_generations.get(sid, 0) + 1
 
     def __len__(self):
+        """Count scene fields still valid in the current generation."""
         names = ("cells", "ranges") if self.name == "cells" else (self.name,)
         return sum(
             1
@@ -433,6 +484,9 @@ class SceneFieldCache:
         )
 
     def resolve(self, scope, key, compute, *, validator=None):
+        """Resolve a versioned field in the consistent scope, computing when reuse is
+        unavailable.
+        """
         if scope is None:
             return compute()
         identity, versions, parameters = key

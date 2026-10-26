@@ -95,11 +95,15 @@ def _enqueue_perception_proof(connection, read_event, sid, seq, binding):
 
 
 class EventPersistence:
+    """Persist authoritative events and reliable downstream work through the shared Store."""
+
     def __init__(self, store):
+        """Bind event persistence to the Store."""
         self.store = store
 
     @property
     def _conn(self):
+        """Return the event-persistence connection."""
         return self.store.connection
 
     def _append_events(
@@ -111,6 +115,9 @@ class EventPersistence:
         source_command_id: str,
         package: AdventurePackage,
     ) -> None:
+        """Append authoritative events and Outbox work in the write scope with fixed
+        version evidence.
+        """
         self.store.require_write()
         # Evidence has already been frozen at the producer stage. This method
         # assigns durable identities and writes; it never samples world state.
@@ -155,6 +162,7 @@ class EventPersistence:
 
     @scoped_read
     def _read_event(self, session_id, seq):
+        """Read and strictly reconstruct a committed event and its evidence."""
         row = self._conn.execute(
             "SELECT e.*, r.event_id, r.source_command_id, r.signals_json FROM events e "
             "JOIN event_records r USING(session_id,event_seq) WHERE session_id=? AND event_seq=?",
@@ -219,5 +227,6 @@ class EventPersistence:
         )
 
     def _enqueue_perception(self, sid, seq, binding):
+        """Create perception work for committed events within the write scope."""
         self.store.require_write()
         return _enqueue_perception_proof(self._conn, self._read_event, sid, seq, binding)

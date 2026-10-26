@@ -41,11 +41,14 @@ def canonical_json(value: object) -> str:
 
 
 def _digest(value: object) -> str:
+    """Hash canonical data with SHA-256."""
     return "sha256:" + hashlib.sha256(canonical_json(value).encode("utf-8")).hexdigest()
 
 
 @dataclass(frozen=True, slots=True)
 class RulesetBinding:
+    """Pin effective rules identity, data revision and evaluator semantics."""
+
     ruleset_id: str
     data_revision: str
     evaluator_version: str
@@ -60,6 +63,8 @@ SYNTHETIC_EVALUATION_RULESET = RulesetBinding(
 
 @dataclass(frozen=True, slots=True)
 class ObjectDefinition:
+    """Define a foundation scene object's creation properties."""
+
     object_id: str
     state: Literal["closed", "open"] | None
     movable: bool = False
@@ -70,6 +75,8 @@ class ObjectDefinition:
 
 @dataclass(frozen=True, slots=True)
 class PassageEndpoint:
+    """Describe one scene's cell, entry and interaction extent for a passage."""
+
     scene_id: str
     standing_cell: str
     threshold_cell: str
@@ -77,6 +84,8 @@ class PassageEndpoint:
 
 @dataclass(frozen=True, slots=True)
 class PassageDefinition:
+    """Associate passage endpoints with direction and an optional shared door."""
+
     passage_id: str
     endpoints: tuple[PassageEndpoint, PassageEndpoint]
     door_object_id: str | None
@@ -84,6 +93,8 @@ class PassageDefinition:
 
 @dataclass(frozen=True, slots=True)
 class SceneDefinition:
+    """Group immutable scene creation inputs and initial entity definitions."""
+
     scene_id: str
     location_id: str
     exits: tuple[str, ...]
@@ -97,6 +108,8 @@ class SceneDefinition:
 
 @dataclass(frozen=True, slots=True)
 class ActorDefinition:
+    """Describe an actor creation reference and its initial placement."""
+
     actor_id: str
     name: str
     initial_scene_id: str
@@ -108,6 +121,8 @@ class ActorDefinition:
 
 @dataclass(frozen=True, slots=True)
 class PCTemplate:
+    """Define a selectable PC creation template and mechanical foundation."""
+
     pc_template_id: str
     name: str
     current_hp: int
@@ -119,6 +134,8 @@ class PCTemplate:
 
 @dataclass(frozen=True, slots=True)
 class SignalScope:
+    """Describe the intended spatial scope of an event signal."""
+
     scene_id: str
     visibility: str
     kind: str = "scene"
@@ -126,6 +143,8 @@ class SignalScope:
 
 @dataclass(frozen=True, slots=True)
 class SignalOrigin:
+    """Identify the configured origin of an event signal."""
+
     scene_id: str
     entity_id: str | None = None
     cell: str | None = None
@@ -133,11 +152,15 @@ class SignalOrigin:
 
 @dataclass(frozen=True, slots=True)
 class SignalStimulus:
+    """Describe the sensory stimulus carried by a signal."""
+
     kind: Literal["ordinary_activity", "light_emission", "sound"]
 
 
 @dataclass(frozen=True, slots=True)
 class Signal:
+    """Combine channel, origin, scope and stimulus for perception processing."""
+
     signal_id: str
     channel: str
     content: str
@@ -148,6 +171,8 @@ class Signal:
 
 @dataclass(frozen=True, slots=True)
 class EventDefinition:
+    """Define Package event triggers and their controlled consequences."""
+
     event_definition_id: str
     trigger_type: str
     scene_id: str
@@ -159,6 +184,8 @@ class EventDefinition:
 
 @dataclass(frozen=True, slots=True)
 class AdventurePackage:
+    """Hold validated creation references and fixed content identity."""
+
     adventure_id: str
     package_version: str
     package_digest: str
@@ -181,6 +208,7 @@ class AdventurePackage:
     time_binding: TimeBinding | None = None
 
     def scene(self, scene_id: str) -> SceneDefinition:
+        """Select a Package scene by identity, rejecting an unknown scene."""
         for scene in self.scenes:
             if scene.scene_id == scene_id:
                 return scene
@@ -189,6 +217,8 @@ class AdventurePackage:
 
 @dataclass(frozen=True, slots=True)
 class PackageLoadResult:
+    """Return Package admission outcome with structured validation issues."""
+
     status: Literal["valid", "invalid"]
     package: AdventurePackage | None = None
     errors: tuple[Issue, ...] = ()
@@ -199,11 +229,13 @@ class _DataLoader(yaml.SafeLoader):
     """SafeLoader plus duplicate-key, alias, depth and node limits."""
 
     def __init__(self, stream: str) -> None:
+        """Initialize YAML loading with depth and node budgets."""
         super().__init__(stream)
         self._depth = 0
         self._nodes = 0
 
     def compose_node(self, parent, index):
+        """Enforce depth/node limits while composing YAML nodes."""
         if self.check_event(yaml.AliasEvent):
             raise yaml.YAMLError("YAML aliases are unsupported")
         self._depth += 1
@@ -216,6 +248,7 @@ class _DataLoader(yaml.SafeLoader):
             self._depth -= 1
 
     def construct_mapping(self, node, deep=False):
+        """Construct a YAML mapping, rejecting duplicate or invalid keys."""
         result = {}
         for key_node, value_node in node.value:
             key = self.construct_object(key_node, deep=deep)
@@ -226,10 +259,12 @@ class _DataLoader(yaml.SafeLoader):
 
 
 def _fail(code: str, path: str, message: str):
+    """Raise a Package validation error."""
     raise StateMachineError(code, message, path=path)
 
 
 def _plain(value: object, path: str = "$") -> None:
+    """Recursively check the allowed plain-data value types."""
     if type(value) in (str, int, bool, type(None)):
         return
     if isinstance(value, list):
@@ -243,6 +278,7 @@ def _plain(value: object, path: str = "$") -> None:
 
 
 def _mapping(value, fields: str, path: str) -> dict:
+    """Validate a mapping and its closed field set."""
     if not isinstance(value, dict):
         _fail("schema_error", path, "Expected a mapping")
     expected = set(fields.split())
@@ -254,6 +290,7 @@ def _mapping(value, fields: str, path: str) -> dict:
 
 
 def _list(value, path: str, *, nonempty: bool = False) -> list:
+    """Validate list input."""
     if not isinstance(value, list) or (nonempty and not value):
         _fail(
             "schema_error",
@@ -264,12 +301,14 @@ def _list(value, path: str, *, nonempty: bool = False) -> list:
 
 
 def _text(value, path: str) -> str:
+    """Require bounded, nonempty text."""
     if not isinstance(value, str) or not value.strip() or len(value) > 4096:
         _fail("schema_error", path, "Expected a nonblank string, maximum 4096 characters")
     return value
 
 
 def _identifier(value, path: str, namespace: str | None = None) -> str:
+    """Validate identifier format and reserved prefixes."""
     text = _text(value, path)
     if len(text) > 128 or not _ID.fullmatch(text):
         _fail("invalid_id", path, "Expected a lowercase dotted ID, maximum 128 characters")
@@ -279,11 +318,13 @@ def _identifier(value, path: str, namespace: str | None = None) -> str:
 
 
 def _empty(value, expected, path: str) -> None:
+    """Require an explicitly empty value in a restricted field."""
     if type(value) is not type(expected) or value != expected:
         _fail("unsupported_mechanism", path, "This foundation requires this field to be empty")
 
 
 def _flags(value, path: str) -> tuple[tuple[str, bool], ...]:
+    """Validate flags and normalize their ordering."""
     if not isinstance(value, dict):
         _fail("schema_error", path, "Expected boolean flags")
     for key, flag in value.items():
@@ -294,16 +335,26 @@ def _flags(value, path: str) -> tuple[tuple[str, bool], ...]:
 
 
 def _unique(values, path: str) -> None:
+    """Reject duplicate identities."""
     if len(values) != len(set(values)):
         _fail("duplicate_id", path, "IDs/references must be unique in their scope")
 
 
 def _reference(value, targets, path: str) -> None:
+    """Require a reference to identify a known entity."""
     if not isinstance(value, str) or value not in targets:
         _fail("invalid_reference", path, f"Unknown reference: {value}")
 
 
 def _validate(data: dict, *, allow_legacy_audit=False) -> AdventurePackage:
+    """Validate a complete Package and return its admitted creation definitions.
+
+    Check the closed input shape, fixed bindings, unique identities and cross-
+    references, then assemble scene/actor, mechanical, world capability, navigation and
+    event inputs. Reject invalid or unsupported combinations through Package validation
+    errors. This is creation-input admission, not a reader or writer of an existing
+    Session's facts.
+    """
     interactions = (
         isinstance(data, dict)
         and isinstance(data.get("manifest"), dict)
@@ -895,6 +946,7 @@ def _validate(data: dict, *, allow_legacy_audit=False) -> AdventurePackage:
 
 
 def _grid_config(raw, path):
+    """Validate and normalize mechanical grid configuration."""
     if raw is None:
         return None
     from dnd5e_engine.evaluation_state import MechanicalGrid
@@ -913,6 +965,7 @@ def _grid_config(raw, path):
 
 
 def _initial_cell(cell, grid_json, path, *, standing=True):
+    """Validate initial cell coordinates and map eligibility."""
     from dnd5e_engine.spatial import GridTopology, canonical_cell_id
     from dnd5e_engine.specs import GridScene
 
@@ -935,6 +988,7 @@ def _initial_cell(cell, grid_json, path, *, standing=True):
 
 
 def _spatial_initial_consistency(scenes, actors, templates, entry):
+    """Check initial spatial occupancy and identity consistency."""
     for scene in scenes:
         if scene.grid_json is None:
             if any(o.movable for o in scene.objects):
@@ -954,6 +1008,7 @@ def _spatial_initial_consistency(scenes, actors, templates, entry):
 
 
 def _passage_definitions(raw, scenes):
+    """Parse passage endpoints and validate their door associations."""
     definitions = []
     objects = {o.object_id: (s.scene_id, o) for s in scenes for o in s.objects}
     scene_ids = {s.scene_id for s in scenes}
@@ -1023,6 +1078,7 @@ def _passage_definitions(raw, scenes):
 
 
 def _event_definitions(raw, scenes):
+    """Parse event definitions, trigger conditions and effects."""
     definitions = []
     for index, value in enumerate(_list(raw, "events")):
         path = f"events[{index}]"
@@ -1207,6 +1263,7 @@ def load_adventure_package(source: str | Path, *, allow_legacy_audit=False) -> P
 
 
 def _creation_fingerprint(request_content: dict, binding: RulesetBinding) -> str:
+    """Hash creation request content and bindings for idempotency."""
     return _digest(
         {
             "fingerprint_schema": "foundation-create/1",

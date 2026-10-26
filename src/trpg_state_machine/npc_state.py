@@ -11,6 +11,8 @@ NPC_STATE_SCHEMA = "npc-state/1"
 
 @dataclass(frozen=True, slots=True)
 class NPCProfile:
+    """Describe NPC role, personality, speaking style and behavior constraints."""
+
     role: str
     personality: tuple[str, ...]
     speaking_style: str
@@ -20,6 +22,8 @@ class NPCProfile:
 @dataclass(frozen=True, slots=True)
 class SourceReference:
     # Package backstory is explicitly different from a Session Observation.
+    """Distinguish Package backstory, memory and versioned observation provenance."""
+
     kind: Literal["package", "memory", "observation"]
     reference_id: str
     version: int | None
@@ -27,6 +31,8 @@ class SourceReference:
 
 @dataclass(frozen=True, slots=True)
 class PrivateRecord:
+    """Carry versioned NPC cognition text and its source references."""
+
     record_id: str
     version: int
     is_current: bool
@@ -36,11 +42,15 @@ class PrivateRecord:
 
 @dataclass(frozen=True, slots=True)
 class EpisodicMemory(PrivateRecord):
+    """Record a private episode with observed/inferred/told epistemic status."""
+
     epistemic_status: Literal["observed", "inferred", "told"]
 
 
 @dataclass(frozen=True, slots=True)
 class Belief(PrivateRecord):
+    """Record a private belief, confidence and active/retracted state."""
+
     epistemic_status: Literal["observed", "inferred", "told"]
     confidence_basis_points: int | None
     status: Literal["active", "retracted"]
@@ -48,17 +58,23 @@ class Belief(PrivateRecord):
 
 @dataclass(frozen=True, slots=True)
 class Relationship(PrivateRecord):
+    """Record a private stance toward an identified target."""
+
     target_id: str
     stance: Literal["friendly", "neutral", "hostile"]
 
 
 @dataclass(frozen=True, slots=True)
 class Goal(PrivateRecord):
+    """Record a versioned NPC goal and its lifecycle state."""
+
     status: Literal["active", "completed", "abandoned"]
 
 
 @dataclass(frozen=True, slots=True)
 class Plan(PrivateRecord):
+    """Associate ordered private steps with a specific goal version."""
+
     goal_id: str
     goal_version: int
     steps: tuple[str, ...]
@@ -67,6 +83,8 @@ class Plan(PrivateRecord):
 
 @dataclass(frozen=True, slots=True)
 class ScheduleEntry:
+    """Assign an NPC scene/activity to a game-tick interval."""
+
     schedule_id: str
     scene_id: str
     start_tick: int
@@ -76,12 +94,16 @@ class ScheduleEntry:
 
 @dataclass(frozen=True, slots=True)
 class NPCRuntimeState:
+    """Group the NPC schedule and current activity claim."""
+
     schedule: tuple[ScheduleEntry, ...]
     current_activity: str | None
 
 
 @dataclass(frozen=True, slots=True)
 class NPCScheduleRun:
+    """Track schedule execution status and actual timing."""
+
     schedule_id: str
     status: Literal["active", "completed", "interrupted", "missed"]
     started_tick: int | None
@@ -91,6 +113,8 @@ class NPCScheduleRun:
 
 @dataclass(frozen=True, slots=True)
 class WorldFactDefinition:
+    """Define objective fact text and its NPC/DM disclosure policy."""
+
     fact_id: str
     text: str
     visibility: Literal["npc_authorized", "dm_only"]
@@ -99,12 +123,16 @@ class WorldFactDefinition:
 
 @dataclass(frozen=True, slots=True)
 class KnownFact:
+    """Expose an objective fact that the NPC is authorized to know."""
+
     fact_id: str
     text: str
 
 
 @dataclass(frozen=True, slots=True)
 class NPCInitialState:
+    """Group configured initial profile, knowledge, cognition and runtime data."""
+
     profile: NPCProfile
     initial_knowledge_ids: tuple[str, ...]
     memories: tuple[EpisodicMemory, ...]
@@ -117,6 +145,8 @@ class NPCInitialState:
 
 @dataclass(frozen=True, slots=True)
 class NPCView:
+    """Expose authorized NPC state/history with configuration and version metadata."""
+
     schema_version: str
     package_digest: str
     session_id: str
@@ -148,19 +178,24 @@ RECORD_TYPES = {
 
 
 def _profile(data):
+    """Restore an NPC profile from its persisted dictionary."""
     return NPCProfile(
         data["role"], tuple(data["personality"]), data["speaking_style"], tuple(data["constraints"])
     )
 
 
 def _runtime(data):
+    """Restore NPC runtime and schedule entries."""
     return NPCRuntimeState(
         tuple(ScheduleEntry(**entry) for entry in data["schedule"]), data["current_activity"]
     )
 
 
 class NPCRuntime:
+    """Initialize and read authorized NPC state without a public cognition-write API."""
+
     def _initialize_npc(self, sid, actor):
+        """Delegate NPC state creation to the initialization coordinator."""
         return self._npc_bootstrap.initialize(sid, actor)
 
     def get_npc_view(self, session_id, npc_id, package, *, context):
@@ -173,6 +208,7 @@ class NPCRuntime:
             return self._npc_view(session_id, npc_id, package, context=context)
 
     def _npc_view(self, session_id, npc_id, package, *, context):
+        """Verify authenticated observer identity before reading the NPC view."""
         observer = self._npc_authorized(session_id, package, context)
         if npc_id != observer:
             raise StateMachineError("unauthorized", "NPC private state belongs to the observer")
@@ -180,6 +216,7 @@ class NPCRuntime:
 
     @scoped_read
     def _npc_current_view(self, session_id, npc_id, package):
+        """Build the current NPC view from profile, cognition records, sources and runtime."""
         row = self._conn.execute(
             "SELECT * FROM npc_states WHERE session_id=? AND npc_id=?",
             (session_id, npc_id),

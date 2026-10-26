@@ -9,7 +9,10 @@ from .world_commands import BarObject, ClearJam, LockObject, PickLock, UnlockObj
 
 
 class OpenableService:
+    """Coordinate opening, lock, bar and jam behavior with world/character facts."""
+
     def __init__(self, handler):
+        """Bind opening services and fact interfaces."""
         self.h = handler
         self.facts = handler.facts
 
@@ -37,6 +40,7 @@ class OpenableService:
         )
 
     def manual_target(self, sid, actor_id, operation, package, *, navigation_scope=None):
+        """Resolve the manual opening target at the actor's passage endpoint."""
         position = self.h._actor_position(sid, actor_id)
         if operation.scene_id != position.scene_id:
             raise StateMachineError("invalid_target", "Interaction must be in the actor's scene")
@@ -59,6 +63,7 @@ class OpenableService:
         )
 
     def lock_status(self, sid, object_id, package):
+        """Read and verify instance lock state, retaining compatibility lock boundaries."""
         locked = self.h.facts.door_lock(sid, object_id)
         definition = self.h.facts.object_definition(sid, object_id)
         configured = any(
@@ -69,6 +74,7 @@ class OpenableService:
         return locked
 
     def validate_lock(self, row, actor_id, operation, package):
+        """Validate lock permissions, placement, credentials and current state."""
         sid = row["session_id"]
         self.h._world_operation_capability(row, operation)
         self.h._world_actor_ready(sid, actor_id)
@@ -151,6 +157,7 @@ class OpenableService:
         return position, passage, locked
 
     def operate_lock(self, row, actor_id, operation, package):
+        """Apply lock state changes and capture their events."""
         position, passage, before = self.validate_lock(row, actor_id, operation, package)
         locked = type(operation) in (LockDoor, LockObject)
         if before == locked:
@@ -181,11 +188,13 @@ class OpenableService:
         ]
 
     def jam_policy(self, sid, oid):
+        """Read the instance's jam transition policy."""
         d = self.facts.object_definition(sid, oid)
         c = d.capability("openable") if d else None
         return c.jam_policy if c else "prevent_transitions"
 
     def validate_transition(self, sid, operation, package, *, candidates=None):
+        """Check candidate opening, threshold occupancy and lock/bar/jam prerequisites."""
         obj = self.facts.object(sid, operation.object_id)
         if obj is None:
             raise StateMachineError("invalid_target", "No object at target")
@@ -218,6 +227,7 @@ class OpenableService:
     def validate_open(
         self, row, actor_id, operation, package, *, origin=None, navigation_scope=None
     ):
+        """Validate a direct or mechanism-origin opening operation."""
         h, sid = self.h, row["session_id"]
         if type(operation.state) is not ObjectState:
             raise StateMachineError("invalid_operation", "Expected a typed ObjectState")
@@ -249,6 +259,7 @@ class OpenableService:
     def operate_open(
         self, row, actor_id, operation, package, *, origin=None, navigation_scope=None
     ):
+        """Change opening state, synchronize affected contents inventory and emit events."""
         self.h.store.require_write()
         passage = self.validate_open(
             row, actor_id, operation, package, origin=origin, navigation_scope=navigation_scope
@@ -280,6 +291,7 @@ class OpenableService:
         ]
 
     def validate_bar(self, row, actor_id, operation, package):
+        """Validate actor, endpoint and capability for a bar operation."""
         h, sid = self.h, row["session_id"]
         h._world_operation_capability(row, operation)
         h._world_actor_ready(sid, actor_id)
@@ -301,6 +313,7 @@ class OpenableService:
             raise StateMachineError("object_must_be_closed", "Close object before barring")
 
     def operate_bar(self, row, actor_id, operation, package):
+        """Change bar state and emit its events."""
         self.h.store.require_write()
         self.validate_bar(row, actor_id, operation, package)
         sid = row["session_id"]
@@ -320,6 +333,7 @@ class OpenableService:
         ]
 
     def prepare_check(self, row, actor_id, op, package):
+        """Prepare opening method, tools and rules check conditions."""
         from dnd5e_engine.evaluation_contracts import CheckPayload
 
         h, sid = self.h, row["session_id"]
@@ -441,6 +455,7 @@ class OpenableService:
         return check, kind, tool, leverage, method, bool(noop)
 
     def apply_check(self, row, actor_id, op, package, plan, *, succeeded):
+        """Apply accepted opening check consequences and emit world events."""
         self.h.store.require_write()
         if not succeeded:
             return []
@@ -513,6 +528,7 @@ class OpenableService:
         return events
 
     def check_availability(self, row, actor_id, op, package):
+        """Build a real rules query to determine opening check availability."""
         from dnd5e_engine.evaluation_openable import OpenableCheckRequest, openable_support_failure
 
         from .commands import TypedCommand

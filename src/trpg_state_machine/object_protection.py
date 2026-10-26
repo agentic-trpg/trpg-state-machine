@@ -26,11 +26,13 @@ MAX_WIND_WORK = 4096
 
 
 def _height(value):
+    """Require a finite height value."""
     if value is not None and (type(value) not in (int, float) or not isfinite(value)):
         raise ValueError("Protection heights must be finite feet or explicitly missing")
 
 
 def _offset(cell):
+    """Validate a bounded local cell offset."""
     if (
         type(cell) is not tuple
         or len(cell) != 2
@@ -61,6 +63,7 @@ class RainProtection:
     local_cells: tuple[tuple[int, int], ...]
 
     def __post_init__(self):
+        """Validate local rain-protection cells."""
         if type(self.local_cells) is not tuple or len(self.local_cells) > MAX_LOCAL_CELLS:
             raise ValueError("Rain protection needs at most 64 immutable local cells")
         for cell in self.local_cells:
@@ -75,11 +78,13 @@ class PrecipitationProtection:
     kinds: tuple[str, ...]
 
     def __post_init__(self):
+        """Validate precipitation protection cells and kinds."""
         RainProtection(self.local_cells)
         validate_precipitation_kinds(self.kinds)
 
 
 def validate_precipitation_kinds(kinds):
+    """Validate the supported precipitation-kind collection."""
     if (
         type(kinds) is not tuple
         or not 1 <= len(kinds) <= 4
@@ -105,6 +110,7 @@ class WindBoundary:
     upper_height_ft: float | None
 
     def __post_init__(self):
+        """Validate wind boundary direction, offset and height."""
         _offset(self.local_cell)
         if self.wind_from not in ORIENTATIONS:
             raise ValueError("Wind boundary requires a cardinal incoming direction")
@@ -130,6 +136,7 @@ class WindProtection:
     boundaries: tuple[WindBoundary, ...]
 
     def __post_init__(self):
+        """Validate wind protection collections and their total budget."""
         if (
             type(self.boundaries) is not tuple
             or len(self.boundaries) > MAX_LOCAL_CELLS
@@ -154,6 +161,7 @@ class CurrentProtectionProperties:
     precipitation: PrecipitationProtection | None = None
 
     def __post_init__(self):
+        """Validate current protection properties and height offsets."""
         if self.rain is not None and type(self.rain) is not RainProtection:
             raise ValueError("Expected typed rain properties")
         if self.wind is not None and type(self.wind) is not WindProtection:
@@ -180,17 +188,23 @@ class CurrentProtectionProvider(Protocol):
         package: "AdventurePackage",
         *,
         candidate: "ObjectSpatialState",
-    ) -> CurrentProtectionProperties | None: ...
+    ) -> CurrentProtectionProperties | None:
+        """Provide current object protection inputs."""
+        ...
 
 
 @dataclass(frozen=True, slots=True)
 class RainContribution:
+    """Represent a projected object contribution to rain protection."""
+
     object_id: str
     cell: str
 
 
 @dataclass(frozen=True, slots=True)
 class PrecipitationContribution:
+    """Represent projected protection for a selected precipitation kind."""
+
     object_id: str
     cell: str
     kind: str
@@ -198,6 +212,8 @@ class PrecipitationContribution:
 
 @dataclass(frozen=True, slots=True)
 class WindContribution:
+    """Represent an object's directional wind protection over cells/heights."""
+
     object_id: str
     cell: str
     lower_height_ft: float
@@ -206,6 +222,8 @@ class WindContribution:
 
 @dataclass(frozen=True, slots=True)
 class ObjectProtectionProjection:
+    """Group one object's projected protection and completeness statuses."""
+
     object_id: str
     scene_id: str | None
     wind_from: Direction
@@ -219,6 +237,7 @@ class ObjectProtectionProjection:
     precipitation_statuses: tuple[tuple[str, str], ...] = ()
 
     def precipitation_status(self, kind):
+        """Read projection status for the requested precipitation kind."""
         if kind == "rain":
             return self.rain_status
         # Legacy configured rain properties declare only rain coverage. Missing
@@ -242,11 +261,14 @@ class ObjectProtectionProjection:
 
 @dataclass(frozen=True, slots=True)
 class SceneProtectionProjection:
+    """Combine object protection projections for scoped environment consumers."""
+
     scene_id: str
     wind_from: Direction
     objects: tuple[ObjectProtectionProjection, ...]
 
     def wind_at(self, cell: str, height_ft: float) -> tuple[WindContribution, ...]:
+        """Combine object wind protection at the requested scene cell and height."""
         _height(height_ft)
         if height_ft is None:
             raise ValueError("Scene height is required")
@@ -260,6 +282,7 @@ def project_protection(oid, state, properties, wind_from, width, height):
     wind_reason = None
 
     def in_bounds(cell):
+        """Return whether the cell lies within scene dimensions."""
         x, y = map(int, cell.split(","))
         return 0 <= x < width and 0 <= y < height
 

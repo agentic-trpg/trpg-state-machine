@@ -4,31 +4,47 @@ from collections import OrderedDict
 
 
 class DerivedCache:
+    """Bound retained derived values and stage publication in successful read scopes."""
+
     def __init__(self, capacity):
+        """Initialize an ordered derived-value cache with a capacity and publication
+        generation.
+        """
         self.capacity = capacity
         self._values = OrderedDict()
         self._generation = 0
 
     def clear(self):
+        """Discard derived values and advance the generation to fence pending publication."""
         self._values.clear()
         self._generation += 1
 
     def release(self, sid):
+        """Drop this Session's entries and advance the publication generation."""
         for key in tuple(self._values):
             if key[0][0] == sid:
                 del self._values[key]
         self._generation += 1
 
     def __len__(self):
+        """Return the retained entry count."""
         return len(self._values)
 
     def _put(self, values, key, value):
+        """Insert or refresh an entry and evict oldest values above capacity."""
         values[key] = value
         values.move_to_end(key)
         while len(values) > self.capacity:
             values.popitem(last=False)
 
     def resolve(self, scope, key, compute, *, validator=None):
+        """Reuse a scoped derived value or compute and retain it pending acceptance.
+
+        Without a scope, compute directly and retain nothing. Within a scope, consult
+        its pending generation before the published cache. New values and optional
+        publication validators remain pending; this lookup does not itself commit or
+        publish them.
+        """
         if scope is None:
             return compute()
         token = (self, self._generation)
@@ -47,6 +63,9 @@ class DerivedCache:
         return value
 
     def publish(self, generation, pending):
+        """Publish pending values only for the current generation and successful
+        validators.
+        """
         if generation == self._generation:
             checks = {}
             for key, (value, validator) in pending.items():

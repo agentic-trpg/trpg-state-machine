@@ -7,6 +7,8 @@ from .package import _fail, _list, _mapping, _reference, _unique
 
 @dataclass(frozen=True, slots=True)
 class LockableDoor:
+    """Define lock credentials and the door associated with a Package lock."""
+
     object_id: str
     initial_locked: bool
     credential_instance_ids: tuple[str, ...]
@@ -14,6 +16,7 @@ class LockableDoor:
 
 
 def validate_locks(raw, scenes, passages, portable):
+    """Validate Package locks, key references and door associations."""
     path = "lockable_doors"
     values = _list(raw, path)
     if len(values) > 64:

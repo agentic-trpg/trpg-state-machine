@@ -13,7 +13,10 @@ from .events import _ActorMotion
 
 
 class SceneLifecycleService:
+    """Coordinate required scene instance creation/loading and entry events."""
+
     def __init__(self, store, sessions, characters, facts, capture, npc_bootstrap, runtime=None):
+        """Bind scene lifecycle storage, runtime and event interfaces."""
         from .event_persistence import EventPersistence
         from .session_runtime import SessionRuntime
 

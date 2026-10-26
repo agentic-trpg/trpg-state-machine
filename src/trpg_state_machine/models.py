@@ -25,12 +25,16 @@ class TrustedContext:
 
 @dataclass(frozen=True, slots=True)
 class PlayerSelection:
+    """Bind a selected player identity to its PC creation template."""
+
     player_id: str
     pc_template_id: str
 
 
 @dataclass(frozen=True, slots=True)
 class CreateSessionRequest:
+    """Carry idempotent creation identity, fixed Package binding and player selection."""
+
     command_id: str
     adventure_id: str
     package_version: str
@@ -54,6 +58,8 @@ class CreationResult:
 
 @dataclass(frozen=True, slots=True)
 class WorldState:
+    """Carry detached world flags and the sole game-clock value/binding."""
+
     flags: dict[str, bool]
     game_tick: int = 0
     time_binding: TimeBinding | LegacyTimeBinding = LegacyTimeBinding()
@@ -61,6 +67,8 @@ class WorldState:
 
 @dataclass(frozen=True, slots=True)
 class SceneInstance:
+    """Carry detached scene visit, flag and object placement facts."""
+
     scene_id: str
     visited_count: int
     local_flags: dict[str, bool]
@@ -70,6 +78,8 @@ class SceneInstance:
 
 @dataclass(frozen=True, slots=True)
 class ActorState:
+    """Carry an actor's identity, kind and authoritative placement projection."""
+
     actor_id: str
     kind: str
     current_scene_id: str
@@ -78,6 +88,8 @@ class ActorState:
 
 @dataclass(frozen=True, slots=True)
 class CharacterState:
+    """Carry detached HP, resources, inventory, effects and experience facts."""
+
     actor_id: str
     current_hp: int
     max_hp: int
@@ -89,6 +101,8 @@ class CharacterState:
 
 @dataclass(frozen=True, slots=True)
 class RNGState:
+    """Carry persisted RNG identity, algorithm, position and encoded state/version."""
+
     state_id: str
     algorithm: str
     encoding: str

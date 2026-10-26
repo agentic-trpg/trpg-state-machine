@@ -12,12 +12,16 @@ from .perception import EventObservation, PerceivedSignal
 
 @dataclass(frozen=True, slots=True)
 class MemoryGateJudgment:
+    """Carry a proposed classification of one observation for NPC work routing."""
+
     work_id: str
     classification: str
 
 
 @dataclass(frozen=True, slots=True)
 class MemoryGateObservation:
+    """Expose observation content and eligibility to the classification gate."""
+
     work_id: str
     observation: EventObservation
     accepted_game_tick: int
@@ -28,6 +32,8 @@ class MemoryGateObservation:
 
 @dataclass(frozen=True, slots=True)
 class MemoryGateInput:
+    """Bundle the fixed NPC observations and versions classified by the gate."""
+
     schema_version: str
     session_id: str
     npc_id: str
@@ -38,6 +44,8 @@ class MemoryGateInput:
 
 @dataclass(frozen=True, slots=True)
 class NPCWorkEligibility:
+    """Describe whether pending observation work can be routed and with what priority."""
+
     work_id: str
     observation_id: str
     classification: str
@@ -50,18 +58,24 @@ class NPCWorkEligibility:
 
 @dataclass(frozen=True, slots=True)
 class NPCModeChange:
+    """Report the resulting NPC mode and associated task changes."""
+
     requested_mode: str
     task: NPCEvaluationTask | None
 
 
 @dataclass(frozen=True, slots=True)
 class NPCObservationRoute:
+    """Report observation routing and its created or retained evaluation work."""
+
     status: str
     task: NPCEvaluationTask | None
     observation_work_ids: tuple[str, ...]
 
 
 class NPCModeRuntime:
+    """Coordinate NPC modes, MemoryGate adoption and observation routing."""
+
     def get_npc_memory_gate_input(
         self, session_id, package, *, context, request_id, observation_work_ids=None
     ):
@@ -167,6 +181,7 @@ class NPCModeRuntime:
             return data
 
     def _memory_gate_input(self, data):
+        """Restore a typed MemoryGate input and its observations."""
         items = []
         for item in data["observations"]:
             observation = item["observation"]
@@ -179,6 +194,7 @@ class NPCModeRuntime:
         return MemoryGateInput(**data)
 
     def _work_occupied(self, work_id):
+        """Return whether active task work already occupies the observation."""
         return (
             self._conn.execute(
                 "SELECT 1 FROM npc_evaluation_observations o JOIN npc_evaluation_tasks t "
@@ -189,6 +205,7 @@ class NPCModeRuntime:
         )
 
     def _eligible_npc_work(self, sid, npc):
+        """Determine pending observation eligibility and priority."""
         occupied = (
             self._conn.execute(
                 "SELECT 1 FROM npc_evaluation_tasks WHERE session_id=? AND npc_id=? "
@@ -246,6 +263,7 @@ class NPCModeRuntime:
             return self._eligible_npc_work(session_id, npc)
 
     def _adopt_memory_gate(self, sid, package, context, request_id, judgments):
+        """Validate and idempotently adopt Host observation classification."""
         self._evaluation_actor(sid, package, context)
         key = (sid, context.observer_id, context.principal_id, request_id)
         saved = self._conn.execute(
@@ -327,12 +345,14 @@ class NPCModeRuntime:
         return result
 
     def _mode(self, sid, npc):
+        """Read the NPC mode, using inactive when no mode row exists."""
         row = self._conn.execute(
             "SELECT mode FROM npc_modes WHERE session_id=? AND npc_id=?", (sid, npc)
         ).fetchone()
         return row[0] if row else "inactive"
 
     def _route_eligible_observations(self, sid, package, context, request_id):
+        """Route eligible observations or create evaluation tasks according to mode."""
         actor = self._evaluation_actor(sid, package, context)
         due = self._eligible_npc_work(sid, context.observer_id)
         if due and due[0].occupied:
@@ -363,6 +383,7 @@ class NPCModeRuntime:
         return NPCObservationRoute("evaluation", task, task.observation_work_ids)
 
     def _set_mode(self, sid, npc, mode):
+        """Persist NPC mode."""
         self._conn.execute(
             "INSERT INTO npc_modes VALUES (?,?,?) ON CONFLICT(session_id,npc_id) "
             "DO UPDATE SET mode=excluded.mode",
@@ -370,6 +391,7 @@ class NPCModeRuntime:
         )
 
     def _evaluation_mode_check(self, sid, npc, mode, gate_authorized):
+        """Check task mode eligibility and maintain related mode records."""
         if mode == "background":
             if not gate_authorized or self._mode(sid, npc) != "inactive":
                 raise StateMachineError(
@@ -379,11 +401,13 @@ class NPCModeRuntime:
             self._set_mode(sid, npc, "interactive")
 
     def get_npc_mode(self, session_id, package, *, context):
+        """Authorize reading the NPC's current mode."""
         with self._transaction():
             npc = self._npc_authorized(session_id, package, context)
             return self._mode(session_id, npc)
 
     def _pending_npc_observations(self, sid, npc):
+        """Read pending observation work within the perception cursor."""
         return self._conn.execute(
             "SELECT w.work_id,w.observation_id FROM npc_observation_work w "
             "JOIN event_observations o USING(observation_id) "
@@ -397,6 +421,9 @@ class NPCModeRuntime:
         ).fetchall()
 
     def _switch_mode(self, sid, package, context, request_id, mode, player_input, background):
+        """Switch interaction mode idempotently, cancelling old tasks and creating new
+        eligible work.
+        """
         actor = self._evaluation_actor(sid, package, context)
         _text(request_id, 128)
         if type(background) is not bool:
@@ -462,6 +489,7 @@ class NPCModeRuntime:
         return NPCModeChange(mode, task)
 
     def request_npc_interaction(self, session_id, player_input, package, *, context, request_id):
+        """Authorize a request to enter NPC interactive mode."""
         _text(player_input)
         with self._transaction(write=True):
             return self._switch_mode(
@@ -469,6 +497,7 @@ class NPCModeRuntime:
             )
 
     def set_npc_inactive(self, session_id, package, *, context, request_id, evaluate_pending=False):
+        """Authorize switching the NPC to inactive mode."""
         with self._transaction(write=True):
             return self._switch_mode(
                 session_id, package, context, request_id, "inactive", None, evaluate_pending
@@ -484,6 +513,7 @@ class NPCModeRuntime:
         classification="uncertain",
         judgments=None,
     ):
+        """Validate external classification and route NPC observation work."""
         _text(request_id, 128)
         if judgments is not None:
             if classification != "uncertain":

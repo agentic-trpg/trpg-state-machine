@@ -11,6 +11,8 @@ from dataclasses import dataclass
 
 @dataclass(frozen=True, slots=True)
 class _Node:
+    """Store one immutable AVL version entry with subtree size and height."""
+
     key: tuple
     value: int
     order: tuple
@@ -21,10 +23,12 @@ class _Node:
 
 
 def _height(node):
+    """Read an immutable tree node's height."""
     return node.height if node else 0
 
 
 def _node(key, value, left=None, right=None):
+    """Construct a version node with size, height and a stable ordering key."""
     return _Node(
         key,
         value,
@@ -37,6 +41,7 @@ def _node(key, value, left=None, right=None):
 
 
 def _balance(key, value, left, right):
+    """Restore AVL balance using structurally shared rotations."""
     if _height(left) - _height(right) > 1:
         if _height(left.left) < _height(left.right):
             pivot = left.right
@@ -61,6 +66,7 @@ def _balance(key, value, left, right):
 
 
 def _set(root, key, order, value):
+    """Insert or replace a version, copying the affected tree path."""
     if root is None:
         return _node(key, value)
     if order == root.order:
@@ -73,6 +79,7 @@ def _set(root, key, order, value):
 
 
 def _delete(root, key, order):
+    """Delete a version while preserving balance, rejecting a missing key."""
     if root is None:
         raise KeyError(key)
     if order < root.order:
@@ -98,14 +105,17 @@ class VersionMap(MutableMapping):
     """A private mutable root handle; forks share only frozen nodes."""
 
     def __init__(self, entries=(), *, root=None):
+        """Initialize the version mapping from entries or a shared immutable root."""
         self._root = root
         for key, value in entries:
             self[key] = value
 
     def fork(self):
+        """Create an isolated version branch by sharing the immutable root."""
         return type(self)(root=self._root)
 
     def __getitem__(self, key):
+        """Read a version by searching the ordered tree."""
         order, node = (key[0], key[1] is not None, key[1] or ""), self._root
         while node is not None:
             if order == node.order:
@@ -114,12 +124,15 @@ class VersionMap(MutableMapping):
         raise KeyError(key)
 
     def __setitem__(self, key, value):
+        """Replace the root with a structurally shared version update."""
         self._root = _set(self._root, key, (key[0], key[1] is not None, key[1] or ""), value)
 
     def __delitem__(self, key):
+        """Replace the root with a structurally shared version deletion."""
         self._root = _delete(self._root, key, (key[0], key[1] is not None, key[1] or ""))
 
     def __iter__(self):
+        """Iterate version keys in order."""
         node, stack = self._root, []
         while node is not None or stack:
             while node is not None:
@@ -130,7 +143,9 @@ class VersionMap(MutableMapping):
             node = node.right
 
     def __len__(self):
+        """Return the version entry count."""
         return self._root.size if self._root else 0
 
     def clear(self):
+        """Release the current root reference."""
         self._root = None

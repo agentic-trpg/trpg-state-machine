@@ -105,6 +105,10 @@ class CheckWorldEffects:
 
 @dataclass(frozen=True, slots=True)
 class TypedCommand:
+    """Carry command identity, expected world version, actor and a closed operation
+    payload.
+    """
+
     session_id: str
     command_id: str
     actor_id: str
@@ -159,6 +163,8 @@ class TypedCommand:
 
 @dataclass(frozen=True, slots=True)
 class CommandReceipt:
+    """Represent the durable command outcome used for idempotent retries."""
+
     session_id: str
     command_id: str
     actor_id: str
@@ -169,12 +175,20 @@ class CommandReceipt:
 
 
 def receipt_from_json(raw: str) -> CommandReceipt:
+    """Decode a durable JSON receipt and restore event sequences as tuples."""
     data = json.loads(raw)
     data["event_seqs"] = tuple(data["event_seqs"])
     return CommandReceipt(**data)
 
 
 def validate_command(command: TypedCommand) -> None:
+    """Validate the command envelope and its closed supported payload shape.
+
+    Check identity strings, expected versions, command/payload tag agreement, schema
+    markers and optional wait references, delegating domain payload validation as
+    needed. Raise structured validation errors; shape validity alone grants no actor
+    authority, world precondition or permission to commit.
+    """
     if type(command) is not TypedCommand or command.schema_version != "sm-command/1":
         raise StateMachineError("invalid_command", "Expected sm-command/1")
     if any(
@@ -336,16 +350,30 @@ def command_fingerprint(command, package, context):
 
 
 class CommandRuntime:
+    """Coordinate authorized command dispatch, savepoints and durable outcomes."""
+
     def _authorize_command(self, row, actor_id, payload, context):
+        """Delegate actor and payload authorization to SessionAccess."""
         return self._sessions._authorize_command(row, actor_id, payload, context)
 
     def _world_operation_capability(self, row, payload):
+        """Check whether SessionAccess admits the requested world operation."""
         return self._sessions._world_operation_capability(row, payload)
 
     def _command_replay(self, command, fingerprint):
+        """Look up an idempotent replay using command identity and fingerprint."""
         return self._session_runtime._command_replay(command, fingerprint)
 
     def submit_command(self, command: TypedCommand, package, *, context) -> CommandReceipt:
+        """Authorize and submit a command, returning its durable idempotent outcome.
+
+        Route actual rules operations to the async evaluation coordinator and synthetic
+        checks to their isolated path. Other domain effects run under a savepoint;
+        ordinary domain refusal rolls back effects before recording a
+        rejected/conflict/choice receipt. Storage, binding and invalid rule-result
+        failures propagate. Successful return follows Store commit/publication; a
+        running event loop requires the async entrypoint for rule commands.
+        """
         validate_command(command)
         with self._transaction():
             admitted = self._session(command.session_id, package, context)
@@ -473,6 +501,7 @@ class CommandRuntime:
         return receipt
 
     def get_command_receipt(self, session_id, command_id, package, *, context):
+        """Authorize access to a command's durable receipt."""
         with self._transaction():
             row = self._session(session_id, package, context)
             receipt = self._session_runtime.receipt(session_id, command_id)

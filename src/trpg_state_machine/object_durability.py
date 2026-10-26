@@ -13,6 +13,8 @@ from .package import canonical_json
 
 @dataclass(frozen=True, slots=True)
 class _ObjectHPSettlement:
+    """Carry internal evidence of an admitted object HP settlement."""
+
     session_id: str
     object_id: str
     resolution_id: str
@@ -22,10 +24,16 @@ class _ObjectHPSettlement:
 
 
 class ObjectDurabilityService:
+    """Apply admitted durability changes and coordinate affected mechanism components."""
+
     def __init__(self, handler):
+        """Bind object durability handling to its runtime."""
         self.handler = handler
 
     def _apply_admitted(self, row, package, result, *, origin):
+        """Apply admitted durability changes, checking execution origin and coordinating
+        destruction/events.
+        """
         h = self.handler
         h.store.require_write()
         if type(result) is not _ObjectHPSettlement or type(origin) is not _WorldEffectOrigin:

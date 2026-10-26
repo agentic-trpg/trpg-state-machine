@@ -35,6 +35,8 @@ if TYPE_CHECKING:
 
 @dataclass(frozen=True, slots=True)
 class ObjectSpatialState:
+    """Combine current object pose, opening and destruction state for projection."""
+
     scene_id: str | None
     anchor: str | None
     orientation: str
@@ -55,6 +57,8 @@ class ObjectSpatialProjection:
 
 @dataclass(frozen=True, slots=True)
 class ObjectProtectionInput:
+    """Carry fixed object/provider inputs for protection projection."""
+
     object_id: str
     state: ObjectSpatialState
     properties: CurrentProtectionProperties | None
@@ -84,22 +88,30 @@ class SceneProtectionInputs:
 
 
 class ObjectSpatialService:
+    """Project object spatial channels and validate scoped placement candidates."""
+
     def __init__(self, handler, *, protection_provider: CurrentProtectionProvider | None = None):
+        """Bind object spatial handling and its protection provider."""
         self.h = handler
         self.protection_provider = protection_provider
 
     @scoped_read
     def config(self, sid, oid):
+        """Read the object's instance spatial capability."""
         d = self.h.facts.object_definition(sid, oid)
         return d.capability("spatial") if d else None
 
     def _legacy(self, sid, oid):
+        """Restore compatibility spatial input from an actual instance or pending creation
+        plan.
+        """
         if self.h.facts.object(sid, oid) is not None:
             return self.h.facts.instances.legacy_object(sid, oid)
         return self.h.facts.instances.pending_object(sid, oid)[1]
 
     @scoped_read
     def state(self, sid, oid, package):
+        """Combine actual placement, facing, opening and damage state."""
         obj = self.h.facts.object(sid, oid)
         if obj is not None:
             return ObjectSpatialState(
@@ -121,6 +133,7 @@ class ObjectSpatialService:
         )
 
     def blocks(self, sid, oid, package, *, candidate=None):
+        """Determine blocking from current or candidate spatial properties."""
         c = self.config(sid, oid)
         if c is None:
             return None
@@ -128,6 +141,7 @@ class ObjectSpatialService:
         return getattr(c, self._property_state(sid, oid, state) + "_blocks_movement")
 
     def _property_state(self, sid, oid, state):
+        """Map zero hit points to destroyed-property state."""
         d = self.h.facts.object_definition(sid, oid)
         durability = d.capability("durability") if d else None
         if (
@@ -140,6 +154,7 @@ class ObjectSpatialService:
 
     def cells(self, package, oid, anchor, orientation="north", *, sid=None):
         # Compatibility for explicitly static geometry callers. Runtime supplies sid.
+        """Compute the complete object footprint from anchor and facing."""
         if sid is None:
             d = self.h.facts.template_object_definition(package, oid)
             c = d.capability("spatial") if d else None
@@ -183,6 +198,9 @@ class ObjectSpatialService:
         return self._project_protection_input(prepared, wind_from)
 
     def _protection_input(self, sid, oid, package, candidate=None, properties=None, *, extent=None):
+        """Prepare fixed object/provider/dimension protection inputs, preserving
+        unsupported reasons.
+        """
         if properties is not None and type(properties) is not CurrentProtectionProperties:
             raise ValueError("Expected typed current protection properties")
         state = candidate if candidate is not None else self.state(sid, oid, package)
@@ -225,6 +243,9 @@ class ObjectSpatialService:
 
     @staticmethod
     def _project_protection_input(prepared, wind_from):
+        """Project protection for the selected wind direction, preserving unknown and
+        explicit empty results.
+        """
         oid, state = prepared.object_id, prepared.state
         if prepared.reason:
             return ObjectProtectionProjection(
@@ -257,6 +278,7 @@ class ObjectSpatialService:
         extents = {}
 
         def extent(scene):
+            """Reuse fixed map dimensions by scene."""
             if scene not in extents:
                 grid = self.h.grid.reader.prepared_scene(sid, scene, package)
                 extents[scene] = (grid.data["width"], grid.data["height"])
@@ -319,6 +341,7 @@ class ObjectSpatialService:
 
     @scoped_read
     def project(self, sid, oid, package, *, candidate=None):
+        """Project current/candidate object properties into independent spatial channels."""
         state = candidate or self.state(sid, oid, package)
         cells = self.cells(package, oid, state.anchor, state.orientation, sid=sid)
         c = self.config(sid, oid)
@@ -337,6 +360,7 @@ class ObjectSpatialService:
 
     @scoped_read
     def target_cells(self, sid, scene_id, oid, package):
+        """Read target occupancy, using the local endpoint for a shared door."""
         ports = self.h._door_ports(scene_id, oid, package, sid=sid)
         if ports:
             return tuple(dict.fromkeys(e.threshold_cell for _, e in ports))
@@ -345,6 +369,7 @@ class ObjectSpatialService:
 
     @scoped_read
     def visible_cells(self, sid, actor, oid, package):
+        """Filter object target cells by the actor's current visibility."""
         position = self.h._public_scope(sid, actor, package)
         targets = self.target_cells(sid, position.scene_id, oid, package)
         base = self.h.grid.base_topology(sid, position.scene_id, package, cells=targets)
@@ -383,6 +408,7 @@ class ObjectSpatialService:
 
     @instance_read("scene", "spatial", "blockers", capacity=8)
     def movement_cells(self, sid, scene_id, package, *, exclude_object=None):
+        """Read current scene object movement-blocking contributions."""
         cells = set()
         doors = {
             p.door_object_id
@@ -498,6 +524,9 @@ class ObjectSpatialService:
         candidates=None,
         error_code="object_placement_blocked",
     ):
+        """Check candidate footprint, facing and local conflicts and return its spatial
+        projection.
+        """
         if type(candidate) is not ObjectSpatialState or candidate.scene_id is None:
             raise StateMachineError("invalid_spatial_state", "Ground candidate required")
         if candidate.scene_id != self.state(sid, oid, package).scene_id:
@@ -541,6 +570,7 @@ class ObjectSpatialService:
         return self.project(sid, oid, package, candidate=candidate)
 
     def _check_shape(self, sid, oid, package, state, projection, error_code):
+        """Check candidate footprint bounds, walls, reserved cells and configuration shape."""
         base = self.h.grid.base_topology(sid, state.scene_id)
         cells = set(projection.occupied_cells)
         if not cells:
@@ -587,6 +617,7 @@ class ObjectSpatialService:
         )
 
     def validate_placement(self, row, actor, op, package):
+        """Validate GM placement/rotation authority and object/position candidates."""
         h, sid = self.h, row["session_id"]
         h._world_operation_capability(row, op)
         h._world_actor_ready(sid, actor)
@@ -623,6 +654,7 @@ class ObjectSpatialService:
         return candidate
 
     def operate(self, row, actor, op, package):
+        """Persist admitted placement/rotation and capture its events."""
         candidate = self.validate_placement(row, actor, op, package)
         h, sid = self.h, row["session_id"]
         before = self.state(sid, op.object_id, package)
@@ -646,6 +678,7 @@ class ObjectSpatialService:
         ]
 
     def audit(self, sid, package):
+        """Enumerate initialized spatial scenes at an explicit audit boundary."""
         for scene in self.h.facts.instances.scenes(sid):
             if (
                 scene.grid_json is not None

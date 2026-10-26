@@ -8,6 +8,7 @@ MAX_TICK = 2147483647  # Preserve the existing command/storage range.
 
 
 def integer(value, path, *, maximum=MAX_TICK, minimum=0, code="invalid_time_query"):
+    """Validate a nonnegative integer within the time value range."""
     if type(value) is not int or not minimum <= value <= maximum:
         raise StateMachineError(code, "Expected a bounded integer", path=path)
     return value
@@ -15,6 +16,8 @@ def integer(value, path, *, maximum=MAX_TICK, minimum=0, code="invalid_time_quer
 
 @dataclass(frozen=True, slots=True)
 class LegacyTimeBinding:
+    """Identify the legacy tick clock without assigning unsupported second-based semantics."""
+
     schema_version: str = "game-clock/1"
 
 
@@ -31,6 +34,7 @@ class TimeBinding:
     night_start: int | None = 64800
 
     def __post_init__(self):
+        """Validate time mode, day length and conversion-field combinations."""
         if type(self.schema_version) is not str or self.schema_version != "world-time/1":
             self._fail("schema_version", "Unsupported time protocol")
         integer(self.day_length, "day_length", minimum=1, code="invalid_time_binding")
@@ -63,10 +67,12 @@ class TimeBinding:
 
     @staticmethod
     def _fail(path, message):
+        """Raise a time binding structure error."""
         raise StateMachineError("invalid_time_binding", message, path=path)
 
 
 def time_binding_from_data(data):
+    """Restore and validate a time binding from its closed field representation."""
     if type(data) is not dict or set(data) != set(asdict(TimeBinding())):
         raise StateMachineError(
             "invalid_time_binding", "Expected complete world-time/1 fields", path="time_binding"

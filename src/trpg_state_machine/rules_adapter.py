@@ -35,10 +35,12 @@ from .session_access import _binding
 
 
 def _invalid(message):
+    """Raise a rules adapter validation error."""
     raise StateMachineError("invalid_rule_result", message)
 
 
 def _json(value):
+    """Convert models and nested data into JSON-compatible values."""
     if hasattr(value, "model_dump"):
         return value.model_dump(mode="json")
     if isinstance(value, (tuple, list, set, frozenset)):
@@ -71,6 +73,7 @@ def delta_changes(request, result):
     affected_actors = budget_owners | {request.payload.target_id}
 
     def edit(component, identity, field, expected, value):
+        """Validate one edit and update the isolated candidate and change list."""
         key = (component, identity, field)
         if key in seen:
             _invalid("Duplicate delta field")
@@ -207,6 +210,7 @@ def delta_changes(request, result):
 
 
 def validate_dnd_result(request, result):
+    """Strictly restore an RE result and validate request, binding, read version and Delta."""
     try:
         result = RuleEvaluationResult.model_validate(copy.deepcopy(result))
         # RE /24 verifies /2 stage coverage against this exact input. Uncovered
@@ -247,6 +251,7 @@ class RulesAdapter:
     """Pinned history-free translation; facts and the outer transaction belong to SM."""
 
     def __init__(self, store, loader, characters, facts, records, world):
+        """Bind the fixed rules loader and character, world and combat interfaces."""
         self.store = store
         self.loader = loader
         self.characters = characters
@@ -256,6 +261,7 @@ class RulesAdapter:
 
     @property
     def _conn(self):
+        """Return the shared rules adapter connection."""
         return self.store.connection
 
     def session_binding(self, row):
@@ -263,6 +269,7 @@ class RulesAdapter:
         return RulesetBinding(**asdict(_binding(row)))
 
     def _pinned_row(self, session_id, package):
+        """Read the Session and verify its fixed Package pin."""
         row = self._conn.execute(
             "SELECT * FROM sessions WHERE session_id=?", (session_id,)
         ).fetchone()
@@ -272,6 +279,7 @@ class RulesAdapter:
         return row
 
     def _verify_dnd_binding(self, package, row=None):
+        """Verify the persisted rules binding against the frozen dataset."""
         if package.legacy_audit_only:
             raise StateMachineError(
                 "legacy_rules_audit_only", "Old mechanical facts require explicit migration"
@@ -293,6 +301,9 @@ class RulesAdapter:
 
     @scoped_read
     def _noncombat_snapshot(self, row, package=None):
+        """Build a complete noncombat snapshot from consistent actors, components, map and
+        lighting.
+        """
         self.records.require_noncombat_save(row)
         sid = row["session_id"]
         if row["mechanical_schema_version"] != "engine-snapshot/17":
@@ -365,6 +376,7 @@ class RulesAdapter:
 
     @scoped_read
     def _combat_snapshot(self, row):
+        """Build a complete fixed combat snapshot from current facts and combat records."""
         sid = row["session_id"]
         if row["mechanical_schema_version"] != "engine-snapshot/17":
             raise StateMachineError(
@@ -404,6 +416,7 @@ class RulesAdapter:
             ) from exc
 
     def _current_cells(self, sid, scene_id, roster, grid):
+        """Read required actor cells and check map consistency and duplicate occupancy."""
         from .grid import cell_in_bounds
 
         topology = self.world.grid.reader.topology_for_grid(sid, scene_id, grid)
@@ -424,9 +437,13 @@ class RulesAdapter:
         return positions
 
     def _rng_context(self, row):
+        """Delegate RNG context reading to the unified runtime."""
         return self.world.runtime.rng_context(row)
 
     def _prepare_combat(self, row, package):
+        """Verify fixed bindings and combat foundations before preparing snapshot and RNG
+        inputs.
+        """
         self._verify_dnd_binding(package, row)
         if package.combat_foundation_json is None:
             raise StateMachineError("unsupported_operation", "Package has no reviewed encounter")
@@ -497,9 +514,11 @@ class RulesAdapter:
         return (snapshot, RNGState.model_validate_json(canonical_json(data["rng_state"])))
 
     async def _evaluate_dnd(self, request):
+        """Invoke stateless evaluation with the selected fixed rules loader."""
         return await evaluate(request, loader=self.loader)
 
     def _dnd_capability(self, payload, actor_id, snapshot):
+        """Determine command support from actual actor, monster and operation state."""
         if type(payload) is CheckPayload:
             return "pending_choice_unsupported" if payload.dc is None else None
         if type(payload) is CombatClosePayload:
@@ -518,6 +537,9 @@ class RulesAdapter:
         return None
 
     def _apply_dnd_changes(self, row, changes):
+        """Adopt verified rules changes through domain interfaces in the shared write
+        scope.
+        """
         self.store.require_write()
         sid = row["session_id"]
         for component, identity, field, value in changes:
@@ -543,6 +565,7 @@ class RulesAdapter:
                 _invalid("Unknown internal component edit")
 
     def request(self, command, package, snapshot, rng, *, row=None):
+        """Build a rules request with durable Session identity and isolated fixed inputs."""
         row = row if row is not None else self._pinned_row(command.session_id, package)
         return RuleEvaluationRequest(
             schema_version="engine-evaluation/24",
@@ -559,6 +582,9 @@ class RulesAdapter:
     def query_availability(
         self, session_id, actor_id, payload, package, snapshot, owner, *, row=None
     ):
+        """Build/query availability and validate response association and support
+        boundaries.
+        """
         row = row if row is not None else self._pinned_row(session_id, package)
         self._verify_dnd_binding(package, row)
         try:

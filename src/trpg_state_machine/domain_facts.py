@@ -23,6 +23,8 @@ _EFFECTS = TypeAdapter(tuple[EffectState, ...])
 
 
 class CharacterFacts:
+    """Maintain authoritative character mechanics and world-linked inventory projections."""
+
     RULE_FIELDS = frozenset(
         (
             "temp_hp",
@@ -57,14 +59,17 @@ class CharacterFacts:
     )
 
     def __init__(self, store, world):
+        """Bind character storage and its cooperating world facts interface."""
         self.store = store
         self.world = world
 
     @property
     def _conn(self):
+        """Return the shared character-facts connection."""
         return self.store.connection
 
     def initialize_pc(self, sid, actor_id, scene_id, pc):
+        """Persist the initial PC character facts."""
         self.store.require_write()
         self._conn.execute(
             "INSERT INTO actors(session_id,actor_id,kind,current_scene_id,cell) "
@@ -85,6 +90,7 @@ class CharacterFacts:
         )
 
     def initialize_npc_actor(self, sid, actor):
+        """Insert an NPC actor and return whether it was newly created."""
         self.store.require_write()
         return bool(
             self._conn.execute(
@@ -103,6 +109,7 @@ class CharacterFacts:
         )
 
     def move(self, sid, actor_id, destination):
+        """Update the actor's authoritative scene and cell position."""
         self.store.require_write()
         self._conn.execute(
             "UPDATE actors SET current_scene_id=?,cell=? WHERE session_id=? AND actor_id=?",
@@ -110,6 +117,7 @@ class CharacterFacts:
         )
 
     def set_hp(self, sid, actor_id, value):
+        """Update the actor's current hit points."""
         self.store.require_write()
         self._conn.execute(
             "UPDATE characters SET current_hp=? WHERE session_id=? AND actor_id=?",
@@ -117,6 +125,7 @@ class CharacterFacts:
         )
 
     def spend_resource(self, sid, actor_id, resource_id, amount):
+        """Read and debit the named character resource, persisting its remaining balance."""
         self.store.require_write()
         row = self._conn.execute(
             "SELECT resources_json FROM characters WHERE session_id=? AND actor_id=?",
@@ -130,6 +139,7 @@ class CharacterFacts:
         )
 
     def award_xp(self, sid, actor_id, value):
+        """Add experience, rejecting a missing character."""
         self.store.require_write()
         current = self._conn.execute(
             "SELECT xp FROM characters WHERE session_id=? AND actor_id=?", (sid, actor_id)
@@ -144,6 +154,7 @@ class CharacterFacts:
         )
 
     def update_rule_metadata(self, sid, actor_id, field, value):
+        """Validate and persist character rules metadata."""
         self.store.require_write()
         if field not in self.RULE_FIELDS:
             raise StateMachineError("invalid_rule_result", "Unsupported actor fact")
@@ -154,6 +165,7 @@ class CharacterFacts:
         )
 
     def initialize_rule_actor(self, row, actor, *, xp=None, encounter=False):
+        """Initialize mechanical actor state consistently with existing character facts."""
         self.store.require_write()
         sid = row["session_id"]
         core = self._conn.execute(
@@ -255,6 +267,7 @@ class CharacterFacts:
 
     @scoped_read
     def _component_inputs(self, row):
+        """Decode and freeze mechanical component inputs with reusable lookup indices."""
         from .component_reads import ComponentInputs
 
         return ComponentInputs(
@@ -265,6 +278,7 @@ class CharacterFacts:
         )
 
     def rule_components(self, sid, owner_ids, *, full_audit=False):
+        """Validate and return rule components for the requested owners."""
         inventory, values = self._validated_rule_components(sid, owner_ids, full_audit=full_audit)
         return {"inventory_state": inventory.model_dump(mode="json"), **values}
 
@@ -291,6 +305,7 @@ class CharacterFacts:
                         slugs.update(self.store.memory.json(core[0]))
 
                 def exists(owner):
+                    """Return whether a mechanical actor with this identity exists."""
                     return (
                         self._conn.execute(
                             "SELECT actor_id FROM mechanical_actors "
@@ -431,6 +446,7 @@ class CharacterFacts:
     def _inventory_model(value):
         # Pinned RE models are strict. JSON arrays represent tuples at this
         # boundary; normalize only that container, never relax scalar checking.
+        """Strictly validate inventory, converting only the JSON entry array to a tuple."""
         entries = value["entries"]
         return InventoryState.model_validate(
             {**value, "entries": tuple(entries)} if isinstance(entries, list) else value
@@ -438,6 +454,7 @@ class CharacterFacts:
 
     @scoped_read
     def _inventory_selection(self, sid, owners, identities):
+        """Select and validate inventory for the requested owner and instance scope."""
         stored = self._conn.execute(
             "SELECT * FROM mechanical_components WHERE session_id=?", (sid,)
         ).fetchone()
@@ -447,6 +464,9 @@ class CharacterFacts:
         return self._inventory_model(selected).model_dump(mode="json")
 
     def project_item_transfer(self, sid, before, after, *, prepared=None):
+        """Preserve item identity/quantity while updating inventory projection after world
+        transfer.
+        """
         self.store.require_write()
         if before["object_id"] != after["object_id"] or before["item_json"] != after["item_json"]:
             raise StateMachineError("invalid_mechanical_state", "Invalid instance transition")
@@ -589,6 +609,7 @@ class CharacterFacts:
 
     @scoped_read
     def _rule_actor(self, sid, actor_id):
+        """Read a mechanical actor and combine its current core character facts."""
         actor = self._conn.execute(
             "SELECT state_json FROM mechanical_actors WHERE session_id=? AND actor_id=?",
             (sid, actor_id),
@@ -613,6 +634,7 @@ class CharacterFacts:
 
     @scoped_read
     def rule_actors(self, sid, owner_ids=None):
+        """Return mechanical actors for the requested owners in stable order."""
         if owner_ids is None:
             owner_ids = tuple(
                 row[0]
@@ -627,6 +649,7 @@ class CharacterFacts:
         }
 
     def position(self, sid, actor_id):
+        """Read authoritative actor position, rejecting a missing character."""
         from .spatial import SpatialPosition
 
         actor = self.world.carrier_position(sid, actor_id)
@@ -636,8 +659,11 @@ class CharacterFacts:
 
 
 class WorldFacts:
+    """Maintain authoritative world facts and access persisted instance configuration."""
+
     @instance_read("scene", "environment", "facts")
     def environment(self, sid, scene_id):
+        """Read and decode the scene's environment facts."""
         from .environment_commands import facts_from_data
 
         row = self._conn.execute(
@@ -647,6 +673,7 @@ class WorldFacts:
         return facts_from_data(self.store.memory.json(row[0])) if row else None
 
     def set_environment(self, sid, scene_id, facts):
+        """Require typed environment facts and persist them for the scene."""
         from dataclasses import asdict
 
         from .environment_models import EnvironmentSceneFacts
@@ -662,12 +689,14 @@ class WorldFacts:
 
     @instance_read("object", None, "facts")
     def object(self, sid, oid):
+        """Read an object row by Session and object identity, or return None."""
         return self._conn.execute(
             "SELECT * FROM objects WHERE session_id=? AND object_id=?", (sid, oid)
         ).fetchone()
 
     @scoped_read
     def carrier_position(self, sid, actor_id):
+        """Read the carrier's current scene and cell position."""
         return self._conn.execute(
             "SELECT current_scene_id,cell FROM actors WHERE session_id=? AND actor_id=?",
             (sid, actor_id),
@@ -675,16 +704,20 @@ class WorldFacts:
 
     @staticmethod
     def template_object_definition(package, oid):
+        """Find the Package object definition used as a creation reference."""
         return next((d for d in package.world_objects if d.object_id == oid), None)
 
     @property
     def instances(self):
+        """Return the instance configuration interface."""
         return self._instances
 
     def object_definition(self, sid, oid):
+        """Read the object's current definition through persisted instance configuration."""
         return self.instances.object_definition(sid, oid)
 
     def __init__(self, store):
+        """Bind world storage and initialize its instance accessor."""
         from .instance_data import InstanceData
 
         self.store = store
@@ -692,9 +725,11 @@ class WorldFacts:
 
     @property
     def _conn(self):
+        """Return the shared world-facts connection."""
         return self.store.connection
 
     def initialize_world(self, sid, package):
+        """Initialize persisted world/object facts and Session instance configuration."""
         self.store.require_write()
         self.instances.initialize_world(sid, package)
         self._conn.executemany(
@@ -714,6 +749,7 @@ class WorldFacts:
         )
 
     def initialize_scene(self, sid, scene_id, package):
+        """Initialize the scene and its instance facts only when not already present."""
         self.store.require_write()
         if self._conn.execute(
             "SELECT 1 FROM scene_instances WHERE session_id=? AND scene_id=?", (sid, scene_id)
@@ -736,6 +772,7 @@ class WorldFacts:
         return True
 
     def initialize_object_capabilities(self, sid, scene_id, package):
+        """Initialize the capability state declared by the object's creation definition."""
         self.store.require_write()
         for d in package.world_objects:
             obj = self.object(sid, d.object_id)
@@ -781,6 +818,7 @@ class WorldFacts:
                 )
 
     def mechanism_status(self, sid, oid):
+        """Read the mechanism status string."""
         row = self._conn.execute(
             "SELECT status FROM object_mechanisms WHERE session_id=? AND object_id=?", (sid, oid)
         ).fetchone()
@@ -788,6 +826,7 @@ class WorldFacts:
 
     @scoped_read
     def mechanism_state(self, sid, oid):
+        """Read and construct the mechanism lifecycle state."""
         from .mechanism_models import MechanismState
 
         row = self._conn.execute(
@@ -798,6 +837,7 @@ class WorldFacts:
         return MechanismState(*row) if row else None
 
     def set_mechanism_state(self, sid, oid, state):
+        """Strictly validate and persist the mechanism lifecycle state."""
         from .mechanism_models import MechanismState
 
         self.store.require_write()
@@ -819,12 +859,14 @@ class WorldFacts:
             raise StateMachineError("invalid_target", "Mechanism not initialized")
 
     def light_state(self, sid, oid):
+        """Read the light's enabled state and selected mode."""
         row = self._conn.execute(
             "SELECT enabled,mode FROM object_lights WHERE session_id=? AND object_id=?", (sid, oid)
         ).fetchone()
         return {"enabled": bool(row[0]), "mode": row[1]} if row else None
 
     def set_light_state(self, sid, oid, enabled, mode):
+        """Validate and update the light switch or mode."""
         self.store.require_write()
         if self.light_state(sid, oid) is None or type(enabled) is not bool or type(mode) is not str:
             raise StateMachineError("unsupported_object_capability", "No valid emitter state")
@@ -834,6 +876,7 @@ class WorldFacts:
         )
 
     def openable_state(self, sid, oid):
+        """Read the object's jam and bar state."""
         row = self._conn.execute(
             "SELECT jammed,barred FROM object_openables WHERE session_id=? AND object_id=?",
             (sid, oid),
@@ -845,6 +888,7 @@ class WorldFacts:
         )
 
     def set_object_bar(self, sid, oid, barred):
+        """Check object/damage prerequisites before changing its bar state."""
         self.store.require_write()
         obj = self.object(sid, oid)
         state = self.openable_state(sid, oid)
@@ -860,6 +904,7 @@ class WorldFacts:
         )
 
     def clear_object_jam(self, sid, oid):
+        """Clear a supported object's jam state."""
         self.store.require_write()
         if self.openable_state(sid, oid) is None:
             raise StateMachineError("unsupported_object_capability", "No jam state")
@@ -870,6 +915,7 @@ class WorldFacts:
         )
 
     def object_hp(self, sid, oid):
+        """Read the object's current durability hit points."""
         row = self._conn.execute(
             "SELECT current_hp FROM object_durability WHERE session_id=? AND object_id=?",
             (sid, oid),
@@ -877,6 +923,7 @@ class WorldFacts:
         return row[0] if row else None
 
     def apply_object_hp(self, sid, oid, expected, value):
+        """Validate and update object durability hit points."""
         self.store.require_write()
         if (
             type(value) is not int
@@ -890,6 +937,7 @@ class WorldFacts:
             raise StateMachineError("invalid_rule_result", "Invalid durability transition")
 
     def visit(self, sid, scene_id):
+        """Record a scene visit."""
         self.store.require_write()
         self._conn.execute(
             "UPDATE scene_instances SET visited_count=visited_count+1 "
@@ -898,6 +946,7 @@ class WorldFacts:
         )
 
     def place(self, sid, object_id, cell, *, orientation=None):
+        """Require an ordinary object and update its authoritative placement."""
         self.store.require_write()
         self.require_ordinary_object(sid, object_id)
         self._conn.execute(
@@ -907,6 +956,7 @@ class WorldFacts:
         )
 
     def switch(self, sid, object_id, state, *, jam_policy="prevent_transitions"):
+        """Validate an opening transition and update the object's open state."""
         self.store.require_write()
         self.validate_door_switch(sid, object_id, state, jam_policy=jam_policy)
         self._conn.execute(
@@ -914,6 +964,7 @@ class WorldFacts:
         )
 
     def locks_for_object(self, sid, oid):
+        """Read lock states associated with the object."""
         return self._conn.execute(
             "SELECT lock_id,locked FROM door_locks WHERE session_id=? AND object_id=? "
             "ORDER BY lock_id",
@@ -921,6 +972,7 @@ class WorldFacts:
         ).fetchall()
 
     def door_lock(self, sid, object_id):
+        """Combine lock and object facts into the current locking state."""
         locks = self.locks_for_object(sid, object_id)
         if not locks:
             return None
@@ -936,6 +988,7 @@ class WorldFacts:
     def validate_door_switch(
         self, sid, object_id, state, *, jam_policy="prevent_transitions", current_state=None
     ):
+        """Check damage, jam, bar and lock prerequisites for changing a door's open state."""
         if jam_policy not in ("prevent_transitions", "prevent_opening", "prevent_closing"):
             raise StateMachineError("invalid_rule_result", "Unknown jam policy")
         if state not in ("open", "closed"):
@@ -958,6 +1011,7 @@ class WorldFacts:
             raise StateMachineError("door_locked", "Door is locked")
 
     def set_door_lock(self, sid, object_id, locked, lock_id=None):
+        """Validate lock/object damage relationships and persist the lock state."""
         self.store.require_write()
         if self.door_lock(sid, object_id) is None:
             raise StateMachineError("unsupported_object_capability", "Door has no lock")
@@ -981,6 +1035,7 @@ class WorldFacts:
         )
 
     def initialize_locks(self, row, package):
+        """Initialize locks and their accepted credential relationships."""
         self.store.require_write()
         if row["world_version"] or row["event_seq"]:
             raise StateMachineError("invalid_lock_foundation", "Locks require a fresh session")
@@ -1018,6 +1073,7 @@ class WorldFacts:
             )
 
     def accepts_credential(self, sid, object_id, instance_id, lock_id=None):
+        """Return whether the credential is accepted by this object's lock."""
         return (
             self._conn.execute(
                 "SELECT 1 FROM door_credentials WHERE session_id=? AND object_id=? "
@@ -1028,6 +1084,7 @@ class WorldFacts:
         )
 
     def require_ordinary_object(self, sid, object_id):
+        """Reject an object that does not qualify for ordinary object operations."""
         row = self._conn.execute(
             "SELECT item_json FROM objects WHERE session_id=? AND object_id=?", (sid, object_id)
         ).fetchone()
@@ -1037,6 +1094,7 @@ class WorldFacts:
             )
 
     def initialize_items(self, row, package, loader):
+        """Initialize portable item instances and their related records."""
         self.store.require_write()
         sid = row["session_id"]
         if row["world_version"] or row["event_seq"]:
@@ -1078,6 +1136,7 @@ class WorldFacts:
             )
 
     def placement(self, sid, oid, *, row=None):
+        """Resolve scene, carrier and cell placement through the container ancestors."""
         obj = row if row is not None else self.object(sid, oid)
         if obj is None:
             raise StateMachineError("invalid_target", "Missing object")
@@ -1106,6 +1165,7 @@ class WorldFacts:
         }
 
     def item_accessible(self, sid, oid, *, row=None, include_self=True):
+        """Return whether the item and its ancestor containers permit contents access."""
         from .world_openable import OpenableService
 
         placement = self.placement(sid, oid, row=row)
@@ -1118,12 +1178,14 @@ class WorldFacts:
 
     @instance_read("object", "container", "contents")
     def contents(self, sid, oid):
+        """Read the direct contents of the parent object."""
         return self._conn.execute(
             "SELECT * FROM objects WHERE session_id=? AND container_id=? ORDER BY object_id",
             (sid, oid),
         ).fetchall()
 
     def descendant_objects(self, sid, roots):
+        """Read the complete descendant closure of the specified root object."""
         found, visited, pending = {}, set(), list(roots)
         while pending:
             oid = pending.pop()
@@ -1224,6 +1286,7 @@ class WorldFacts:
             memory.scene_association(table, sid, scene_id)
 
     def _discover_capability_ids(self, sid, scene_id, table):
+        """Discover capability-bearing object identities associated with the scene."""
         if not self._has_capability(sid, table):
             return ()
         pending = list(self.direct_objects(sid, scene_id))
@@ -1259,6 +1322,7 @@ class WorldFacts:
 
     @scoped_read(membership=("object_lights", "object_mechanisms"))
     def _has_capability(self, sid, table):
+        """Return whether the object has a record for this capability."""
         return (
             self._conn.execute(
                 f"SELECT 1 FROM {table} WHERE session_id=? LIMIT 1", (sid,)
@@ -1278,6 +1342,7 @@ class WorldFacts:
 
     @scoped_read
     def item_entry(self, row):
+        """Convert the persisted item row into a mechanical inventory entry."""
         sid, oid = row["session_id"], row["object_id"]
         data = self.require_item_unit(row)
         placement = self.placement(sid, oid, row=row)
@@ -1287,12 +1352,16 @@ class WorldFacts:
         return {"instance_id": oid, "owner_id": placement["carrier_id"], **data}
 
     def require_item_unit(self, row):
+        """Validate and return quantity data for one portable item instance."""
         data = self.store.memory.json(row["item_json"]) if row["item_json"] is not None else None
         if not valid_item_unit(data):
             raise StateMachineError("invalid_mechanical_state", "Portable unit metadata is invalid")
         return data
 
     def portable_inventory(self, sid, *, owner_ids=None, instance_ids=()):
+        """Build portable inventory and its identity set for the requested owner/instance
+        scope.
+        """
         identities, entries = set(), {}
         if owner_ids is None:
             rows = self._conn.execute(
@@ -1329,6 +1398,9 @@ class WorldFacts:
     def transfer_item(
         self, sid, before, *, carrier_id=None, scene_id=None, cell=None, container_id=None
     ):
+        """Update the item's unique ownership and containment relationship in a write
+        scope.
+        """
         self.store.require_write()
         current = self._conn.execute(
             "SELECT * FROM objects WHERE session_id=? AND object_id=?", (sid, before["object_id"])
@@ -1345,6 +1417,7 @@ class WorldFacts:
         ).fetchone()
 
     def object_position(self, sid, object_id):
+        """Resolve the object's current spatial position."""
         obj = self.object(sid, object_id)
         return (
             {
@@ -1357,6 +1430,7 @@ class WorldFacts:
         )
 
     def scene_flags(self, sid, scene_id):
+        """Read the scene flags dictionary."""
         row = self._conn.execute(
             "SELECT flags_json FROM scene_instances WHERE session_id=? AND scene_id=?",
             (sid, scene_id),
@@ -1364,6 +1438,7 @@ class WorldFacts:
         return self.store.memory.json(row[0]) if row else None
 
     def set_scene_flags(self, sid, scene_id, flags):
+        """Persist scene flags."""
         self.store.require_write()
         self._conn.execute(
             "UPDATE scene_instances SET flags_json=? WHERE session_id=? AND scene_id=?",
@@ -1371,10 +1446,12 @@ class WorldFacts:
         )
 
     def set_tick(self, sid, tick):
+        """Persist the authoritative world game tick."""
         self.store.require_write()
         self._conn.execute("UPDATE world_states SET game_tick=? WHERE session_id=?", (tick, sid))
 
     def initialize_time_binding(self, sid, binding):
+        """Initialize the Session's time binding."""
         from dataclasses import asdict
 
         self.store.require_write()
@@ -1384,6 +1461,7 @@ class WorldFacts:
 
     @scoped_read
     def _time_binding(self, sid):
+        """Read and decode the persisted time binding."""
         from .time_binding import LegacyTimeBinding, time_binding_from_data
 
         row = self._conn.execute(
@@ -1395,6 +1473,7 @@ class WorldFacts:
         )
 
     def time_state(self, sid):
+        """Return the current game time state."""
         row = self._conn.execute(
             "SELECT game_tick FROM world_states WHERE session_id=?", (sid,)
         ).fetchone()
@@ -1403,6 +1482,7 @@ class WorldFacts:
         return self._time_binding(sid), row[0]
 
     def initialize_rule_scene(self, sid, scene):
+        """Initialize rules scene facts."""
         self.store.require_write()
         self._conn.execute(
             "INSERT INTO mechanical_scenes(session_id,scene_id,state_json) VALUES (?,?,?)",
@@ -1410,6 +1490,7 @@ class WorldFacts:
         )
 
     def initialize_mechanical_scene(self, sid, scene_id, package):
+        """Initialize the mechanical scene map and instance records."""
         self.store.require_write()
         definition = package.scene(scene_id)
         if definition.grid_json is not None:
@@ -1442,6 +1523,7 @@ class WorldFacts:
             )
 
     def spatial_scene(self, sid, scene_id):
+        """Read a supported spatial scene configuration."""
         scene = self.maps.scene(sid, scene_id, spatial_only=True)
         return scene.copy_data() if scene else None
 
@@ -1449,6 +1531,7 @@ class WorldFacts:
     def maps(self):
         # Grid owns the representation; Store owns its bounded lifetime. All
         # Facts/Reader instances on this connection use the same disposable pool.
+        """Return the shared map access interface."""
         from .grid_maps import GridMaps
 
         if self.store._grid_maps is None:
@@ -1456,11 +1539,14 @@ class WorldFacts:
         return self.store._grid_maps
 
     def mechanical_scene(self, sid, scene_id):
+        """Read the persisted mechanical scene and its map."""
         scene = self.maps.scene(sid, scene_id)
         return scene.copy_data() if scene else None
 
 
 class CombatRecords:
+    """Persist encounter workflow and advancement records alongside shared character facts."""
+
     RULE_FIELDS = frozenset(
         (
             "current_turn_index",
@@ -1478,13 +1564,16 @@ class CombatRecords:
     )
 
     def __init__(self, store):
+        """Bind combat records to shared storage."""
         self.store = store
 
     @property
     def _conn(self):
+        """Return the combat-records connection."""
         return self.store.connection
 
     def initialize(self, sid, snapshot, *, spatial, process_id):
+        """Initialize combat runtime records."""
         self.store.require_write()
         self._conn.execute(
             "INSERT INTO combats VALUES (?,?,?,?,?)",
@@ -1498,6 +1587,7 @@ class CombatRecords:
         )
 
     def freeze_positions(self, sid, cells):
+        """Freeze position evidence for the closing combat."""
         self.store.require_write()
         self._conn.execute(
             "UPDATE combats SET state_json=json_set(state_json,'$.actor_zone',json(?)) "
@@ -1506,6 +1596,7 @@ class CombatRecords:
         )
 
     def update_rule_state(self, sid, field, value):
+        """Persist combat mechanical state."""
         self.store.require_write()
         if field not in self.RULE_FIELDS:
             raise StateMachineError("invalid_rule_result", "Unsupported combat fact")
@@ -1515,6 +1606,7 @@ class CombatRecords:
         )
 
     def update_ledger(self, sid, actor_id, value):
+        """Persist the combat advancement ledger."""
         self.store.require_write()
         self._conn.execute(
             "UPDATE combats SET state_json=json_set(state_json,?,json(?)) WHERE session_id=?",
@@ -1522,12 +1614,14 @@ class CombatRecords:
         )
 
     def active(self, session_id):
+        """Read the currently active combat, or return None."""
         combat = self._conn.execute(
             "SELECT state_json FROM combats WHERE session_id=?", (session_id,)
         ).fetchone()
         return bool(combat and not self.store.memory.json(combat[0])["ended"])
 
     def require_noncombat_save(self, row):
+        """Reject a save outside the supported noncombat boundary."""
         combat = self._conn.execute(
             "SELECT state_json FROM combats WHERE session_id=?", (row["session_id"],)
         ).fetchone()

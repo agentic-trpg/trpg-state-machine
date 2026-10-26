@@ -14,6 +14,8 @@ from .scoped_reads import scoped_read
 
 @dataclass(frozen=True, slots=True)
 class NPCEvaluationTask:
+    """Represent durable NPC evaluation identity, status and fixed version associations."""
+
     schema_version: str
     evaluation_id: str
     session_id: str
@@ -32,6 +34,8 @@ class NPCEvaluationTask:
 
 @dataclass(frozen=True, slots=True)
 class NPCEvaluationInput:
+    """Bundle an authorized task's fixed Meta and observation inputs."""
+
     task: NPCEvaluationTask
     npc_meta: NPCView
     observations: tuple[EventObservation, ...]
@@ -39,6 +43,7 @@ class NPCEvaluationInput:
 
 
 def _text(value, maximum=4096):
+    """Require bounded, nonempty text input."""
     if type(value) is not str or not value.strip() or len(value) > maximum:
         raise StateMachineError("invalid_evaluation", "Expected bounded nonempty text")
     try:
@@ -49,7 +54,10 @@ def _text(value, maximum=4096):
 
 
 class NPCEvaluationRuntime:
+    """Create and read authorized NPC evaluations with fixed observation scope."""
+
     def _evaluation_actor(self, sid, package, context):
+        """Authorize and read the controlled NPC evaluation actor."""
         npc = self._npc_authorized(sid, package, context)
         row = self._conn.execute(
             "SELECT * FROM npc_states WHERE session_id=? AND npc_id=?", (sid, npc)
@@ -59,6 +67,7 @@ class NPCEvaluationRuntime:
         return row
 
     def _evaluation_row(self, evaluation_id, package, context):
+        """Validate evaluation identity and read the authorized NPC's task."""
         _text(evaluation_id, 128)
         if type(context) is not NPCContext:
             raise StateMachineError("unauthorized", "Expected trusted NPC Context")
@@ -77,6 +86,7 @@ class NPCEvaluationRuntime:
 
     @scoped_read
     def _task(self, row):
+        """Restore a typed task from its persisted row and associated observations."""
         works = self._conn.execute(
             "SELECT w.work_id,w.observation_id FROM npc_evaluation_observations t "
             "JOIN npc_observation_work w USING(work_id) WHERE evaluation_id=? ORDER BY ordinal",
@@ -140,6 +150,14 @@ class NPCEvaluationRuntime:
         player_input=None,
         gate_authorized=False,
     ):
+        """Create or replay an authorized NPC task with fixed observation associations.
+
+        Check request fingerprint, expected NPC version, mode, occupied work and
+        eligible perception inputs. Persist the task and input references together in
+        the existing write scope, returning the typed task. A matching request replays;
+        conflicting or ineligible work is rejected without launching an external model
+        call here.
+        """
         actor = self._evaluation_actor(sid, package, context)
         _text(request_id, 128)
         _text(reason)
@@ -248,6 +266,7 @@ class NPCEvaluationRuntime:
         )
 
     def get_npc_evaluation_task(self, evaluation_id, package, *, context):
+        """Authorize and read task, Meta, associated observations and Recent inputs."""
         with self._transaction():
             row = self._evaluation_row(evaluation_id, package, context)
             task = self._task(row)
@@ -277,6 +296,7 @@ class NPCEvaluationRuntime:
             return NPCEvaluationInput(task, meta, observations, recent)
 
     def _task_recent_ids(self, row):
+        """Read the Recent observation identities already fixed for the task."""
         return {
             r[0]
             for r in self._conn.execute(
@@ -286,6 +306,7 @@ class NPCEvaluationRuntime:
         }
 
     def _task_recent_observations(self, row):
+        """Build the task's Recent observations and retention state."""
         return tuple(
             RecentObservation(self._observation(r), self._retention(r))
             for r in self._observation_rows(
@@ -299,6 +320,7 @@ class NPCEvaluationRuntime:
     def _meta_observation_scope(self, row):
         # Original Work grants survive TTL for safe in-flight/recovery processing.
         # Completed background OB requires both immutable Task grant and validity now.
+        """Determine the task observation scope available to Meta changes."""
         return set(self._task(row).source_observation_ids) | {
             item["observation_id"]
             for item in self._observation_rows(
@@ -332,6 +354,7 @@ class NPCEvaluationRuntime:
             )
 
     def list_npc_evaluation_tasks(self, session_id, package, *, context):
+        """Authorize listing the NPC's durable evaluation tasks."""
         with self._transaction():
             npc = self._npc_authorized(session_id, package, context)
             return tuple(

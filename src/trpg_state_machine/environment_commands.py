@@ -20,36 +20,48 @@ from .environment_models import (
 
 @dataclass(frozen=True, slots=True)
 class InitializeEnvironment:
+    """Request initial environment facts for one scene."""
+
     scene_id: str
     facts: EnvironmentSceneFacts
 
 
 @dataclass(frozen=True, slots=True)
 class SetEnvironmentBase:
+    """Request replacement of the scene's base environment conditions."""
+
     scene_id: str
     conditions: EnvironmentConditions
 
 
 @dataclass(frozen=True, slots=True)
 class AddEnvironmentSource:
+    """Request insertion of a local environment contribution."""
+
     scene_id: str
     source: EnvironmentSource
 
 
 @dataclass(frozen=True, slots=True)
 class ReplaceEnvironmentSource:
+    """Request replacement of an identified environment source."""
+
     scene_id: str
     source: EnvironmentSource
 
 
 @dataclass(frozen=True, slots=True)
 class RemoveEnvironmentSource:
+    """Request removal of an identified environment source."""
+
     scene_id: str
     source_id: str
 
 
 @dataclass(frozen=True, slots=True)
 class SetEnvironmentProtection:
+    """Request replacement of static scene protection."""
+
     scene_id: str
     protection: SceneEnvironmentProtection
 
@@ -66,6 +78,8 @@ EnvironmentMutation = (
 
 @dataclass(frozen=True, slots=True)
 class BatchEnvironment:
+    """Group ordered environment mutations into one controlled operation."""
+
     changes: tuple[EnvironmentMutation, ...]
 
 
@@ -82,6 +96,7 @@ ENVIRONMENT_OPERATIONS = tuple(ENVIRONMENT_COMMANDS.values())
 
 
 def validate_environment_operation(op):
+    """Validate the closed environment operation and batch mutation shape."""
     if type(op) is BatchEnvironment:
         if type(op.changes) is not tuple or not 1 <= len(op.changes) <= MAX_BATCH:
             invalid("Batch requires 1..16 immutable mutations")
@@ -122,6 +137,7 @@ def environment_operation_to_data(op):
 
     # Adding an optional shelter field must preserve historical command receipts.
     def legacy_protection(value):
+        """Normalize default representations in compatibility protection data."""
         if type(value) is dict:
             if "rain_cells" in value and "wind" in value and value.get("precipitation") is None:
                 value.pop("precipitation", None)
@@ -136,6 +152,7 @@ def environment_operation_to_data(op):
 
 
 def _decode(cls, raw, converters=None):
+    """Decode exact dataclass fields with controlled field conversions."""
     if type(raw) is not dict or set(raw) - {f.name for f in fields(cls)}:
         invalid("Unknown environment mapping fields")
     values = dict(raw)
@@ -149,12 +166,14 @@ def _decode(cls, raw, converters=None):
 
 
 def _tuple(raw, convert, maximum):
+    """Validate array size and convert each item into a tuple entry."""
     if type(raw) not in (list, tuple) or len(raw) > maximum:
         invalid("Invalid bounded environment sequence")
     return tuple(convert(v) for v in raw)
 
 
 def conditions_from_data(raw):
+    """Restore typed environment conditions."""
     return _decode(
         EnvironmentConditions,
         raw,
@@ -163,6 +182,7 @@ def conditions_from_data(raw):
 
 
 def area_from_data(raw):
+    """Restore an area and its height interval."""
     return _decode(
         EnvironmentArea,
         raw,
@@ -174,6 +194,7 @@ def area_from_data(raw):
 
 
 def source_from_data(raw):
+    """Restore an environment source definition."""
     return _decode(
         EnvironmentSource,
         raw,
@@ -185,6 +206,7 @@ def source_from_data(raw):
 
 
 def protection_from_data(raw):
+    """Restore static wind and precipitation protection."""
     return _decode(
         SceneEnvironmentProtection,
         raw,
@@ -218,6 +240,7 @@ def protection_from_data(raw):
 
 
 def facts_from_data(raw):
+    """Restore complete scene environment facts."""
     return _decode(
         EnvironmentSceneFacts,
         raw,
@@ -230,6 +253,7 @@ def facts_from_data(raw):
 
 
 def environment_operation_from_data(kind, raw):
+    """Decode and validate the tagged environment operation."""
     if type(kind) is not str:
         invalid("Environment command type must be a string")
     cls = ENVIRONMENT_COMMANDS.get(kind)
@@ -238,6 +262,7 @@ def environment_operation_from_data(kind, raw):
     if cls is BatchEnvironment:
 
         def mutation(v):
+            """Restore one tagged mutation within the batch list."""
             if type(v) is not dict or set(v) != {"command_type", "payload"}:
                 invalid("Batch wire mutations require command_type and payload")
             if v["command_type"] == "world.batch_environment":

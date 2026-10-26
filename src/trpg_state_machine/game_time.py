@@ -9,6 +9,8 @@ from .package import canonical_json
 
 @dataclass(frozen=True, slots=True)
 class AdvanceGameTime:
+    """Request a bounded advancement of the legacy game clock."""
+
     expected_tick: int
     next_tick: int
 
@@ -53,6 +55,7 @@ def sync_npc_schedules(runtime, sid, command_id, package):
         changed = False
 
         def record(entry, status, previous=None, *, npc=npc):
+            """Record a schedule transition and capture its event-stage evidence."""
             nonlocal changed
             if previous is None:
                 db.execute(

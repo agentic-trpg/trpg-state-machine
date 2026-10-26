@@ -21,6 +21,7 @@ _PROCESS_TOKEN = uuid4().hex
 
 
 def process_id():
+    """Return the process identity including this interpreter's private token."""
     return f"{os.getpid()}:{_PROCESS_TOKEN}"
 
 
@@ -48,6 +49,7 @@ def validate_foundation(value):
 
 
 def validate_noncombat_foundation(value):
+    """Validate noncombat foundation, scene, actor and isolated RNG inputs."""
     if type(value) is not dict or set(value) != {
         "snapshot",
         "rng_state",
@@ -91,6 +93,7 @@ def validate_noncombat_foundation(value):
 
 
 def _remap(value, old, new):
+    """Recursively replace selected identity keys and values in structured data."""
     if isinstance(value, dict):
         return {new if k == old else k: _remap(v, old, new) for k, v in value.items()}
     if isinstance(value, list):

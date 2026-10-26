@@ -12,6 +12,9 @@ from .object_protection import transform_local_cells
 
 
 def spatial_cells(config, anchor, orientation, state, hp):
+    """Derive spatial cell index rows from authoritative occupancy and instance
+    configuration.
+    """
     if anchor is None:
         return "[]"
     data = json.loads(config) if config else {}

@@ -5,6 +5,7 @@ from functools import partial, wraps
 
 
 def _key(value):
+    """Build a stage-local memo key for supported argument values."""
     if hasattr(value, "runtime_key"):
         return value.runtime_key()
     if hasattr(value, "package_digest"):
@@ -21,11 +22,15 @@ def _key(value):
 
 
 def scoped_read(method=None, *, membership=()):
+    """Decorate a read for reuse within one UnitOfWork mutation stage."""
     if method is None:
         return partial(scoped_read, membership=membership)
 
     @wraps(method)
     def read(self, *args, **kwargs):
+        """Read within the scope, clearing memoized results when the mutation stage
+        changes.
+        """
         store = (
             self.h.store
             if hasattr(self, "h")

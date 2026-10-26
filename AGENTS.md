@@ -1,3 +1,9 @@
+<!-- Current entry, 2026-10-27: dated NOT IMPLEMENTED/branch-only notes below
+retain their historical scope. Current SM main b9ae704 contains the scoped SessionMemory,
+instance-field and passage-index implementation; this prose batch does not close its
+remaining recovery/multiplayer limits. Resolve required sibling documents from the
+logical parallel workspace. -->
+
 ## Project Architecture Authority
 
 2026-10-22 runtime instance ownership: read the paired [MC §2.3a](https://github.com/agentic-trpg/agentic-trpg/blob/docs/runtime-instance-ownership/docs/MODULE_CONTRACTS.md#23a-实例字段关联与局部准入-decided) and the [local inventory and acceptance](docs/reviews/RUNTIME_INSTANCE_OWNERSHIP.md). The paired docs branch is not main; in this task its logical sibling is `.worktrees/runtime-instance-ownership/agentic-trpg`. Follow target-instance fields/associations/indices and affected candidate dependencies; ordinary queries and operations must not replace these with Session/Scene scans or Full Audit. Runtime fields belong to the existing SessionMemory/UnitOfWork publication, with immutable owner replacements, bounded retention, rollback isolation and per-connection recovery invalidation. Check real consumers before claiming completion; do not introduce another Session/transaction authority.
@@ -56,3 +62,15 @@ Requirements:
 - Inventory every real write path, including Meta/Task/modes, time, Activity/Effects, mechanism chains and background work. Maintenance/import/migration needs an explicit stop/reload boundary. Loading/cold data/recovery use persisted instances consistently, never Package defaults for existing fields.
 - Future implementation validation must jointly inspect SQL, current RAM, old reading references/fixed Snapshots, indexes, caches and restart recovery. Cover rollback/unknown commit/post-commit publication failure/lost response, retries/stale NPC results/concurrent taking, loading/unloading/cold data and deterministic scale counters. Existing operation memo, Schema40, GridMaps and Environment acceptance are not complete RAM-layer evidence. Cross-command weight/mechanism reuse remains NOT IMPLEMENTED until independently proven.
 - Preserve domain ownership, current public DTO/Schema/RE pin, Stateless RE and single-player MVP. Concrete data structures, fine-grained versions and APIs remain OPEN; future 5–6-player load is a separate measured target. Docs-only work does not authorize implementation or runtime test claims.
+
+## Source documentation maintenance (2026-10-27)
+
+- Follow [the shared source documentation standard](../agentic-trpg/docs/CODE_DOCUMENTATION.md).
+  New modules/classes/functions need proportionate docstrings; changed responsibilities,
+  inputs/outputs, side effects or constraints require synchronized explanations. Preserve
+  stronger existing constraints and review prose against implementation. Plans belong in
+  contracts; current docstrings are the future index's maintained functional explanation.
+- Use the applicable repository workflows in `.agents/skills/`: `trpg-runtime-change`, `trpg-locality-review`, `trpg-atomicity-review`, `trpg-code-documentation`.
+  Read each matching SKILL.md explicitly when needed; these mandatory requirements do
+  not depend on automatic triggering. Resolve sibling DOC paths from the logical workspace
+  root. Keep the SM/RE documentation workflow copies consistent with the one shared standard.

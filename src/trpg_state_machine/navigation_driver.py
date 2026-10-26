@@ -11,6 +11,8 @@ from .package import canonical_json
 
 @dataclass(frozen=True, slots=True)
 class NavigationPumpResult:
+    """Report bounded navigation pump progress and its stopping outcome."""
+
     activity: NavigationActivity
     receipts: tuple[CommandReceipt, ...]
     stop_reason: str

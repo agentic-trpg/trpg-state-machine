@@ -18,6 +18,9 @@ class ContainmentState(Mapping):
     """
 
     def __init__(self, rows, *, source_stage=None, source_scope=None):
+        """Copy candidate rows and prepare containment adjacency, definitions and local
+        weight memo.
+        """
         self._rows, self.children = {}, {}
         for r in rows.values():
             oid = r["object_id"]
@@ -30,19 +33,28 @@ class ContainmentState(Mapping):
         self.weight_dirty = set()
 
     def __getitem__(self, key):
+        """Read an isolated candidate object row by identity."""
         return self._rows[key]
 
     def __iter__(self):
+        """Iterate candidate object identities."""
         return iter(self._rows)
 
     def __len__(self):
+        """Return the candidate object count."""
         return len(self._rows)
 
     def contents(self, oid):
+        """Read direct contents through the adjacency bucket."""
         return tuple(self._rows[i] for i in self.children.get(oid, ()))
 
     def relocate(self, oid, **changes):
+        """Relocate the isolated candidate, mark old/new ancestors dirty and clear local
+        weight memo.
+        """
+
         def ancestors(current):
+            """Collect candidate ancestors while guarding against cycles."""
             result = set()
             while current in self._rows and current not in result:
                 result.add(current)
@@ -63,17 +75,26 @@ class ContainmentState(Mapping):
         self.weights.clear()
 
     def definition(self, facts, oid):
+        """Reuse the instance definition for the candidate object."""
         if oid not in self.definitions:
             self.definitions[oid] = facts.object_definition(self[oid]["session_id"], oid)
         return self.definitions[oid]
 
 
 class ContainerService:
+    """Validate containment/access and maintain candidate subtree weight and transfer
+    behavior.
+    """
+
     def __init__(self, handler):
+        """Bind container handling to world facts and its coordinator."""
         self.h = handler
         self.facts = handler.facts
 
     def reachable(self, sid, actor, oid, package):
+        """Validate actual scene, carrier, ancestor access and spatial contact with the
+        target.
+        """
         h = self.h
         position = h._public_scope(sid, actor, package)
         obj = self.facts.object(sid, oid)
@@ -94,10 +115,12 @@ class ContainerService:
         return obj
 
     def config(self, sid, oid):
+        """Read container capability from the instance definition."""
         d = self.facts.object_definition(sid, oid)
         return d.capability("container") if d else None
 
     def require_contents_access(self, sid, oid, package):
+        """Require container capability and access through its enclosing shell."""
         c = self.config(sid, oid)
         if c is None:
             raise StateMachineError(
@@ -108,6 +131,9 @@ class ContainerService:
         return c
 
     def _rows(self, sid, roots=None):
+        """Prepare a rooted containment closure, or explicitly all Session objects if no
+        root is supplied.
+        """
         return ContainmentState(
             {
                 r["object_id"]: dict(r)
@@ -123,9 +149,11 @@ class ContainerService:
 
     @staticmethod
     def prepare(rows):
+        """Convert object rows into an isolated candidate with adjacency indices."""
         return rows if isinstance(rows, ContainmentState) else ContainmentState(rows)
 
     def total_weight(self, oid, rows, package, *, path=frozenset()):
+        """Compute total candidate subtree weight in a consistent read scope."""
         if self.h.store._scope is None:
             with self.h.store.transaction():
                 return self.total_weight(oid, rows, package, path=path)
@@ -134,6 +162,9 @@ class ContainerService:
 
     @instance_read("object", "container", "own_weight", maintained="weight")
     def own_weight(self, sid, oid):
+        """Multiply instance weight by actual quantity, returning None when weight is
+        unknown.
+        """
         encoded = self.facts.instances.get(sid, "object", oid)["definition"]
         definition = self.h.store.memory.json(encoded)
         row = self.h._conn.execute(
@@ -147,6 +178,9 @@ class ContainerService:
 
     @instance_read("object", "container", "total_weight", capacity=4, maintained="weight")
     def current_weight(self, sid, oid, *, path=frozenset()):
+        """Sum own/subtree weight, rejecting cycles/noncontainer parents and propagating
+        unknown weight.
+        """
         if oid in path:
             raise StateMachineError("container_cycle", "Invalid parent relation")
         children = self.facts.contents(sid, oid)
@@ -167,6 +201,7 @@ class ContainerService:
 
     @instance_read("object", "container", "contents_weight", maintained="weight")
     def contents_weight(self, sid, oid):
+        """Sum child subtree weights without own weight, preserving unknown values."""
         total = 0
         for child in self.facts.contents(sid, oid):
             weight = self.current_weight(sid, child["object_id"], path=frozenset((oid,)))
@@ -174,6 +209,9 @@ class ContainerService:
         return total
 
     def _weight(self, oid, state, path):
+        """Reuse unchanged staged subtree fields and recompute dirty ancestors in the
+        isolated candidate.
+        """
         if oid in path or oid not in state:
             raise StateMachineError("container_cycle", "Invalid parent relation")
         if oid in state.weights:
@@ -201,6 +239,7 @@ class ContainerService:
         return total
 
     def ancestry(self, oid, rows):
+        """Read candidate ancestors, rejecting cycles or missing relationships."""
         seen, parents = {oid}, []
         while rows[oid]["container_id"] is not None:
             oid = rows[oid]["container_id"]
@@ -211,6 +250,9 @@ class ContainerService:
         return parents
 
     def subtree(self, oid, rows):
+        """Read the full moving subtree through adjacency buckets and validate
+        relationships.
+        """
         rows = self.prepare(rows)
         affected, pending = set(), [oid]
         while pending:
@@ -290,6 +332,9 @@ class ContainerService:
                         )
 
     def require_unbound(self, sid, actor, iid, *, rows=None, affected=None):
+        """Check supported equipment, material, attunement and effect bindings on the
+        moving subtree.
+        """
         h = self.h
         actors = h.characters.rule_actors(sid, {actor})
         if actor not in actors:
@@ -339,6 +384,9 @@ class ContainerService:
                 )
 
     def validate(self, row, actor, op, package):
+        """Validate transfer access/original placement and audit the relocated subtree and
+        old/new ancestors.
+        """
         h, sid = self.h, row["session_id"]
         h._world_operation_capability(row, op)
         h._world_actor_ready(sid, actor)
@@ -370,6 +418,9 @@ class ContainerService:
         return item
 
     def operate(self, row, actor, op, package):
+        """Apply admitted transfer, updating ownership/inventory and capturing events in
+        the same transaction.
+        """
         item = self.validate(row, actor, op, package)
         h, sid = self.h, row["session_id"]
         if type(op) is PutItem and item["container_id"] == op.container_id:

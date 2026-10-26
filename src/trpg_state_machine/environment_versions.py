@@ -14,15 +14,18 @@ from .package import canonical_json
 
 
 def source_key(raw):
+    """Return canonical base-condition and source content for environment versioning."""
     data = json.loads(raw) if raw else {}
     return canonical_json((data.get("base"), data.get("sources", [])))
 
 
 def protection_key(raw):
+    """Return canonical static protection content."""
     return canonical_json((json.loads(raw) if raw else {}).get("protection"))
 
 
 def wind_key(raw):
+    """Return the base and local wind inputs relevant to wind versioning."""
     data = (json.loads(raw) if raw else {}) or {}
     sources = data if isinstance(data, list) else data.get("sources", [])
     # Full Wind values matter: speed-only changes can introduce/remove a tie
@@ -49,17 +52,21 @@ def wind_key(raw):
 
 
 def _identifier(value):
+    """Validate and quote a controlled SQL identifier."""
     if type(value) is not str or not re.fullmatch(r"[A-Za-z_][A-Za-z_0-9]*", value):
         raise ValueError("Expected a SQL identifier")
     return '"' + value + '"'
 
 
 def _literal(value):
+    """Escape an SQL string literal."""
     return "'" + str(value).replace("'", "''") + "'"
 
 
 @dataclass(frozen=True, slots=True)
 class EnvironmentInputWatch:
+    """Describe persisted field changes that invalidate environment inputs."""
+
     table: str
     key_column: str
     key: str
@@ -69,6 +76,7 @@ class EnvironmentInputWatch:
     scene_ids: tuple[str, ...] = ()
 
     def __post_init__(self):
+        """Validate an environment field-dependency watch definition."""
         for name in (self.table, self.key_column, *self.columns):
             _identifier(name)
         if (
@@ -87,12 +95,15 @@ class EnvironmentInputWatch:
 
 @dataclass(frozen=True, slots=True)
 class EnvironmentTimeWatch:
+    """Describe game-time boundaries affecting environment validity."""
+
     boundaries: tuple[int, ...] = ()
     continuous: bool = False
     wind: bool = False
     scene_ids: tuple[str, ...] = ()
 
     def __post_init__(self):
+        """Validate an environment time-dependency watch definition."""
         if (
             type(self.boundaries) is not tuple
             or len(self.boundaries) > 256
@@ -121,6 +132,7 @@ class VersionedEnvironmentEffectsProvider:
     _binding_descriptor: str | None = field(default=None, init=False, repr=False, compare=False)
 
     def environment_sources(self, sid, scene_id, package):
+        """Delegate source reads to the versioned Effects reader."""
         return self.reader.environment_sources(sid, scene_id, package)
 
 
@@ -140,6 +152,9 @@ class VersionedProtectionProvider:
     _binding_descriptor: str | None = field(default=None, init=False, repr=False, compare=False)
 
     def current_protection(self, sid, oid, package, *, candidate):
+        """Return versioned spatial protection inputs, including supported empty
+        contributions.
+        """
         from .object_protection import CurrentProtectionProperties, RainProtection, WindProtection
 
         if oid not in self.object_ids:
@@ -148,14 +163,19 @@ class VersionedProtectionProvider:
 
 
 class EnvironmentVersions:
+    """Maintain environment source/protection versions and registered provider watches."""
+
     def __init__(self, store):
+        """Bind environment version maintenance to the shared Store."""
         self.store = store
 
     @property
     def db(self):
+        """Return the version-maintenance connection."""
         return self.store.connection
 
     def current(self, sid, scene):
+        """Read source/protection versions, using initial versions for missing rows."""
         row = self.db.execute(
             "SELECT source_version,protection_version FROM scene_environment_versions "
             "WHERE session_id=? AND scene_id=?",
@@ -164,6 +184,7 @@ class EnvironmentVersions:
         return tuple(row) if row else (0, 0)
 
     def advance(self, sid, scene, *, source=False, protection=False):
+        """Advance the requested environment version inside a write transaction."""
         self.store.require_write()
         self.db.execute(
             "INSERT INTO scene_environment_versions VALUES (?,?,?,?) "
@@ -175,6 +196,7 @@ class EnvironmentVersions:
 
     @staticmethod
     def descriptor(provider):
+        """Validate provider identity/watch descriptors and hash their fixed description."""
         if provider is None:
             return "none"
         if type(provider) not in (VersionedEnvironmentEffectsProvider, VersionedProtectionProvider):
@@ -206,6 +228,9 @@ class EnvironmentVersions:
         return descriptor
 
     def cacheable(self, sid, scene, effects, protection):
+        """Check registered provider identity/dependencies for cross-query cache
+        eligibility.
+        """
         descriptors = tuple(self.descriptor(p) for p in (effects, protection))
         if None in descriptors or any(
             getattr(getattr(p, "reader", p), "environment_cacheable", True) is not True
@@ -225,10 +250,12 @@ class EnvironmentVersions:
         ), descriptors
 
     def bind(self, sid, scene, package, provider, role):
+        """Register provider dependencies atomically within a savepoint."""
         with self.store.savepoint():
             self._bind(sid, scene, package, provider, role)
 
     def _bind(self, sid, scene, package, provider, role):
+        """Validate the scene/provider and install change and time watches."""
         self.store.require_write()
         expected = {
             "effects": VersionedEnvironmentEffectsProvider,
@@ -320,6 +347,7 @@ class EnvironmentVersions:
         )
 
     def _bump_sql(self, sid, scene, source, protection):
+        """Build an SQL fragment advancing source or protection versions."""
         return (
             "INSERT INTO scene_environment_versions VALUES ("
             + _literal(sid)
@@ -336,6 +364,7 @@ class EnvironmentVersions:
         )
 
     def _watch(self, sid, scene, name, watch):
+        """Install related-data triggers that maintain environment input versions."""
         if watch.scene_ids and scene not in watch.scene_ids:
             return
         if watch.table in ("scene_environment_versions", "environment_provider_bindings"):
@@ -396,6 +425,7 @@ class EnvironmentVersions:
             )
 
     def _time(self, sid, scene, name, watch, role):
+        """Install triggers maintaining versions when game time crosses watched boundaries."""
         if watch.scene_ids and scene not in watch.scene_ids:
             return
         if not watch.continuous and not watch.boundaries:

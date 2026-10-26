@@ -4,6 +4,7 @@ from .navigation_models import NavigationKnowledge, NavigationRegion
 
 
 def validate_navigation(raw, scenes, passages, actors, templates):
+    """Validate navigation knowledge and scene/passage references."""
     from .package import _fail, _identifier, _list, _mapping, _reference, _unique
 
     data = _mapping(raw, "regions actor_grants pc_template_grants", "navigation")
@@ -34,6 +35,7 @@ def validate_navigation(raw, scenes, passages, actors, templates):
     region_ids = {r.region_id for r in regions}
 
     def grants(name, identity, valid):
+        """Validate navigation grants on an actor or template."""
         result = []
         for grant in _list(data[name], "navigation." + name):
             grant = _mapping(grant, identity + " region_ids", "navigation." + name)

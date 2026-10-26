@@ -1,5 +1,13 @@
 # Agentic TRPG — State Machine Foundation
 
+## Source explanations and development workflows — 2026-10-27
+
+[Source documentation maintenance](docs/SOURCE_DOCUMENTATION.md) is mandatory for
+new/changed code. Repository workflows are installed under `.agents/skills/`;
+[coverage and validation evidence](docs/reviews/CODE_DOCUMENTATION_AND_SKILLS.md)
+separate explanation coverage from runtime acceptance.
+
+
 ## Session RAM runtime — 2026-10-22
 
 现有生产入口已接入统一 RAM／候选读取、SQLite 增量提交后发布与暂停恢复；普通命令不再

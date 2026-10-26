@@ -30,6 +30,7 @@ from .world_commands import WORLD_CAPABILITY_OPERATIONS, RepositionObject
 
 
 def _trusted(context: TrustedContext) -> None:
+    """Validate trusted context identity, role and authority fields."""
     if not isinstance(context, TrustedContext) or any(
         not isinstance(v, str) or not v.strip() or len(v) > 256
         for v in (context.principal_id, context.player_id)
@@ -51,18 +52,24 @@ def _trusted(context: TrustedContext) -> None:
 
 
 def _binding(row: sqlite3.Row) -> RulesetBinding:
+    """Restore the three-field rules binding from its persisted row."""
     return RulesetBinding(row["ruleset_id"], row["data_revision"], row["evaluator_version"])
 
 
 class SessionAccess:
+    """Centralize trusted subject, Session pin and command/NPC authorization."""
+
     def __init__(self, store):
+        """Bind Session authorization to the shared Store."""
         self.store = store
 
     @property
     def _conn(self):
+        """Return the shared authorization connection."""
         return self.store.connection
 
     def _session(self, session_id: str, package: AdventurePackage, context: TrustedContext):
+        """Read the Session and verify ownership and Package pin."""
         _trusted(context)
         if not isinstance(package, AdventurePackage):
             raise StateMachineError("invalid_request", "An approved package is required")
@@ -77,6 +84,7 @@ class SessionAccess:
         return row
 
     def _check_package_pin(self, row, package):
+        """Require persisted Package/rules identities to match the supplied inputs."""
         if (row["adventure_id"], row["package_version"]) != (
             package.adventure_id,
             package.package_version,
@@ -94,6 +102,7 @@ class SessionAccess:
             )
 
     def _authorize_command(self, row, actor_id, payload, context):
+        """Authorize the command actor and operation for the trusted context."""
         if type(payload) in ENVIRONMENT_OPERATIONS and not context.can_manage_environment:
             raise StateMachineError("unauthorized", "Trusted environment management grant required")
         if type(payload) is RepositionObject and not context.can_place_world_objects:
@@ -143,6 +152,7 @@ class SessionAccess:
             raise StateMachineError("invalid_actor", "Command requires the selected PC")
 
     def _world_operation_capability(self, row, payload):
+        """Check world operation support in this Session's capability scope."""
         if type(payload) in (*WORLD_CAPABILITY_OPERATIONS, *ENVIRONMENT_OPERATIONS) or isinstance(
             payload,
             (
@@ -169,6 +179,9 @@ class SessionAccess:
                 )
 
     def _npc_authorized(self, session_id, package, context):
+        """Verify the authenticated NPC subject mapping and return its trusted observer
+        identity.
+        """
         if (
             type(context) is not NPCContext
             or context.session_id != session_id
@@ -194,6 +207,7 @@ class SessionAccess:
         return context.observer_id
 
     def require_legacy_npc_time(self, sid):
+        """Reject unsupported legacy NPC time modes."""
         if self._conn.execute(
             "SELECT 1 FROM world_time_bindings WHERE session_id=?", (sid,)
         ).fetchone():

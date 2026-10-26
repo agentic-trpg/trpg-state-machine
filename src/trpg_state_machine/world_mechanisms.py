@@ -17,12 +17,16 @@ from .world_commands import CheckMechanism, SetLightEnabled
 
 
 class MechanismService:
+    """Coordinate indexed mechanism triggers, lifecycle, service checks and bounded chains."""
+
     def __init__(self, handler):
+        """Bind mechanism handling and the rules effect port."""
         self.h = handler
         self._invocation = None
         self.effects = MechanismEffectRunner(handler)
 
     def config(self, sid, oid):
+        """Read the object's instance mechanism capability."""
         d = self.h.facts.object_definition(sid, oid)
         return d.capability("mechanism") if d else None
 
@@ -45,6 +49,7 @@ class MechanismService:
 
     @instance_read("scene", "mechanisms", "index", maintained="mechanism_index")
     def _scene_index(self, sid, scene):
+        """Build a read-only event/cell/object index from scene capability members."""
         index = {}
         for oid in self.h.facts.scene_capability_ids(sid, scene, "object_mechanisms"):
             config = self.trigger_config(sid, oid)
@@ -65,6 +70,7 @@ class MechanismService:
         return TriggerIndex({key: tuple(sorted(entries)) for key, entries in index.items()})
 
     def qualify_link(self, sid, origin, target, kind, value, package):
+        """Validate internal linkage origin and target parameters."""
         if (
             type(origin) is not _WorldEffectOrigin
             or origin.kind is not _WorldEffectKind.MECHANISM
@@ -73,6 +79,7 @@ class MechanismService:
             raise StateMachineError("invalid_execution_origin", "No admitted mechanism consequence")
 
     def _preflight(self, sid, action, package, candidates):
+        """Preflight one linked target's capability, position and candidate opening state."""
         h = self.h
         obj = h.facts.object(sid, action.target_object_id)
         d = h.facts.object_definition(sid, action.target_object_id)
@@ -108,6 +115,9 @@ class MechanismService:
             raise StateMachineError("unsupported_operation", "Unknown linked result")
 
     def preflight(self, sid, actions, package):
+        """Preflight the action batch, rejecting an unavailable rules port before fact
+        writes.
+        """
         candidates, lights, changed = {}, {}, False
         for action in actions:
             if action.kind == "rule_effect":
@@ -137,6 +147,7 @@ class MechanismService:
         return changed
 
     def _state(self, sid, oid, config, package):
+        """Read mechanism lifecycle and verify component integrity."""
         state = self.h.facts.mechanism_state(sid, oid)
         if state is None:
             raise StateMachineError("invalid_target", "Mechanism not initialized")
@@ -149,6 +160,7 @@ class MechanismService:
         return state
 
     def _pose(self, sid, oid, config):
+        """Validate mechanism placement and container access."""
         obj = self.h.facts.object(sid, oid)
         if config.placement_policy == "ground_prepared" and (
             obj["scene_id"] is None
@@ -161,6 +173,7 @@ class MechanismService:
             raise StateMachineError("container_inaccessible", "Mechanism is enclosed")
 
     def _eligible(self, sid, oid, config, actor, package):
+        """Check arming, placement, frequency and cooldown activation prerequisites."""
         state = self._state(sid, oid, config, package)
         if state.status != "armed":
             code = {
@@ -190,6 +203,7 @@ class MechanismService:
         return state
 
     def _manual(self, row, actor, op, package):
+        """Validate actor, placement and target for a manual mechanism operation."""
         h, sid = self.h, row["session_id"]
         h._world_operation_capability(row, op)
         h._world_actor_ready(sid, actor)
@@ -203,6 +217,7 @@ class MechanismService:
         return c
 
     def validate(self, row, actor, op, package):
+        """Validate manual activation eligibility and preflight all actions."""
         c = self._manual(row, actor, op, package)
         self._eligible(row["session_id"], op.object_id, c, actor, package)
         operation = c.operation(op.operation_id)
@@ -211,12 +226,22 @@ class MechanismService:
 
     @staticmethod
     def activation_id(oid, source_command_id, source_event_seq, operation_id):
+        """Derive a stable activation key from source command, event and operation
+        identity.
+        """
         raw = json.dumps(
             [oid, source_command_id, source_event_seq, operation_id], separators=(",", ":")
         )
         return "activation." + hashlib.sha256(raw.encode()).hexdigest()
 
     def _activate(self, row, oid, actor, operation_id, package, command_id, source_seq):
+        """Apply one admitted, idempotently identified mechanism activation.
+
+        Check activation replay and eligibility, preflight configured actions, then
+        update lifecycle and execute supported consequences through the existing world
+        interfaces. Return captured ordered events. All writes remain in the caller's
+        shared transaction; the activation marker is not an independent commit boundary.
+        """
         h, sid = self.h, row["session_id"]
         if type(command_id) is not str or not command_id:
             raise StateMachineError("invalid_execution_origin", "Admitted source command required")
@@ -344,6 +369,7 @@ class MechanismService:
         return events
 
     def operate(self, row, actor, op, package, source_command_id):
+        """Validate and execute manual mechanism activation."""
         self.validate(row, actor, op, package)
         return self._activate(
             row,
@@ -356,6 +382,7 @@ class MechanismService:
         )
 
     def method_plan(self, row, actor, op, package):
+        """Select a disarm/rearm service method and validate its prerequisites."""
         c = self._manual(row, actor, op, package)
         sid = row["session_id"]
         state = self._state(sid, op.object_id, c, package)
@@ -405,6 +432,7 @@ class MechanismService:
         return method, state
 
     def service(self, row, actor, op, package, *, succeeded=True, command_id=None):
+        """Adopt a service check result, updating lifecycle or triggering failure actions."""
         method, state = self.method_plan(row, actor, op, package)
         if not succeeded:
             if method.trigger_on_failure:
@@ -447,6 +475,7 @@ class MechanismService:
         ]
 
     def prepare_check(self, row, actor, op, package):
+        """Prepare fixed rules check input for a mechanism service method."""
         from dnd5e_engine.evaluation_contracts import CheckPayload
         from pydantic import ValidationError
 
@@ -476,6 +505,7 @@ class MechanismService:
         return payload, method, state
 
     def check_availability(self, row, actor, op, package):
+        """Query actual rules eligibility for mechanism service availability."""
         plan = self.prepare_check(row, actor, op, package)
         from dnd5e_engine.evaluation_checks import check_support_failure
 
@@ -499,6 +529,9 @@ class MechanismService:
         return plan
 
     def component_destroyed(self, row, package, component, *, prepared=None):
+        """Update associated mechanisms through component destruction reverse relations and
+        emit events.
+        """
         index = self._batch_index(row["session_id"], prepared)
         sid, events = row["session_id"], []
         for oid, _, _ in index.get(("destroyed", None, component), ()):
@@ -545,6 +578,7 @@ class MechanismService:
         }
 
     def _batch_index(self, sid, prepared):
+        """Share the prepared Session mechanism index within one event batch."""
         if prepared is None:
             return self._build_index(sid)
         if sid not in prepared:
@@ -552,6 +586,14 @@ class MechanismService:
         return prepared[sid]
 
     def automatic(self, row, package, event, command_id, source_seq, *, prepared=None):
+        """Resolve automatic mechanisms associated with this fixed event batch.
+
+        Use prepared trigger/target indices to select candidates, then recheck actual
+        pose, arming and lifecycle eligibility against the current candidate.
+        Deduplicate activation per instance within the batch and preserve source
+        event/command association. Return ordered consequences for the existing bounded
+        event expansion and shared transaction.
+        """
         sid, payload, kind = row["session_id"], event.payload, event.event_type
         if kind not in {
             "actor.stepped",
@@ -712,17 +754,20 @@ class MechanismService:
         return events
 
     def next_boundary(self, session_id, package):
+        """Read the earliest mechanism reset boundary."""
         return self.h._conn.execute(
             "SELECT min(reset_at_tick) FROM object_mechanisms WHERE session_id=?",
             (session_id,),
         ).fetchone()[0]
 
     def settle_one(self, row, package, command_id):
+        """Settle currently due mechanisms and return the domain time result."""
         from .time_coordination import DueResult
 
         return DueResult(tuple(self._reset_due(row, package)))
 
     def _reset_due(self, row, package):
+        """Reset due mechanism state against the sole world clock and record events."""
         sid, events = row["session_id"], []
         tick = self.h.facts.time_state(sid)[1]
         due = self.h._conn.execute(

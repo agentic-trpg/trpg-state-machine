@@ -9,6 +9,7 @@ from .errors import StateMachineError
 
 
 def world_effects_ready(runtime, row, command):
+    """Check supported conditional world effects and their fact prerequisites."""
     effects = command.check_world_effects
     if effects is None:
         return True
@@ -48,6 +49,7 @@ def world_effects_ready(runtime, row, command):
 
 
 def check_changes(request, result):
+    """Validate the check result and return supported domain state changes."""
     payload = request.payload
     if (
         payload.tool is not None

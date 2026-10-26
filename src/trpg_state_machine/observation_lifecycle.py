@@ -13,6 +13,8 @@ from .perception import EventObservation, PerceivedSignal
 
 @dataclass(frozen=True, slots=True)
 class ObservationRetention:
+    """Describe retention state independently of observation processing state."""
+
     observation_id: str
     work_id: str
     processing_status: str
@@ -24,11 +26,15 @@ class ObservationRetention:
 
 @dataclass(frozen=True, slots=True)
 class RecentObservation:
+    """Pair a retained Recent observation with its retention metadata."""
+
     observation: EventObservation
     retention: ObservationRetention
 
 
 class ObservationLifecycleRuntime:
+    """Read observation history, processing eligibility and retention projections."""
+
     def _observation_rows(
         self,
         sid,
@@ -44,6 +50,9 @@ class ObservationLifecycleRuntime:
     ):
         # Only this NPC's projection prefix fences reads. Processing and TTL
         # remain independent, and another NPC's work cannot hold this one.
+        """Read observation rows by NPC, processing and retention eligibility, optionally
+        metadata only.
+        """
         filters, values = [], [sid, npc, self._npc_perception_cursor(sid, npc)]
         if recent is not None:
             filters.append(
@@ -87,6 +96,7 @@ class ObservationLifecycleRuntime:
         ).fetchall()
 
     def _retention(self, row):
+        """Construct observation retention state from the persisted record."""
         expiry = row["expires_game_tick"]
         status = (
             "legacy_unknown"
@@ -106,6 +116,7 @@ class ObservationLifecycleRuntime:
         )
 
     def _observation(self, row):
+        """Restore an event observation and its perception signals."""
         return EventObservation(
             row["observation_id"],
             row["npc_id"],
@@ -113,6 +124,7 @@ class ObservationLifecycleRuntime:
         )
 
     def _recent_observations(self, sid, npc):
+        """Build Recent observations with retention information."""
         return tuple(
             RecentObservation(self._observation(row), self._retention(row))
             for row in self._observation_rows(sid, npc, recent=True)

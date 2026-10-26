@@ -9,6 +9,8 @@ from .package import _fail, _identifier, _list, _mapping, _reference, _text, _un
 
 @dataclass(frozen=True, slots=True)
 class ForceMethod:
+    """Define one supported force-opening method and its check prerequisites."""
+
     method_id: str
     ability: str
     skill: str | None
@@ -23,6 +25,8 @@ class ForceMethod:
 
 @dataclass(frozen=True, slots=True)
 class Openable:
+    """Define opening, jam, bar and transition capabilities for an instance."""
+
     initial_jammed: bool = False
     initial_barred: bool | None = None
     jam_policy: str = "prevent_transitions"
@@ -34,6 +38,8 @@ class Openable:
 
 @dataclass(frozen=True, slots=True)
 class Durability:
+    """Define object HP/damage properties used by admitted durability operations."""
+
     armor_class: int
     max_hp: int
     initial_hp: int
@@ -45,6 +51,8 @@ class Durability:
 
 @dataclass(frozen=True, slots=True)
 class LockDefinition:
+    """Define lock identity, credentials and supported service methods."""
+
     lock_id: str
     initial_locked: bool
     credential_instance_ids: tuple[str, ...]
@@ -56,12 +64,16 @@ class LockDefinition:
 
 @dataclass(frozen=True, slots=True)
 class LockSet:
+    """Group the locks associated with an object capability."""
+
     locks: tuple[LockDefinition, ...]
     kind: str = "locks"
 
 
 @dataclass(frozen=True, slots=True)
 class Container:
+    """Define container access, capacity and supported containment policy."""
+
     capacity_weight_lb: int | None | Literal["unknown"]
     capacity_volume_cu_ft: int | None | Literal["unknown"]
     opening_profiles: tuple[str, ...]
@@ -83,6 +95,8 @@ class SpatialProperties:
 
 @dataclass(frozen=True, slots=True)
 class SpatialObject:
+    """Define object footprint, orientation and spatial property channels."""
+
     footprint: tuple[tuple[int, int], ...]
     mobility_policy: str
     open_blocks_movement: bool
@@ -97,6 +111,8 @@ class SpatialObject:
 
 @dataclass(frozen=True, slots=True)
 class LightMode:
+    """Define one configured illumination mode."""
+
     mode_id: str
     bright_radius_ft: int | None
     dim_outer_radius_ft: int
@@ -104,6 +120,8 @@ class LightMode:
 
 @dataclass(frozen=True, slots=True)
 class LightEmitter:
+    """Define a light instance's modes and enabled-state policy."""
+
     modes: tuple[LightMode, ...]
     initial_enabled: bool
     initial_mode: str
@@ -116,6 +134,8 @@ class LightEmitter:
 
 @dataclass(frozen=True, slots=True)
 class WorldObjectDefinition:
+    """Combine an object's effective identity, placement and capability configuration."""
+
     object_id: str
     definition_ref: str
     display_name: str
@@ -131,6 +151,7 @@ class WorldObjectDefinition:
     content_kind: str | None = None
 
     def capability(self, kind):
+        """Select the capability configuration by kind from the object definition."""
         return next((c for c in self.capabilities if c.kind == kind), None)
 
 
@@ -145,6 +166,13 @@ def validate_world_objects(
     oriented=False,
     mechanisms=False,
 ):
+    """Validate and normalize effective object capability definitions for creation.
+
+    Check identity/reference consistency, pose/footprint constraints, weights and the
+    supported capability combinations, including opening, durability, containers, lights
+    and mechanisms. Return admitted definitions; do not instantiate runtime state or
+    infer unsupported capabilities from narrative descriptions.
+    """
     result = []
     objects = {o.object_id: o for s in scenes for o in s.objects}
     for value in _list(raw, "world_objects"):

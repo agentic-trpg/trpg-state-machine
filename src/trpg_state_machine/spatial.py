@@ -35,12 +35,16 @@ from .world_commands import WORLD_CAPABILITY_OPERATIONS
 
 @dataclass(frozen=True, slots=True)
 class SpatialPosition:
+    """Represent an actor's actual scene/cell position at a world version."""
+
     scene_id: str
     cell: str | None
 
 
 @dataclass(frozen=True, slots=True)
 class WorldActionAvailability:
+    """Report disclosed eligibility for a specific world operation."""
+
     status: str
     reason: str
     world_version: int
@@ -48,6 +52,8 @@ class WorldActionAvailability:
 
 @dataclass(frozen=True, slots=True)
 class SpatialDoor:
+    """Expose a door/passage relation permitted in a spatial view."""
+
     passage_id: str
     object_id: str
     state: str
@@ -58,6 +64,8 @@ class SpatialDoor:
 
 @dataclass(frozen=True, slots=True)
 class SpatialView:
+    """Expose authorized scene geometry, occupants, objects and exits."""
+
     actor_position: SpatialPosition
     world_version: int
     objects: tuple[tuple[str, str, bool, bool], ...]
@@ -67,12 +75,16 @@ class SpatialView:
 
 @dataclass(frozen=True, slots=True)
 class CarriedItemsView:
+    """Expose authorized carried item entries at a fixed world version."""
+
     actor_id: str
     world_version: int
     entries: tuple[InventoryEntry, ...]
 
 
 class WorldHandler:
+    """Coordinate world domain operations through existing facts and capability services."""
+
     def __init__(
         self,
         store,
@@ -86,6 +98,9 @@ class WorldHandler:
         loader=None,
         runtime=None,
     ):
+        """Bind world object, grid, time, scene, activity and shared submission
+        collaborators.
+        """
         from .activity_records import ActivityRecords
         from .event_persistence import EventPersistence
         from .session_runtime import SessionRuntime
@@ -124,31 +139,42 @@ class WorldHandler:
 
     @property
     def _conn(self):
+        """Return the shared World connection."""
         return self.store.connection
 
     def _transaction(self, *, write=False):
+        """Delegate Store transaction scope management."""
         return self.store.transaction(write=write)
 
     def _session(self, sid, package, context):
+        """Delegate authorized Session access."""
         return self.sessions._session(sid, package, context)
 
     def _npc_authorized(self, sid, package, context):
+        """Delegate authenticated NPC access checks."""
         return self.sessions._npc_authorized(sid, package, context)
 
     def _active_combat(self, sid):
+        """Read the active combat record."""
         return self.combats.active(sid)
 
     def _capture_event(self, *args, **kwargs):
+        """Delegate capture of actual event-stage facts."""
         return self.capture._capture_event(*args, **kwargs)
 
     def _world_operation_capability(self, row, operation):
+        """Delegate world operation support validation."""
         return self.sessions._world_operation_capability(row, operation)
 
     def _initialize_scene(self, sid, scene_id, package):
+        """Delegate creation/loading of required scene instances."""
         return self.scenes.ensure_scene(sid, scene_id, package)
 
     @scoped_read
     def _world_actor_ready(self, sid, actor_id, *, navigation_scope=None):
+        """Check activity occupancy, actor state and authoritative position for action
+        readiness.
+        """
         qualified = self.activities.qualifies(navigation_scope, sid, actor_id)
         if self.activities.active(sid, actor_id) and not qualified:
             raise StateMachineError("unsupported_actor_activity", "Navigation owns actor execution")
@@ -185,6 +211,7 @@ class WorldHandler:
 
     @scoped_read
     def _public_scope(self, sid, actor_id, package):
+        """Validate public spatial eligibility in the actor's scene."""
         proof = self._conn.execute(
             "SELECT complete FROM scene_integrity WHERE session_id=? AND scene_id="
             "(SELECT current_scene_id FROM actors WHERE session_id=? AND actor_id=?)",
@@ -216,6 +243,9 @@ class WorldHandler:
         return position
 
     def _prepare_visible_targets(self, sid, actor_id, package, *, cells=None):
+        """Prepare actor position, topology and dimensions once for target visibility
+        checks.
+        """
         position = self._public_scope(sid, actor_id, package)
         topology, extent = self.grid.base_topology(
             sid, position.scene_id, package, with_extent=True, cells=cells
@@ -223,6 +253,7 @@ class WorldHandler:
         return position, topology, extent
 
     def _visible_target(self, sid, actor_id, cell, package, *, prepared=None):
+        """Check target cell bounds and actual visibility."""
         position, topology = (
             self._prepare_visible_targets(sid, actor_id, package, cells=(cell,))
             if prepared is None
@@ -239,6 +270,9 @@ class WorldHandler:
         return position
 
     def _validate_step(self, sid, actor_id, operation, package):
+        """Validate a one-step destination against local topology and movement
+        prerequisites.
+        """
         position = self._public_scope(sid, actor_id, package)
         if position.scene_id != operation.scene_id or position.cell != operation.expected_cell:
             raise StateMachineError("position_conflict", "Position precondition differs")
@@ -260,6 +294,7 @@ class WorldHandler:
         return SpatialPosition(position.scene_id, operation.to_cell)
 
     def _validate_placement(self, sid, actor_id, operation, package):
+        """Validate visibility, capability and spatial placement prerequisites."""
         position = self._public_scope(sid, actor_id, package)
         obj = self._conn.execute(
             "SELECT scene_id,cell FROM objects WHERE session_id=? AND object_id=?",
@@ -328,6 +363,7 @@ class WorldHandler:
         return position
 
     def _validate_item_transfer(self, row, actor_id, operation, package):
+        """Validate item transfer placement, visibility and binding prerequisites."""
         sid = row["session_id"]
         self._world_operation_capability(row, operation)
         self._world_actor_ready(sid, actor_id)
@@ -421,6 +457,9 @@ class WorldHandler:
         return position, item
 
     def _operate_item_transfer(self, row, actor_id, operation, package):
+        """Coordinate world item ownership and character inventory projection with transfer
+        events.
+        """
         sid = row["session_id"]
         position, before = self._validate_item_transfer(row, actor_id, operation, package)
         pickup = type(operation) is PickupItem
@@ -467,6 +506,7 @@ class WorldHandler:
         return events
 
     def read_carried_items(self, session_id, actor_id, package, *, context):
+        """Authorize and read visible carried entries at the current world version."""
         with self._transaction():
             self._spatial_reader(session_id, actor_id, package, context)
             known = set(self.characters.rule_actors(session_id, {actor_id}))
@@ -490,6 +530,7 @@ class WorldHandler:
             return CarriedItemsView(actor_id, version, visible)
 
     def _door_ports(self, scene_id, object_id, package, *, sid):
+        """Select passage endpoints for this door and scene."""
         return tuple(
             (p, e)
             for p in self.facts.instances.passages(sid, scene_id=scene_id, object_id=object_id)
@@ -556,10 +597,12 @@ class WorldHandler:
         return obj, None
 
     def _validate_switch_range(self, sid, actor_id, operation, package):
+        """Check actor readiness and touching cells for the switch target."""
         self._world_actor_ready(sid, actor_id)
         self.objects.spatial.contact_cell(sid, actor_id, operation.object_id, package)
 
     def _validate_door_occupancy(self, sid, operation, package):
+        """Check entity occupancy in the door threshold."""
         if operation.state.value == "closed":
             for passage in self.facts.instances.passages(sid, object_id=operation.object_id):
                 if passage.door_object_id == operation.object_id:
@@ -592,6 +635,7 @@ class WorldHandler:
                             )
 
     def _passage_route(self, sid, actor_id, to_scene_id, package, passage_id=None):
+        """Validate passage direction, endpoints and destination eligibility."""
         position = self._actor_position(sid, actor_id)
         source = self.facts.instances.scene(sid, position.scene_id)
         # Retain the abstract API's unknown-scene rejection.
@@ -646,6 +690,7 @@ class WorldHandler:
         return SpatialPosition(target.scene_id, b.standing_cell)
 
     def _world_destination(self, row, actor_id, operation, package, *, navigation_scope=None):
+        """Resolve the validated world destination for the operation kind."""
         sid = row["session_id"]
         self._world_operation_capability(row, operation)
         self._world_actor_ready(sid, actor_id, navigation_scope=navigation_scope)
@@ -746,6 +791,7 @@ class WorldHandler:
             return WorldActionAvailability("available", "available", row["world_version"])
 
     def get_spatial_view(self, session_id, actor_id, package, *, context):
+        """Authorize and construct the current spatial view, objects and exits."""
         with self._transaction():
             self._spatial_reader(session_id, actor_id, package, context)
             if self._active_combat(session_id):
@@ -806,6 +852,9 @@ class WorldHandler:
             return SpatialView(position, version, tuple(objects), exits, doors)
 
     def _operate_spatial(self, row, package, operation, actor_id, *, navigation_scope=None):
+        """Apply validated movement, placement or transfer and coordinate scene-entry
+        events.
+        """
         sid = row["session_id"]
         if type(operation) in (PickupItem, DropItem):
             return self._operate_item_transfer(row, actor_id, operation, package)
@@ -837,12 +886,15 @@ class WorldHandler:
 
     @scoped_read
     def _actor_position(self, sid, actor_id):
+        """Read the sole authoritative actor position through character facts."""
         return self.characters.position(sid, actor_id)
 
     def _spatial_scene(self, sid, scene_id):
+        """Read the selected spatial scene configuration."""
         return self.facts.spatial_scene(sid, scene_id)
 
     def _current_actor_cells(self, sid, scene_id, roster):
+        """Read required actor cells and check map and occupancy consistency."""
         topology = self.grid.base_topology(sid, scene_id)
         positions = {}
         for actor_id in roster:
@@ -857,6 +909,7 @@ class WorldHandler:
         return positions
 
     def _spatial_combat_guard(self, sid, scene_id, package):
+        """Check whether current spatial state supports entering combat."""
         if self._spatial_scene(sid, scene_id) is None:
             return
         if self.objects.lights.sources(sid, scene_id, package):
@@ -895,6 +948,7 @@ class WorldHandler:
                 )
 
     def _door_closed(self, sid, passage, package):
+        """Determine shared-door closure from object blocking and lock state."""
         blocking = self.objects.spatial.blocks(sid, passage.door_object_id, package)
         if blocking is not None:
             return blocking
@@ -910,6 +964,7 @@ class WorldHandler:
         return self.facts.instances.pending_object(sid, passage.door_object_id)[1].state == "closed"
 
     def _spatial_reader(self, sid, actor_id, package, context):
+        """Verify self/control authority before reading the actor's actual position."""
         if type(actor_id) is not str or not actor_id:
             raise StateMachineError("invalid_query", "Actor identity is required")
         if type(context) is TrustedContext:
@@ -930,6 +985,9 @@ class WorldHandler:
             return self._spatial_reader(session_id, actor_id, package, context)
 
     def _assert_spatial_consistency(self, sid, package):
+        """Audit complete spatial instances and actor occupancy at an explicit audit
+        boundary.
+        """
         self.objects.spatial.audit(sid, package)
         definitions = {o.object_id: o for s in self.facts.instances.scenes(sid) for o in s.objects}
         for scene in self.facts.instances.scenes(sid):
@@ -972,6 +1030,9 @@ class WorldHandler:
         navigation_scope=None,
         source_command_id=None,
     ):
+        """Dispatch supported world, environment, time and object operations in the shared
+        write scope.
+        """
         self.store.require_write()
         if navigation_scope is not None and (
             effect_origin is not None

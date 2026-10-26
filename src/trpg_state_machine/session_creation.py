@@ -19,12 +19,15 @@ from .time_binding import TimeBinding
 
 
 def _result(raw: str) -> CreationResult:
+    """Restore the creation result and rules binding from JSON."""
     data = json.loads(raw)
     data["ruleset_binding"] = RulesetBinding(**data["ruleset_binding"])
     return CreationResult(**data)
 
 
 class SessionCreation:
+    """Create all required Session/domain facts atomically with idempotent replay."""
+
     def __init__(
         self,
         store,
@@ -38,6 +41,7 @@ class SessionCreation:
         persistence,
         evaluator,
     ):
+        """Bind domain interfaces and the shared Store for atomic creation."""
         self.store, self.runtime = store, runtime
         self.world, self.characters, self.rules, self.combat = world, characters, rules, combat
         self.capture, self.effects, self.persistence = capture, effects, persistence
@@ -45,9 +49,13 @@ class SessionCreation:
 
     @property
     def _conn(self):
+        """Return the creation coordinator's connection."""
         return self.store.connection
 
     def _replay(self, context: TrustedContext, command_id: str, fingerprint: str):
+        """Read creation replay by trusted subject/command identity, rejecting fingerprint
+        conflicts.
+        """
         row = self._conn.execute(
             "SELECT fingerprint, result_json FROM creation_commands "
             "WHERE principal_id = ? AND command_id = ?",

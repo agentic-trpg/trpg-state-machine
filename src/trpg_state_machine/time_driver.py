@@ -19,10 +19,12 @@ class _DriverLock:
 
     @staticmethod
     def path(database, sid):
+        """Build the driver lock path from database and Session identity."""
         key = hashlib.sha256(sid.encode()).hexdigest()[:32]
         return Path(database).with_name(Path(database).name + f".time-{key}.lock")
 
     def __init__(self, database, sid):
+        """Acquire the process-shared driver lock and prepare resource cleanup."""
         self.resources = ExitStack()
         self.file = self.resources.enter_context(self.path(database, sid).open("a+b"))
         self.file.seek(0)
@@ -47,6 +49,7 @@ class _DriverLock:
             ) from exc
 
     def close(self):
+        """Release driver lock resources."""
         self.resources.close()
 
 
@@ -60,6 +63,7 @@ class TimeDriver:
     def __init__(
         self, runtime, sid, package, context, submit, *, clock_ns=monotonic_ns, scheduler=None
     ):
+        """Validate event loop/time authority and attach the Session's sole driver."""
         self.runtime, self.time = runtime, runtime.time
         self.sid, self.package, self.context, self.submit = sid, package, context, submit
         self.clock_ns = clock_ns
@@ -91,6 +95,7 @@ class TimeDriver:
             raise
 
     def target(self, run):
+        """Project the driver target, rebasing from durable state when necessary."""
         if self.generation != run["generation"]:
             self.rebase(run)
         target = self._project(run)
@@ -106,6 +111,7 @@ class TimeDriver:
         return target
 
     def _project(self, run):
+        """Compute a bounded target tick from monotonic time and the explicit rate."""
         elapsed = max(0, self.clock_ns() - self.base_ns)
         if run["mode"] != "running" or run["rate_numerator"] is None:
             return self.base_tick
@@ -117,6 +123,7 @@ class TimeDriver:
         )
 
     def rebase(self, run):
+        """Rebase host sampling from the persisted game tick and runtime generation."""
         self.base_tick = Fraction(self.time.world.facts.time_state(self.sid)[1]) + Fraction(
             run.get("remainder", "0")
         )
@@ -124,12 +131,14 @@ class TimeDriver:
         self.generation = run["generation"]
 
     def _cancel(self):
+        """Cancel scheduled wakeup and advance the local epoch."""
         self.epoch += 1
         if self.handle is not None:
             self.handle.cancel()
             self.handle = None
 
     def refresh(self):
+        """Reschedule a bounded wakeup from current runtime mode and consumer boundaries."""
         if self.closed:
             return
         self._cancel()
@@ -170,6 +179,9 @@ class TimeDriver:
         self.handle = self.scheduler.call_later(delay, lambda: self._wake(epoch, generation))
 
     def _wake(self, epoch, generation):
+        """Reauthorize on wakeup and advance time through the original command/receipt
+        protocol.
+        """
         if self.closed or epoch != self.epoch:
             return
         try:
@@ -226,6 +238,7 @@ class TimeDriver:
         self.refresh()
 
     def close(self):
+        """Cancel tasks, remove driver registration and release the lock."""
         if not self.closed:
             self.closed = True
             self._cancel()

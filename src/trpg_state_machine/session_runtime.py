@@ -20,6 +20,7 @@ from .world_commands import ActivateMechanism, RepositionObject
 
 
 def _fingerprint(command, digest, binding, context):
+    """Hash command, trusted subject, Package pin and rules binding for idempotency."""
     data = asdict(command)
     if command.time_wait is None:
         data.pop("time_wait")  # Preserve every pre-wait command fingerprint.
@@ -51,7 +52,10 @@ def _fingerprint(command, digest, binding, context):
 
 
 class SessionRuntime:
+    """Coordinate durable command metadata, RNG, receipts and shared finalization."""
+
     def __init__(self, store, access, persistence):
+        """Bind Session submission interfaces and register recovery listeners."""
         self.store = store
         self.access = access
         self.persistence = persistence
@@ -71,9 +75,11 @@ class SessionRuntime:
 
     @property
     def _conn(self):
+        """Return the unified runtime connection."""
         return self.store.connection
 
     def fingerprint(self, command, row, context):
+        """Fingerprint a command using the admitted persisted Session pin."""
         return _fingerprint(command, row["package_digest"], _binding(row), context)
 
     def admit(self, row):
@@ -126,15 +132,18 @@ class SessionRuntime:
             lock.close()
 
     def refresh_time_drivers(self):
+        """Refresh attached time drivers."""
         if self.time:
             for driver in tuple(self.time.drivers.values()):
                 driver.refresh()
 
     def authorize_time_wait_reply(self, row, package, command, context):
+        """Delegate authorization of a time-wait reply."""
         if self.time is not None:
             return self.time.waits.authorize(row, package, command, context)
 
     def finish_time_wait_reply(self, row, package, command, events=()):
+        """Delegate completion of a time-wait reply and return its events."""
         return [] if self.time is None else self.time.waits.finish(row, package, command, events)
 
     def coordinate_combat_time(self, row, package, command_id, previous_round, event_offset=0):
@@ -310,6 +319,7 @@ class SessionRuntime:
         maps.release(sid)
 
     def receipt(self, sid, command_id):
+        """Read a durable command receipt by Session and command identity."""
         from .commands import receipt_from_json
 
         row = self._conn.execute(
@@ -337,6 +347,7 @@ class SessionRuntime:
         return version
 
     def version_conflict(self, row, command):
+        """Compare expected and current world versions."""
         return row["world_version"] != command.expected_world_version
 
     def finish(self, command, context, fingerprint, row, status, version, error):
@@ -376,6 +387,7 @@ class SessionRuntime:
         return receipt
 
     def _command_replay(self, command, fingerprint):
+        """Replay an existing command key, rejecting a conflicting content fingerprint."""
         from .commands import receipt_from_json
 
         stored = self._conn.execute(
@@ -390,18 +402,21 @@ class SessionRuntime:
         return receipt_from_json(stored["receipt_json"])
 
     def move_pc_scene(self, sid, scene_id):
+        """Persist the PC's current scene pointer."""
         self.store.require_write()
         self._conn.execute(
             "UPDATE sessions SET current_scene_id=? WHERE session_id=?", (scene_id, sid)
         )
 
     def set_mechanical_schema(self, sid, version):
+        """Persist the mechanical schema marker."""
         self.store.require_write()
         self._conn.execute(
             "UPDATE sessions SET mechanical_schema_version=? WHERE session_id=?", (version, sid)
         )
 
     def initialize(self, sid, package, context, pc, pc_actor_id, rng_ref):
+        """Initialize the persisted Session record."""
         self.store.require_write()
         self._conn.execute(
             "INSERT INTO sessions VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,0,0,NULL)",
@@ -423,6 +438,7 @@ class SessionRuntime:
         )
 
     def initialize_rng(self, sid, rng_ref, *, synthetic):
+        """Initialize the authoritative RNG stream and its version."""
         self.store.require_write()
         self._conn.execute(
             "INSERT INTO rng_states(session_id,state_id,algorithm,encoding,position) "
@@ -437,6 +453,7 @@ class SessionRuntime:
             )
 
     def select_rule_rng(self, sid, state_json, *, reset_position=False):
+        """Select the Session's rules RNG stream."""
         self.store.require_write()
         if reset_position:
             self._conn.execute(
@@ -452,10 +469,12 @@ class SessionRuntime:
             )
 
     def set_world_version(self, sid, version):
+        """Persist the world version."""
         self.store.require_write()
         self._conn.execute("UPDATE sessions SET world_version=? WHERE session_id=?", (version, sid))
 
     def advance_rule_rng(self, sid, transition, rng):
+        """Validate and atomically advance rules RNG state and version."""
         self.store.require_write()
         try:
             transition.verify_input(rng)
@@ -473,6 +492,7 @@ class SessionRuntime:
         )
 
     def advance_synthetic_rng(self, sid, transition):
+        """Validate and advance synthetic RNG state."""
         self.store.require_write()
         before, rng = transition.before, transition.after
         current = self._conn.execute(
@@ -500,6 +520,7 @@ class SessionRuntime:
         )
 
     def record_receipt(self, command, context, fingerprint, receipt):
+        """Persist the idempotent command receipt in the write scope."""
         self.store.require_write()
         self._conn.execute(
             "INSERT INTO command_receipts VALUES (?,?,?,?,?)",
@@ -513,10 +534,12 @@ class SessionRuntime:
         )
 
     def rng_context(self, row):
+        """Read the selected Session's RNG context."""
         return self._rng_context(row["session_id"])
 
     @scoped_read
     def _rng_context(self, sid):
+        """Construct a typed RNG context from persisted state and version."""
         rng = self._conn.execute("SELECT * FROM rng_states WHERE session_id=?", (sid,)).fetchone()
         if (
             rng is None

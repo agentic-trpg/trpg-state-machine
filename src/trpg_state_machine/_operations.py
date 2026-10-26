@@ -23,17 +23,23 @@ from .world_commands import (
 
 
 class ObjectState(StrEnum):
+    """Supported open/closed state values for foundation object commands."""
+
     CLOSED = "closed"
     OPEN = "open"
 
 
 @dataclass(frozen=True, slots=True)
 class EnterScene:
+    """Request entry into a selected scene through lifecycle coordination."""
+
     scene_id: str
 
 
 @dataclass(frozen=True, slots=True)
 class SetSceneFlag:
+    """Request a boolean flag change on one scene."""
+
     scene_id: str
     flag_id: str
     value: bool
@@ -41,6 +47,8 @@ class SetSceneFlag:
 
 @dataclass(frozen=True, slots=True)
 class SetObjectState:
+    """Request an object's open/closed transition in a scene."""
+
     scene_id: str
     object_id: str
     state: ObjectState
@@ -48,6 +56,8 @@ class SetObjectState:
 
 @dataclass(frozen=True, slots=True)
 class MoveActor:
+    """Request an actor scene transition through controlled world operations."""
+
     actor_id: str
     to_scene_id: str
 
@@ -65,6 +75,8 @@ class PlaceObject:
 
 @dataclass(frozen=True, slots=True)
 class StepActor:
+    """Request one spatial step guarded by the expected starting cell."""
+
     scene_id: str
     expected_cell: str
     to_cell: str
@@ -73,6 +85,8 @@ class StepActor:
 
 @dataclass(frozen=True, slots=True)
 class TraversePassage:
+    """Request passage traversal from a specified scene and expected cell."""
+
     passage_id: str
     from_scene_id: str
     expected_cell: str
@@ -81,6 +95,8 @@ class TraversePassage:
 
 @dataclass(frozen=True, slots=True)
 class PickupItem:
+    """Request pickup of one portable instance at its expected ground location."""
+
     instance_id: str
     scene_id: str
     expected_cell: str
@@ -89,6 +105,8 @@ class PickupItem:
 
 @dataclass(frozen=True, slots=True)
 class DropItem:
+    """Request placement of a carried instance at a ground cell."""
+
     instance_id: str
     scene_id: str
     to_cell: str
@@ -97,6 +115,8 @@ class DropItem:
 
 @dataclass(frozen=True, slots=True)
 class UnlockDoor:
+    """Request door unlocking using a credential instance and expected actor cell."""
+
     scene_id: str
     object_id: str
     credential_instance_id: str
@@ -106,6 +126,8 @@ class UnlockDoor:
 
 @dataclass(frozen=True, slots=True)
 class LockDoor:
+    """Request door locking using a credential instance and expected actor cell."""
+
     scene_id: str
     object_id: str
     credential_instance_id: str

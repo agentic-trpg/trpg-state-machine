@@ -36,8 +36,11 @@ def cell_in_bounds(topology, cell):
 
 
 def _read(method):
+    """Wrap a grid method in a consistent read scope."""
+
     @wraps(method)
     def read(self, *args, **kwargs):
+        """Call the wrapped grid method inside the grid read scope."""
         with self.read_scope():
             return method(self, *args, **kwargs)
 
@@ -46,6 +49,8 @@ def _read(method):
 
 @dataclass(frozen=True, slots=True)
 class GridOccupant:
+    """Associate an entity with its occupied scene cells and spatial kind."""
+
     kind: str
     entity_id: str
     cells: tuple[str, ...]
@@ -53,6 +58,8 @@ class GridOccupant:
 
 class _GridSnapshot:
     # Keep prepared implementation data out of dataclass fields/asdict/wire data.
+    """Carry fixed map, occupants and object contributions for grid queries."""
+
     __slots__ = (
         "_map",
         "_by_cell",
@@ -66,6 +73,8 @@ class _GridSnapshot:
 
 @dataclass(frozen=True, slots=True)
 class GridView(_GridSnapshot):
+    """Query a fixed grid snapshot using prepared occupancy and geometry indices."""
+
     scene_id: str
     world_version: int
     grid_json: str
@@ -75,6 +84,7 @@ class GridView(_GridSnapshot):
 
     def __deepcopy__(self, memo):
         # Hidden read-only preparations need no reconstruction for a detached DTO.
+        """Copy the fixed view while preserving immutable prepared input isolation."""
         result = object.__new__(type(self))
         memo[id(self)] = result
         for name in ("scene_id", "world_version", "grid_json", "occupants", "objects"):
@@ -84,6 +94,7 @@ class GridView(_GridSnapshot):
         return result
 
     def __post_init__(self, _prepared):
+        """Prepare occupancy, entity and cover query indices from the fixed map."""
         prepared = _prepared
         if prepared is None or prepared.grid_json != self.grid_json:
             prepared = PreparedGrid.build(json.loads(self.grid_json))
@@ -121,20 +132,25 @@ class GridView(_GridSnapshot):
 
     @property
     def width(self):
+        """Return map width in cells."""
         return self._map.data["width"]
 
     @property
     def height(self):
+        """Return map height in cells."""
         return self._map.data["height"]
 
     @property
     def cell_size_ft(self):
+        """Return cell edge length in feet."""
         return self._map.topology.cell_size_ft
 
     def _base(self):
+        """Return the fixed base topology."""
         return self._map.topology
 
     def normalize_cell(self, cell):
+        """Normalize a cell identity and check map bounds."""
         try:
             if type(cell) is not str:
                 raise ValueError("Expected a Cell string")
@@ -152,6 +168,7 @@ class GridView(_GridSnapshot):
         return tuple(self.occupants[i] for i in sorted(indices))
 
     def entity_cells(self, kind, entity_id):
+        """Read the fixed occupied cells for one entity."""
         try:
             return self._by_entity[kind, entity_id]
         except KeyError as exc:
@@ -163,9 +180,11 @@ class GridView(_GridSnapshot):
 
     def is_adjacent(self, a, b):
         # RE is_adjacent also filters blocked destinations; this is geometry only.
+        """Return whether the geometric distance qualifies as adjacent."""
         return self.distance_ft(a, b) == self.cell_size_ft
 
     def cells_within_range(self, origin, range_ft):
+        """Enumerate cells within the requested geometric range."""
         origin = self._range_origin(origin, range_ft)
         topology = self._base()
         x0, y0 = map(int, origin.split(","))
@@ -187,6 +206,7 @@ class GridView(_GridSnapshot):
         )
 
     def _range_origin(self, origin, range_ft):
+        """Validate the range and normalize its origin."""
         if (
             type(range_ft) not in (int, float)
             or (type(range_ft) is float and not isfinite(range_ft))
@@ -196,6 +216,7 @@ class GridView(_GridSnapshot):
         return self.normalize_cell(origin)
 
     def entities_within_range(self, origin, range_ft):
+        """Return entities with at least one occupied cell in range."""
         origin = self._range_origin(origin, range_ft)
         topology = self._base()
         return tuple(
@@ -205,6 +226,7 @@ class GridView(_GridSnapshot):
         )
 
     def neighbors(self, cell):
+        """Enumerate neighboring cells within map bounds."""
         cell = self.normalize_cell(cell)
         x0, y0 = map(int, cell.split(","))
         return tuple(
@@ -215,6 +237,7 @@ class GridView(_GridSnapshot):
         )
 
     def movement_blocking_cells(self):
+        """Combine base and object movement-blocking cells."""
         return tuple(
             sorted(
                 set(self._map.data["blocked_cells"])
@@ -223,6 +246,7 @@ class GridView(_GridSnapshot):
         )
 
     def difficult_terrain_cells(self):
+        """Combine base and object difficult terrain cells."""
         return tuple(
             sorted(
                 set(self._map.data["difficult_terrain_cells"])
@@ -246,6 +270,7 @@ class GridView(_GridSnapshot):
         return self._base().has_line_of_sight(a, b) and self.cover_between(a, b) != "total"
 
     def cover_between(self, a, b, *, creature_cover=False):
+        """Combine base, object and optional creature cover."""
         a, b = self.normalize_cell(a), self.normalize_cell(b)
         base = self._base()
         if not base.has_line_of_sight(a, b):
@@ -291,12 +316,14 @@ class GridReader:
     """Leaf reads only: depends on Store/WorldFacts, never OSS/Light/composition."""
 
     def __init__(self, store, facts):
+        """Bind grid facts and the shared map interface."""
         self.store = store
         self.facts = facts
         self.maps = facts.maps
 
     @contextmanager
     def read_scope(self):
+        """Reuse the active read scope or open a read-only transaction when needed."""
         if self.store.connection.in_transaction:
             yield
         else:
@@ -306,6 +333,7 @@ class GridReader:
     @_read
     @instance_read("scene", "spatial", "map")
     def prepared_scene(self, sid, scene_id, package):
+        """Prepare persisted scene maps, distinguishing predictions for uncreated scenes."""
         stored = self.maps.scene(sid, scene_id, spatial_only=True)
         if stored is not None:
             prepared = stored.grid
@@ -322,6 +350,7 @@ class GridReader:
 
     @_read
     def scene_grid(self, sid, scene_id, package):
+        """Return a detached data copy of the prepared scene map."""
         return self.prepared_scene(sid, scene_id, package).copy_data()
 
     @_read
@@ -340,6 +369,7 @@ class GridReader:
     @_read
     @instance_read("scene", "spatial", "object_positions")
     def scene_object_occupants(self, sid, scene_id, package):
+        """Read scene object occupancy, including definitions not yet instantiated."""
         initialized = self.store.connection.execute(
             "SELECT 1 FROM scene_instances WHERE session_id=? AND scene_id=?", (sid, scene_id)
         ).fetchone()
@@ -370,6 +400,7 @@ class GridReader:
     @_read
     @instance_read("scene", "spatial", "occupants")
     def scene_occupants(self, sid, scene_id, package):
+        """Read character and object occupancy for the scene."""
         initialized = self.store.connection.execute(
             "SELECT 1 FROM scene_instances WHERE session_id=? AND scene_id=?", (sid, scene_id)
         ).fetchone()
@@ -426,10 +457,12 @@ class GridService:
     """
 
     def __init__(self, handler):
+        """Bind the grid service and its reader."""
         self.h = handler
         self.reader = GridReader(handler.store, handler.facts)
 
     def read_scope(self):
+        """Delegate consistent read scope management to the reader."""
         return self.reader.read_scope()
 
     @staticmethod
@@ -478,6 +511,7 @@ class GridService:
 
     @_read
     def read_scene(self, sid, scene_id, package):
+        """Build a fixed grid view with scene occupants and spatial contributions."""
         row = self.h._conn.execute(
             "SELECT world_version FROM sessions WHERE session_id=?", (sid,)
         ).fetchone()
