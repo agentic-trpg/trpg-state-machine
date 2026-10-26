@@ -85,3 +85,12 @@ then the relevant authoritative contracts and current source. Update the overvie
 those relationships change. Local function/docstring edits require the relevant source
 and necessary context; they do not require rereading all architecture documents or
 mechanically changing the overview.
+
+## Local code retrieval tools
+
+For broad code/doc discovery or caller/callee navigation, optionally use the local
+retrieval MCP/CLI described in [Local Code Tools](../agentic-trpg/docs/LOCAL_CODE_TOOLS.md). Check indexed repository,
+version and last freshness check against the actual working directory/dependency pin;
+read current source before relying on a result. Small edits need no mandatory query.
+If the toolkit is absent, stale or incompatible, continue with `rg` and direct source
+reads; resolve sibling documentation against the logical parallel workspace.
