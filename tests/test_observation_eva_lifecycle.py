@@ -1,11 +1,9 @@
 """Mode-correct authorization, frozen Recent scope, explicit recovery and real commit."""
 
-import io
 import json
 import sqlite3
 import subprocess
 import sys
-import zipfile
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import asdict, replace
 from pathlib import Path
@@ -14,7 +12,7 @@ from threading import Barrier
 import pytest
 from perception_support import synthetic_notice
 from test_memory_gate import classify
-from test_migrations import assert_preserved, stored_rows
+from test_migrations import stored_rows
 from test_npc_evaluation_tasks import create_task, prepare
 from test_npc_evaluation_tasks import evaluation_package as evaluation_package
 from test_npc_modes import new_observation
@@ -463,51 +461,3 @@ with StateMachine(sys.argv[1]) as sm:
             == receipt
         )
     assert stored_rows(db) == after
-
-
-def test_actual_ob2_upgrade_preserves_gate_task_scope_and_recovers_old_work(
-    tmp_path, ob_package, context
-):
-    source = tmp_path / "old"
-    archive = subprocess.run(
-        ["git", "archive", "--format=zip", "e694975", "src"],
-        cwd=ROOT,
-        check=True,
-        capture_output=True,
-    ).stdout
-    with zipfile.ZipFile(io.BytesIO(archive)) as contents:
-        contents.extractall(source)
-    db = tmp_path / "old.db"
-    process = subprocess.run(
-        [
-            sys.executable,
-            str(ROOT / "tests/_ob_gate_legacy_worker.py"),
-            str(source / "src"),
-            str(db),
-            str(tmp_path / "evaluation.yaml"),
-        ],
-        cwd=tmp_path,
-        capture_output=True,
-        text=True,
-        encoding="utf-8",
-    )
-    assert process.returncode == 0, process.stderr
-    sid, eid = json.loads(process.stdout)
-    before = stored_rows(db)
-    with StateMachine(db) as sm:
-        assert_preserved(db, before)
-        sm.upgrade_instance_configs(sid, ob_package, context=context)
-        npc = NPCContext("agent:npc.caretaker", sid, "npc.caretaker")
-        data = sm.get_npc_evaluation_task(eid, ob_package, context=npc)
-        assert data.task.status == "running" and data.observations
-        assert data.recent_observations == ()  # No invented grant to old Task.
-        assert (
-            sm._conn.execute("SELECT count(*) FROM npc_evaluation_recent_scope").fetchone()[0] == 0
-        )
-        advance(sm, sid, ob_package, context, 100)
-        evidence = sm.get_npc_evaluation_recovery_input(eid, ob_package, context=npc)
-        assert {x.observation.observation_id for x in evidence} == set(
-            data.task.source_observation_ids
-        )
-        sm.submit_npc_evaluation_result(eid, NPCEvaluationResult(), ob_package, context=npc)
-        assert not sm.get_pending_npc_observation_work(sid, ob_package, context=npc)

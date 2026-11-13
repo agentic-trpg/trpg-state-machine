@@ -1,12 +1,7 @@
 """RF4-REV-01: real public producers, current fact owners and frozen evidence."""
 
-import io
 import json
-import os
 import sqlite3
-import subprocess
-import zipfile
-from pathlib import Path
 
 import pytest
 from dnd_support import NPC, create, initialize
@@ -14,7 +9,7 @@ from modern_support import modern_data, modern_loader
 from perception_support import synthetic_notice
 from test_combat_closure import close_command, pc_attack
 from test_events import event_data
-from test_migrations import assert_original_rows_equal, stored_rows
+from test_migrations import stored_rows
 
 from trpg_state_machine import (
     EnterScene,
@@ -440,82 +435,3 @@ def test_evidence_or_outbox_fault_rolls_back_all_facts_and_same_command_retries(
         committed = stored_rows(db)
         assert sm.submit_command(cmd, package, context=context) == receipt
         assert stored_rows(db) == committed
-
-
-def test_actual_baseline_missing_evidence_is_preserved_without_automatic_repair(
-    tmp_path, package_data, context, rf4_baseline_python
-):
-    root = Path(__file__).resolve().parents[1]
-    baseline = "4e4e678e1b2e580959fc22d07465940211c66a3a"
-    old = tmp_path / "baseline"
-    archive = subprocess.run(
-        ["git", "archive", "--format=zip", baseline, "src"],
-        cwd=root,
-        check=True,
-        capture_output=True,
-    ).stdout
-    with zipfile.ZipFile(io.BytesIO(archive)) as files:
-        files.extractall(old)
-    base = tmp_path / "base.json"
-    base.write_text(json.dumps(package_data), "utf-8")
-    db = tmp_path / "old.db"
-    script = """
-import json,sys
-from pathlib import Path
-sys.path.insert(0, sys.argv[1])
-import trpg_state_machine.event_capture as capture
-assert Path(capture.__file__).is_relative_to(Path(sys.argv[4]))
-from test_rf4_position_evidence import authored_package, create, initialize, fire
-from trpg_state_machine import StateMachine, TrustedContext
-from trpg_state_machine.package import _validate
-data, assets = authored_package(
-    json.loads(Path(sys.argv[2]).read_text('utf-8')), return_source=True)
-package = _validate(data)
-Path(sys.argv[2]).with_name('historical-package.json').write_text(
-    json.dumps(data), encoding='utf-8')
-context = TrustedContext('authenticated:alice', 'player.alice', ('npc.caretaker','npc.attendant'))
-with StateMachine(sys.argv[3], dnd_loader=assets) as sm:
- sid = create(sm, package, context)
- assert initialize(sm, sid, package, context).status == 'committed'
- _, _, event = fire(sm, sid, package, context)
- print(json.dumps([sid,event.event_seq]))
-"""
-    process = subprocess.run(
-        [str(rf4_baseline_python), "-c", script, str(root / "tests"), str(base), str(db), str(old)],
-        cwd=tmp_path,
-        env=dict(os.environ, PYTHONPATH=str(old / "src")),
-        capture_output=True,
-        text=True,
-        check=False,
-    )
-    assert process.returncode == 0, process.stderr
-    sid, seq = json.loads(process.stdout)
-    frozen = saved_evidence(db, sid, seq)
-    assert json.loads(frozen)["actors"][0]["mechanical"]["cell"] is None
-    before = stored_rows(db)
-    package = _validate(json.loads(base.with_name("historical-package.json").read_text("utf-8")))
-    assets = modern_loader()
-    with StateMachine(db, dnd_loader=assets) as sm:
-        assert_original_rows_equal(before, stored_rows(db))
-        sm.upgrade_instance_configs(sid, package, context=context)
-        assert (
-            sm._conn.execute(
-                "SELECT count(*) FROM objects WHERE carrier_id IS NOT NULL OR item_json IS NOT NULL"
-            ).fetchone()[0]
-            == 0
-        )
-        assert sm.read_actor_position(sid, NPC, package, context=context).cell == "1,0"
-        assert (
-            sm.get_command_receipt(sid, "fire.position", package, context=context).status
-            == "committed"
-        )
-        assert sm.project_event(sid, seq, package, context=context) == "unresolved"
-        assert saved_evidence(db, sid, seq) == frozen
-        assert (
-            sm._conn.execute(
-                "SELECT complete FROM npc_perception_queue "
-                "WHERE session_id=? AND npc_id=? AND event_seq=?",
-                (sid, NPC, seq),
-            ).fetchone()[0]
-            == 0
-        )

@@ -1,15 +1,9 @@
 """Real producers, independent SQLite reads, and historical-runtime recovery."""
 
-import io
 import json
-import os
 import sqlite3
-import subprocess
-import sys
-import zipfile
 from copy import deepcopy
 from dataclasses import replace
-from pathlib import Path
 
 import pytest
 from dnd_support import create
@@ -18,7 +12,7 @@ from test_conditional_world_effects import conditional
 from test_dnd_runtime import attack, setup
 from test_events import event_data
 from test_game_time import tick_command
-from test_migrations import assert_original_rows_equal, stored_rows
+from test_migrations import stored_rows
 from test_npc_evaluation_tasks import create_task, prepare
 from test_npc_evaluation_tasks import evaluation_package as evaluation_package
 from test_perception_conditions import sensory_event_package
@@ -660,97 +654,6 @@ def test_real_move_captures_destination_without_copying_identity(tmp_path, scope
             sm._conn.execute("SELECT count(*) FROM actors WHERE actor_id=?", (N1,)).fetchone()[0]
             == 1
         )
-
-
-def test_actual_per1_runtime_evidence3_is_retained_without_final_state_backfill(
-    tmp_path, scoped_data, context
-):
-    archive = subprocess.run(
-        ["git", "archive", "--format=zip", "5deea78", "src"],
-        cwd=Path(__file__).resolve().parents[1],
-        check=True,
-        capture_output=True,
-    ).stdout
-    old = tmp_path / "per1"
-    with zipfile.ZipFile(io.BytesIO(archive)) as files:
-        files.extractall(old)
-    path = tmp_path / "package.json"
-    path.write_text(json.dumps(scoped_data), encoding="utf-8")
-    package = load_adventure_package(path).package
-    db = tmp_path / "per1.db"
-    code = """
-import json, sys
-from trpg_state_machine import (
- StateMachine, CreateSessionRequest, PlayerSelection, TrustedContext, load_adventure_package,
-)
-from trpg_state_machine.perception import JudgmentResult, SignalJudgment
-p=load_adventure_package(sys.argv[2]).package
-c=TrustedContext('authenticated:alice','player.alice',('npc.caretaker','npc.attendant'))
-def notice(r):
- return JudgmentResult(tuple(SignalJudgment(s.signal_id,True) for s in r.signals))
-with StateMachine(sys.argv[1]) as sm:
- ids=[]
- for key in ('complete','pending'):
-  r=CreateSessionRequest(key,p.adventure_id,p.package_version,p.package_digest,(PlayerSelection(c.player_id,'pc_template.observer'),))
-  sid=sm.create_session(r,p,context=c).session_id
-  ids.append(sid)
-  if key=='complete':
-   for seq in (1,2):
-    assert sm.project_event(sid,seq,p,context=c,judgment=notice)=='resolved'
- print(json.dumps(ids))
-"""
-    process = subprocess.run(
-        [sys.executable, "-c", code, str(db), str(path)],
-        env=dict(os.environ, PYTHONPATH=str(old / "src")),
-        cwd=tmp_path,
-        check=True,
-        capture_output=True,
-        text=True,
-        encoding="utf-8",
-    )
-    complete, pending = json.loads(process.stdout)
-    before = stored_rows(db)
-    samples = {sid: evidence(db, sid, 2) for sid in (complete, pending)}
-    assert all(e["schema"] == "event-evidence/3" for e in samples.values())
-    for _ in range(2):
-        with StateMachine(db) as sm:
-            assert sm.project_event(complete, 2, package, context=context) == "already_complete"
-            assert (
-                sm.project_event(
-                    pending,
-                    2,
-                    package,
-                    context=context,
-                    judgment=lambda _: pytest.fail("Legacy phase is unproven"),
-                )
-                == "unresolved"
-            )
-            assert sm.perception_cursor(complete, package, context=context) == 2
-            assert sm.perception_cursor(pending, package, context=context) == 0
-    after = stored_rows(db)
-    assert_original_rows_equal(before, after, excluded=("event_outbox",))
-    with StateMachine(db) as sm:
-        assert sm.project_event(pending, 1, package, context=context) == "resolved"
-        sm.upgrade_instance_configs(pending, package, context=context)
-        enter(sm, pending, package, context, B, "new-world")
-        assert evidence(db, pending, 4)["schema"] == "event-evidence/4"
-        assert (
-            sm.project_event(
-                pending,
-                2,
-                package,
-                context=context,
-                judgment=lambda _: pytest.fail("Current world cannot repair legacy"),
-            )
-            == "unresolved"
-        )
-        assert sm.perception_cursor(pending, package, context=context) == 1
-        for sid in (complete, pending):
-            assert evidence(db, sid, 2) == samples[sid]
-    with sqlite3.connect(db) as conn:
-        assert conn.execute("PRAGMA user_version").fetchone()[0] == 41
-        assert conn.execute("PRAGMA foreign_key_check").fetchall() == []
-        assert conn.execute("SELECT session_id FROM event_observations").fetchall() == [(complete,)]
 
 
 @pytest.mark.parametrize("field,value", [("kind", "radius"), ("scene_id", "scene.absent")])

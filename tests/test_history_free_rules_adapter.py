@@ -1,13 +1,8 @@
 """RF4 real pinned evaluator, persisted current facts and explicit old-format policy."""
 
-import io
 import json
-import os
 import re
 import sqlite3
-import subprocess
-import sys
-import zipfile
 from copy import deepcopy
 from dataclasses import replace
 from importlib.metadata import distribution
@@ -19,7 +14,6 @@ from dnd_support import create, initialize
 from modern_support import modern_data, modern_loader
 from test_dnd_ledger_scope import stored_state
 from test_dnd_runtime import attack as lantern_attack
-from test_migrations import assert_original_rows_equal, stored_rows
 from test_real_checks import check_command
 
 from trpg_state_machine import StateMachine, StateMachineError
@@ -280,71 +274,6 @@ def test_initial_context_components_must_agree(package_data):
     with pytest.raises(StateMachineError) as error:
         _validate(data)
     assert error.value.code == "invalid_reference"
-
-
-def schema22_database(tmp_path):
-    source = tmp_path / "baseline22"
-    archive = subprocess.run(
-        ["git", "archive", "--format=zip", BASELINE, "src", "tests/fixtures/lantern_station.yaml"],
-        cwd=ROOT,
-        check=True,
-        capture_output=True,
-    ).stdout
-    with zipfile.ZipFile(io.BytesIO(archive)) as files:
-        files.extractall(source)
-    database = tmp_path / "schema22.db"
-    worker = subprocess.run(
-        [
-            sys.executable,
-            str(ROOT / "tests/_legacy_database_worker.py"),
-            str(source),
-            str(database),
-            str(source / "tests/fixtures/lantern_station.yaml"),
-            "no",
-        ],
-        cwd=tmp_path,
-        env=dict(os.environ, PYTHONPATH=str(source / "src")),
-        check=True,
-        capture_output=True,
-        text=True,
-        encoding="utf-8",
-    )
-    assert json.loads(worker.stdout)["schema"] == 22
-    return database
-
-
-@pytest.mark.parametrize(
-    "stage",
-    [
-        "DROP COLUMN mechanical_schema_version",
-        "CREATE TABLE mechanical_components",
-        "PRAGMA user_version = 23",
-    ],
-)
-def test_actual_schema22_upgrade_failure_is_atomic_and_retry_preserves_every_old_row(
-    tmp_path, monkeypatch, stage
-):
-    db = schema22_database(tmp_path)
-    before = stored_rows(db)
-    connect = sqlite3.connect
-
-    class Failing(sqlite3.Connection):
-        def execute(self, sql, *args):
-            result = super().execute(sql, *args)
-            if stage in sql:
-                raise sqlite3.OperationalError("injected RF4 migration failure")
-            return result
-
-    monkeypatch.setattr(sqlite3, "connect", lambda *a, **k: connect(*a, factory=Failing, **k))
-    with pytest.raises(StateMachineError) as error:
-        StateMachine(db)
-    assert error.value.code == "storage_error"
-    monkeypatch.undo()
-    assert stored_rows(db) == before
-    with StateMachine(db) as sm:
-        assert sm._conn.execute("PRAGMA user_version").fetchone()[0] == 41
-        assert not sm._conn.execute("SELECT * FROM mechanical_components").fetchall()
-    assert_original_rows_equal(before, stored_rows(db))
 
 
 def test_combat_only_initialization_uses_existing_hp(tmp_path, package_data, context):

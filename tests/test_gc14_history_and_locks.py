@@ -1,12 +1,6 @@
 """Real archived receipts, current locks, NPC handoff and pinned-RE death history."""
 
-import io
 import json
-import subprocess
-import sys
-import zipfile
-from dataclasses import asdict
-from pathlib import Path
 
 import pytest
 from dnd_support import initialize
@@ -18,7 +12,6 @@ from spatial_support import A, B, create, submit
 from test_combat_closure import close_command, pc_attack
 from test_gc14_review_fixes import (
     MOVER,
-    departure_data,
     events_for,
     evidence,
     setup,
@@ -36,69 +29,9 @@ from trpg_state_machine import (
     UnlockDoor,
     load_adventure_package,
     pump_navigation,
-    world_command_from_data,
 )
 from trpg_state_machine.npc_results import NPCActionIntent, NPCEvaluationResult
 from trpg_state_machine.perception import NPCContext
-
-
-def test_original_receipt_and_historical_move_are_not_backfilled_after_upgrade(tmp_path, context):
-    root = Path(__file__).parents[1]
-    archive = subprocess.run(
-        ["git", "archive", "--format=zip", "359e096f1621ecb4b6cbbd55c9320e1e2efe5701", "src"],
-        cwd=root,
-        capture_output=True,
-        check=True,
-    ).stdout
-    source = tmp_path / "old"
-    with zipfile.ZipFile(io.BytesIO(archive)) as contents:
-        contents.extractall(source)
-    document, database = tmp_path / "package.json", tmp_path / "old.db"
-    document.write_text(json.dumps(departure_data()), "utf-8")
-    old = json.loads(
-        subprocess.run(
-            [
-                sys.executable,
-                str(root / "tests/_gc14_history_worker.py"),
-                str(source),
-                str(database),
-                str(document),
-            ],
-            capture_output=True,
-            text=True,
-            encoding="utf-8",
-            check=True,
-        ).stdout
-    )
-    assert old["types"] == ["actor.moved"]
-    from dataclasses import replace
-
-    context = replace(context, controlled_npc_ids=(*context.controlled_npc_ids, MOVER))
-    p = load_adventure_package(document).package
-    original = stored_rows(database)
-    with StateMachine(database) as sm:
-        sid = old["sid"]
-        sm.upgrade_instance_configs(sid, p, context=context)
-        sm.resume_session(sid, p, context=context)
-        assert sm._conn.execute("PRAGMA user_version").fetchone()[0] == 41
-        from test_migrations import assert_original_rows_equal
-
-        upgraded = stored_rows(database)
-        assert_original_rows_equal(original, upgraded)
-        raw = old["command"]
-        del raw["check_world_effects"]
-        receipt = sm.submit_command(world_command_from_data(raw), p, context=context)
-        assert json.loads(json.dumps(asdict(receipt))) == old["receipt"]
-        assert stored_rows(database) == upgraded
-        new = submit(sm, sid, p, context, MoveActor(MOVER, A), "new.move", MOVER)
-        assert new.status == "committed"
-        assert [e.event_type for e in events_for(sm, sid, p, context, new)] == [
-            "actor.departed",
-            "actor.moved",
-        ]
-        before_columns, before_rows = original["event_evidence"]
-        assert before_columns == stored_rows(database)["event_evidence"][0]
-        assert before_rows <= stored_rows(database)["event_evidence"][1]
 
 
 def test_locked_navigation_departs_only_after_explicit_unlock_and_resume(tmp_path, context):

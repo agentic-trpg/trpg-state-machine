@@ -1,8 +1,6 @@
-import json
 import sqlite3
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
-from pathlib import Path
 
 import pytest
 
@@ -200,43 +198,3 @@ def test_all_world_commands(tmp_path, package, context, request_for):
                 index,
             )
             assert sm.submit_command(command, package, context=context).status == "committed"
-
-
-def test_upgrade_batch1_preserves_real_database(tmp_path, package, context, request_for):
-    database = tmp_path / "state.db"
-    with StateMachine(database) as sm:
-        created = sm.create_session(request_for(), package, context=context)
-        before = sm.read_session(created.session_id, package, context=context)
-    # Copy matching authority columns into the original Batch-1 schema, then upgrade it.
-    legacy = tmp_path / "legacy.db"
-    with sqlite3.connect(legacy) as conn:
-        schema = Path("src/trpg_state_machine/_schema.sql").read_text("utf-8")
-        conn.executescript(schema)
-        conn.execute("PRAGMA foreign_keys=ON")
-        conn.execute("ATTACH DATABASE ? AS source", (str(database),))
-        tables = [r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")]
-        for table in tables:
-            fields = [r[1] for r in conn.execute(f"PRAGMA table_info({table})")]
-            columns = ",".join(fields)
-            if table == "characters":
-                fields.remove("inventory_json")
-                conn.execute(
-                    f"INSERT INTO {table}({','.join(fields)},inventory_json) "
-                    f"SELECT {','.join(fields)},? FROM source.{table}",
-                    (json.dumps(before.character.inventory),),
-                )
-            else:
-                conn.execute(f"INSERT INTO {table}({columns}) SELECT {columns} FROM source.{table}")
-    database = legacy
-    with StateMachine(database) as sm:
-        sm.upgrade_instance_configs(created.session_id, package, context=context)
-        assert sm.resume_session(created.session_id, package, context=context) == before
-        assert sm._conn.execute("PRAGMA user_version").fetchone()[0] == 41
-        assert sm._conn.execute("SELECT COUNT(*) FROM event_evidence").fetchone()[0] == 0
-        assert (
-            sm.submit_command(
-                make_command(sm, created, package, context), package, context=context
-            ).status
-            == "committed"
-        )
-    assert Path(database).exists()

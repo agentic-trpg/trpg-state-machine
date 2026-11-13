@@ -2,7 +2,6 @@
 
 import io
 import json
-import sqlite3
 import subprocess
 import sys
 import zipfile
@@ -13,7 +12,6 @@ from threading import Barrier
 
 import pytest
 from test_dnd_ledger_scope import stored_state
-from test_migrations import assert_preserved, stored_rows
 from test_npc_evaluation_tasks import evaluation_package as evaluation_package
 from test_npc_evaluation_tasks import prepare
 from test_npc_results import full_result
@@ -466,58 +464,6 @@ with StateMachine(sys.argv[2]) as sm:
         check=True,
     )
     return db, json.loads(result.stdout)
-
-
-def test_actual_schema14_concurrent_upgrade_preserves_all_prior_authority(tmp_path, context):
-    db, sid = old_schema14(tmp_path)
-    original, barrier = stored_rows(db), Barrier(3)
-
-    def upgrade(_):
-        barrier.wait(timeout=10)
-        with StateMachine(db) as sm:
-            return sm._conn.execute("PRAGMA user_version").fetchone()[0]
-
-    with ThreadPoolExecutor(max_workers=3) as pool:
-        assert list(pool.map(upgrade, range(3))) == [41] * 3
-    assert_preserved(db, original)
-    from trpg_state_machine import load_adventure_package
-
-    package = load_adventure_package(SOURCE).package
-    context = replace(context, can_advance_time=True)
-    with StateMachine(db) as sm:
-        sm.upgrade_instance_configs(sid, package, context=context)
-        assert sm.resume_session(sid, package, context=context).world.game_tick == 0
-        npc = grant(sm, sid, package, context)
-        assert npc_view(sm, sid, package, npc).memories[-1].text == "Old committed memory."
-        assert tick(sm, sid, package, context, 10).status == "committed"
-    after = stored_state(db)
-    for _ in range(2):
-        with StateMachine(db):
-            pass
-        assert stored_state(db) == after
-
-
-def test_interrupted_schema15_migration_is_atomic_and_retryable(tmp_path, monkeypatch):
-    db, _ = old_schema14(tmp_path)
-    before, read = stored_state(db), Path.read_text
-
-    def broken(path, *args, **kwargs):
-        text = read(path, *args, **kwargs)
-        return (
-            text.replace("PRAGMA user_version = 15;", "INVALID MIGRATION;")
-            if path.name == "_migration_15.sql"
-            else text
-        )
-
-    monkeypatch.setattr(Path, "read_text", broken)
-    with pytest.raises(StateMachineError):
-        StateMachine(db)
-    assert stored_state(db) == before
-    with sqlite3.connect(db) as conn:
-        assert conn.execute("PRAGMA user_version").fetchone()[0] == 14
-    monkeypatch.undo()
-    with StateMachine(db) as sm:
-        assert sm._conn.execute("PRAGMA user_version").fetchone()[0] == 41
 
 
 def test_overlapping_schedule_fails_closed_without_partial_clock(

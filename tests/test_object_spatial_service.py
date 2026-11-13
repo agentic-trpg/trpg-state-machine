@@ -1,19 +1,17 @@
 """Object-side geometry through real commands, shared commits and Package bindings."""
 
 import hashlib
-import io
 import json
 import os
 import subprocess
 import sys
-import zipfile
 from copy import deepcopy
 from dataclasses import asdict, replace
 from pathlib import Path
 
 import pytest
-from lock_support import CRED, A, lock_loader
-from test_migrations import assert_original_rows_equal, stored_rows
+from lock_support import CRED, A
+from test_migrations import stored_rows
 from test_world_durability import adopt, durability_data
 from test_world_spatial import OBSTACLE, spatial_world_data
 from world_support import command, setup, submit
@@ -23,7 +21,6 @@ from trpg_state_machine import (
     ObjectState,
     RepositionObject,
     SetObjectState,
-    StateMachine,
     StateMachineError,
     StepActor,
 )
@@ -550,82 +547,3 @@ def test_scene_contribution_seam_and_combat_property_guard(tmp_path, context):
         assert spatial.scene_contributions(sid, B, p)[DOOR].movement_blocking_cells == ("0,1",)
         with pytest.raises(StateMachineError, match="properties need RE"):
             sm._world._spatial_combat_guard(sid, A, p)
-
-
-def test_real_schema32_save_receipt_replay_and_all_old_columns_preserved(
-    tmp_path, context, monkeypatch, pre_frozen_python
-):
-    root = Path(__file__).resolve().parents[1]
-    source = tmp_path / "old"
-    archive = subprocess.run(
-        ["git", "archive", "--format=zip", "a897ae5", "src"],
-        cwd=root,
-        check=True,
-        capture_output=True,
-    ).stdout
-    with zipfile.ZipFile(io.BytesIO(archive)) as contents:
-        contents.extractall(source)
-    db = tmp_path / "legacy.db"
-    code = (
-        "import sys,json; from test_world_spatial import spatial_world_data,OBSTACLE; "
-        "from world_support import setup,command; "
-        "from trpg_state_machine import TrustedContext,RepositionObject; "
-        "from dataclasses import replace,asdict; from pathlib import Path; "
-        "c=replace(TrustedContext('authenticated:alice','player.alice'),"
-        "can_place_world_objects=True); "
-        "s,sid,p,db=setup(Path(sys.argv[1]),c,spatial_world_data()); "
-        "cmd=command(s,sid,p,c,RepositionObject('scene.platform',OBSTACLE,'2,0','1,0'),'old'); "
-        "r=s.submit_command(cmd,p,context=c); d=asdict(cmd); d.pop('check_world_effects'); "
-        "v=s._conn.execute('PRAGMA user_version').fetchone()[0]; "
-        "print(json.dumps({'sid':sid,'command':d,'receipt':asdict(r),'schema':v,"
-        "'data':spatial_world_data()})); s.close()"
-    )
-    result = subprocess.run(
-        [str(pre_frozen_python), "-c", code, str(tmp_path)],
-        cwd=tmp_path,
-        env={
-            **os.environ,
-            "PYTHONPATH": os.pathsep.join([str(source / "src"), str(root / "tests")]),
-        },
-        capture_output=True,
-        text=True,
-        check=True,
-    )
-    old = json.loads(result.stdout)
-    assert old["schema"] == 32 and old["receipt"]["status"] == "committed"
-    db = tmp_path / "world.db"
-    before = stored_rows(db)
-    import sqlite3
-
-    read_text = Path.read_text
-
-    def interrupted(path, *args, **kwargs):
-        content = read_text(path, *args, **kwargs)
-        return (
-            content.replace("PRAGMA user_version = 33;", "INVALID MIGRATION;")
-            if path.name == "_migration_33.sql"
-            else content
-        )
-
-    monkeypatch.setattr(Path, "read_text", interrupted)
-    with pytest.raises(StateMachineError):
-        StateMachine(db, dnd_loader=lock_loader())
-    assert stored_rows(db) == before
-    with sqlite3.connect(db) as connection:
-        assert connection.execute("PRAGMA user_version").fetchone()[0] == 32
-    monkeypatch.undo()
-    gm = replace(context, can_place_world_objects=True)
-    p = _validate(old["data"])
-    with StateMachine(db, dnd_loader=lock_loader()) as sm:
-        sid = old["sid"]
-        sm.upgrade_instance_configs(sid, p, context=context)
-        with pytest.raises(StateMachineError) as error:
-            sm.resume_session(sid, p, context=context)
-        assert error.value.code == "ruleset_binding_mismatch"
-        assert_original_rows_equal(before, stored_rows(db))
-        assert sm._conn.execute("PRAGMA user_version").fetchone()[0] == 41
-        assert {r[0] for r in sm._conn.execute("SELECT orientation FROM objects")} == {"north"}
-        replay = sm.submit_command(world_command_from_data(old["command"]), p, context=gm)
-        assert json.loads(json.dumps(asdict(replay))) == old["receipt"]
-        assert_original_rows_equal(before, stored_rows(db))
-        assert sm._conn.execute("PRAGMA foreign_key_check").fetchall() == []

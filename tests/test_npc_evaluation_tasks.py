@@ -1,12 +1,9 @@
 """Durable task authorization, existing Inbox identity and actual SQLite recovery."""
 
-import io
 import json
-import os
 import sqlite3
 import subprocess
 import sys
-import zipfile
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import asdict, replace
 from pathlib import Path
@@ -16,7 +13,7 @@ import pytest
 import yaml
 from perception_support import synthetic_notice
 from test_events import event_data
-from test_migrations import assert_preserved, stored_rows
+from test_migrations import stored_rows
 from test_npc_state import SOURCE, enter, grant, request
 
 from trpg_state_machine import SetSceneFlag, StateMachine, StateMachineError, load_adventure_package
@@ -224,55 +221,6 @@ def test_concurrent_task_creation_sqlite_unique_authorization(
     assert tasks == [tasks[0]] * 4
     with sqlite3.connect(db) as conn:
         assert conn.execute("SELECT COUNT(*) FROM npc_evaluation_tasks").fetchone()[0] == 1
-
-
-def test_actual_sm14_upgrade_preserves_all_rows_and_backfills_only_existing_inbox(
-    tmp_path, evaluation_package, context
-):
-    old = tmp_path / "old"
-    archive = subprocess.run(
-        ["git", "archive", "--format=zip", "344c5f6", "src"],
-        cwd=ROOT,
-        check=True,
-        capture_output=True,
-    ).stdout
-    with zipfile.ZipFile(io.BytesIO(archive)) as contents:
-        contents.extractall(old)
-    db = tmp_path / "old.db"
-    env = dict(os.environ, PYTHONPATH=str(old / "src"))
-    code = """
-import sys
-sys.path.insert(0, sys.argv[1])
-from trpg_state_machine import (
- StateMachine, load_adventure_package, TrustedContext, CreateSessionRequest, PlayerSelection,
-)
-from trpg_state_machine import SetSceneFlag
-p=load_adventure_package(sys.argv[3]).package
-c=TrustedContext('authenticated:alice','player.alice')
-with StateMachine(sys.argv[2]) as sm:
- r=CreateSessionRequest('old',p.adventure_id,p.package_version,p.package_digest,(PlayerSelection(c.player_id,'pc_template.observer'),))
- sid=sm.create_session(r,p,context=c).session_id
- sm._apply(sid,p,SetSceneFlag('scene.platform','flag.lamp_checked',True),expected_world_version=0,context=c)
- for e in sm.read_events(sid,p,context=c):
-  sm.project_event(sid,e.event_seq,p,context=c)
- assert sm._conn.execute('PRAGMA user_version').fetchone()[0]==10
-"""
-    process = subprocess.run(
-        [sys.executable, "-c", code, str(old / "src"), str(db), str(tmp_path / "evaluation.yaml")],
-        env=env,
-        capture_output=True,
-        text=True,
-    )
-    assert process.returncode == 0, process.stderr
-    before = stored_rows(db)
-    with StateMachine(db) as sm:
-        assert sm._conn.execute("SELECT COUNT(*) FROM npc_evaluation_tasks").fetchone()[0] == 0
-        assert sm._conn.execute("SELECT COUNT(*) FROM npc_observation_work").fetchone()[0] > 0
-        assert sm._conn.execute("SELECT COUNT(*) FROM observation_signal_sources").fetchone()[0] > 0
-    assert_preserved(db, before)
-    with StateMachine(db):
-        pass
-    assert_preserved(db, before)
 
 
 def test_unconfigured_npc_cannot_authorize_cognition(tmp_path, package, context, request_for):

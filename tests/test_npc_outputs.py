@@ -1,11 +1,9 @@
 """Output/Command reconciliation and continuous cognition prefix in real SQLite."""
 
-import io
 import json
 import sqlite3
 import subprocess
 import sys
-import zipfile
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import asdict, replace
 from pathlib import Path
@@ -13,7 +11,7 @@ from threading import Barrier
 
 import pytest
 from perception_support import synthetic_notice
-from test_migrations import assert_preserved, stored_rows
+from test_migrations import stored_rows
 from test_npc_evaluation_tasks import create_task, prepare
 from test_npc_evaluation_tasks import evaluation_package as evaluation_package
 from test_npc_modes import new_observation
@@ -527,101 +525,6 @@ def test_two_npcs_and_sessions_cannot_use_foreign_observation_or_memory(
             ).npc_state_version
             == 1
         )
-
-
-@pytest.mark.parametrize("version,commit", [(11, "c94955f"), (12, "44f8e90"), (13, "2ddd79e")])
-def test_actual_prior_npc_runtime_migration_preserves_tasks_meta_outputs_and_recovers_completion(
-    tmp_path, evaluation_package, context, version, commit
-):
-    old = tmp_path / "old"
-    archive = subprocess.run(
-        ["git", "archive", "--format=zip", commit, "src"], cwd=ROOT, check=True, capture_output=True
-    ).stdout
-    with zipfile.ZipFile(io.BytesIO(archive)) as contents:
-        contents.extractall(old)
-    db = tmp_path / "old.db"
-    code = """
-import sys,json
-sys.path.insert(0,sys.argv[1])
-from dataclasses import replace
-from trpg_state_machine import (
- StateMachine,TrustedContext,CreateSessionRequest,PlayerSelection,SetSceneFlag,load_adventure_package)
-from trpg_state_machine.perception import NPCContext
-p=load_adventure_package(sys.argv[3]).package
-c=TrustedContext('authenticated:alice','player.alice',('npc.caretaker',))
-with StateMachine(sys.argv[2]) as sm:
- r=CreateSessionRequest('old',p.adventure_id,p.package_version,p.package_digest,
-  (PlayerSelection(c.player_id,'pc_template.observer'),))
- sid=sm.create_session(r,p,context=c).session_id
- sm.grant_npc_access(sid,'npc.caretaker','agent:npc.caretaker',p,context=c)
- sm._apply(sid,p,SetSceneFlag('scene.platform','flag.lamp_checked',True),
-  expected_world_version=0,context=c)
- for e in sm.read_events(sid,p,context=c): sm.project_event(sid,e.event_seq,p,context=c)
- n=NPCContext('agent:npc.caretaker',sid,'npc.caretaker')
- ids=tuple(o.observation_id for o in sm.read_observations(sid,p,context=n))
- t=sm.create_npc_evaluation_task(sid,p,context=n,request_id='old.task',mode='interactive',
-  reason='test',expected_npc_state_version=1,source_observation_ids=ids)
- if int(sys.argv[4])>=12:
-  from trpg_state_machine.npc_results import NPCEvaluationResult,NPCActionIntent
-  from trpg_state_machine.npc_state import SourceReference
-  m=sm.get_npc_view(sid,'npc.caretaker',p,context=n).memories[0]
-  m=replace(m,version=2,sources=(SourceReference('observation',ids[0],None),))
-  sm.submit_npc_evaluation_result(t.evaluation_id,NPCEvaluationResult(memory_updates=(m,),
-   action_intents=(NPCActionIntent('move_actor','scene.workshop',1),)),p,context=n)
- assert sm._conn.execute('PRAGMA user_version').fetchone()[0]==int(sys.argv[4])
- print(json.dumps([sid,t.evaluation_id]))
-"""
-    process = subprocess.run(
-        [
-            sys.executable,
-            "-c",
-            code,
-            str(old / "src"),
-            str(db),
-            str(tmp_path / "evaluation.yaml"),
-            str(version),
-        ],
-        capture_output=True,
-        text=True,
-    )
-    assert process.returncode == 0, process.stderr
-    sid, eid = json.loads(process.stdout)
-    before = stored_rows(db)
-    original_work = before.pop("npc_observation_work")
-    with StateMachine(db) as sm:
-        npc = grant(sm, sid, evaluation_package, context)
-        task = sm.get_npc_evaluation_task(eid, evaluation_package, context=npc).task
-        assert task.status == ("running" if version == 11 else "completed")
-        if version == 11:
-            columns, rows = original_work
-            assert {
-                tuple(r)
-                for r in sm._conn.execute(
-                    f"SELECT {','.join(columns)} FROM npc_observation_work"
-                ).fetchall()
-            } == rows
-            assert (
-                sm._conn.execute(
-                    "SELECT 1 FROM npc_observation_work WHERE accepted_game_tick IS NOT NULL "
-                    "OR expires_game_tick IS NOT NULL"
-                ).fetchone()
-                is None
-            )
-            assert sm.npc_completed_cursor(
-                sid, evaluation_package, context=npc
-            ) < sm.perception_cursor(sid, evaluation_package, context=context)
-        else:
-            assert (
-                sm._conn.execute("SELECT DISTINCT status FROM npc_observation_work").fetchone()[0]
-                == "completed"
-            )
-            assert sm.npc_completed_cursor(
-                sid, evaluation_package, context=npc
-            ) == sm.perception_cursor(sid, evaluation_package, context=context)
-    assert_preserved(db, before)
-    with StateMachine(db):
-        pass
-    assert_preserved(db, before)
 
 
 @pytest.mark.parametrize(

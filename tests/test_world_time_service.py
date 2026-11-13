@@ -1,19 +1,17 @@
 """Real Session, public commands, immutable bindings and bounded time queries."""
 
-import io
 import json
 import os
 import sqlite3
 import subprocess
 import sys
-import zipfile
 from dataclasses import asdict, replace
 from fractions import Fraction
 from pathlib import Path
 
 import pytest
 from test_game_time import tick, tick_command
-from test_migrations import assert_original_rows_equal, stored_rows
+from test_migrations import stored_rows
 from test_npc_evaluation_tasks import evaluation_package as evaluation_package
 
 from trpg_state_machine import (
@@ -427,79 +425,6 @@ with StateMachine(sys.argv[1]) as sm:
     )
     assert json.loads(process.stdout) == [1, 4, 0, receipt.status, 3]
     assert stored_rows(db) == before
-
-
-def test_real_schema31_upgrade_atomicity_and_historical_command_replay(
-    tmp_path, package, context, request_for, monkeypatch
-):
-    root = Path(__file__).resolve().parents[1]
-    old = tmp_path / "old"
-    archive = subprocess.run(
-        ["git", "archive", "--format=zip", "7aa9ad1", "src"],
-        cwd=root,
-        check=True,
-        capture_output=True,
-    ).stdout
-    with zipfile.ZipFile(io.BytesIO(archive)) as contents:
-        contents.extractall(old)
-    db = tmp_path / "old.db"
-    ctx = replace(context, can_advance_time=True)
-    code = """
-import json,sys
-from trpg_state_machine import *
-p=load_adventure_package(sys.argv[2]).package
-c=TrustedContext('authenticated:alice','player.alice',can_advance_time=True)
-r=CreateSessionRequest('old',p.adventure_id,p.package_version,p.package_digest,
-                       (PlayerSelection(c.player_id,'pc_template.observer'),))
-with StateMachine(sys.argv[1]) as sm:
-    sid=sm.create_session(r,p,context=c).session_id
-    actor=sm.read_session(sid,p,context=c).pc_actor_id
-    receipt=sm.submit_command(TypedCommand(sid,'old.tick',actor,'world.advance_time',
-                                          AdvanceGameTime(0,10),0),p,context=c)
-    print(json.dumps([sid,actor]))
-"""
-    process = subprocess.run(
-        [sys.executable, "-c", code, str(db), str(root / "tests/fixtures/lantern_station.yaml")],
-        cwd=tmp_path,
-        env={**os.environ, "PYTHONPATH": str(old / "src")},
-        check=True,
-        capture_output=True,
-        text=True,
-        encoding="utf-8",
-    )
-    sid, actor = json.loads(process.stdout)
-    original = stored_rows(db)
-    read = Path.read_text
-
-    def broken(path, *args, **kwargs):
-        text = read(path, *args, **kwargs)
-        return (
-            text.replace("PRAGMA user_version = 32;", "INVALID MIGRATION;")
-            if (path.name == "_migration_32.sql")
-            else text
-        )
-
-    monkeypatch.setattr(Path, "read_text", broken)
-    with pytest.raises(StateMachineError) as failure:
-        StateMachine(db)
-    assert failure.value.code == "storage_error"
-    assert stored_rows(db) == original
-    with sqlite3.connect(db) as connection:
-        assert connection.execute("PRAGMA user_version").fetchone()[0] == 31
-    monkeypatch.undo()
-    from trpg_state_machine import AdvanceGameTime, TypedCommand
-
-    replay = TypedCommand(sid, "old.tick", actor, "world.advance_time", AdvanceGameTime(0, 10), 0)
-    replay_context = replace(ctx, controlled_npc_ids=())
-    for _ in range(2):
-        with StateMachine(db) as sm:
-            assert sm._conn.execute("PRAGMA user_version").fetchone()[0] == 41
-            sm.upgrade_instance_configs(sid, package, context=ctx)
-            assert sm.world_time.read(sid, package, context=ctx).binding == LegacyTimeBinding()
-            assert sm.submit_command(replay, package, context=replay_context).status == "committed"
-            assert sm.read_session(sid, package, context=ctx).world.game_tick == 10
-            assert sm._conn.execute("SELECT * FROM world_time_bindings").fetchall() == []
-        assert_original_rows_equal(original, stored_rows(db))
 
 
 def test_closed_binding_data_schema():

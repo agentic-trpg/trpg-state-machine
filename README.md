@@ -33,13 +33,13 @@ Batch 1 实现了一个可运行的本地闭环：**验证原创合成 Adventure
 StateMachine 是统一 API 与组件装配入口；各领域 Facts / Records 管理所属权威事实，通过共享事务共同提交。Package 是不可变模板；返回的 Snapshot 是独立副本，修改副本不会写入数据库。已接入固定候选 SHA 的真实 D&D 基础攻击及受限胜利/TPK 关闭，同时保留隔离的合成测试路径；没有第二份运行态权威。正常关闭后可以保存并在新进程恢复；活跃战斗跨进程精确续玩仍不支持。
 
 Session Management 已分离为 SessionCreation 创建协调、SessionAccess 授权和 SessionRuntime
-执行元数据／公共提交协调。公开 create_session 等签名保留；当前存储为 Schema40（实例配置批次为 Schema39）；运行时 RE 校验、
+执行元数据／公共提交协调。公开 create_session 等当前签名保留；当前存储为 Schema41；运行时 RE 校验、
 求值和查询以持久化 Session 的三项绑定为准。已授权 NPC 移动也可延迟创建目标场景，
 不制造 PC 进入事件。对象能力、Scene 配置、NPC senses 和辅助读取现已取持久实例数据；
-旧库须显式调用 upgrade_instance_configs，恢复 getter 不补字段、不重置状态。
+当前 Schema41 存档可直接恢复；早期开发数据库会在打开时被拒绝，恢复 getter 不补字段、不重置状态。
 ContainerService 在一次读取／候选状态中共用邻接索引和子树重量，位置变更使旧重量失效。
 RE 冻结素材已按 a011eba 整合提交接入：Runtime 一次选定，初始化／求值／查询／校验共用。
-旧 /36 存档保留审计与显式实例升级，新 RE 不静默重绑；三项状态与计数证据见
+RE 不静默重绑；原实例配置批次的历史状态与计数证据见
 [实例配置／容器／RE 核对记录](docs/INSTANCE_CONFIGURATION_PROGRESS.md)。
 实际调用链、旧 Session 策略和字段缺口见 [Session 管理](docs/SESSION_MANAGEMENT.md)，
 检查与交付见 [进度](docs/SESSION_MANAGEMENT_PROGRESS.md)。
@@ -560,7 +560,10 @@ Owner-only `grant_npc_access(...)` assigns an authenticated principal to an exis
 
 168 tests pass, including 22 perception tests: two observers/multiple Signals, event-time movement, hidden activity, malformed/timeout JEV, all-false/known occlusion, durable unresolved gaps, inbox rollback, concurrent deduplication, authorization revocation/isolation and fresh-process reading of real persisted inbox rows. See docs/batches/SM5.md.
 
-## Stabilization of SM-2–SM-5
+## Historical stabilization of SM-2–SM-5
+
+The following migration policy and test counts describe that earlier development batch.
+Current builds reject pre-41 development saves; see the [current save policy](docs/SESSION_MANAGEMENT.md#2026-11-14-预发布存档策略清理).
 
 Evaluator configuration and Result RulesetBinding mismatches raise structured
 `StateMachineError(code="ruleset_binding_mismatch")`, without a receipt, state/RNG

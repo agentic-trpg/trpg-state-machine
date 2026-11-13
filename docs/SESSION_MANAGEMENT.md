@@ -1,10 +1,17 @@
 # Session Management
 
-## 2026-11-14 STORAGE-01 第二批候选
+## 2026-11-14 预发布存档策略清理
+
+当前支持新建 Schema41 数据库和 Schema41 存档的保存、卸载及恢复。Schema1–40
+开发存档在写连接打开前只读识别并明确拒绝，写锁内再次核对版本；不会运行旧库存
+预检、回填、配置升级或感知队列回填。新库仍顺序执行建表 SQL。旧批次的迁移说明
+保留为当时的历史证据，不是当前可调用入口。详见[本轮清理记录](reviews/PRE_RELEASE_SAVE_CLEANUP.md)。
+
+## 2026-11-14 STORAGE-01 第二批候选（历史）
 
 Schema 41 将库存持久事实归到 `objects` 的实例、`item_json`、携带和容纳关系。角色携带类型和锁定版 RE 的 `InventoryState` 按请求派生。SessionMemory 沿实际归属及容器依赖维护角色库存读取缓存，随既有 UnitOfWork 发布和回滚。资源、施法和效果仍沿各自组件读取。下文 2026-10-22 的库存聚合列和投影补丁描述保留其历史语境。
 
-迁移预检可通过 `python -m trpg_state_machine.inventory_migration SAVE` 在 SQLite 临时备份上运行。实际打开旧档时在 Store 原迁移事务中核对和迁移，冲突时原档保留。未证明有世界交互配置的旧物品保留规则数据和实例 ID，只有获得对应配置后才可能具备世界操作能力。[本批阶段报告](reviews/storage-01-inventory/STAGE_REPORT.md)
+当时的迁移预检、旧库存提升和配置升级已按预发布策略退出当前入口；以下[阶段报告](reviews/storage-01-inventory/STAGE_REPORT.md)保留原批次证据。
 
 ## 2026-10-22 World 通路反向关联
 

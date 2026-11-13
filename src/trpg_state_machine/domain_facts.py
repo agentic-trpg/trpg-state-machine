@@ -14,7 +14,7 @@ from dnd5e_engine.evaluation_state import InventoryState
 from pydantic import TypeAdapter
 
 from .errors import StateMachineError
-from .item_units import valid_item_unit
+from .item_units import core_item_id, valid_item_unit
 from .package import canonical_json
 from .runtime_instances import instance_read
 from .scoped_reads import scoped_read
@@ -90,8 +90,6 @@ class CharacterFacts:
 
     def initialize_legacy_items(self, sid, actor_id, slugs):
         """Materialize each explicit core-only Package occurrence as an owned item."""
-        from .inventory_migration import _legacy_id
-
         self.store.require_write()
         for position, slug in enumerate(slugs):
             unit = {
@@ -103,7 +101,7 @@ class CharacterFacts:
             if not valid_item_unit(unit):
                 raise StateMachineError("invalid_item_foundation", "Invalid core item slug")
             self.world.materialize_owned_item(
-                sid, _legacy_id(sid, actor_id, position), actor_id, unit
+                sid, core_item_id(sid, actor_id, position), actor_id, unit
             )
 
     def seed_combat_pc_items(self, sid, template_id, actor_id, foundation, slugs):
@@ -133,9 +131,7 @@ class CharacterFacts:
 
     def _retire_legacy_item_identity(self, sid, owner, slug):
         """Replace only a proved core-only placeholder before first rules adoption."""
-        from .inventory_migration import _legacy_id
-
-        prefix = _legacy_id(sid, owner, 0)[:-8]
+        prefix = core_item_id(sid, owner, 0)[:-8]
         candidates = [
             row
             for row in self._conn.execute(
@@ -376,8 +372,6 @@ class CharacterFacts:
             if not current <= expected:
                 raise StateMachineError("invalid_item_foundation", "Initial item slugs disagree")
             if current != expected:
-                from .inventory_migration import _legacy_id
-
                 for position, slug in enumerate(actor.carried_item_slugs):
                     if slug in current:
                         continue
@@ -391,7 +385,7 @@ class CharacterFacts:
                         raise StateMachineError(
                             "invalid_item_foundation", "Invalid actor item slug"
                         )
-                    iid = _legacy_id(sid, actor.entity_id, position)
+                    iid = core_item_id(sid, actor.entity_id, position)
                     self.world.materialize_owned_item(sid, iid, actor.entity_id, unit)
 
     @scoped_read

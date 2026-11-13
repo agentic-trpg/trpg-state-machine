@@ -1,7 +1,7 @@
 """File-backed SQLite lifecycle and one explicit shared transaction scope."""
 
 import sqlite3
-from contextlib import contextmanager
+from contextlib import closing, contextmanager
 from pathlib import Path
 from threading import RLock, get_ident
 from time import monotonic, perf_counter_ns, sleep
@@ -9,7 +9,6 @@ from weakref import WeakValueDictionary
 
 from .errors import StateMachineError
 from .storage_migrations import (
-    migrate_perception_queues,
     reconcile_schema34,
     validate_environment_table,
     validate_environment_versions,
@@ -63,6 +62,7 @@ class SqliteStore:
             raise StateMachineError(
                 "unsupported_storage", "A local file database with WAL is required"
             )
+        self._reject_old_save_before_writable_open(database)
         self._closed = False
         self._thread = get_ident()
         self._scope = None
@@ -128,6 +128,22 @@ class SqliteStore:
         self._runtime_connection = RuntimeConnection(self)
         self._data_version = self._conn.execute("PRAGMA data_version").fetchone()[0]
 
+    @staticmethod
+    def _reject_old_save_before_writable_open(database):
+        """Inspect an existing save read-only so refusal cannot checkpoint its WAL."""
+        path = Path(database)
+        if not path.is_file():
+            return
+        try:
+            with closing(sqlite3.connect(path.resolve().as_uri() + "?mode=ro", uri=True)) as probe:
+                version = probe.execute("PRAGMA user_version").fetchone()[0]
+        except sqlite3.Error as exc:
+            raise StateMachineError("storage_error", "Cannot inspect SQLite database") from exc
+        if 0 < version < 41:
+            raise StateMachineError(
+                "unsupported_storage_schema", f"Pre-release save schema {version} is not supported"
+            )
+
     def _migrate(self):
         """Apply registered schema upgrades and integrity preparation at the migration
         boundary.
@@ -136,8 +152,7 @@ class SqliteStore:
             Path(__file__).with_name(f"_migration_{v}.sql") for v in range(2, 42)
         ]
         steps = [_migration_statements(path.read_text("utf-8")) for path in scripts]
-        # Migration 4 rebuilds a referenced table. Disable FK enforcement only on
-        # this unopened runtime connection, then validate all references before commit.
+        # Fresh databases apply the registered DDL under one opening transaction.
         self._conn.execute("PRAGMA foreign_keys = OFF")
         try:
             self._conn.execute("BEGIN IMMEDIATE")
@@ -147,11 +162,14 @@ class SqliteStore:
                 raise StateMachineError(
                     "unsupported_storage_schema", f"Unsupported storage version: {version}"
                 )
+            if 0 < version < 41:
+                raise StateMachineError(
+                    "unsupported_storage_schema",
+                    f"Pre-release save schema {version} is not supported",
+                )
             if (
                 version == 0
-                and self._conn.execute(
-                    "SELECT name FROM sqlite_master WHERE type='table'"
-                ).fetchone()
+                and self._conn.execute("SELECT 1 FROM sqlite_master LIMIT 1").fetchone()
             ):
                 raise StateMachineError(
                     "unsupported_storage_schema", "Unversioned nonempty database"
@@ -161,10 +179,6 @@ class SqliteStore:
             if version >= 34:
                 reconcile_schema34(self._conn, version, steps[33])
             for target in range(version + 1, 42):
-                if target == 41:
-                    from .inventory_migration import preflight_inventory
-
-                    preflight_inventory(self._conn)
                 for statement in steps[target - 1]:
                     self._conn.execute(statement)
                 if self._conn.execute("PRAGMA user_version").fetchone()[0] != target:
@@ -208,24 +222,6 @@ class SqliteStore:
                     )
             reconcile_schema34(self._conn, 35, steps[33])
             validate_environment_versions(self._conn, required=True)
-            if version < 5:
-                # The locked source version proves ALL existing events predate
-                # perception, even if a user command used the legacy source sentinel.
-                self._conn.execute(
-                    "INSERT INTO legacy_perception_boundaries "
-                    "SELECT session_id,event_seq,'legacy_event_evidence_unavailable' "
-                    "FROM sessions WHERE event_seq>0 "
-                    "ON CONFLICT(session_id) DO UPDATE SET "
-                    "through_event_seq=excluded.through_event_seq"
-                )
-                self._conn.execute(
-                    "INSERT INTO projection_cursors "
-                    "SELECT session_id,'perception',through_event_seq "
-                    "FROM legacy_perception_boundaries WHERE true "
-                    "ON CONFLICT(session_id,consumer) DO UPDATE SET event_seq=excluded.event_seq"
-                )
-            if version < 19:
-                migrate_perception_queues(self._conn)
             if self._conn.execute("PRAGMA foreign_key_check").fetchone():
                 raise StateMachineError("storage_error", "Migration contains invalid references")
             self._conn.commit()

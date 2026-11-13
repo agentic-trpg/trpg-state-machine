@@ -7,7 +7,6 @@ import yaml
 from dnd5e_engine.evaluation_state import CombatSnapshot
 from dnd_support import create, initialize, loader, make_package
 from dnd_support import package_data as dnd_package_data
-from test_migrations import assert_preserved, historical_database, stored_rows
 
 from trpg_state_machine import StateMachine, StateMachineError, load_adventure_package
 
@@ -125,18 +124,6 @@ def test_initialize_rollback_and_retry(tmp_path, package_data, context):
         assert sm._conn.execute("SELECT count(*) FROM command_receipts").fetchone()[0] == 0
         sm._conn.execute("DROP TRIGGER fail_combat")
         assert initialize(sm, sid, package, context).status == "committed"
-
-
-@pytest.mark.parametrize("version", [1, 2, 3, 4, 5, 6])
-def test_combat_migration_preserves_real_old_database(tmp_path, package, context, version):
-    db, sessions = historical_database(tmp_path, version)
-    before = stored_rows(db)
-    with StateMachine(db) as sm:
-        for sid in sessions:
-            sm.upgrade_instance_configs(sid, package, context=context)
-            assert sm.resume_session(sid, package, context=context).session_id == sid
-        assert sm._conn.execute("SELECT count(*) FROM combats").fetchone()[0] == 0
-    assert_preserved(db, before)
 
 
 def test_authored_foundation_uses_public_package_loader(tmp_path, package_data):

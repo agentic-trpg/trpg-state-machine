@@ -1,13 +1,11 @@
 """Real SQLite NPC ownership, provenance, isolation, rollback and fresh-process restore."""
 
 import copy
-import io
 import json
 import os
 import sqlite3
 import subprocess
 import sys
-import zipfile
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import asdict, replace
 from pathlib import Path
@@ -16,7 +14,7 @@ from threading import Barrier
 import pytest
 import yaml
 from perception_support import synthetic_notice
-from test_migrations import assert_preserved, historical_database, stored_rows
+from test_migrations import stored_rows
 
 from trpg_state_machine import (
     CreateSessionRequest,
@@ -465,124 +463,6 @@ def test_concurrent_idempotent_creation_initializes_npc_once(tmp_path, npc_packa
         assert conn.execute("SELECT count(*) FROM npc_states").fetchone()[0] == 1
         assert conn.execute("SELECT count(*) FROM npc_private_records").fetchone()[0] == 7
         assert conn.execute("PRAGMA foreign_key_check").fetchall() == []
-
-
-@pytest.mark.parametrize("version", [1, 2, 3, 4, 5, 6, 7, 8, 9])
-def test_actual_schema_1_to_9_upgrade_preserves_data_and_marks_legacy(
-    tmp_path, package, context, version, legacy_python
-):
-    if version <= 7:
-        database, sids = historical_database(tmp_path, version)
-    else:
-        sha = "a008543" if version == 8 else "a91b0da"
-        destination = tmp_path / "historical_source"
-        archive = subprocess.run(
-            ["git", "archive", "--format=zip", sha, "src", "tests/fixtures/lantern_station.yaml"],
-            cwd=ROOT,
-            capture_output=True,
-            check=True,
-        ).stdout
-        with zipfile.ZipFile(io.BytesIO(archive)) as contents:
-            contents.extractall(destination)
-        database = tmp_path / "historical.db"
-        process = subprocess.run(
-            [
-                legacy_python if version == 8 else sys.executable,
-                str(ROOT / "tests/_legacy_database_worker.py"),
-                str(destination),
-                str(database),
-                str(destination / "tests/fixtures/lantern_station.yaml"),
-                "no",
-            ],
-            cwd=tmp_path,
-            capture_output=True,
-            text=True,
-            encoding="utf-8",
-            check=True,
-        )
-        result = json.loads(process.stdout)
-        assert result["schema"] == version
-        sids = result["sessions"]
-    before = stored_rows(database)
-    barrier = Barrier(3)
-
-    def upgrade(_):
-        barrier.wait(timeout=10)
-        with StateMachine(database) as sm:
-            return sm._conn.execute("PRAGMA user_version").fetchone()[0]
-
-    with ThreadPoolExecutor(max_workers=3) as pool:
-        assert list(pool.map(upgrade, range(3))) == [40] * 3
-    assert_preserved(database, before)
-    with StateMachine(database) as sm:
-        for sid in sids:
-            grant(sm, sid, package, context)
-            result = view(sm, sid, package)
-            assert result.initialization_origin == "legacy"
-            assert result.configuration == "unconfigured"
-            assert result.profile is result.runtime is result.name is result.controller_kind is None
-            assert result.memories == result.belief_history == ()
-            assert result.npc_state_version == 1
-    upgraded = stored_rows(database)
-    for _ in range(2):
-        with StateMachine(database):
-            pass
-        assert stored_rows(database) == upgraded
-
-
-@pytest.mark.parametrize("interruption", ["sql_error", "process_exit"])
-def test_schema10_upgrade_interruption_rolls_back_and_recovers(tmp_path, monkeypatch, interruption):
-    from test_migrations import HISTORY
-
-    monkeypatch.setitem(HISTORY, 9, "a91b0da")
-    database, _ = historical_database(tmp_path, 9)
-    before = stored_rows(database)
-    if interruption == "sql_error":
-        read_text = Path.read_text
-
-        def broken(path, *args, **kwargs):
-            content = read_text(path, *args, **kwargs)
-            return (
-                content.replace("PRAGMA user_version = 10;", "INVALID MIGRATION;")
-                if path.name == "_migration_10.sql"
-                else content
-            )
-
-        monkeypatch.setattr(Path, "read_text", broken)
-        with pytest.raises(StateMachineError) as caught:
-            StateMachine(database)
-        assert caught.value.code == "storage_error"
-        monkeypatch.undo()
-    else:
-        script = """
-import os, sqlite3, sys
-from trpg_state_machine import StateMachine
-connect = sqlite3.connect
-def traced(*args, **kwargs):
-    conn = connect(*args, **kwargs)
-    def stop(sql):
-        if 'CREATE TABLE npc_known_facts' in sql:
-            os._exit(23)
-    conn.set_trace_callback(stop)
-    return conn
-sqlite3.connect = traced
-StateMachine(sys.argv[1])
-"""
-        env = dict(os.environ, PYTHONPATH=str(ROOT / "src"), PYTHONUTF8="1")
-        process = subprocess.run(
-            [sys.executable, "-c", script, str(database)],
-            env=env,
-            cwd=tmp_path,
-            capture_output=True,
-            check=False,
-        )
-        assert process.returncode == 23, process.stderr
-    assert stored_rows(database) == before
-    with sqlite3.connect(database) as conn:
-        assert conn.execute("PRAGMA user_version").fetchone()[0] == 9
-    with StateMachine(database):
-        pass
-    assert_preserved(database, before)
 
 
 @pytest.mark.parametrize(

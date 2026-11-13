@@ -1,19 +1,16 @@
 """Real Environment service/SQLite/command tests; explicit external seam fixtures."""
 
-import io
 import json
 import os
-import sqlite3
 import subprocess
 import sys
-import zipfile
 from dataclasses import asdict, replace
 from pathlib import Path
 
 import pytest
 from lock_support import A, B, lock_loader
 from spatial_support import create
-from test_migrations import assert_original_rows_equal, stored_rows
+from test_migrations import stored_rows
 from test_object_protection import large_data
 from test_world_spatial import OBSTACLE
 from world_support import command, setup, submit
@@ -770,75 +767,3 @@ def test_height_scoped_sources_and_unit_height_readonly_seam(tmp_path, context):
 def test_strong_types_limits_and_unknown_input(factory):
     with pytest.raises(StateMachineError):
         factory()
-
-
-def test_real_schema33_migration_preserves_all_rows_bindings_and_atomicity(
-    tmp_path, context, monkeypatch, pre_frozen_python
-):
-    root = Path(__file__).resolve().parents[1]
-    source = tmp_path / "old"
-    archive = subprocess.run(
-        ["git", "archive", "--format=zip", "9ce60cb", "src"],
-        cwd=root,
-        check=True,
-        capture_output=True,
-    ).stdout
-    with zipfile.ZipFile(io.BytesIO(archive)) as z:
-        z.extractall(source)
-    code = """
-from pathlib import Path
-from world_support import setup,submit
-from test_object_protection import large_data
-from dataclasses import replace
-from trpg_state_machine import TrustedContext,AdvanceGameTime
-import sys,json
-c=TrustedContext('authenticated:alice','player.alice')
-sm,sid,p,db=setup(Path(sys.argv[1]),c,large_data())
-r=submit(sm,sid,p,replace(c,can_advance_time=True),AdvanceGameTime(0,3),'old.tick')
-(Path(sys.argv[1])/'old-package.json').write_text(json.dumps(large_data()),encoding='utf-8')
-print(json.dumps([sid,sm._conn.execute('PRAGMA user_version').fetchone()[0]]));sm.close()
-"""
-    result = subprocess.run(
-        [str(pre_frozen_python), "-c", code, str(tmp_path)],
-        cwd=tmp_path,
-        env={
-            **os.environ,
-            "PYTHONPATH": os.pathsep.join((str(source / "src"), str(root / "tests"))),
-        },
-        check=True,
-        capture_output=True,
-        text=True,
-    )
-    sid, version = json.loads(result.stdout)
-    assert version == 33
-    db = tmp_path / "world.db"
-    before = stored_rows(db)
-    read = Path.read_text
-
-    def broken(path, *args, **kwargs):
-        content = read(path, *args, **kwargs)
-        return (
-            content.replace("PRAGMA user_version = 35;", "INVALID MIGRATION;")
-            if path.name == "_migration_35.sql"
-            else content
-        )
-
-    monkeypatch.setattr(Path, "read_text", broken)
-    with pytest.raises(StateMachineError):
-        StateMachine(db, dnd_loader=lock_loader())
-    assert stored_rows(db) == before
-    with sqlite3.connect(db) as conn:
-        assert conn.execute("PRAGMA user_version").fetchone()[0] == 33
-    monkeypatch.undo()
-    p = _validate(json.loads((tmp_path / "old-package.json").read_text("utf-8")))
-    with StateMachine(db, dnd_loader=lock_loader()) as sm:
-        sm.upgrade_instance_configs(sid, p, context=context)
-        with pytest.raises(StateMachineError) as error:
-            sm.resume_session(sid, p, context=context)
-        assert error.value.code == "ruleset_binding_mismatch"
-        assert_original_rows_equal(before, stored_rows(db))
-        assert sm._conn.execute("PRAGMA user_version").fetchone()[0] == 41
-        assert sm._conn.execute("SELECT * FROM scene_environments").fetchall() == []
-        assert sm.environment.read_facts(sid, A, p, context=gm(context)) is None
-        assert sm.world_time.read(sid, p, context=context).binding.schema_version == "game-clock/1"
-        assert sm.world_time.read(sid, p, context=context).game_tick == 3
