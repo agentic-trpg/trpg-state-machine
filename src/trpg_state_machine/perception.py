@@ -783,7 +783,7 @@ class PerceptionRuntime:
                     character["current_hp"],
                     character["max_hp"],
                     json.loads(character["resources_json"]),
-                    tuple(json.loads(character["inventory_json"])),
+                    tuple(self._characters.carried_slugs(sid, row["pc_actor_id"])),
                     tuple(json.loads(character["effects_json"])),
                     character["xp"],
                 )

@@ -97,6 +97,7 @@ NPC 评估固定授权观察和版本输入；外部模型推理后调用
 | 表示 | 持有者／修改责任 | 读取与隔离边界 |
 | --- | --- | --- |
 | 持久事实／配置／版本／RNG | 各领域通过 SqliteStore 共同事务写 SQLite | 创建、冷读、恢复、回执及可靠查询的持久依据 |
+| 物品事实与库存视图 | `objects` 持有物品状态、携带和容纳关系 | WorldFacts 按实例和实际容器关系读取。CharacterFacts 按需生成 RE `InventoryState` 和角色携带类型 |
 | 已加载事实范围 | Store 的 SessionMemory；受控 RuntimeConnection 参与读取 | 支持的查询复用固定 RAM 范围及候选补丁；看到 SQL 调用形式不等于又访问数据库 |
 | 对象／场景／World／角色字段 | `runtime_instances.py` 的 `ObjectRuntime`、`SceneRuntime`、`WorldRuntime`、`CharacterRuntime` | 沿现有发布机制替换 owner，不能独立写成第二套权威 |
 | 索引／缓存／准备地图 | 字段 owner、GridMaps、Environment 等有界派生结构 | 维护依赖与失效，冷准备／必要全量输出保留真实成本 |

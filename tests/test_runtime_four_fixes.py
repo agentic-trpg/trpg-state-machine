@@ -1,7 +1,6 @@
 """Production regression costs for movement, NPC targets and version metadata."""
 
 import builtins
-import json
 from collections import Counter
 from contextlib import contextmanager
 
@@ -214,21 +213,15 @@ def test_changed_inventory_is_validated_once_and_pruning_keeps_composite_stamp(
         old = sm.read_carried_items(sid, actor, package, context=context)
         identity = old.entries[0].instance_id
         with sm._transaction(write=True):
-            value = sm._conn.execute(
-                "SELECT inventory_json FROM mechanical_components WHERE session_id=?", (sid,)
-            ).fetchone()[0]
-            value = json.loads(value)
-            entry = next(e for e in value["entries"] if e["instance_id"] == identity)
-            entry["quantity"], entry["charges_remaining_per_unit"] = 2, 3
-            # Unknown aggregate writer: retain conservative component invalidation.
             sm._conn.execute(
-                "UPDATE mechanical_components SET inventory_json=? WHERE session_id=?",
-                (json.dumps(value), sid),
+                "UPDATE objects SET item_json=json_set(item_json,'$.charges_remaining_per_unit',3) "
+                "WHERE session_id=? AND object_id=?",
+                (sid, identity),
             )
         with counts_for(sm, monkeypatch) as counts:
             current = sm.read_carried_items(sid, actor, package, context=context)
         assert counts["inventory_validations"] == counts["validated_entries"] == 1
-        assert current.entries[0].quantity == 2
+        assert current.entries[0].quantity == 1
         assert current.entries[0].charges_remaining_per_unit == 3
         assert old.entries[0].quantity == 1
         memory = sm._store.memory
@@ -240,7 +233,7 @@ def test_changed_inventory_is_validated_once_and_pruning_keeps_composite_stamp(
         memory.trim_versions()
         assert memory.version(dep) == stamp
         assert len(memory.versions) < 2048
-        assert old_versions[("inventory_components", sid)] == stamp[2]
+        assert old_versions[dep] == stamp[1]
         with counts_for(sm, monkeypatch) as counts:
             assert sm.read_carried_items(sid, actor, package, context=context) == current
         assert counts["inventory_validations"] == counts["version_records_iterated"] == 0

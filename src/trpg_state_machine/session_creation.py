@@ -204,9 +204,19 @@ class SessionCreation:
             initial_row = self._conn.execute(
                 "SELECT * FROM sessions WHERE session_id=?", (session_id,)
             ).fetchone()
+            self.world.facts.initialize_items(initial_row, package, self.rules.loader)
             if package.noncombat_foundation_json is not None:
                 self.combat._initialize_noncombat(initial_row, package)
-            self.world.facts.initialize_items(initial_row, package, self.rules.loader)
+            elif package.combat_foundation_json is not None:
+                self.characters.seed_combat_pc_items(
+                    session_id,
+                    pc.pc_template_id,
+                    pc_actor_id,
+                    package.combat_foundation_json,
+                    pc.inventory,
+                )
+            elif package.combat_foundation_json is None and pc.inventory:
+                self.characters.initialize_legacy_items(session_id, pc_actor_id, pc.inventory)
             self.world.facts.initialize_locks(initial_row, package)
             if package.portable_items:
                 self.characters.rule_components(

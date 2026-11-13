@@ -399,6 +399,10 @@ def test_corrupt_current_facts_fail_closed_without_repair(tmp_path, context, fau
     sm, sid, p, db = setup(tmp_path, context)
     with sm:
         acquire(sm, sid, p, context)
+        operations = (UnlockDoor(A, DOOR, CRED, "0,0"), SetObjectState(A, DOOR, ObjectState.OPEN))
+        commands = [
+            command(sm, sid, p, context, op, f"corrupt.{i}") for i, op in enumerate(operations)
+        ]
         if fault == "missing_lock":
             sm._conn.execute(
                 "DELETE FROM door_credentials WHERE session_id=? AND object_id=?", (sid, DOOR)
@@ -413,7 +417,7 @@ def test_corrupt_current_facts_fail_closed_without_repair(tmp_path, context, fau
             )
         elif fault == "inventory":
             sm._conn.execute(
-                "UPDATE mechanical_components SET inventory_json='{}' WHERE session_id=?", (sid,)
+                "UPDATE objects SET item_json='{}' WHERE session_id=? AND object_id=?", (sid, CRED)
             )
         else:
             unit = json.loads(
@@ -421,18 +425,18 @@ def test_corrupt_current_facts_fail_closed_without_repair(tmp_path, context, fau
                     "SELECT item_json FROM objects WHERE session_id=? AND object_id=?", (sid, CRED)
                 ).fetchone()[0]
             )
-            unit["quantity" if fault == "quantity" else "charges_remaining_per_unit"] = 2
+            unit["quantity" if fault == "quantity" else "charges_remaining_per_unit"] = (
+                2 if fault == "quantity" else -1
+            )
             sm._conn.execute(
                 "UPDATE objects SET item_json=? WHERE session_id=? AND object_id=?",
                 (json.dumps(unit), sid, CRED),
             )
-        for i, operation in enumerate(
-            (UnlockDoor(A, DOOR, CRED, "0,0"), SetObjectState(A, DOOR, ObjectState.OPEN))
-        ):
+        for i, cmd in enumerate(commands):
             if fault not in ("missing_lock", "open_locked") and i:
                 continue
             before = stored_rows(db)
-            result = submit(sm, sid, p, context, operation, f"corrupt.{i}")
+            result = sm.submit_command(cmd, p, context=context)
             assert result.status == "rejected"
             unchanged_except_receipt(before, stored_rows(db))
 

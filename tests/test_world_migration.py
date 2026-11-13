@@ -9,7 +9,7 @@ from pathlib import Path
 
 import pytest
 from lock_support import CRED, DOOR, lock_loader
-from test_migrations import stored_rows
+from test_migrations import assert_original_rows_equal, stored_rows
 
 from trpg_state_machine import StateMachine, StateMachineError, TrustedContext
 from trpg_state_machine.package import _validate
@@ -60,11 +60,7 @@ def test_old_nonempty_save_preserves_facts_keys_receipts_and_adds_no_capabilitie
             sm.resume_session(sid, p, context=ctx)
         assert error.value.code == "ruleset_binding_mismatch"
         after = stored_rows(db)
-        for table in before.keys() - {"door_locks", "door_credentials", "objects"}:
-            assert after[table] == before[table], table
-        from test_migrations import assert_original_rows_equal
-
-        assert_original_rows_equal(before, after)
+        assert_original_rows_equal(before, after, excluded=("door_locks", "door_credentials"))
         assert sm._world_facts.door_lock(sid, DOOR) is True
         assert sm._world_facts.accepts_credential(sid, DOOR, CRED, "lock." + DOOR)
         assert sm._conn.execute("SELECT count(*) FROM object_durability").fetchone()[0] == 0

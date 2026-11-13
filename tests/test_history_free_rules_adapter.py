@@ -101,12 +101,17 @@ def test_unknown_component_facts_never_fall_back_to_package(tmp_path, package_da
                 ('{"unknown":1}', sid, command.actor_id),
             )
         else:
-            field = "owner_id" if fault == "unknown_owner" else "unknown_field"
-            sm._conn.execute(
-                "UPDATE mechanical_components SET inventory_json=json_set(inventory_json,?,?) "
-                "WHERE session_id=?",
-                ("$.entries[0]." + field, "absent.actor", sid),
-            )
+            if fault == "unknown_owner":
+                sm._conn.execute(
+                    "DELETE FROM mechanical_actors WHERE session_id=? AND actor_id=?",
+                    (sid, command.actor_id),
+                )
+            else:
+                sm._conn.execute(
+                    "UPDATE objects SET item_json=json_set(item_json,'$.unknown_field',?) "
+                    "WHERE session_id=? AND carrier_id=?",
+                    ("invalid", sid, command.actor_id),
+                )
         before = stored_state(db)
         calls = []
         real = sm._rules._evaluate_dnd
@@ -139,9 +144,10 @@ def test_component_dependency_change_conflicts_without_committing_real_result(
             assert result.status == "accepted"
             with sqlite3.connect(db) as other:
                 other.execute(
-                    "UPDATE mechanical_components SET inventory_json="
-                    "json_set(inventory_json,'$.entries[0].quantity',2) WHERE session_id=?",
-                    (sid,),
+                    "UPDATE objects SET item_json="
+                    "json_set(item_json,'$.charges_remaining_per_unit',2) "
+                    "WHERE session_id=? AND carrier_id=?",
+                    (sid, command.actor_id),
                 )
             return result
 
@@ -149,12 +155,8 @@ def test_component_dependency_change_conflicts_without_committing_real_result(
         receipt = sm.submit_command(command, package, context=context)
         assert receipt.status == "conflict" and not receipt.event_seqs
         after = stored_state(db)
-        assert {
-            k: v
-            for k, v in before.items()
-            if k not in ("mechanical_components", "command_receipts")
-        } == {
-            k: v for k, v in after.items() if k not in ("mechanical_components", "command_receipts")
+        assert {k: v for k, v in before.items() if k not in ("objects", "command_receipts")} == {
+            k: v for k, v in after.items() if k not in ("objects", "command_receipts")
         }
         assert sm.submit_command(command, package, context=context) == receipt
 
@@ -340,7 +342,7 @@ def test_actual_schema22_upgrade_failure_is_atomic_and_retry_preserves_every_old
     monkeypatch.undo()
     assert stored_rows(db) == before
     with StateMachine(db) as sm:
-        assert sm._conn.execute("PRAGMA user_version").fetchone()[0] == 40
+        assert sm._conn.execute("PRAGMA user_version").fetchone()[0] == 41
         assert not sm._conn.execute("SELECT * FROM mechanical_components").fetchall()
     assert_original_rows_equal(before, stored_rows(db))
 

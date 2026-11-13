@@ -23,7 +23,7 @@ _EFFECTS = TypeAdapter(tuple[EffectState, ...])
 
 
 class CharacterFacts:
-    """Maintain authoritative character mechanics and world-linked inventory projections."""
+    """Maintain character mechanics and project inventory from World item facts."""
 
     RULE_FIELDS = frozenset(
         (
@@ -78,16 +78,97 @@ class CharacterFacts:
         )
         self._conn.execute(
             "INSERT INTO characters(session_id,actor_id,current_hp,max_hp,"
-            "resources_json,inventory_json) VALUES (?,?,?,?,?,?)",
+            "resources_json) VALUES (?,?,?,?,?)",
             (
                 sid,
                 actor_id,
                 pc.current_hp,
                 pc.max_hp,
                 canonical_json(dict(pc.resources)),
-                canonical_json(pc.inventory),
             ),
         )
+
+    def initialize_legacy_items(self, sid, actor_id, slugs):
+        """Materialize each explicit core-only Package occurrence as an owned item."""
+        from .inventory_migration import _legacy_id
+
+        self.store.require_write()
+        for position, slug in enumerate(slugs):
+            unit = {
+                "item_slug": slug,
+                "quantity": 1,
+                "charges_remaining_per_unit": 0,
+                "accessible": True,
+            }
+            if not valid_item_unit(unit):
+                raise StateMachineError("invalid_item_foundation", "Invalid core item slug")
+            self.world.materialize_owned_item(
+                sid, _legacy_id(sid, actor_id, position), actor_id, unit
+            )
+
+    def seed_combat_pc_items(self, sid, template_id, actor_id, foundation, slugs):
+        """Expose selected PC's explicit combat item identities before encounter start."""
+        snapshot = json.loads(foundation)["snapshot"]
+        inventory = self._inventory_model(snapshot["inventory_state"])
+        chosen = [e for e in inventory.entries if e.owner_id == template_id]
+        if {e.item_slug for e in chosen} != set(slugs):
+            raise StateMachineError("invalid_item_foundation", "PC inventory differs from rules")
+        for entry in chosen:
+            unit = {
+                "item_slug": entry.item_slug,
+                "quantity": 1,
+                "charges_remaining_per_unit": entry.charges_remaining_per_unit,
+                "accessible": entry.accessible,
+            }
+            if not valid_item_unit(unit) or not 1 <= entry.quantity <= 128:
+                raise StateMachineError("invalid_item_foundation", "Ambiguous combat item unit")
+            for n in range(entry.quantity):
+                iid = entry.instance_id if n == 0 else f"{entry.instance_id}.unit.{n:08d}"
+                self.world.materialize_owned_item(sid, iid, actor_id, unit, allow_existing=n == 0)
+
+    def carried_slugs(self, sid, actor_id):
+        """Return distinct owned item slugs from current object and ancestry facts."""
+        _, entries = self.world.portable_inventory(sid, owner_ids={actor_id})
+        return list(dict.fromkeys(e["item_slug"] for e in entries.values()))
+
+    def _retire_legacy_item_identity(self, sid, owner, slug):
+        """Replace only a proved core-only placeholder before first rules adoption."""
+        from .inventory_migration import _legacy_id
+
+        prefix = _legacy_id(sid, owner, 0)[:-8]
+        candidates = [
+            row
+            for row in self._conn.execute(
+                "SELECT * FROM objects WHERE session_id=? AND carrier_id=? AND object_id LIKE ?",
+                (sid, owner, prefix + "%"),
+            ).fetchall()
+            if row["object_id"].startswith(prefix)
+            and row["item_json"] is not None
+            and self.store.memory.json(row["item_json"])["item_slug"] == slug
+        ]
+        if not candidates:
+            return
+        if len(candidates) != 1:
+            raise StateMachineError("invalid_item_foundation", "Legacy item identity is ambiguous")
+        old = candidates[0]
+        config = self._conn.execute(
+            "SELECT config_json FROM instance_configs WHERE session_id=? AND domain='object' "
+            "AND instance_id=?",
+            (sid, old["object_id"]),
+        ).fetchone()
+        if (
+            self.store.memory.json(old["item_json"])
+            != {
+                "item_slug": slug,
+                "quantity": 1,
+                "charges_remaining_per_unit": 0,
+                "accessible": True,
+            }
+            or config is None
+            or self.store.memory.json(config[0]).get("portable_policy") is not None
+        ):
+            raise StateMachineError("invalid_item_foundation", "Legacy item has changed")
+        self.world.retire_owned_item(sid, old)
 
     def initialize_npc_actor(self, sid, actor):
         """Insert an NPC actor and return whether it was newly created."""
@@ -184,13 +265,8 @@ class CharacterFacts:
                         "unsupported_combat_foundation",
                         "Legacy resources/effects cannot be converted implicitly",
                     )
-                if self.store.memory.json(core["inventory_json"]) != list(actor.carried_item_slugs):
-                    raise StateMachineError(
-                        "invalid_combat_foundation", "Equipment must match selected PC"
-                    )
             if (
                 (core["current_hp"], core["max_hp"]) != (actor.hp_current, actor.hp_max)
-                or self.store.memory.json(core["inventory_json"]) != list(actor.carried_item_slugs)
                 or self.store.memory.json(core["resources_json"])
                 or self.store.memory.json(core["effects_json"])
             ):
@@ -205,14 +281,13 @@ class CharacterFacts:
         else:
             self._conn.execute(
                 "INSERT INTO characters(session_id,actor_id,current_hp,max_hp,resources_json,"
-                "inventory_json,effects_json,xp) VALUES (?,?,?,?,?,?,?,?)",
+                "effects_json,xp) VALUES (?,?,?,?,?,?,?)",
                 (
                     sid,
                     actor.entity_id,
                     actor.hp_current,
                     actor.hp_max,
                     "{}",
-                    canonical_json(actor.carried_item_slugs),
                     "[]",
                     0 if xp is None else xp,
                 ),
@@ -228,17 +303,11 @@ class CharacterFacts:
     def initial_rule_actor(self, sid, approved):
         """Overlay existing core balances at the first mechanical initialization."""
         core = self._conn.execute(
-            "SELECT current_hp,max_hp,inventory_json FROM characters "
-            "WHERE session_id=? AND actor_id=?",
+            "SELECT current_hp,max_hp FROM characters WHERE session_id=? AND actor_id=?",
             (sid, approved.entity_id),
         ).fetchone()
         if core is None:
             return approved
-        if self.store.memory.json(core["inventory_json"]) != list(approved.carried_item_slugs):
-            raise StateMachineError(
-                "invalid_combat_foundation",
-                "Changed equipment requires explicit current inventory instance facts",
-            )
         return approved.model_copy(
             update={"hp_current": core["current_hp"], "hp_max": core["max_hp"]}
         )
@@ -246,11 +315,11 @@ class CharacterFacts:
     def initialize_rule_components(self, sid, snapshot):
         """Initial explicit facts only; an existing owner record may never be reset."""
         self.store.require_write()
-        fields = ("inventory_state", "resource_state", "casting_state", "effect_states")
+        fields = ("resource_state", "casting_state", "effect_states")
         data = snapshot.model_dump(mode="json", include=set(fields))
         encoded = tuple(canonical_json(data[field]) for field in fields)
         old = self._conn.execute(
-            "SELECT schema_version,inventory_json,resources_json,casting_json,effects_json "
+            "SELECT schema_version,resources_json,casting_json,effects_json "
             "FROM mechanical_components WHERE session_id=?",
             (sid,),
         ).fetchone()
@@ -260,22 +329,116 @@ class CharacterFacts:
                 raise StateMachineError(
                     "invalid_combat_foundation", "Initialization cannot reset component facts"
                 )
+            _, current_items = self.world.portable_inventory(sid)
+            expected_items = {}
+            for entry in snapshot.inventory_state.entries:
+                for number in range(entry.quantity):
+                    iid = (
+                        entry.instance_id
+                        if number == 0
+                        else f"{entry.instance_id}.unit.{number:08d}"
+                    )
+                    expected_items[iid] = {
+                        "instance_id": iid,
+                        "owner_id": entry.owner_id,
+                        "item_slug": entry.item_slug,
+                        "quantity": 1,
+                        "charges_remaining_per_unit": entry.charges_remaining_per_unit,
+                        "accessible": entry.accessible,
+                    }
+            if current_items != expected_items:
+                raise StateMachineError(
+                    "invalid_combat_foundation", "Initialization cannot reset item facts"
+                )
             return
-        self._conn.execute(
-            "INSERT INTO mechanical_components VALUES (?,?,?,?,?,?)", (sid, *expected)
-        )
+        self._conn.execute("INSERT INTO mechanical_components VALUES (?,?,?,?,?)", (sid, *expected))
+        # The snapshot is ingress data. Materialize each owned unit once in the
+        # World object relation before ordinary item initialization checks it.
+        for entry in snapshot.inventory_state.entries:
+            source_unit = {
+                "item_slug": entry.item_slug,
+                "quantity": 1,
+                "charges_remaining_per_unit": entry.charges_remaining_per_unit,
+                "accessible": entry.accessible,
+            }
+            if not valid_item_unit(source_unit) or not 1 <= entry.quantity <= 128:
+                raise StateMachineError("invalid_item_foundation", "Ambiguous initial item unit")
+            for number in range(entry.quantity):
+                iid = entry.instance_id if number == 0 else f"{entry.instance_id}.unit.{number:08d}"
+                if number == 0 and self.world.object(sid, iid) is None:
+                    self._retire_legacy_item_identity(sid, entry.owner_id, entry.item_slug)
+                self.world.materialize_owned_item(
+                    sid, iid, entry.owner_id, source_unit, allow_existing=True
+                )
+        for actor in snapshot.character_states:
+            current = set(self.carried_slugs(sid, actor.entity_id))
+            expected = set(actor.carried_item_slugs)
+            if not current <= expected:
+                raise StateMachineError("invalid_item_foundation", "Initial item slugs disagree")
+            if current != expected:
+                from .inventory_migration import _legacy_id
+
+                for position, slug in enumerate(actor.carried_item_slugs):
+                    if slug in current:
+                        continue
+                    unit = {
+                        "item_slug": slug,
+                        "quantity": 1,
+                        "charges_remaining_per_unit": 0,
+                        "accessible": True,
+                    }
+                    if not valid_item_unit(unit):
+                        raise StateMachineError(
+                            "invalid_item_foundation", "Invalid actor item slug"
+                        )
+                    iid = _legacy_id(sid, actor.entity_id, position)
+                    self.world.materialize_owned_item(sid, iid, actor.entity_id, unit)
 
     @scoped_read
     def _component_inputs(self, row):
-        """Decode and freeze mechanical component inputs with reusable lookup indices."""
+        """Decode noninventory components with reusable owner lookup indices."""
         from .component_reads import ComponentInputs
 
         return ComponentInputs(
             {
                 field: self.store.memory.json(row[field])
-                for field in ("inventory_json", "resources_json", "casting_json", "effects_json")
+                for field in ("resources_json", "casting_json", "effects_json")
             }
         )
+
+    @scoped_read
+    def binding_components(self, sid, actor_id):
+        """Validate only noninventory mechanical facts needed for item bindings."""
+        row = self._conn.execute(
+            "SELECT * FROM mechanical_components WHERE session_id=?", (sid,)
+        ).fetchone()
+        if row is None or row["schema_version"] != "engine-snapshot/17":
+            raise StateMachineError(
+                "unsupported_mechanical_version", "Explicit component facts are missing"
+            )
+        try:
+            values = self._component_inputs(row).select({actor_id})
+            resources = values["resources_json"]
+            if resources is not None:
+                ResourceState.model_validate(
+                    {**resources, "pools": tuple(resources["pools"])}
+                    if isinstance(resources["pools"], list)
+                    else resources
+                )
+            casting = values["casting_json"]
+            if casting is not None:
+                casting = self.store.memory.model_json(
+                    CastingState, canonical_json(casting)
+                ).model_dump(mode="json")
+            effects = self.store.memory.model_json(_EFFECTS, canonical_json(values["effects_json"]))
+            return {
+                "casting_state": casting,
+                "effect_states": [v.model_dump(mode="json") for v in effects],
+            }
+        except (ValueError, KeyError, TypeError) as exc:
+            raise StateMachineError(
+                "invalid_mechanical_state", "Stored binding facts are incomplete"
+            ) from exc
 
     def rule_components(self, sid, owner_ids, *, full_audit=False):
         """Validate and return rule components for the requested owners."""
@@ -293,42 +456,26 @@ class CharacterFacts:
                 "unsupported_mechanical_version", "Explicit component facts are missing"
             )
         try:
+            _, item_entries = self.world.portable_inventory(
+                sid, owner_ids=None if full_audit else owner_ids
+            )
+            item_inventory = {"entries": list(item_entries.values())}
             if not full_audit:
-                inputs = self._component_inputs(row)
-                slugs = set()
-                for owner in owner_ids:
-                    core = self._conn.execute(
-                        "SELECT inventory_json FROM characters WHERE session_id=? AND actor_id=?",
-                        (sid, owner),
-                    ).fetchone()
-                    if core:
-                        slugs.update(self.store.memory.json(core[0]))
-
-                def exists(owner):
-                    """Return whether a mechanical actor with this identity exists."""
-                    return (
-                        self._conn.execute(
-                            "SELECT actor_id FROM mechanical_actors "
-                            "WHERE session_id=? AND actor_id=?",
-                            (sid, owner),
-                        ).fetchone()
-                        is not None
-                    )
-
-                values = inputs.select(owner_ids, slugs, exists)
+                values = self._component_inputs(row).select(owner_ids)
+                values["inventory"] = item_inventory
             else:
                 values = {
                     field: self.store.memory.json(row[field])
                     for field in (
-                        "inventory_json",
                         "resources_json",
                         "casting_json",
                         "effects_json",
                     )
                 }
+                values["inventory"] = item_inventory
             inventory, resources, casting, effects = (
                 values[field]
-                for field in ("inventory_json", "resources_json", "casting_json", "effects_json")
+                for field in ("inventory", "resources_json", "casting_json", "effects_json")
             )
             typed_inventory = self._inventory_model(inventory)
             inventory = typed_inventory.model_dump(mode="json")
@@ -350,18 +497,23 @@ class CharacterFacts:
             )
             effects = self.store.memory.model_json(_EFFECTS, canonical_json(effects))
             effects = [v.model_dump(mode="json") for v in effects]
-            known = set(self.rule_actors(sid, None if full_audit else owner_ids))
             references = {v["owner_id"] for v in inventory["entries"]}
             references |= {v["target_id"] for v in effects}
             if resources is not None:
                 references |= {v["owner_id"] for v in resources["pools"]}
             if casting is not None:
                 references |= {v["actor_id"] for v in casting["actors"]}
-            if not references <= known:
-                raise ValueError("component owner is missing")
-            self.validate_portable_inventory(
-                sid, inventory, owner_ids=None if full_audit else owner_ids
-            )
+            for owner in references:
+                if (
+                    self._conn.execute(
+                        "SELECT 1 FROM mechanical_actors m JOIN characters c "
+                        "USING(session_id,actor_id) "
+                        "WHERE m.session_id=? AND m.actor_id=?",
+                        (sid, owner),
+                    ).fetchone()
+                    is None
+                ):
+                    raise ValueError("component owner is missing")
             inventory["entries"] = [v for v in inventory["entries"] if v["owner_id"] in owner_ids]
             if resources is not None:
                 resources["pools"] = [v for v in resources["pools"] if v["owner_id"] in owner_ids]
@@ -382,36 +534,6 @@ class CharacterFacts:
                 "invalid_mechanical_state", "Stored component closure is incomplete"
             ) from exc
 
-    def validate_portable_inventory(self, sid, inventory, *, owner_ids=None):
-        """Validate the complete portable subset before any owner projection."""
-        identities, expected = self.world.portable_inventory(
-            sid,
-            owner_ids=owner_ids,
-            instance_ids=tuple(e["instance_id"] for e in inventory["entries"]),
-        )
-        actual = {
-            e["instance_id"]: e for e in inventory["entries"] if e["instance_id"] in identities
-        }
-        if actual != expected:
-            raise StateMachineError(
-                "invalid_mechanical_state", "Portable inventory differs from location facts"
-            )
-        if identities:
-            by_owner = {}
-            for e in inventory["entries"]:
-                if e["quantity"] > 0:
-                    by_owner.setdefault(e["owner_id"], set()).add(e["item_slug"])
-            for aid, actor in self.rule_actors(sid, owner_ids).items():
-                slugs = by_owner.get(aid, set())
-                if (
-                    len(actor["carried_item_slugs"]) != len(slugs)
-                    or set(actor["carried_item_slugs"]) != slugs
-                ):
-                    raise StateMachineError(
-                        "invalid_mechanical_state",
-                        "Carried projection differs from owned instances",
-                    )
-
     def prepare_inventory_change(self, sid, roots):
         """Validate the old moving/accessibility subtree and affected owner closure."""
         rows = self.world.descendant_objects(sid, roots)
@@ -421,19 +543,11 @@ class CharacterFacts:
         identities = {r["object_id"] for r in portable}
         owners = {self.world.placement(sid, r["object_id"])["carrier_id"] for r in portable}
         owners.discard(None)
-        inventory = (
-            self.rule_components(sid, owners)["inventory_state"]
-            if owners
-            else self._inventory_selection(sid, owners, identities)
-        )
-        expected = {r["object_id"]: self.world.item_entry(r) for r in portable}
-        actual = {
-            e["instance_id"]: e for e in inventory["entries"] if e["instance_id"] in identities
-        }
-        if actual != {i: e for i, e in expected.items() if e is not None}:
-            raise StateMachineError(
-                "invalid_mechanical_state", "Item projection precondition differs"
-            )
+        for owner in owners:
+            if self.binding_actor(sid, owner) is None:
+                raise StateMachineError("unsupported_actor_state", "Item owner lacks actor facts")
+            self.binding_components(sid, owner)
+        self._inventory_selection(sid, set(), identities)
         return identities, owners
 
     @instance_read("actor", None, "inventory", maintained="inventory")
@@ -454,13 +568,14 @@ class CharacterFacts:
 
     @scoped_read
     def _inventory_selection(self, sid, owners, identities):
-        """Select and validate inventory for the requested owner and instance scope."""
+        """Select item instance facts for the requested owner and identity scope."""
         stored = self._conn.execute(
             "SELECT * FROM mechanical_components WHERE session_id=?", (sid,)
         ).fetchone()
         if stored is None:
             raise StateMachineError("unsupported_mechanical_version", "Explicit inventory missing")
-        selected = self._component_inputs(stored).inventory(owners, identities)
+        _, entries = self.world.portable_inventory(sid, owner_ids=owners, instance_ids=identities)
+        selected = {"entries": list(entries.values())}
         return self._inventory_model(selected).model_dump(mode="json")
 
     def project_item_transfer(self, sid, before, after, *, prepared=None):
@@ -475,117 +590,20 @@ class CharacterFacts:
             # root pose. Production callers validate the entire old subtree first.
             old_entry = self.world.item_entry(before)
             prepared = ({before["object_id"]}, {old_entry["owner_id"]} if old_entry else set())
-            entries = self._inventory_selection(sid, prepared[1], prepared[0])["entries"]
-            if (
-                next((e for e in entries if e["instance_id"] == before["object_id"]), None)
-                != old_entry
-            ):
-                raise StateMachineError(
-                    "invalid_mechanical_state", "Item projection precondition differs"
-                )
         self.sync_inventory_change(sid, prepared)
 
     def sync_inventory_change(self, sid, prepared):
-        """One inventory UPDATE and only changed owner mirrors; no Session reconstruction.
-
-        The legacy aggregate JSON row still requires SQLite JSON traversal/encoding.
-        Python validation/construction is limited to affected owners and the subtree.
-        """
+        """Validate affected item facts after a transfer; no inventory mirror is written."""
         self.store.require_write()
         if prepared is None:
             return
-        identities, owners = prepared
-        owners = set(owners)
-        for oid in identities:
-            owners.add(self.world.placement(sid, oid)["carrier_id"])
-        owners.discard(None)
-        old = self._inventory_selection(sid, owners, identities)
-        portable, expected = self.world.portable_inventory(
-            sid, owner_ids=owners, instance_ids=identities
-        )
-        selected = {e["instance_id"]: e for e in old["entries"]}
-        remove = portable - expected.keys()
-        replacements = {i: e for i, e in expected.items() if i in selected and selected[i] != e}
-        additions = [e for i, e in expected.items() if i not in selected]
-        if remove & selected.keys() or replacements or additions:
-            with self.store.memory.inventory_projection_write(sid, owners):
-                self._conn.execute(
-                    "UPDATE mechanical_components SET "
-                    "inventory_json=json_set(inventory_json,'$.entries',"
-                    "json((SELECT json_group_array(json(value)) FROM ("
-                    "SELECT CASE WHEN p.key IS NULL THEN e.value ELSE p.value END AS value "
-                    "FROM json_each(inventory_json,'$.entries') e LEFT JOIN json_each(?) p "
-                    "ON p.key=json_extract(e.value,'$.instance_id') "
-                    "WHERE json_extract(e.value,'$.instance_id') NOT IN (SELECT value FROM "
-                    "json_each(?)) "
-                    "UNION ALL SELECT value FROM json_each(?))))) WHERE session_id=?",
-                    (
-                        canonical_json(replacements),
-                        json.dumps(sorted(remove)),
-                        canonical_json(additions),
-                        sid,
-                    ),
-                )
-        entries = [e for e in old["entries"] if e["instance_id"] not in portable] + list(
-            expected.values()
-        )
-        by_owner = {}
-        for entry in entries:
-            if entry["quantity"] > 0:
-                by_owner.setdefault(entry["owner_id"], set()).add(entry["item_slug"])
-        for aid, actor in self.rule_actors(sid, owners).items():
-            wanted = by_owner.get(aid, set())
-            current = actor["carried_item_slugs"]
-            slugs = [v for v in current if v in wanted] + sorted(wanted - set(current))
-            if slugs != current:
-                self._conn.execute(
-                    "UPDATE characters SET inventory_json=? WHERE session_id=? AND actor_id=?",
-                    (canonical_json(slugs), sid, aid),
-                )
-        self.validate_portable_inventory(sid, {"entries": entries}, owner_ids=owners)
-
-    def sync_world_inventory(self, sid):
-        """Rebuild only the authoritative portable subset; preserve every other entry."""
-        self.store.require_write()
-        stored = self._conn.execute(
-            "SELECT inventory_json FROM mechanical_components WHERE session_id=?", (sid,)
-        ).fetchone()
-        if stored is None:
-            if self._conn.execute(
-                "SELECT 1 FROM objects WHERE session_id=? AND item_json IS NOT NULL", (sid,)
-            ).fetchone():
-                raise StateMachineError(
-                    "unsupported_mechanical_version", "Explicit inventory missing"
-                )
-            return
-        inventory = self.store.memory.model_json(InventoryState, stored[0]).model_dump(mode="json")
-        identities, entries = self.world.portable_inventory(sid)
-        old_order = [
-            e["instance_id"] for e in inventory["entries"] if e["instance_id"] in identities
-        ]
-        old_ids = set(old_order)
-        others = [e for e in inventory["entries"] if e["instance_id"] not in identities]
-        inventory["entries"] = others + [entries[i] for i in old_order if i in entries]
-        inventory["entries"].extend(entries[i] for i in entries if i not in old_ids)
-        self.store.memory.model_json(InventoryState, canonical_json(inventory))
-        self._conn.execute(
-            "UPDATE mechanical_components SET inventory_json=? WHERE session_id=?",
-            (canonical_json(inventory), sid),
-        )
-        by_owner = {}
-        for entry in inventory["entries"]:
-            if entry["quantity"] > 0:
-                by_owner.setdefault(entry["owner_id"], set()).add(entry["item_slug"])
-        for actor, current in self.rule_actors(sid).items():
-            wanted = by_owner.get(actor, set())
-            old = current["carried_item_slugs"]
-            slugs = [slug for slug in old if slug in wanted] + sorted(wanted - set(old))
-            if slugs != old:
-                self._conn.execute(
-                    "UPDATE characters SET inventory_json=? WHERE session_id=? AND actor_id=?",
-                    (canonical_json(slugs), sid, actor),
-                )
-        self.validate_portable_inventory(sid, inventory)
+        identities, _ = prepared
+        _, expected = self.world.portable_inventory(sid, owner_ids=set(), instance_ids=identities)
+        self._inventory_model({"entries": list(expected.values())})
+        for owner in {entry["owner_id"] for entry in expected.values()}:
+            if self.binding_actor(sid, owner) is None:
+                raise StateMachineError("unsupported_actor_state", "Item owner lacks actor facts")
+            self.binding_components(sid, owner)
 
     def initialize_rule_positions(self, row, cells, scene_id):
         """Called only at fresh session creation before events or world movement."""
@@ -608,7 +626,7 @@ class CharacterFacts:
             )
 
     @scoped_read
-    def _rule_actor(self, sid, actor_id):
+    def _rule_actor(self, sid, actor_id, *, include_carried=True):
         """Read a mechanical actor and combine its current core character facts."""
         actor = self._conn.execute(
             "SELECT state_json FROM mechanical_actors WHERE session_id=? AND actor_id=?",
@@ -628,9 +646,13 @@ class CharacterFacts:
         data.update(
             hp_current=core["current_hp"],
             hp_max=core["max_hp"],
-            carried_item_slugs=parse(core["inventory_json"]),
+            carried_item_slugs=self.carried_slugs(sid, actor_id) if include_carried else [],
         )
         return data
+
+    def binding_actor(self, sid, actor_id):
+        """Read current actor equipment metadata without assembling carried items."""
+        return self._rule_actor(sid, actor_id, include_carried=False)
 
     @scoped_read
     def rule_actors(self, sid, owner_ids=None):
@@ -1093,6 +1115,52 @@ class WorldFacts:
                 "unsupported_object_capability", "Portable instances require item transfer"
             )
 
+    def materialize_owned_item(self, sid, iid, owner, unit, *, allow_existing=False):
+        """Create one proved owned item in World facts or verify an admitted identity."""
+        self.store.require_write()
+        if not valid_item_unit(unit):
+            raise StateMachineError("invalid_item_foundation", "Invalid initial item unit")
+        old = self.object(sid, iid)
+        if old is not None:
+            if (
+                allow_existing
+                and old["item_json"] is not None
+                and self.store.memory.json(old["item_json"]) == unit
+                and self.placement(sid, iid)["carrier_id"] == owner
+            ):
+                return
+            raise StateMachineError("invalid_item_foundation", "Initial item identity conflicts")
+        self._conn.execute(
+            "INSERT INTO objects(session_id,object_id,scene_id,state,cell,"
+            "carrier_id,item_json) VALUES (?,?,NULL,NULL,NULL,?,?)",
+            (sid, iid, owner, canonical_json(unit)),
+        )
+        self.instances.put(
+            sid,
+            "object",
+            iid,
+            {
+                "definition": "null",
+                "movable": False,
+                "blocks_passage": False,
+                "portable_policy": None,
+            },
+        )
+
+    def retire_owned_item(self, sid, before):
+        """Remove a proved placeholder after checking its current World row."""
+        self.store.require_write()
+        current = self.object(sid, before["object_id"])
+        if current is None or dict(current) != dict(before):
+            raise StateMachineError("invalid_item_foundation", "Legacy item changed")
+        self._conn.execute(
+            "DELETE FROM instance_configs WHERE session_id=? AND domain='object' AND instance_id=?",
+            (sid, before["object_id"]),
+        )
+        self._conn.execute(
+            "DELETE FROM objects WHERE session_id=? AND object_id=?", (sid, before["object_id"])
+        )
+
     def initialize_items(self, row, package, loader):
         """Initialize portable item instances and their related records."""
         self.store.require_write()
@@ -1118,10 +1186,16 @@ class WorldFacts:
             old = self._conn.execute(
                 "SELECT * FROM objects WHERE session_id=? AND object_id=?", (sid, item.instance_id)
             ).fetchone()
-            if old is None or old["item_json"] is not None:
+            if old is None:
                 raise StateMachineError(
                     "invalid_item_foundation", "Portable instance must exist exactly once"
                 )
+            if old["item_json"] is not None:
+                if self.store.memory.json(old["item_json"]) != data or old["carrier_id"] != owner:
+                    raise StateMachineError(
+                        "invalid_item_foundation", "Portable instance differs from item facts"
+                    )
+                continue
             self._conn.execute(
                 "UPDATE objects SET item_json=?,carrier_id=?,scene_id=?,cell=? "
                 "WHERE session_id=? AND object_id=?",

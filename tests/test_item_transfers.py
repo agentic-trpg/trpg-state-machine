@@ -70,6 +70,31 @@ def without_receipts(rows):
     return {k: v for k, v in rows.items() if k != "command_receipts"}
 
 
+def test_item_facts_supply_inventory_without_legacy_columns(tmp_path, context):
+    sm, sid, package, _ = setup(tmp_path, context)
+    with sm:
+        for table in ("characters", "mechanical_components"):
+            names = {row[1] for row in sm._conn.execute(f"PRAGMA table_info({table})")}
+            assert "inventory_json" not in names
+        ready(sm, sid, package, context)
+        sql = []
+        sm._store._conn.set_trace_callback(sql.append)
+        try:
+            assert (
+                submit(sm, sid, package, context, PickupItem(DAGGER, A, "2,1"), "fact.pick").status
+                == "committed"
+            )
+            pc = sm.read_session(sid, package, context=context).pc_actor_id
+            entries = sm.read_noncombat_snapshot(
+                sid, package, context=context
+            ).inventory_state.entries
+            assert any(e.instance_id == DAGGER and e.owner_id == pc for e in entries)
+            assert "dagger" in sm.read_session(sid, package, context=context).character.inventory
+        finally:
+            sm._store._conn.set_trace_callback(None)
+        assert not any("inventory_json" in statement for statement in sql)
+
+
 def test_public_navigation_transfer_two_types_same_type_instances_and_new_process(
     tmp_path, context
 ):
@@ -273,8 +298,6 @@ def test_queries_own_inventory_and_closed_data_adapter_have_no_side_effects(tmp_
     "table",
     [
         "objects",
-        "mechanical_components",
-        "characters",
         "event_evidence",
         "event_outbox",
         "command_receipts",
@@ -292,7 +315,7 @@ def test_midwrite_storage_faults_roll_back_all_tables_and_retry(tmp_path, contex
             )
         operation = DropItem(DAGGER, A, "1,1") if drop else PickupItem(DAGGER, A, "2,1")
         cmd = command(sm, sid, package, context, operation, "fault")
-        verb = "UPDATE" if table in {"objects", "mechanical_components", "characters"} else "INSERT"
+        verb = "UPDATE" if table == "objects" else "INSERT"
         sm._conn.execute(
             f"CREATE TRIGGER gc3_fault BEFORE {verb} ON {table} "
             "BEGIN SELECT RAISE(ABORT,'GC3 injected'); END"
@@ -733,9 +756,9 @@ def test_slug_equipment_ambiguity_refuses_drop_without_mutating_any_facts(
 
 @pytest.mark.parametrize(
     "fault",
-    ["missing", "bad_other_owner", "portable_mismatch", "ground_ghost", "bad_slug_projection"],
+    ["missing", "invalid_item_unit"],
 )
-def test_local_inventory_projection_and_explicit_full_validation(tmp_path, context, fault):
+def test_local_item_facts_and_explicit_full_validation(tmp_path, context, fault):
     sm, sid, package, db = setup(tmp_path, context)
     with sm:
         ready(sm, sid, package, context)
@@ -743,41 +766,13 @@ def test_local_inventory_projection_and_explicit_full_validation(tmp_path, conte
             submit(sm, sid, package, context, PickupItem(DAGGER, A, "2,1"), "pick").status
             == "committed"
         )
-        pc = sm.read_session(sid, package, context=context).pc_actor_id
         if fault == "missing":
             sm._conn.execute("DELETE FROM mechanical_components WHERE session_id=?", (sid,))
-        elif fault == "bad_other_owner":
-            sm._conn.execute(
-                "UPDATE mechanical_components SET inventory_json="
-                "json_set(inventory_json,'$.entries[0].owner_id','npc.absent') WHERE session_id=?",
-                (sid,),
-            )
-        elif fault == "portable_mismatch":
-            sm._conn.execute(
-                "UPDATE mechanical_components SET inventory_json="
-                "json_set(inventory_json,'$.entries[1].charges_remaining_per_unit',7) "
-                "WHERE session_id=?",
-                (sid,),
-            )
-        elif fault == "ground_ghost":
-            entry = {
-                "instance_id": ROPE,
-                "owner_id": pc,
-                "item_slug": "rope",
-                "quantity": 1,
-                "charges_remaining_per_unit": 0,
-                "accessible": True,
-            }
-            sm._conn.execute(
-                "UPDATE mechanical_components SET inventory_json="
-                "json_insert(inventory_json,'$.entries[#]',json(?)) WHERE session_id=?",
-                (json.dumps(entry), sid),
-            )
         else:
             sm._conn.execute(
-                "UPDATE characters SET inventory_json='[\"rapier\"]' "
-                "WHERE session_id=? AND actor_id=?",
-                (sid, pc),
+                "UPDATE objects SET item_json=json_set(item_json,'$.quantity',2) "
+                "WHERE session_id=? AND object_id=?",
+                (sid, DAGGER),
             )
         before = stored_rows(db)
         # Unrelated PC corruption belongs to explicit full diagnostics/recovery.
@@ -891,14 +886,17 @@ def test_genuine_schema23_upgrade_is_atomic_preserves_all_history_and_adds_no_ca
         assert stored_rows(db) == before
     package = load_adventure_package(document).package
     with StateMachine(db, dnd_loader=item_loader()) as sm:
-        assert sm._conn.execute("PRAGMA user_version").fetchone()[0] == 40
+        assert sm._conn.execute("PRAGMA user_version").fetchone()[0] == 41
         assert_original_rows_equal(before, stored_rows(db))
-        assert (
-            sm._conn.execute(
-                "SELECT count(*) FROM objects WHERE item_json IS NOT NULL OR carrier_id IS NOT NULL"
-            ).fetchone()[0]
-            == 0
-        )
+        promoted = sm._conn.execute(
+            "SELECT object_id,carrier_id,item_json FROM objects "
+            "WHERE session_id=? AND item_json IS NOT NULL",
+            (old["sid"],),
+        ).fetchall()
+        assert len(promoted) == 1
+        assert promoted[0]["carrier_id"] is not None
+        assert json.loads(promoted[0]["item_json"])["item_slug"] == "rapier"
+        assert not sm._world_facts.instances.is_portable(old["sid"], promoted[0]["object_id"])
         sm.upgrade_instance_configs(old["sid"], package, context=context)
         with pytest.raises(StateMachineError) as error:
             sm.resume_session(old["sid"], package, context=context)

@@ -7,7 +7,7 @@ from dnd_support import package_data as dnd_package_data
 from test_commands import make_command
 from test_dnd_runtime import attack, authority
 from test_events import create_request, event_data, load_event_package
-from test_migrations import historical_database, stored_rows
+from test_migrations import assert_preserved, historical_database, stored_rows
 
 from trpg_state_machine import StateMachine, StateMachineError
 from trpg_state_machine.package import _validate
@@ -70,11 +70,7 @@ def test_real_old_history_is_audited_not_guessed(tmp_path, package_data, context
             ).fetchone()[0]
             == 2
         )
-    with sqlite3.connect(db) as conn:
-        for table, (columns, oldrows) in before.items():
-            assert oldrows <= set(
-                conn.execute(f"SELECT {','.join(columns)} FROM {table}").fetchall()
-            )
+    assert_preserved(db, before)
 
 
 def test_schema8_failure_rolls_back_all_migration_steps(tmp_path, package_data, monkeypatch):
@@ -103,7 +99,7 @@ def test_schema8_failure_rolls_back_all_migration_steps(tmp_path, package_data, 
     with sqlite3.connect(db) as conn:
         assert conn.execute("PRAGMA user_version").fetchone()[0] == 7
     with StateMachine(db) as sm:
-        assert sm._conn.execute("PRAGMA user_version").fetchone()[0] == 40
+        assert sm._conn.execute("PRAGMA user_version").fetchone()[0] == 41
         assert sm._conn.execute("PRAGMA foreign_key_check").fetchall() == []
 
 

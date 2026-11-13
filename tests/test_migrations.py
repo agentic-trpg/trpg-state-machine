@@ -95,23 +95,79 @@ def stored_rows(database):
 
 
 def assert_preserved(database, original):
+    current = stored_rows(database)
     with sqlite3.connect(database) as conn:
         for table, (columns, rows) in original.items():
+            columns, rows = inventory_migration_projection(table, columns, rows, current)
             after = set(conn.execute(f"SELECT {','.join(columns)} FROM {table}").fetchall())
             assert rows <= after, table
-        assert conn.execute("PRAGMA user_version").fetchone()[0] == 40
+        assert conn.execute("PRAGMA user_version").fetchone()[0] == 41
         assert conn.execute("PRAGMA integrity_check").fetchone()[0] == "ok"
         assert conn.execute("PRAGMA foreign_key_check").fetchall() == []
 
 
+def inventory_migration_projection(table, columns, rows, current):
+    """Verify retired inventory fields against the migrated instance facts."""
+    if "inventory_json" not in columns or "inventory_json" in current[table][0]:
+        return columns, rows
+    fields, values = current["objects"]
+    objects = {
+        (item["session_id"], item["object_id"]): item
+        for row in values
+        for item in (dict(zip(fields, row, strict=True)),)
+    }
+
+    def owner(sid, item):
+        seen = set()
+        while item["container_id"] is not None:
+            assert item["object_id"] not in seen
+            seen.add(item["object_id"])
+            item = objects[sid, item["container_id"]]
+        return item["carrier_id"]
+
+    for row in rows:
+        record = dict(zip(columns, row, strict=True))
+        sid = record["session_id"]
+        inventory = json.loads(record["inventory_json"])
+        if table == "characters":
+            assert set(inventory) == {
+                json.loads(item["item_json"])["item_slug"]
+                for (session, _), item in objects.items()
+                if session == sid and item["item_json"] and owner(sid, item) == record["actor_id"]
+            }
+        else:
+            assert table == "mechanical_components"
+            for entry in inventory["entries"]:
+                identity = entry["instance_id"]
+                for n in range(entry["quantity"]):
+                    item = objects[sid, identity if n == 0 else f"{identity}.unit.{n:08d}"]
+                    unit = json.loads(item["item_json"])
+                    assert owner(sid, item) == entry["owner_id"]
+                    assert unit["quantity"] == 1
+                    assert unit["item_slug"] == entry["item_slug"]
+                    assert unit["charges_remaining_per_unit"] == entry["charges_remaining_per_unit"]
+    indices = [i for i, column in enumerate(columns) if column != "inventory_json"]
+    return [columns[i] for i in indices], {tuple(row[i] for i in indices) for row in rows}
+
+
 def assert_original_rows_equal(original, current, *, excluded=()):
-    """Exact equality of every original column/row across additive schema changes."""
+    """Check original rows, accounting for retired inventory columns and promoted items."""
+    migrated_inventory = any(
+        "inventory_json" in original[table][0] and "inventory_json" not in current[table][0]
+        for table in ("characters", "mechanical_components")
+        if table in original and table in current
+    )
     for table, (columns, rows) in original.items():
         if table in excluded:
             continue
         current_columns, current_rows = current[table]
+        columns, rows = inventory_migration_projection(table, columns, rows, current)
         indices = [current_columns.index(column) for column in columns]
-        assert {tuple(row[i] for i in indices) for row in current_rows} == rows, table
+        projected = {tuple(row[i] for i in indices) for row in current_rows}
+        if migrated_inventory and table in ("objects", "instance_configs"):
+            assert rows <= projected, table
+        else:
+            assert projected == rows, table
 
 
 @pytest.mark.parametrize("version", [1, 2, 3, 4])
@@ -320,7 +376,7 @@ def test_concurrent_initialization_and_upgrade(tmp_path, version, monkeypatch):
             )
 
     with ThreadPoolExecutor(max_workers=4) as workers:
-        assert list(workers.map(open_runtime, range(4))) == [(40, 1, "wal")] * 4
+        assert list(workers.map(open_runtime, range(4))) == [(41, 1, "wal")] * 4
     assert len(version_reads) >= 4 and all(version_reads)
     monkeypatch.undo()
     assert_preserved(database, original)

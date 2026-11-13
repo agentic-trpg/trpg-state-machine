@@ -269,7 +269,7 @@ def test_public_placement_scope_is_independent_of_unrelated_growth(
         print("placement", dict(small), dict(large), dict(calls))
 
 
-def test_container_closure_and_inventory_write_once(tmp_path, context, monkeypatch):
+def test_container_closure_without_inventory_mirror_write(tmp_path, context, monkeypatch):
     sm, sid, package, _ = setup(tmp_path, context, container_data())
     with sm:
         acquire(sm, sid, package, context)
@@ -277,7 +277,6 @@ def test_container_closure_and_inventory_write_once(tmp_path, context, monkeypat
         actor = sm.read_session(sid, package, context=context).pc_actor_id
         op = PutItem(A, CRED, BOX, "0,0")
         calls = Counter()
-        observe(monkeypatch, sm._characters, "sync_world_inventory", calls, "full_sync")
         observe(monkeypatch, sm._objects.spatial, "audit", calls, "full_audit")
         scope = sm._objects.containers._rows(sid, (CRED, BOX))
         assert set(scope) == {CRED, BOX}
@@ -285,10 +284,7 @@ def test_container_closure_and_inventory_write_once(tmp_path, context, monkeypat
             result = submit(sm, sid, package, context, op, "scoped.put")
         assert result.status == "committed"
         assert calls == Counter()
-        assert (
-            sum(s.startswith("UPDATE mechanical_components SET inventory_json") for s in sql) == 1
-        )
-        assert sum(s.startswith("UPDATE characters SET inventory_json") for s in sql) == 1
+        assert not any("inventory_json" in statement for statement in sql)
         assert sm.get_object(sid, actor, BOX, package, context=context)["contents"] == (CRED,)
         print("container", dict(counts))
 
@@ -489,7 +485,6 @@ def test_unrelated_event_does_not_build_mechanism_or_inventory_index(
     with sm:
         calls = Counter()
         observe(monkeypatch, sm._objects.mechanisms, "_build_index", calls, "mechanism_builds")
-        observe(monkeypatch, sm._characters, "sync_world_inventory", calls, "inventory_syncs")
         observe(monkeypatch, sm._objects.spatial, "audit", calls, "audits")
         flag = package.scenes[0].flags[0][0]
         old = dict(package.scenes[0].flags)[flag]
@@ -712,7 +707,7 @@ sm.close()
     assert stored_rows(db) == before
     monkeypatch.setattr(runtime_integrity, "certify_scene", certify)
     with StateMachine(db, dnd_loader=lock_loader()) as sm:
-        assert sm._conn.execute("PRAGMA user_version").fetchone()[0] == 40
+        assert sm._conn.execute("PRAGMA user_version").fetchone()[0] == 41
         assert_original_rows_equal(before, stored_rows(db))
         assert tuple(
             r[0]
@@ -808,7 +803,7 @@ def test_schema40_object_lookup_addendum_preserves_facts_and_old_read_scope(tmp_
         old.execute("BEGIN")
         fixed = old.execute("SELECT * FROM objects ORDER BY object_id").fetchall()
         with StateMachine(database, dnd_loader=sm._rules.loader) as reopened:
-            assert reopened._conn.execute("PRAGMA user_version").fetchone()[0] == 40
+            assert reopened._conn.execute("PRAGMA user_version").fetchone()[0] == 41
             assert reopened._conn.execute(
                 "SELECT sql FROM sqlite_master WHERE name='spatial_object_lookup'"
             ).fetchone()[0] == (

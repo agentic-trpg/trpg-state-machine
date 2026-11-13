@@ -10,6 +10,7 @@ from pathlib import Path
 import pytest
 from lock_support import CRED, lock_loader
 from test_dnd_ledger_scope import stored_state
+from test_migrations import assert_original_rows_equal, stored_rows
 from test_world_containers import BOX, container_data
 from world_support import setup
 
@@ -58,20 +59,22 @@ print(json.dumps({'session_id': sid, 'database': str(db)}))
     )
     identities = json.loads(result.stdout)
     db, sid = identities["database"], identities["session_id"]
-    before = stored_state(db)
+    before = stored_rows(db)
     package = _validate(json.loads((destination / "package.json").read_text("utf-8")))
     with StateMachine(db, dnd_loader=lock_loader()) as sm:
-        assert sm._conn.execute("PRAGMA user_version").fetchone()[0] == 40
-        after_schema = stored_state(db)
-        assert after_schema["instance_configs"] == ()
-        assert {key: after_schema[key] for key in before} == before
+        assert sm._conn.execute("PRAGMA user_version").fetchone()[0] == 41
+        after_schema = stored_rows(db)
+        assert_original_rows_equal(before, after_schema)
+        (promoted_config,) = after_schema["instance_configs"][1]
+        assert promoted_config[:2] == (sid, "object")
+        assert json.loads(promoted_config[3])["inventory_origin"] == "schema41"
         with pytest.raises(StateMachineError) as error:
             sm.resume_session(sid, package, context=context)
         assert error.value.code == "incomplete_instance_config"
         sm.upgrade_instance_configs(sid, package, context=context)
         assert sm._world_facts.object(sid, CRED)["container_id"] == BOX
+        assert_original_rows_equal(before, stored_rows(db))
         after = stored_state(db)
-        assert {key: after[key] for key in before} == before
         with pytest.raises(StateMachineError) as error:
             sm.save_session(sid, package, context=context)
         assert error.value.code == "ruleset_binding_mismatch"
@@ -83,7 +86,7 @@ print(json.dumps({'session_id': sid, 'database': str(db)}))
 def test_upgrade_commit_failure_rolls_back_all_config_records(tmp_path, context, monkeypatch):
     sm, sid, package, db = setup(tmp_path, context, container_data())
     with sm:
-        sm._conn.execute("DELETE FROM instance_configs")
+        sm._conn.execute("DELETE FROM instance_configs WHERE domain='scene'")
         before = stored_state(db)
         put = InstanceData.put
         injected = False
@@ -102,7 +105,7 @@ def test_upgrade_commit_failure_rolls_back_all_config_records(tmp_path, context,
             patch.setattr(InstanceData, "put", deferred_fault)
             with pytest.raises(StateMachineError) as error:
                 sm.upgrade_instance_configs(sid, package, context=context)
-            assert error.value.code == "storage_error"
+            assert error.value.code == "storage_error", str(error.value)
         assert stored_state(db) == before
         sm.upgrade_instance_configs(sid, package, context=context)
         sm.save_session(sid, package, context=context)

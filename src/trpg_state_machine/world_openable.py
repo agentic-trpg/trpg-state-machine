@@ -126,20 +126,12 @@ class OpenableService:
             )
         ):
             raise StateMachineError("credential_unavailable", "No usable owned credential")
-        known = set(self.h.characters.rule_actors(sid, {actor_id}))
-        if actor_id not in known:
+        if self.h.characters.binding_actor(sid, actor_id) is None:
             raise StateMachineError("unsupported_actor_state", "Explicit actor facts required")
-        components = self.h.characters.rule_components(sid, {actor_id})
+        components = self.h.characters.binding_components(sid, actor_id)
         if any(e["target_id"] == actor_id for e in components["effect_states"]):
             raise StateMachineError("unsupported_actor_state", "Active effects need adjudication")
-        entry = next(
-            (
-                e
-                for e in components["inventory_state"]["entries"]
-                if e["instance_id"] == operation.credential_instance_id
-            ),
-            None,
-        )
+        entry = self.h.facts.item_entry(item)
         if (
             entry is None
             or entry["owner_id"] != actor_id

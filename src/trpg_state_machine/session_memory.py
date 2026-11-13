@@ -12,7 +12,6 @@ import json
 import re
 import sqlite3
 from collections import OrderedDict
-from contextlib import contextmanager
 from copy import deepcopy
 from dataclasses import replace
 from itertools import combinations
@@ -429,58 +428,23 @@ class SessionMemory:
                 self.store._scope.memory_versions.setdefault((f"{source}:{identity!r}", sid), 0)
         return dependency
 
-    @contextmanager
-    def inventory_projection_write(self, sid, owners):
-        """Attribute the domain's validated inventory patch, not a writable fact.
-
-        Only sync_inventory_change uses this synchronous capture hint. Unscoped
-        aggregate SQL/imports conservatively invalidate all loaded owner models.
-        All resulting stamps remain in the existing savepoint candidate.
-        """
-        self.store.require_write()
-        previous = getattr(self, "_inventory_targets", None)
-        self._inventory_targets = sid, frozenset(owners)
-        try:
-            yield
-        finally:
-            self._inventory_targets = previous
-
     def _inventory_changes(self, table, old, new):
         """Invalidate affected owners along the changed object's ancestry only.
 
-        The existing aggregate component and actor-membership versions are also
-        checked by version(); no owner list is scanned to propagate those changes.
+        Component membership and layout versions are checked by version();
+        no owner list is scanned to propagate unrelated changes.
         """
         if table == "mechanical_components":
-            targets = getattr(self, "_inventory_targets", None)
-            if (
-                targets is not None
-                and old is not None
-                and new is not None
-                and old["session_id"] == new["session_id"] == targets[0]
-                and all(
-                    old[c] == new[c]
-                    for c in (
-                        "schema_version",
-                        "resources_json",
-                        "casting_json",
-                        "effects_json",
-                    )
-                )
-            ):
-                for actor in targets[1]:
-                    self._advance_field("inventory", targets[0], actor)
-            else:
-                for sid in {r["session_id"] for r in (old, new) if r is not None}:
-                    dep = ("inventory_components", sid)
-                    versions = self.store._scope.memory_versions
-                    versions[dep] = versions.get(dep, 0) + 1
+            for sid in {r["session_id"] for r in (old, new) if r is not None}:
+                dep = ("inventory_components", sid)
+                versions = self.store._scope.memory_versions
+                versions[dep] = versions.get(dep, 0) + 1
             return
         if table in ("characters", "mechanical_actors", "actors"):
             if old is not None and new is not None:
                 identity = ("session_id", "actor_id")
                 if table == "characters":
-                    relevant = (*identity, "inventory_json", "resources_json", "effects_json")
+                    relevant = (*identity, "resources_json", "effects_json")
                     if all(old[c] == new[c] for c in relevant):
                         return
                 elif all(old[c] == new[c] for c in identity):

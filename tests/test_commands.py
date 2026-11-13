@@ -1,3 +1,4 @@
+import json
 import sqlite3
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
@@ -215,13 +216,22 @@ def test_upgrade_batch1_preserves_real_database(tmp_path, package, context, requ
         conn.execute("ATTACH DATABASE ? AS source", (str(database),))
         tables = [r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")]
         for table in tables:
-            columns = ",".join(r[1] for r in conn.execute(f"PRAGMA table_info({table})"))
-            conn.execute(f"INSERT INTO {table}({columns}) SELECT {columns} FROM source.{table}")
+            fields = [r[1] for r in conn.execute(f"PRAGMA table_info({table})")]
+            columns = ",".join(fields)
+            if table == "characters":
+                fields.remove("inventory_json")
+                conn.execute(
+                    f"INSERT INTO {table}({','.join(fields)},inventory_json) "
+                    f"SELECT {','.join(fields)},? FROM source.{table}",
+                    (json.dumps(before.character.inventory),),
+                )
+            else:
+                conn.execute(f"INSERT INTO {table}({columns}) SELECT {columns} FROM source.{table}")
     database = legacy
     with StateMachine(database) as sm:
         sm.upgrade_instance_configs(created.session_id, package, context=context)
         assert sm.resume_session(created.session_id, package, context=context) == before
-        assert sm._conn.execute("PRAGMA user_version").fetchone()[0] == 40
+        assert sm._conn.execute("PRAGMA user_version").fetchone()[0] == 41
         assert sm._conn.execute("SELECT COUNT(*) FROM event_evidence").fetchone()[0] == 0
         assert (
             sm.submit_command(

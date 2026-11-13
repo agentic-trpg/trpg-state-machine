@@ -124,7 +124,6 @@ def test_relevant_unknown_capacity_rejects(tmp_path, context, which, dimension):
                     "UPDATE objects SET container_id=?,carrier_id=NULL WHERE object_id=?",
                     (BAG, CRED),
                 )
-            sm._characters.sync_world_inventory(sid)
         op = (
             TakeItem(A, CRED, BAG, "0,0")
             if which.startswith("source")
@@ -270,19 +269,19 @@ def test_effect_guards_only_active_operating_actor(tmp_path, context, related, d
         )
 
 
-@pytest.mark.parametrize("stage", ["projection", "after_event"])
+@pytest.mark.parametrize("stage", ["transfer", "after_event"])
 def test_transfer_fault_rolls_back_all_facts(tmp_path, context, monkeypatch, stage):
     sm, sid, p, _ = setup(tmp_path, context, container_data())
     with sm:
         acquire(sm, sid, p, context)
-        if stage == "projection":
-            original = sm._characters.project_item_transfer
+        if stage == "transfer":
+            original = sm._world_facts.transfer_item
 
             def fail(*args, **kwargs):
                 original(*args, **kwargs)
-                raise StateMachineError("injected_failure", "after projection")
+                raise StateMachineError("injected_failure", "after item write")
 
-            monkeypatch.setattr(sm._characters, "project_item_transfer", fail)
+            monkeypatch.setattr(sm._world_facts, "transfer_item", fail)
         else:
             original = sm._world._capture_event
 
@@ -473,7 +472,6 @@ def test_legacy_third_level_can_be_removed_without_rewriting_other_locations(tmp
                     "WHERE object_id=?",
                     (parent, child),
                 )
-            sm._characters.sync_world_inventory(sid)
         assert_admission(sm, sid, p, context, TakeItem(A, BAG, BOX, "0,0"), "recover")
         actor = sm.read_session(sid, p, context=context).pc_actor_id
         assert sm.get_object(sid, actor, CRED, p, context=context)["location"]["ancestry"] == (

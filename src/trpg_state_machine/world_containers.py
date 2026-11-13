@@ -336,10 +336,10 @@ class ContainerService:
         moving subtree.
         """
         h = self.h
-        actors = h.characters.rule_actors(sid, {actor})
-        if actor not in actors:
+        state = h.characters.binding_actor(sid, actor)
+        if state is None:
             raise StateMachineError("unsupported_actor_state", "Explicit mechanical facts required")
-        components = h.characters.rule_components(sid, {actor})
+        components = h.characters.binding_components(sid, actor)
         if any(e["target_id"] == actor and not e["disabled"] for e in components["effect_states"]):
             raise StateMachineError("unsupported_actor_state", "Active effect transfer unsupported")
         rows = self._rows(sid, (iid,)) if rows is None else rows
@@ -353,7 +353,6 @@ class ContainerService:
             raise StateMachineError(
                 "unsupported_actor_activity", "Casting-bound item transfer unsupported"
             )
-        state = actors[actor]
         for oid in affected:
             obj = self.facts.object(sid, oid)
             if not obj["item_json"]:

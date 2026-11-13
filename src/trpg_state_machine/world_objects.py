@@ -117,6 +117,8 @@ class WorldObjectService:
         obj = self.facts.object(sid, oid)
         if obj is None:
             raise StateMachineError("invalid_target", "No authorized local object")
+        if obj["item_json"] is not None and not self.facts.instances.is_portable(sid, oid):
+            raise StateMachineError("invalid_target", "No authorized local object")
         if obj["container_id"] is not None:
             try:
                 self.containers.reachable(sid, actor_id, oid, package)

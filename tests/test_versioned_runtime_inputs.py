@@ -86,35 +86,19 @@ def expanded(sm, sid, n, package):
             "WHERE session_id=? AND scene_id=?",
             (n + 10, json.dumps([f"{i + 5},2" for i in range(n)]), sid, A),
         )
-        stored = sm._conn.execute(
-            "SELECT inventory_json FROM mechanical_components WHERE session_id=?", (sid,)
-        ).fetchone()[0]
-        inventory = json.loads(stored)
-        inventory["entries"].extend(
+        unit = json.dumps(
             {
-                "instance_id": f"unrelated.stock_{i}",
-                "owner_id": "npc.caretaker",
                 "item_slug": "amulet",
                 "quantity": 1,
                 "charges_remaining_per_unit": 0,
                 "accessible": True,
             }
-            for i in range(n)
         )
-        sm._conn.execute(
-            "UPDATE mechanical_components SET inventory_json=? WHERE session_id=?",
-            (json.dumps(inventory), sid),
-        )
-        core = sm._conn.execute(
-            "SELECT inventory_json FROM characters WHERE session_id=? AND actor_id='npc.caretaker'",
-            (sid,),
-        ).fetchone()[0]
-        slugs = list(dict.fromkeys([*json.loads(core), "amulet"]))
-        sm._conn.execute(
-            "UPDATE characters SET inventory_json=? "
-            "WHERE session_id=? AND actor_id='npc.caretaker'",
-            (json.dumps(slugs), sid),
-        )
+        for i in range(n):
+            sm._conn.execute(
+                "INSERT INTO objects(session_id,object_id,carrier_id,item_json) VALUES (?,?,?,?)",
+                (sid, f"unrelated.stock_{i}", "npc.caretaker", unit),
+            )
         sm.scene_lifecycle._validate_scene(sid, A, package)
 
 
@@ -201,53 +185,49 @@ def test_models_follow_candidate_stages_rollback_reload_and_complete_schema(tmp_
         old_inventory = sm.read_carried_items(sid, actor, package, context=context)
         legacy = next(e for e in old_inventory.entries if not e.instance_id.startswith("object."))
 
-        def quantity(value):
-            stored = sm._conn.execute(
-                "SELECT inventory_json FROM mechanical_components WHERE session_id=?", (sid,)
-            ).fetchone()[0]
-            data = json.loads(stored)
-            next(e for e in data["entries"] if e["instance_id"] == legacy.instance_id)[
-                "quantity"
-            ] = value
+        def set_charges(value):
             sm._conn.execute(
-                "UPDATE mechanical_components SET inventory_json=? WHERE session_id=?",
-                (json.dumps(data), sid),
+                "UPDATE objects SET item_json=json_set(item_json,'$.charges_remaining_per_unit',?) "
+                "WHERE session_id=? AND object_id=?",
+                (value, sid, legacy.instance_id),
             )
 
-        def current_quantity():
+        def current_charges():
             inventory = (
                 sm._world.characters.inventory_model(sid, actor)
                 if sm._store._scope is not None
                 else sm.read_carried_items(sid, actor, package, context=context)
             )
             return next(
-                e.quantity for e in inventory.entries if e.instance_id == legacy.instance_id
+                e.charges_remaining_per_unit
+                for e in inventory.entries
+                if e.instance_id == legacy.instance_id
             )
 
         with pytest.raises(RuntimeError), sm._transaction(write=True):
             update_grid(sm, sid, width=7)
-            quantity(2)
+            set_charges(2)
             first = maps.mechanical_grid(sid, A)
-            assert first.width == 7 and current_quantity() == 2
+            assert first.width == 7 and current_charges() == 2
             with pytest.raises(ValueError), sm._store.savepoint():
                 update_grid(sm, sid, width=8)
-                quantity(3)
-                assert maps.mechanical_grid(sid, A).width == 8 and current_quantity() == 3
+                set_charges(3)
+                assert maps.mechanical_grid(sid, A).width == 8 and current_charges() == 3
                 raise ValueError("savepoint")
-            assert maps.mechanical_grid(sid, A).width == 7 and current_quantity() == 2
+            assert maps.mechanical_grid(sid, A).width == 7 and current_charges() == 2
             update_grid(sm, sid, width=9)
-            quantity(4)
-            assert maps.mechanical_grid(sid, A).width == 9 and current_quantity() == 4
+            set_charges(4)
+            assert maps.mechanical_grid(sid, A).width == 9 and current_charges() == 4
             raise RuntimeError("outer")
         assert maps.mechanical_grid(sid, A) == old_grid
         assert sm.read_carried_items(sid, actor, package, context=context) == old_inventory
         with sm._transaction(write=True):
             update_grid(sm, sid, width=6)
-            quantity(2)
+            set_charges(2)
             sm.scene_lifecycle._validate_scene(sid, A, package)
         old_grid.blocked_cells.append("0,0")
         assert "0,0" not in maps.mechanical_grid(sid, A).blocked_cells
-        assert first.width == 7 and legacy.quantity == 1
+        assert first.width == 7 and legacy.charges_remaining_per_unit == 0
         with pytest.raises(ValueError), sm._transaction(write=True):
             sm._conn.execute(
                 "UPDATE mechanical_scenes SET state_json=json_remove(state_json,'$.grid.sunlight') "
@@ -258,13 +238,13 @@ def test_models_follow_candidate_stages_rollback_reload_and_complete_schema(tmp_
             assert sm._world.capture._perception_geometry(sid, A) == (None, None)
             raise ValueError("missing sensory field")
         sm.unload_session(sid, package, context=context)
-        assert maps.mechanical_grid(sid, A).width == 6 and current_quantity() == 2
+        assert maps.mechanical_grid(sid, A).width == 6 and current_charges() == 2
     with StateMachine(db, dnd_loader=sm._rules.loader) as restored:
         restored.resume_session(sid, package, context=context)
         assert restored._world_facts.maps.mechanical_grid(sid, A).width == 6
         assert (
             next(
-                e.quantity
+                e.charges_remaining_per_unit
                 for e in restored.read_carried_items(sid, actor, package, context=context).entries
                 if e.instance_id == legacy.instance_id
             )
@@ -376,10 +356,8 @@ def test_map_model_commit_faults_and_cross_connection_recovery(
 
 
 @pytest.mark.parametrize("change", ("accessible", "location", "durability"))
-def test_inventory_cached_model_cannot_hide_unprojected_source_changes(tmp_path, context, change):
+def test_inventory_model_reflects_candidate_object_changes(tmp_path, context, change):
     from lock_support import CRED
-
-    from trpg_state_machine import StateMachineError
 
     sm, sid, package, _ = setup(tmp_path, context, lighting_data())
     with sm:
@@ -400,10 +378,13 @@ def test_inventory_cached_model_cannot_hide_unprojected_source_changes(tmp_path,
                 )
             else:
                 sm._conn.execute("INSERT INTO object_durability VALUES (?,?,0)", (sid, CRED))
-            with pytest.raises(StateMachineError) as error:
-                sm._world.characters.inventory_model(sid, actor)
-            assert error.value.code == "invalid_mechanical_state"
-            raise RuntimeError("discard invalid candidate")
+            current = sm._world.characters.inventory_model(sid, actor)
+            item = next((entry for entry in current.entries if entry.instance_id == CRED), None)
+            if change == "location":
+                assert item is None
+            else:
+                assert item is not None and not item.accessible
+            raise RuntimeError("discard candidate")
         assert sm.read_carried_items(sid, actor, package, context=context) == old
 
 

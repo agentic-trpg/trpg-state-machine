@@ -341,7 +341,10 @@ def test_old_save_upgrade_is_explicit_atomic_and_preserves_facts(tmp_path, conte
             submit(sm, sid, package, context, PutItem(A, CRED, BAG, "0,0"), "put").status
             == "committed"
         )
-        sm._conn.execute("DELETE FROM instance_configs WHERE session_id=?", (sid,))
+        sm._conn.execute(
+            "DELETE FROM instance_configs WHERE session_id=? AND domain='object' AND instance_id=?",
+            (sid, CRED),
+        )
         before = stored_state(db)
         with pytest.raises(StateMachineError) as error:
             sm.resume_session(sid, package, context=context)
@@ -389,7 +392,7 @@ def test_sqlite_direct_contents_uses_existing_index(tmp_path, context):
             (sid, BOX),
         ).fetchall()
         assert "objects_container" in " ".join(r[3] for r in plan)
-        assert sm._conn.execute("PRAGMA user_version").fetchone()[0] == 40
+        assert sm._conn.execute("PRAGMA user_version").fetchone()[0] == 41
         configs = sm._conn.execute(
             "SELECT config_json FROM instance_configs WHERE domain='object'"
         ).fetchall()

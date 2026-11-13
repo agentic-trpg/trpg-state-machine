@@ -341,7 +341,7 @@ def test_actual_legacy_combat_upgrade_preserves_mechanics_rng_receipt(
     )
     assert completed.returncode == 0, completed.stderr
     old = json.loads(completed.stdout)
-    from test_migrations import stored_rows
+    from test_migrations import assert_preserved, stored_rows
 
     original = stored_rows(database)
     assets = loader()
@@ -372,7 +372,7 @@ def test_actual_legacy_combat_upgrade_preserves_mechanics_rng_receipt(
             sm.get_command_receipt(sid, "old.real.attack", package, context=context).status
             == "committed"
         )
-        assert sm._conn.execute("PRAGMA user_version").fetchone()[0] == 40
+        assert sm._conn.execute("PRAGMA user_version").fetchone()[0] == 41
         assert sm._conn.execute("PRAGMA foreign_key_check").fetchall() == []
         sm.upgrade_instance_configs(sid, package, context=context)
         before = sm.read_session(sid, package, context=context)
@@ -384,9 +384,7 @@ def test_actual_legacy_combat_upgrade_preserves_mechanics_rng_receipt(
         assert sm.get_command_receipt(sid, command.command_id, package, context=context) is None
         sm.upgrade_instance_configs(sid, package, context=context)
         assert sm.read_session(sid, package, context=context) == before
-    with sqlite3.connect(database) as db:
-        for table, (columns, rows) in original.items():
-            assert rows <= set(db.execute(f"SELECT {','.join(columns)} FROM {table}").fetchall())
+    assert_preserved(database, original)
 
 
 def test_npc_zero_hp_delta_keeps_condition_and_damage_ledger_consistent(

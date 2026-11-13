@@ -683,7 +683,7 @@ def test_interrupted_schema19_migration_rolls_back_and_recovers(
     with sqlite3.connect(db) as conn:
         assert conn.execute("PRAGMA user_version").fetchone()[0] == 18
     with StateMachine(db) as sm:
-        assert sm._conn.execute("PRAGMA user_version").fetchone()[0] == 40
+        assert sm._conn.execute("PRAGMA user_version").fetchone()[0] == 41
         assert sm._conn.execute("PRAGMA foreign_key_check").fetchall() == []
 
 

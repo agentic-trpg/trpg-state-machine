@@ -368,7 +368,7 @@ class StateMachine(
                 pc["current_hp"],
                 pc["max_hp"],
                 json.loads(pc["resources_json"]),
-                tuple(json.loads(pc["inventory_json"])),
+                tuple(self._characters.carried_slugs(sid, pc["actor_id"])),
                 tuple(json.loads(pc["effects_json"])),
                 pc["xp"],
             ),
@@ -464,8 +464,10 @@ class StateMachine(
                 )
             )
             known = {o.object_id for s in package.scenes for o in s.objects}
+            from .inventory_migration import is_generated_placeholder
+
             if any(
-                r[0] not in known
+                r[0] not in known and not is_generated_placeholder(self._conn, session_id, r[0])
                 for r in self._conn.execute(
                     "SELECT object_id FROM objects WHERE session_id=?", (session_id,)
                 )

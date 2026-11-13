@@ -413,12 +413,12 @@ class WorldHandler:
             ).fetchone()
         ):
             raise StateMachineError("item_out_of_reach", "Item destination is occupied")
-        known = set(self.characters.rule_actors(sid, {actor_id}))
-        if actor_id not in known:
+        state = self.characters.binding_actor(sid, actor_id)
+        if state is None:
             raise StateMachineError(
                 "unsupported_actor_state", "Carrier needs explicit mechanical facts"
             )
-        components = self.characters.rule_components(sid, {actor_id})
+        components = self.characters.binding_components(sid, actor_id)
         if any(e["target_id"] == actor_id for e in components["effect_states"]):
             raise StateMachineError(
                 "unsupported_actor_state", "Active effects need unsupported adjudication"
@@ -426,7 +426,6 @@ class WorldHandler:
         if type(operation) is DropItem:
             if self.facts.contents(sid, operation.instance_id):
                 self.objects.containers.require_unbound(sid, actor_id, operation.instance_id)
-            state = self.characters.rule_actors(sid, {actor_id})[actor_id]
             casting = components["casting_state"]
             if casting is not None and any(
                 material["inventory_instance_id"] == operation.instance_id
@@ -509,8 +508,12 @@ class WorldHandler:
         """Authorize and read visible carried entries at the current world version."""
         with self._transaction():
             self._spatial_reader(session_id, actor_id, package, context)
-            known = set(self.characters.rule_actors(session_id, {actor_id}))
-            if actor_id not in known:
+            known = self._conn.execute(
+                "SELECT 1 FROM mechanical_actors m JOIN characters c "
+                "USING(session_id,actor_id) WHERE m.session_id=? AND m.actor_id=?",
+                (session_id, actor_id),
+            ).fetchone()
+            if known is None:
                 raise StateMachineError(
                     "unsupported_mechanical_version", "Explicit inventory is unavailable"
                 )

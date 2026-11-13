@@ -14,5 +14,5 @@ def valid_item_unit(data):
         and data["quantity"] == 1
         and type(data["charges_remaining_per_unit"]) is int
         and 0 <= data["charges_remaining_per_unit"] <= 2**63 - 1
-        and data["accessible"] is True
+        and type(data["accessible"]) is bool
     )

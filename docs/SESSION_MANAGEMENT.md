@@ -1,5 +1,11 @@
 # Session Management
 
+## 2026-11-14 STORAGE-01 第二批候选
+
+Schema 41 将库存持久事实归到 `objects` 的实例、`item_json`、携带和容纳关系。角色携带类型和锁定版 RE 的 `InventoryState` 按请求派生。SessionMemory 沿实际归属及容器依赖维护角色库存读取缓存，随既有 UnitOfWork 发布和回滚。资源、施法和效果仍沿各自组件读取。下文 2026-10-22 的库存聚合列和投影补丁描述保留其历史语境。
+
+迁移预检可通过 `python -m trpg_state_machine.inventory_migration SAVE` 在 SQLite 临时备份上运行。实际打开旧档时在 Store 原迁移事务中核对和迁移，冲突时原档保留。未证明有世界交互配置的旧物品保留规则数据和实例 ID，只有获得对应配置后才可能具备世界操作能力。[本批阶段报告](reviews/storage-01-inventory/STAGE_REPORT.md)
+
 ## 2026-10-22 World 通路反向关联
 
 WorldRuntime.passages 在原 SessionMemory 中持有只读 PassageIndex；InstanceData.passages
