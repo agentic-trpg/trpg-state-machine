@@ -38,6 +38,7 @@ from trpg_state_machine import (
     StartNavigation,
     StateMachine,
     StateMachineError,
+    TypedCommand,
     world_command_from_data,
 )
 from trpg_state_machine.npc_results import NPCDropIntent, NPCEvaluationResult, NPCPickupIntent
@@ -649,6 +650,72 @@ def test_combat_initialization_and_real_availability_keep_current_inventory(tmp_
             "unsupported_combat_world_operation",
         )
         assert without_receipts(stored_rows(db)) == without_receipts(stored)
+
+
+@pytest.mark.parametrize("move_spare", [False, True])
+def test_attack_uses_the_held_rapier_instance(tmp_path, context, move_spare):
+    """Use the instance on both public RE paths and permit moving its spare."""
+    from dnd5e_engine.evaluation_contracts import CombatIntentPayload
+
+    data = item_data()
+    held = "object.held_rapier"
+    data["scenes"][0]["objects"][-3]["object_id"] = held
+    owner = data["pc_templates"][0]["pc_template_id"]
+    data["item_transfers"][0].update(instance_id=held, item_slug="rapier", initial_owner_id=owner)
+    data["item_transfers"][1].update(item_slug="rapier", initial_owner_id=owner)
+    for foundation in data["rule_bindings"].values():
+        snapshot = foundation["snapshot"]
+        snapshot["snapshot_schema_version"] = "engine-snapshot/18"
+        snapshot["character_states"][0]["held_weapon_instance_id"] = held
+        entries = snapshot["inventory_state"]["entries"]
+        entries[0]["instance_id"] = held
+        entries.append({**entries[0], "instance_id": SECOND})
+    data["actors"][0]["initial_cell"] = "1,0"
+    sm, sid, package, db = setup(tmp_path, context, data)
+    with sm:
+        pc = sm.read_session(sid, package, context=context).pc_actor_id
+        assert (
+            submit(sm, sid, package, context, DropItem(held, A, "0,0"), "held.drop").status
+            == "rejected"
+        )
+        if move_spare:
+            assert (
+                submit(sm, sid, package, context, DropItem(SECOND, A, "0,0"), "spare.drop").status
+                == "committed"
+            )
+        saved = sm.save_session(sid, package, context=context)
+        assets = sm._rules.loader
+    with StateMachine(db, dnd_loader=assets) as sm:
+        assert sm.resume_session(sid, package, context=context) == saved
+        assert initialize(sm, sid, package, context).status == "committed"
+        state = sm.read_combat_snapshot(sid, package, context=context)
+        actor = next(a for a in state.character_states if a.entity_id == pc)
+        assert actor.held_weapon_instance_id == held
+        assert (SECOND in {e.instance_id for e in state.inventory_state.entries}) != move_spare
+        rng = sm.read_rng_context(sid, package, context=context)
+        spare = CombatIntentPayload(intent_type="attack", target_id=NPC, weapon_instance_id=SECOND)
+        assert (
+            sm.query_action_availability(sid, pc, spare, package, context=context).status
+            == "unavailable"
+        )
+        bad = TypedCommand(sid, "attack.spare", pc, "combat.intent", spare, state.world_version)
+        assert sm.submit_command(bad, package, context=context).status == "rejected"
+        assert sm.read_rng_context(sid, package, context=context) == rng
+        assert sm.read_combat_snapshot(sid, package, context=context) == state
+        selected = spare.model_copy(update={"weapon_instance_id": held})
+        assert (
+            sm.query_action_availability(sid, pc, selected, package, context=context).status
+            == "available"
+        )
+        attack = TypedCommand(
+            sid, "attack.held", pc, "combat.intent", selected, state.world_version
+        )
+        receipt = sm.submit_command(attack, package, context=context)
+        assert receipt.status == "committed", receipt
+        after = sm.read_rng_context(sid, package, context=context)
+        assert after != rng
+        assert sm.submit_command(attack, package, context=context) == receipt
+        assert sm.read_rng_context(sid, package, context=context) == after
 
 
 def initial_carrier_data(*, slug="dagger", charges=0):

@@ -306,7 +306,7 @@ class RulesAdapter:
         """
         self.records.require_noncombat_save(row)
         sid = row["session_id"]
-        if row["mechanical_schema_version"] != "engine-snapshot/17":
+        if row["mechanical_schema_version"] not in ("engine-snapshot/17", "engine-snapshot/18"):
             raise StateMachineError(
                 "unsupported_mechanical_version", "Complete noncombat state was not initialized"
             )
@@ -358,7 +358,7 @@ class RulesAdapter:
         no mechanical profile. A later rule request still requires a complete
         local snapshot; recovery must not create those missing profiles.
         """
-        if row["mechanical_schema_version"] != "engine-snapshot/17":
+        if row["mechanical_schema_version"] not in ("engine-snapshot/17", "engine-snapshot/18"):
             raise StateMachineError(
                 "unsupported_mechanical_version", "Old mechanical facts need migration"
             )
@@ -378,7 +378,7 @@ class RulesAdapter:
     def _combat_snapshot(self, row):
         """Build a complete fixed combat snapshot from current facts and combat records."""
         sid = row["session_id"]
-        if row["mechanical_schema_version"] != "engine-snapshot/17":
+        if row["mechanical_schema_version"] not in ("engine-snapshot/17", "engine-snapshot/18"):
             raise StateMachineError(
                 "unsupported_mechanical_version", "Old save lacks proven current component facts"
             )
@@ -525,7 +525,12 @@ class RulesAdapter:
             return None
         if payload.intent_type != "attack":
             return "intent.capability"
-        if payload.weapon_id is None and payload.stat_block_action_id is None:
+        selected = (
+            payload.weapon_instance_id
+            if snapshot.snapshot_schema_version == "engine-snapshot/18"
+            else payload.weapon_id
+        )
+        if selected is None and payload.stat_block_action_id is None:
             return "pending_choice_unsupported"
         if payload.stat_block_action_id is not None:
             slug = snapshot.combat_state.monster_slug_by_entity.get(actor_id)
@@ -568,7 +573,11 @@ class RulesAdapter:
         """Build a rules request with durable Session identity and isolated fixed inputs."""
         row = row if row is not None else self._pinned_row(command.session_id, package)
         return RuleEvaluationRequest(
-            schema_version="engine-evaluation/24",
+            schema_version=(
+                "engine-evaluation/25"
+                if snapshot.snapshot_schema_version == "engine-snapshot/18"
+                else "engine-evaluation/24"
+            ),
             session_id=command.session_id,
             command_id=command.command_id,
             operation_kind=command.command_type,
@@ -589,7 +598,11 @@ class RulesAdapter:
         self._verify_dnd_binding(package, row)
         try:
             request = ActionAvailabilityRequest(
-                schema_version="engine-availability/13",
+                schema_version=(
+                    "engine-availability/14"
+                    if snapshot.snapshot_schema_version == "engine-snapshot/18"
+                    else "engine-availability/13"
+                ),
                 session_id=session_id,
                 operation_kind="combat.intent",
                 actor_id=actor_id,

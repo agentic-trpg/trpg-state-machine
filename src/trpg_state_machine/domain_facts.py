@@ -295,6 +295,8 @@ class CharacterFacts:
         state = actor.model_dump(
             mode="json", exclude={"hp_current", "hp_max", "carried_item_slugs"}
         )
+        if state.get("held_weapon_instance_id") is not None:
+            del state["weapon_in_hands"]
         self._conn.execute(
             "INSERT INTO mechanical_actors VALUES (?,?,?)",
             (sid, actor.entity_id, canonical_json(state)),
@@ -351,7 +353,12 @@ class CharacterFacts:
                     "invalid_combat_foundation", "Initialization cannot reset item facts"
                 )
             return
-        self._conn.execute("INSERT INTO mechanical_components VALUES (?,?,?,?,?)", (sid, *expected))
+        self._conn.execute(
+            "INSERT INTO mechanical_components "
+            "(session_id,schema_version,resources_json,casting_json,effects_json) "
+            "VALUES (?,?,?,?,?)",
+            (sid, *expected),
+        )
         # The snapshot is ingress data. Materialize each owned unit once in the
         # World object relation before ordinary item initialization checks it.
         for entry in snapshot.inventory_state.entries:
@@ -412,7 +419,7 @@ class CharacterFacts:
         row = self._conn.execute(
             "SELECT * FROM mechanical_components WHERE session_id=?", (sid,)
         ).fetchone()
-        if row is None or row["schema_version"] != "engine-snapshot/17":
+        if row is None or row["schema_version"] not in ("engine-snapshot/17", "engine-snapshot/18"):
             raise StateMachineError(
                 "unsupported_mechanical_version", "Explicit component facts are missing"
             )
@@ -451,7 +458,7 @@ class CharacterFacts:
         row = self._conn.execute(
             "SELECT * FROM mechanical_components WHERE session_id=?", (sid,)
         ).fetchone()
-        if row is None or row["schema_version"] != "engine-snapshot/17":
+        if row is None or row["schema_version"] not in ("engine-snapshot/17", "engine-snapshot/18"):
             raise StateMachineError(
                 "unsupported_mechanical_version", "Explicit component facts are missing"
             )
@@ -643,6 +650,15 @@ class CharacterFacts:
                 "invalid_mechanical_state", "Legacy core resources/effects have no typed source"
             )
         data = parse(actor[0])
+        held = data.get("held_weapon_instance_id")
+        if held is not None and include_carried:
+            item = self.world.object(sid, held)
+            entry = self.world.item_entry(item) if item is not None else None
+            if entry is None or entry["owner_id"] != actor_id or not entry["accessible"]:
+                raise StateMachineError(
+                    "invalid_mechanical_state", "Held weapon requires an accessible owned item"
+                )
+            data["weapon_in_hands"] = entry["item_slug"]
         data.update(
             hp_current=core["current_hp"],
             hp_max=core["max_hp"],

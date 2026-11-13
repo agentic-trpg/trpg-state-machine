@@ -438,8 +438,13 @@ class WorldHandler:
             slug = self.store.memory.json(item["item_json"])["item_slug"]
             armor = state["worn_armor"]
             asset = self.loader.get_item(slug) if self.loader else None
+            held = state.get("held_weapon_instance_id")
             if (
-                state["weapon_in_hands"] == slug
+                (
+                    operation.instance_id == held
+                    if held is not None
+                    else state.get("weapon_in_hands") == slug
+                )
                 or state["other_hand_occupied"]
                 or (state["shield_equipped"] and slug == "shield")
                 or (

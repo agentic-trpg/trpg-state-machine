@@ -66,7 +66,7 @@ class CombatHandler:
         for actor in snapshot.character_states:
             self.characters.initialize_rule_actor(row, actor, xp=initial["xp"][actor.entity_id])
         self.characters.initialize_rule_components(row["session_id"], snapshot)
-        self.runtime.set_mechanical_schema(row["session_id"], "engine-snapshot/17")
+        self.runtime.set_mechanical_schema(row["session_id"], snapshot.snapshot_schema_version)
         self.runtime.select_rule_rng(row["session_id"], canonical_json(initial["rng_state"]))
 
     def _initialize_combat(self, row, package, prepared):

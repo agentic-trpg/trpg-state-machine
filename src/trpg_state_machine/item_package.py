@@ -25,7 +25,7 @@ def validate_items(raw, scenes, foundation, definitions, *, world=False):
     if foundation is None:
         _fail("unsupported_mechanism", path, "Portable items require complete noncombat facts")
     snapshot = json.loads(foundation)["snapshot"]
-    if snapshot["snapshot_schema_version"] != "engine-snapshot/17":
+    if snapshot["snapshot_schema_version"] not in ("engine-snapshot/17", "engine-snapshot/18"):
         _fail("unsupported_mechanism", path, "Portable items require current component facts")
     known = {a["entity_id"] for a in snapshot["character_states"]}
     objects = {o.object_id: (s, o) for s in scenes for o in s.objects}

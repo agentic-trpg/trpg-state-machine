@@ -133,7 +133,7 @@ class SqliteStore:
         boundary.
         """
         scripts = [Path(__file__).with_name("_schema.sql")] + [
-            Path(__file__).with_name(f"_migration_{v}.sql") for v in range(2, 42)
+            Path(__file__).with_name(f"_migration_{v}.sql") for v in range(2, 43)
         ]
         steps = [_migration_statements(path.read_text("utf-8")) for path in scripts]
         # Migration 4 rebuilds a referenced table. Disable FK enforcement only on
@@ -143,7 +143,7 @@ class SqliteStore:
             self._conn.execute("BEGIN IMMEDIATE")
             # Read AFTER acquiring the cross-process SQLite migration write lock.
             version = self._conn.execute("PRAGMA user_version").fetchone()[0]
-            if version not in range(42):
+            if version not in range(43):
                 raise StateMachineError(
                     "unsupported_storage_schema", f"Unsupported storage version: {version}"
                 )
@@ -160,7 +160,7 @@ class SqliteStore:
             validate_environment_versions(self._conn, required=version >= 36)
             if version >= 34:
                 reconcile_schema34(self._conn, version, steps[33])
-            for target in range(version + 1, 42):
+            for target in range(version + 1, 43):
                 if target == 41:
                     from .inventory_migration import preflight_inventory
 

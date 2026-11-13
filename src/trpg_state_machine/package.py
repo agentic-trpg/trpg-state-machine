@@ -454,7 +454,12 @@ def _validate(data: dict, *, allow_legacy_audit=False) -> AdventurePackage:
         # Execution/restore verifies the unchanged identity against RE /37;
         # parsing must never silently repin an existing Session.
         or (
-            binding.evaluator_version not in ("dnd5e-evaluation/36", "dnd5e-evaluation/37")
+            binding.evaluator_version
+            not in (
+                "dnd5e-evaluation/36",
+                "dnd5e-evaluation/37",
+                "dnd5e-evaluation/38",
+            )
             and not legacy_audit
         )
     ):

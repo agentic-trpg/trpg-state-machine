@@ -66,8 +66,7 @@ def validate_noncombat_foundation(value):
         ]
         ids = [snapshot.scene_state.scene_id, *(s.scene_id for s in scenes)]
         if (
-            snapshot.snapshot_schema_version != "engine-snapshot/17"
-            or snapshot.world_version != 0
+            snapshot.world_version != 0
             or not snapshot.character_states
             or len(ids) != len(set(ids))
             or type(value["xp"]) is not dict
