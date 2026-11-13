@@ -52,3 +52,26 @@ The committed attack facts and fixed request prove the held instance. The
 existing combat event payloads still expose attack and roll data without an
 item instance ID. The complete combat snapshot and its existing dependency
 scope are retained.
+
+## Locked validation and test-only follow-up
+
+- The locked SM install passed 74 focused tests and the real cross-phase
+  example through combat, save and a fresh-process resume. Both installed RE
+  distributions identify the full `fdff8d0` SHA. The RE event-stage demo
+  evaluated and verified its response successfully.
+- An initial Windows RE integration run decoded UTF-8 capability text as GBK.
+  With UTF-8 mode and subprocess access, the engine run completed with 9,048
+  passed and three outdated assertions failed. The follow-up keeps required
+  fields and unknown-field rejection covered and asserts both supported
+  protocol versions in validation and serialization schemas. Commit
+  `0b633e264d79019b13e06421e457e02c761e0746` changes only those two RE test
+  files. Independent retesting passed 137 tests and the exact final two mode
+  variants. Bridge (142 tests), demo (54 tests), type checks and strict docs
+  build also passed.
+- The first SM broad run flagged fresh-process NPC receipt recovery. The
+  case passed in isolation under the locked environment and passed in the
+  later broad run, which completed with 2,065 tests passed and one failure.
+  SM updated that test's old dependency SHA in
+  `cd875f3e7a61779ec30b582d3db2926faebf3505`; the reviewer passed all
+  23 tests in the affected file with the locked install. The follow-up
+  changed no production code in either repository.
