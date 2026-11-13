@@ -1,13 +1,9 @@
-import sqlite3
-from pathlib import Path
-
 import pytest
 from dnd_support import create, initialize, loader
 from dnd_support import package_data as dnd_package_data
 from test_commands import make_command
 from test_dnd_runtime import attack, authority
 from test_events import create_request, event_data, load_event_package
-from test_migrations import assert_preserved, historical_database, stored_rows
 
 from trpg_state_machine import StateMachine, StateMachineError
 from trpg_state_machine.package import _validate
@@ -41,65 +37,6 @@ def test_trigger_links_exact_source_event_in_same_command_chain(
         assert all(events[r[1]].event_id == r[3] for r in rows)
         assert sm.submit_command(command, package, context=context) == receipt
         assert sm._conn.execute("SELECT count(*) FROM trigger_history").fetchone()[0] == 2
-        assert sm._conn.execute("PRAGMA foreign_key_check").fetchall() == []
-
-
-@pytest.mark.parametrize("version", [3, 6, 7])
-def test_real_old_history_is_audited_not_guessed(tmp_path, package_data, context, version):
-    definition = event_data()
-    definition["trigger"]["event_type"] = "scene.entered"
-    definition["condition"]["value"] = False
-    package = load_event_package(tmp_path, package_data, [definition]).package
-    db, sessions = historical_database(tmp_path, version, tmp_path / "events.yaml")
-    before = stored_rows(db)
-    assert len(before["trigger_history"][1]) == 2
-    with StateMachine(db) as sm:
-        rows = sm._conn.execute(
-            "SELECT source_event_seq,source_event_status FROM trigger_history"
-        ).fetchall()
-        assert [tuple(r) for r in rows] == [(None, "legacy_unavailable")] * 2
-        assert sm._conn.execute("PRAGMA foreign_key_check").fetchall() == []
-        for sid in sessions:
-            sm.upgrade_instance_configs(sid, package, context=context)
-            sm.resume_session(sid, package, context=context)
-    with StateMachine(db) as restarted:
-        assert (
-            restarted._conn.execute(
-                "SELECT count(*) FROM trigger_history "
-                "WHERE source_event_status='legacy_unavailable'"
-            ).fetchone()[0]
-            == 2
-        )
-    assert_preserved(db, before)
-
-
-def test_schema8_failure_rolls_back_all_migration_steps(tmp_path, package_data, monkeypatch):
-    definition = event_data()
-    definition["trigger"]["event_type"] = "scene.entered"
-    definition["condition"]["value"] = False
-    load_event_package(tmp_path, package_data, [definition])
-    db, _ = historical_database(tmp_path, 7, tmp_path / "events.yaml")
-    original = stored_rows(db)
-    read = Path.read_text
-    with monkeypatch.context() as patch:
-
-        def broken(path, *args, **kwargs):
-            text = read(path, *args, **kwargs)
-            return (
-                text.replace("PRAGMA user_version = 8;", "INVALID MIGRATION;")
-                if path.name == "_migration_8.sql"
-                else text
-            )
-
-        patch.setattr(Path, "read_text", broken)
-        with pytest.raises(StateMachineError) as caught:
-            StateMachine(db)
-        assert caught.value.code == "storage_error"
-    assert stored_rows(db) == original
-    with sqlite3.connect(db) as conn:
-        assert conn.execute("PRAGMA user_version").fetchone()[0] == 7
-    with StateMachine(db) as sm:
-        assert sm._conn.execute("PRAGMA user_version").fetchone()[0] == 41
         assert sm._conn.execute("PRAGMA foreign_key_check").fetchall() == []
 
 

@@ -1,6 +1,13 @@
 """Closed portable-unit metadata, shared by Package admission and current facts."""
 
+import hashlib
 import re
+
+
+def core_item_id(sid, owner, position):
+    """Give one explicit core inventory occurrence a stable object identity."""
+    digest = hashlib.sha256(f"{sid}\0{owner}".encode()).hexdigest()[:20]
+    return f"legacy.inventory.{digest}.{position:08d}"
 
 
 def valid_item_unit(data):

@@ -1,11 +1,8 @@
 """GC3 ordinary public transfers: real SQLite, public commands and pinned RE."""
 
-import io
 import json
-import sqlite3
 import subprocess
 import sys
-import zipfile
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import asdict, replace
 from pathlib import Path
@@ -27,7 +24,7 @@ from item_support import (
     navigate,
     submit,
 )
-from test_migrations import assert_original_rows_equal, stored_rows
+from test_migrations import stored_rows
 from test_npc_evaluation_tasks import create_task
 from test_real_checks import check_command
 
@@ -896,86 +893,3 @@ def test_real_cross_session_actor_reference_is_rejected_before_receipt(tmp_path,
         with pytest.raises(StateMachineError):
             sm.submit_command(replace(cmd, session_id=other), package, context=context)
         assert stored_rows(db) == before
-
-
-@pytest.mark.parametrize(
-    "fault", [None, "CREATE TABLE objects_gc3", "DROP TABLE objects", "PRAGMA user_version = 24"]
-)
-def test_genuine_schema23_upgrade_is_atomic_preserves_all_history_and_adds_no_capabilities(
-    tmp_path, context, monkeypatch, fault, pre_frozen_python
-):
-    root = Path(__file__).parents[1]
-    archive = subprocess.run(
-        ["git", "archive", "--format=zip", "0e380cc27e6c20516fe0f3f4c81b895310124f62", "src"],
-        cwd=root,
-        capture_output=True,
-        check=True,
-    ).stdout
-    source = tmp_path / "baseline"
-    with zipfile.ZipFile(io.BytesIO(archive)) as contents:
-        contents.extractall(source)
-    data = item_data()
-    data["manifest"]["schema_version"] = "state-machine-foundation/3"
-    del data["item_transfers"]
-    document = tmp_path / "legacy.json"
-    document.write_text(json.dumps(data), "utf-8")
-    db = tmp_path / "old.db"
-    worker = subprocess.run(
-        [
-            str(pre_frozen_python),
-            str(root / "tests/_item_legacy_worker.py"),
-            str(source),
-            str(db),
-            str(document),
-        ],
-        capture_output=True,
-        text=True,
-        encoding="utf-8",
-        check=True,
-    )
-    old = json.loads(worker.stdout)
-    assert old["schema"] == 23
-    before = stored_rows(db)
-    if fault:
-        connect = sqlite3.connect
-
-        class Failing(sqlite3.Connection):
-            def execute(self, sql, *args):
-                result = super().execute(sql, *args)
-                if fault in sql:
-                    raise sqlite3.OperationalError("injected GC3 migration fault")
-                return result
-
-        monkeypatch.setattr(sqlite3, "connect", lambda *a, **k: connect(*a, factory=Failing, **k))
-        with pytest.raises(StateMachineError):
-            StateMachine(db, dnd_loader=item_loader())
-        monkeypatch.undo()
-        assert stored_rows(db) == before
-    package = load_adventure_package(document).package
-    with StateMachine(db, dnd_loader=item_loader()) as sm:
-        assert sm._conn.execute("PRAGMA user_version").fetchone()[0] == 41
-        assert_original_rows_equal(before, stored_rows(db))
-        promoted = sm._conn.execute(
-            "SELECT object_id,carrier_id,item_json FROM objects "
-            "WHERE session_id=? AND item_json IS NOT NULL",
-            (old["sid"],),
-        ).fetchall()
-        assert len(promoted) == 1
-        assert promoted[0]["carrier_id"] is not None
-        assert json.loads(promoted[0]["item_json"])["item_slug"] == "rapier"
-        assert not sm._world_facts.instances.is_portable(old["sid"], promoted[0]["object_id"])
-        sm.upgrade_instance_configs(old["sid"], package, context=context)
-        with pytest.raises(StateMachineError) as error:
-            sm.resume_session(old["sid"], package, context=context)
-        assert error.value.code == "ruleset_binding_mismatch"
-        assert (
-            sm.read_session(old["sid"], package, context=context).package_digest
-            == package.package_digest
-        )
-        assert sm._conn.execute("PRAGMA foreign_key_check").fetchall() == []
-        assert sm._conn.execute("PRAGMA integrity_check").fetchone()[0] == "ok"
-        ready(sm, old["sid"], package, context)
-        receipt = submit(
-            sm, old["sid"], package, context, PickupItem(DAGGER, A, "2,1"), "legacy.pick"
-        )
-        assert (receipt.status, receipt.error_code) == ("rejected", "unsupported_object_capability")

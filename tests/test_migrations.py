@@ -1,85 +1,20 @@
-"""Real historical runtimes, migration locks, crash recovery and projection epochs."""
+"""Fresh schema setup, migration locking, and interrupted setup rollback."""
 
-import io
-import json
 import os
 import sqlite3
 import subprocess
 import sys
-import zipfile
 from concurrent.futures import ThreadPoolExecutor
-from dataclasses import replace
 from pathlib import Path
 from threading import Barrier
 
-import pytest
-import yaml
-from perception_support import synthetic_notice
 from test_mechanics import mechanical_package as mechanical_package
 
 from trpg_state_machine import (
-    ObjectState,
-    SetObjectState,
     StateMachine,
-    TypedCommand,
-    load_adventure_package,
 )
-from trpg_state_machine.perception import NPCContext
 
 ROOT = Path(__file__).resolve().parents[1]
-HISTORY = {
-    7: "74368459ec805a341d9b6e9451e218444a174fa6",
-    6: "4d84e36ff889c94e107a86d27eb28f274ddc6136",
-    1: "182efbe6b6b331fea274b5ae7863a8888e791339",
-    2: "86ac1bf816d917c155cadf436097eb6b6f81a6f4",
-    3: "1e289a9b57d72d955777ff1d781b1ba90f89112f",
-    4: "16291de08b41ef147a2389bdb3d02235fa65cb0e",
-    5: "0a3837d8a0ce83a47b2c8ef4bf37046562d712f5",
-}
-
-
-def archived_source(tmp_path, version):
-    destination = tmp_path / f"source-{version}"
-    archive = subprocess.run(
-        [
-            "git",
-            "archive",
-            "--format=zip",
-            HISTORY[version],
-            "src",
-            "tests/fixtures/lantern_station.yaml",
-        ],
-        cwd=ROOT,
-        check=True,
-        capture_output=True,
-    ).stdout
-    with zipfile.ZipFile(io.BytesIO(archive)) as contents:
-        contents.extractall(destination)
-    return destination
-
-
-def historical_database(tmp_path, version, fixture=None):
-    source = archived_source(tmp_path, version)
-    database = tmp_path / "historical.db"
-    result = subprocess.run(
-        [
-            sys.executable,
-            str(ROOT / "tests/_legacy_database_worker.py"),
-            str(source),
-            str(database),
-            str(fixture or source / "tests/fixtures/lantern_station.yaml"),
-            "yes" if fixture else "no",
-        ],
-        cwd=tmp_path,
-        check=False,
-        capture_output=True,
-        text=True,
-        encoding="utf-8",
-    )
-    assert result.returncode == 0, result.stderr
-    created = json.loads(result.stdout)
-    assert created["schema"] == version
-    return database, created["sessions"]
 
 
 def stored_rows(database):
@@ -95,10 +30,8 @@ def stored_rows(database):
 
 
 def assert_preserved(database, original):
-    current = stored_rows(database)
     with sqlite3.connect(database) as conn:
         for table, (columns, rows) in original.items():
-            columns, rows = inventory_migration_projection(table, columns, rows, current)
             after = set(conn.execute(f"SELECT {','.join(columns)} FROM {table}").fetchall())
             assert rows <= after, table
         assert conn.execute("PRAGMA user_version").fetchone()[0] == 41
@@ -106,266 +39,40 @@ def assert_preserved(database, original):
         assert conn.execute("PRAGMA foreign_key_check").fetchall() == []
 
 
-def inventory_migration_projection(table, columns, rows, current):
-    """Verify retired inventory fields against the migrated instance facts."""
-    if "inventory_json" not in columns or "inventory_json" in current[table][0]:
-        return columns, rows
-    fields, values = current["objects"]
-    objects = {
-        (item["session_id"], item["object_id"]): item
-        for row in values
-        for item in (dict(zip(fields, row, strict=True)),)
-    }
-
-    def owner(sid, item):
-        seen = set()
-        while item["container_id"] is not None:
-            assert item["object_id"] not in seen
-            seen.add(item["object_id"])
-            item = objects[sid, item["container_id"]]
-        return item["carrier_id"]
-
-    for row in rows:
-        record = dict(zip(columns, row, strict=True))
-        sid = record["session_id"]
-        inventory = json.loads(record["inventory_json"])
-        if table == "characters":
-            assert set(inventory) == {
-                json.loads(item["item_json"])["item_slug"]
-                for (session, _), item in objects.items()
-                if session == sid and item["item_json"] and owner(sid, item) == record["actor_id"]
-            }
-        else:
-            assert table == "mechanical_components"
-            for entry in inventory["entries"]:
-                identity = entry["instance_id"]
-                for n in range(entry["quantity"]):
-                    item = objects[sid, identity if n == 0 else f"{identity}.unit.{n:08d}"]
-                    unit = json.loads(item["item_json"])
-                    assert owner(sid, item) == entry["owner_id"]
-                    assert unit["quantity"] == 1
-                    assert unit["item_slug"] == entry["item_slug"]
-                    assert unit["charges_remaining_per_unit"] == entry["charges_remaining_per_unit"]
-    indices = [i for i, column in enumerate(columns) if column != "inventory_json"]
-    return [columns[i] for i in indices], {tuple(row[i] for i in indices) for row in rows}
-
-
 def assert_original_rows_equal(original, current, *, excluded=()):
-    """Check original rows, accounting for retired inventory columns and promoted items."""
-    migrated_inventory = any(
-        "inventory_json" in original[table][0] and "inventory_json" not in current[table][0]
-        for table in ("characters", "mechanical_components")
-        if table in original and table in current
-    )
+    """Check unchanged columns and rows across a current-schema operation."""
     for table, (columns, rows) in original.items():
         if table in excluded:
             continue
         current_columns, current_rows = current[table]
-        columns, rows = inventory_migration_projection(table, columns, rows, current)
         indices = [current_columns.index(column) for column in columns]
         projected = {tuple(row[i] for i in indices) for row in current_rows}
-        if migrated_inventory and table in ("objects", "instance_configs"):
-            assert rows <= projected, table
-        else:
-            assert projected == rows, table
+        assert projected == rows, table
 
 
-@pytest.mark.parametrize("version", [1, 2, 3, 4])
-def test_actual_old_runtime_upgrade_preserves_authority_and_audits_history(
-    tmp_path, package, context, version
-):
-    database, sessions = historical_database(tmp_path, version)
-    original = stored_rows(database)
-    with StateMachine(database) as sm:
-        for sid in sessions:
-            sm.upgrade_instance_configs(sid, package, context=context)
-            snapshot = sm.resume_session(sid, package, context=context)
-            assert snapshot.package_digest == package.package_digest
-            assert snapshot.ruleset_binding == package.ruleset_binding
-            assert snapshot.character.current_hp == 11
-            assert snapshot.rng.position == snapshot.rng.rng_version == 0
-            assert sm.perception_cursor(sid, package, context=context) == snapshot.event_seq
-            assert (
-                sm.project_event(sid, 1, package, context=context, judgment=synthetic_notice)
-                == "legacy_unavailable"
-            )
-        sm.upgrade_instance_configs(sessions[0], package, context=context)
-        assert sm.resume_session(sessions[0], package, context=context).world_version == 3
-        sm.upgrade_instance_configs(sessions[1], package, context=context)
-        assert sm.resume_session(sessions[1], package, context=context).world_version == 0
-        assert (
-            sm._conn.execute("SELECT count(*) FROM legacy_perception_boundaries").fetchone()[0] == 2
-        )
-        # Historical work is retained as unavailable, never completed or false.
-        assert (
-            sm._conn.execute(
-                "SELECT count(*) FROM event_outbox WHERE consumer='perception' AND done=1"
-            ).fetchone()[0]
-            == 0
-        )
-        assert sm._conn.execute("SELECT count(*) FROM perception_results").fetchone()[0] == 0
-        assert sm._conn.execute("SELECT count(*) FROM event_observations").fetchone()[0] == 0
-        assert sm._conn.execute("PRAGMA foreign_keys").fetchone()[0] == 1
-    assert_preserved(database, original)
-    audit = stored_rows(database)
-    for _ in range(2):
-        with StateMachine(database) as sm:
-            assert (
-                sm.project_event(
-                    sessions[0], 1, package, context=context, judgment=synthetic_notice
-                )
-                == "legacy_unavailable"
-            )
-        assert stored_rows(database) == audit
-
-
-def upgrade_with_old_schema5(tmp_path, database):
-    source = archived_source(tmp_path, 5)
-    subprocess.run(
-        [
-            sys.executable,
-            "-c",
-            "import sys; sys.path.insert(0,sys.argv[1]); "
-            "from trpg_state_machine import StateMachine; "
-            "StateMachine(sys.argv[2]).close()",
-            str(source / "src"),
-            str(database),
-        ],
-        cwd=tmp_path,
-        check=True,
-        capture_output=True,
-    )
-
-
-def test_real_schema4_nonzero_rng_and_mechanical_receipt_survive_upgrade(
-    tmp_path, mechanical_package, context
-):
-    package = mechanical_package
-    database, sessions = historical_database(tmp_path, 4, tmp_path / "mechanics.yaml")
-    original = stored_rows(database)
-    with StateMachine(database) as sm:
-        sm.upgrade_instance_configs(sessions[0], package, context=context)
-        snapshot = sm.resume_session(sessions[0], package, context=context)
-        assert snapshot.world_version == 4
-        assert snapshot.rng.position == snapshot.rng.rng_version == 1
-        assert snapshot.character.current_hp == 12
-        assert snapshot.character.resources == {"resource.tokens": 2}
-        assert snapshot.character.inventory == ("item.synthetic_token",)
-        receipt = sm.get_command_receipt(sessions[0], "old.mechanical", package, context=context)
-        assert receipt.status == "committed" and receipt.world_version == 4
-    assert_preserved(database, original)
-
-
-@pytest.mark.parametrize("via_schema5", [False, True])
-def test_legacy_boundary_allows_same_session_new_observations_but_holds_new_gaps(
-    tmp_path, package_data, context, via_schema5
-):
-    # Fully authored/validated forward-compatible typed input. This is NOT a
-    # claim that the historical YAML loader supported the new senses field.
-    for actor in package_data["actors"]:
-        actor["senses"] = {"visual": True, "auditory": True}
-    fixture = tmp_path / "approved.yaml"
-    fixture.write_text(yaml.safe_dump(package_data), "utf-8")
-    package = load_adventure_package(fixture).package
-    assert package is not None
-    database, sessions = historical_database(tmp_path, 4, fixture)
-    if via_schema5:
-        upgrade_with_old_schema5(tmp_path, database)
-    original = stored_rows(database)
-    with StateMachine(database) as sm:
-        sid, other = sessions
-        sm.upgrade_instance_configs(sid, package, context=context)
-        before = sm.resume_session(sid, package, context=context)
-        boundary = before.event_seq
-        sm.grant_npc_access(sid, "npc.caretaker", "npc.agent", package, context=context)
-        npc = NPCContext("npc.agent", sid, "npc.caretaker")
-        first = TypedCommand(
-            sid,
-            "new.open",
-            before.pc_actor_id,
-            "set_object_state",
-            SetObjectState("scene.platform", "object.platform_gate", ObjectState.OPEN),
-            3,
-        )
-        second = replace(
-            first,
-            command_id="new.close",
-            expected_world_version=4,
-            payload=replace(first.payload, state=ObjectState.CLOSED),
-        )
-        r1 = sm.submit_command(first, package, context=context)
-        r2 = sm.submit_command(second, package, context=context)
-        assert (
-            sm.project_event(
-                sid, r2.event_seqs[0], package, context=context, judgment=synthetic_notice
-            )
-            == "resolved"
-        )
-        assert sm.read_observations(sid, package, context=npc) == ()
-        assert sm.perception_cursor(sid, package, context=context) == boundary
-        assert (
-            sm.project_event(
-                sid, r1.event_seqs[0], package, context=context, judgment=synthetic_notice
-            )
-            == "resolved"
-        )
-        observations = sm.read_observations(sid, package, context=npc)
-        assert len(observations) == 2
-        assert sm.perception_cursor(sid, package, context=context) == r2.event_seqs[0]
-        assert sm.perception_cursor(other, package, context=context) == 2
-        assert (
-            sm.project_event(sid, 1, package, context=context, judgment=synthetic_notice)
-            == "legacy_unavailable"
-        )
-        assert (
-            sm._conn.execute(
-                "SELECT count(*) FROM perception_results WHERE event_seq<=? AND session_id=?",
-                (boundary, sid),
-            ).fetchone()[0]
-            == 0
-        )
-    # All original authority/receipt/evidence rows remain unchanged. Projection
-    # cursor is intentionally advanced, so omit only that derived table here.
-    original.pop("projection_cursors", None)
-    # New commands legitimately modify these authoritative rows; equality was
-    # checked by the separate historical-runtime test before any new command.
-    for table in ("sessions", "objects", "rng_states"):
-        original.pop(table, None)
-    assert_preserved(database, original)
-    with StateMachine(database) as sm:
-        assert sm.read_observations(sid, package, context=npc) == observations
-        assert (
-            sm.project_event(
-                sid, r1.event_seqs[0], package, context=context, judgment=synthetic_notice
-            )
-            == "already_complete"
-        )
-        assert sm._conn.execute("SELECT count(*) FROM npc_inbox").fetchone()[0] == 2
-
-
-@pytest.mark.parametrize("version", [0, 1, 4, 5])
-def test_concurrent_initialization_and_upgrade(tmp_path, version, monkeypatch):
-    if version:
-        database, _ = historical_database(tmp_path, 1 if version == 5 else version)
-        if version == 5:
-            upgrade_with_old_schema5(tmp_path, database)
-        original = stored_rows(database)
-    else:
-        database, original = tmp_path / "empty.db", {}
+def test_concurrent_fresh_initialization(tmp_path, monkeypatch):
+    database, original = tmp_path / "empty.db", {}
     barrier = Barrier(4)
     connect = sqlite3.connect
     version_reads = []
 
     class TracedConnection(sqlite3.Connection):
         def execute(self, sql, *args):
-            if sql == "PRAGMA user_version" and not getattr(self, "read_version", False):
+            if (
+                sql == "PRAGMA user_version"
+                and not getattr(self, "read_only_probe", False)
+                and not getattr(self, "read_version", False)
+            ):
                 version_reads.append(self.in_transaction)
                 self.read_version = True
             return super().execute(sql, *args)
 
-    monkeypatch.setattr(
-        sqlite3, "connect", lambda *a, **k: connect(*a, factory=TracedConnection, **k)
-    )
+    def traced_connect(*args, **kwargs):
+        conn = connect(*args, factory=TracedConnection, **kwargs)
+        conn.read_only_probe = kwargs.get("uri", False) and "mode=ro" in str(args[0])
+        return conn
+
+    monkeypatch.setattr(sqlite3, "connect", traced_connect)
 
     def open_runtime(_):
         barrier.wait(timeout=10)
@@ -382,118 +89,9 @@ def test_concurrent_initialization_and_upgrade(tmp_path, version, monkeypatch):
     assert_preserved(database, original)
 
 
-@pytest.mark.parametrize("missing_evidence", [False, True])
-def test_schema5_mixed_history_does_not_archive_real_pending_work(
-    tmp_path, package_data, context, missing_evidence
-):
-    for actor in package_data["actors"]:
-        actor["senses"] = {"visual": True, "auditory": True}
-    fixture = tmp_path / "approved.yaml"
-    fixture.write_text(yaml.safe_dump(package_data), "utf-8")
-    package = load_adventure_package(fixture).package
-    database, sessions = historical_database(tmp_path, 4, fixture)
-    upgrade_with_old_schema5(tmp_path, database)
-    # Real schema-5 commands and projection commits, before the new migration.
-    script = """
-import json, sys
-sys.path.insert(0, sys.argv[1])
-from trpg_state_machine import (
-    StateMachine, TrustedContext, TypedCommand, ObjectState, SetObjectState,
-    SetSceneFlag, load_adventure_package,
-)
-package = load_adventure_package(sys.argv[3]).package
-context = TrustedContext('authenticated:alice','player.alice')
-sid = sys.argv[4]
-with StateMachine(sys.argv[2]) as sm:
-    before = sm.read_session(sid,package,context=context)
-    receipts = []
-    for key,kind,payload,version in [
-        ('legacy.unavailable','set_scene_flag',SetSceneFlag('scene.platform','flag.lamp_checked',True),3),
-        ('genuine.later','set_object_state',SetObjectState('scene.platform','object.platform_gate',ObjectState.OPEN),4)]:
-        command = TypedCommand(sid,key,before.pc_actor_id,kind,payload,version)
-        receipts.append(sm.submit_command(command,package,context=context))
-    sm.grant_npc_access(sid,'npc.caretaker','npc.agent',package,context=context)
-    assert sm.project_event(sid,receipts[1].event_seqs[0],package,context=context)=='resolved'
-    if sys.argv[5]=='yes':
-        sm._conn.execute('DELETE FROM event_evidence WHERE session_id=? AND event_seq=?',
-                         (sid,receipts[0].event_seqs[0]))
-    print(json.dumps({'boundary':before.event_seq,'first':receipts[0].event_seqs[0],'later':receipts[1].event_seqs[0]}))
-"""
-    run = subprocess.run(
-        [
-            sys.executable,
-            "-c",
-            script,
-            str(tmp_path / "source-5/src"),
-            str(database),
-            str(fixture),
-            sessions[0],
-            "yes" if missing_evidence else "no",
-        ],
-        cwd=tmp_path,
-        capture_output=True,
-        text=True,
-        encoding="utf-8",
-    )
-    assert run.returncode == 0, run.stderr
-    saved = json.loads(run.stdout)
-    sid = sessions[0]
-    npc = NPCContext("npc.agent", sid, "npc.caretaker")
-    with StateMachine(database) as sm:
-        assert (
-            sm._conn.execute(
-                "SELECT through_event_seq FROM legacy_perception_boundaries WHERE session_id=?",
-                (sid,),
-            ).fetchone()[0]
-            == saved["boundary"]
-        )
-        assert sm.perception_cursor(sid, package, context=context) == saved["boundary"]
-        assert sm.read_observations(sid, package, context=npc) == ()
-        assert (
-            sm._conn.execute(
-                "SELECT count(*) FROM npc_inbox WHERE session_id=?", (sid,)
-            ).fetchone()[0]
-            == 1
-        )
-        status = sm.project_event(
-            sid, saved["first"], package, context=context, judgment=synthetic_notice
-        )
-        assert status == ("unresolved" if missing_evidence else "resolved")
-        if missing_evidence:
-            assert sm.perception_cursor(sid, package, context=context) == saved["boundary"]
-            assert sm.read_observations(sid, package, context=npc) == ()
-            assert (
-                sm._conn.execute(
-                    "SELECT done FROM event_outbox WHERE session_id=? AND event_seq=? "
-                    "AND consumer='perception'",
-                    (sid, saved["first"]),
-                ).fetchone()[0]
-                == 0
-            )
-        else:
-            assert sm.perception_cursor(sid, package, context=context) == saved["later"]
-            # The old Observation is still visible behind the correct watermark,
-            # but has no recoverable game-time lifetime, so is not Recent.
-            assert sm.read_observations(sid, package, context=npc) == ()
-            retained = sm.get_pending_npc_observation_work(sid, package, context=npc)
-            assert len(retained) == 1 and retained[0].retention_status == "legacy_unknown"
-    with StateMachine(database) as sm:
-        assert sm.read_observations(sid, package, context=npc) == ()
-        assert len(sm.get_pending_npc_observation_work(sid, package, context=npc)) == (
-            0 if missing_evidence else 1
-        )
-
-
-@pytest.mark.parametrize("version", [0, 1, 3, 5])
-def test_process_interruption_rolls_back_complete_migration(tmp_path, version):
-    if version:
-        database, _ = historical_database(tmp_path, 1 if version == 5 else version)
-        if version == 5:
-            upgrade_with_old_schema5(tmp_path, database)
-        original = stored_rows(database)
-    else:
-        database, original = tmp_path / "empty.db", {}
-    # Kill after real DDL/data changes, including schema-6 history/cursor writes.
+def test_process_interruption_rolls_back_fresh_schema_setup(tmp_path):
+    database, original = tmp_path / "empty.db", {}
+    # Kill after real DDL changes in fresh schema setup.
     script = """
 import os, sqlite3, sys
 sys.path.insert(0, sys.argv[1])
@@ -501,8 +99,7 @@ original = sqlite3.connect
 class CrashConnection(sqlite3.Connection):
     def execute(self, sql, *args):
         result = super().execute(sql, *args)
-        if (sql.strip().upper() == 'DROP TABLE RNG_STATES;'
-            or 'FROM legacy_perception_boundaries b JOIN sessions s' in sql):
+        if sql.strip().upper() == 'DROP TABLE RNG_STATES;':
             os._exit(73)
         return result
 sqlite3.connect = lambda *a, **k: original(*a, factory=CrashConnection, **k)
@@ -517,21 +114,9 @@ StateMachine(sys.argv[2])
     )
     assert process.returncode == 73, process.stderr
     with sqlite3.connect(database) as conn:
-        assert conn.execute("PRAGMA user_version").fetchone()[0] == version
+        assert conn.execute("PRAGMA user_version").fetchone()[0] == 0
         assert conn.execute("PRAGMA integrity_check").fetchone()[0] == "ok"
     assert stored_rows(database) == original
     with StateMachine(database):
         pass
     assert_preserved(database, original)
-
-
-def remove_post39_derived_storage(conn):
-    """A synthetic older schema must not retain newer lookup/maintenance objects."""
-    for (name,) in conn.execute(
-        "SELECT name FROM sqlite_master WHERE type='trigger' "
-        "AND (name GLOB 'spatial_index_*' OR name GLOB 'integrity_*')"
-    ).fetchall():
-        conn.execute('DROP TRIGGER "' + name.replace('"', '""') + '"')
-    for table in ("object_spatial_cells", "scene_integrity_dependencies", "scene_integrity"):
-        conn.execute("DROP TABLE " + table)
-    conn.execute("DROP INDEX actors_cell_lookup")

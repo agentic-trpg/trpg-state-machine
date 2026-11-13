@@ -1,9 +1,7 @@
-import io
 import json
 import sqlite3
 import subprocess
 import sys
-import zipfile
 from copy import deepcopy
 from dataclasses import asdict, replace
 from pathlib import Path
@@ -12,7 +10,7 @@ import pytest
 import yaml
 from dnd5e_engine.evaluation_contracts import CombatIntentPayload, PreflightChoice
 from dnd5e_engine.evaluation_state import CombatSnapshot, NonCombatSnapshot
-from dnd_support import NPC, loader
+from dnd_support import NPC
 from dnd_support import package_data as dnd_package_data
 from perception_support import synthetic_notice
 from pydantic import ValidationError
@@ -24,7 +22,6 @@ from trpg_state_machine import (
     MoveActor,
     ObjectState,
     SetObjectState,
-    StateMachine,
     StateMachineError,
 )
 from trpg_state_machine.perception import NPCContext
@@ -302,89 +299,6 @@ def test_noncombat_discriminator_is_not_forged_into_combat(tmp_path, package_dat
         assert actual.snapshot_kind == "non_combat" and actual.character_states
         with pytest.raises(ValidationError):
             CombatSnapshot.model_validate_json(actual.model_dump_json())
-
-
-@pytest.mark.parametrize(
-    "legacy_schema,commit",
-    [
-        (7, "8f24ca03e6037428bbc559d50e91bcd57669a0ed"),
-        (8, "a00854374a38b01a13cc0fbfa089ef6e0b709cef"),
-    ],
-)
-def test_actual_legacy_combat_upgrade_preserves_mechanics_rng_receipt(
-    tmp_path, package_data, context, legacy_python, legacy_schema, commit
-):
-    source = tmp_path / "sm7-source"
-    archived = subprocess.run(
-        [
-            "git",
-            "archive",
-            "--format=zip",
-            commit,
-            "src",
-            "tests/fixtures",
-            "tests/dnd_support.py",
-        ],
-        capture_output=True,
-        check=True,
-    ).stdout
-    with zipfile.ZipFile(io.BytesIO(archived)) as contents:
-        contents.extractall(source)
-    database = tmp_path / "real-old.db"
-    worker = Path(__file__).with_name("_dnd_legacy_worker.py")
-    completed = subprocess.run(
-        [legacy_python, str(worker), str(source), str(database), str(legacy_schema)],
-        capture_output=True,
-        text=True,
-        encoding="utf-8",
-        timeout=30,
-    )
-    assert completed.returncode == 0, completed.stderr
-    old = json.loads(completed.stdout)
-    from test_migrations import assert_preserved, stored_rows
-
-    original = stored_rows(database)
-    assets = loader()
-    from trpg_state_machine.package import _validate
-
-    package = _validate(old["package_data"], allow_legacy_audit=True)
-    sid = old["session_id"]
-    with StateMachine(database, dnd_loader=assets) as sm:
-        with pytest.raises(StateMachineError) as missing:
-            sm.read_combat_snapshot(sid, package, context=context)
-        assert missing.value.code == "unsupported_mechanical_version"
-        assert (
-            sm._conn.execute(
-                "SELECT count(*) FROM mechanical_components WHERE session_id=?", (sid,)
-            ).fetchone()[0]
-            == 0
-        )
-        assert [
-            event.payload["engine_event"]
-            for event in sm.read_events(sid, package, context=context)
-            if event.event_type == "combat.engine_event"
-        ] == old["snapshot"]["combat_state"]["event_log"]
-        assert (
-            json.loads(sm.read_rng_context(sid, package, context=context).model_dump_json())
-            == old["rng"]
-        )
-        assert (
-            sm.get_command_receipt(sid, "old.real.attack", package, context=context).status
-            == "committed"
-        )
-        assert sm._conn.execute("PRAGMA user_version").fetchone()[0] == 41
-        assert sm._conn.execute("PRAGMA foreign_key_check").fetchall() == []
-        sm.upgrade_instance_configs(sid, package, context=context)
-        before = sm.read_session(sid, package, context=context)
-        assert before.ruleset_binding.evaluator_version == "dnd5e-evaluation/4"
-        command = attack(sm, sid, package, context, key="old.unsupported")
-        with pytest.raises(StateMachineError) as caught:
-            sm.submit_command(command, package, context=context)
-        assert caught.value.code == "legacy_rules_audit_only"
-        assert sm.get_command_receipt(sid, command.command_id, package, context=context) is None
-        sm.upgrade_instance_configs(sid, package, context=context)
-        assert sm.read_session(sid, package, context=context) == before
-    assert_preserved(database, original)
 
 
 def test_npc_zero_hp_delta_keeps_condition_and_damage_ledger_consistent(

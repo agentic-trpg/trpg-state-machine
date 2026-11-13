@@ -12,7 +12,6 @@ from test_world_containers import BAG, BOX, container_data
 from world_support import setup, submit
 
 from trpg_state_machine import PutItem, StateMachine, StateMachineError, TakeItem
-from trpg_state_machine.instance_data import InstanceData
 from trpg_state_machine.package import AdventurePackage
 
 
@@ -333,7 +332,8 @@ def test_spatial_durability_after_template_access_is_disabled(tmp_path, context,
         sm.save_session(sid, package, context=context)
 
 
-def test_old_save_upgrade_is_explicit_atomic_and_preserves_facts(tmp_path, context, monkeypatch):
+def test_current_save_refuses_missing_carried_object_config_without_writes(tmp_path, context):
+    """A damaged current save cannot regain object authority from its Package."""
     sm, sid, package, db = setup(tmp_path, context, container_data())
     with sm:
         acquire(sm, sid, package, context)
@@ -348,39 +348,8 @@ def test_old_save_upgrade_is_explicit_atomic_and_preserves_facts(tmp_path, conte
         before = stored_state(db)
         with pytest.raises(StateMachineError) as error:
             sm.resume_session(sid, package, context=context)
-        assert error.value.code == "incomplete_instance_config" and stored_state(db) == before
-        original = InstanceData.put
-
-        def fail(self, session_id, domain, identity, value):
-            original(self, session_id, domain, identity, value)
-            if domain == "object":
-                raise RuntimeError("late upgrade failure")
-
-        with monkeypatch.context() as patch:
-            patch.setattr(InstanceData, "put", fail)
-            with pytest.raises(RuntimeError):
-                sm.upgrade_instance_configs(sid, package, context=context)
+        assert error.value.code == "incomplete_instance_config"
         assert stored_state(db) == before
-        with pytest.raises(StateMachineError):
-            sm.upgrade_instance_configs(
-                sid, replace(package, package_digest="sha256:" + "f" * 64), context=context
-            )
-        sm.upgrade_instance_configs(sid, package, context=context)
-        after = stored_state(db)
-        derived = {
-            "instance_configs",
-            "object_spatial_cells",
-            "scene_integrity",
-            "scene_integrity_dependencies",
-        }
-        assert {k: v for k, v in after.items() if k not in derived} == {
-            k: v for k, v in before.items() if k not in derived
-        }
-        assert sm._world_facts.object(sid, CRED)["container_id"] == BAG
-        prohibit_templates(monkeypatch, package)
-        saved = sm.save_session(sid, package, context=context)
-    with StateMachine(db, dnd_loader=lock_loader()) as restored:
-        assert restored.resume_session(sid, package, context=context) == saved
 
 
 def test_sqlite_direct_contents_uses_existing_index(tmp_path, context):

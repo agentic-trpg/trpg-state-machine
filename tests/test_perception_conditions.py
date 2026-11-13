@@ -1,12 +1,7 @@
 """Real pinned Engine admission and committed Event-time SQLite regressions."""
 
-import io
 import json
-import os
 import sqlite3
-import subprocess
-import sys
-import zipfile
 from copy import deepcopy
 from dataclasses import replace
 
@@ -19,7 +14,7 @@ from dnd5e_engine.specs import GridScene
 from dnd_support import NPC, create
 from modern_support import modern_data, modern_loader
 from test_events import event_data
-from test_migrations import assert_original_rows_equal, stored_rows
+from test_migrations import stored_rows
 from test_npc_state import SOURCE
 
 from trpg_state_machine import (
@@ -485,57 +480,6 @@ def test_event_time_conditions_and_darkness_survive_current_change(tmp_path, pac
         assert result["reasons"]["signal.activity"]["reason"] == "engine_sight_auto_fail"
         assert result["reasons"]["signal.chime"]["reason"] == "engine_hearing_auto_fail"
         assert sm._conn.execute("SELECT count(*) FROM event_observations").fetchone()[0] == 0
-
-
-def test_real_legacy_save_missing_evidence_never_backfills(tmp_path, context):
-    archive = subprocess.run(
-        ["git", "archive", "--format=zip", "4745f17", "src"], check=True, capture_output=True
-    ).stdout
-    old = tmp_path / "old"
-    with zipfile.ZipFile(io.BytesIO(archive)) as files:
-        files.extractall(old)
-    db = tmp_path / "old.db"
-    code = """
-import sys
-from trpg_state_machine import (
- StateMachine, CreateSessionRequest, PlayerSelection, TrustedContext, load_adventure_package,
-)
-p=load_adventure_package(sys.argv[2]).package
-c=TrustedContext('authenticated:alice','player.alice')
-r=CreateSessionRequest('legacy',p.adventure_id,p.package_version,p.package_digest,(PlayerSelection(c.player_id,'pc_template.observer'),))
-with StateMachine(sys.argv[1]) as sm:
- print(sm.create_session(r,p,context=c).session_id)
-"""
-    env = dict(os.environ, PYTHONPATH=str(old / "src"))
-    process = subprocess.run(
-        [sys.executable, "-c", code, str(db), str(SOURCE)],
-        env=env,
-        capture_output=True,
-        text=True,
-        check=True,
-    )
-    sid = process.stdout.strip()
-    package = load_adventure_package(SOURCE).package
-    before = stored_rows(db)
-    with StateMachine(db) as sm:
-        assert sm._conn.execute("PRAGMA user_version").fetchone()[0] == 41
-        assert sm.project_event(sid, 1, package, context=context) == "resolved"
-        assert (
-            sm.project_event(
-                sid,
-                2,
-                package,
-                context=context,
-                judgment=lambda _: pytest.fail("Legacy evidence is incomplete"),
-            )
-            == "unresolved"
-        )
-        assert sm.perception_cursor(sid, package, context=context) == 1
-        assert sm._conn.execute("SELECT count(*) FROM event_observations").fetchone()[0] == 0
-    after = stored_rows(db)
-    assert_original_rows_equal(
-        before, after, excluded=("event_outbox", "projection_cursors", "npc_completion_cursors")
-    )
 
 
 def test_event_evidence_write_failure_rolls_back_world_receipt_outbox(

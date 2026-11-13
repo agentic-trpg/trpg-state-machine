@@ -1,5 +1,11 @@
 # Session Management 重构进度
 
+## 2026-11-14 预发布存档策略
+
+旧开发库升级和库存回填退出运行入口；Schema1–40 在打开时只读识别并拒绝。
+当前 Schema41 的创建、保存、恢复与回滚验证见
+[清理记录](reviews/PRE_RELEASE_SAVE_CLEANUP.md)。下文旧库升级描述保留当时范围。
+
 ## 2026-10-27 source explanations and workflows
 
 Added production source explanations and repository workflows without changing runtime

@@ -1,6 +1,5 @@
 """Authoritative input versions: real SQLite writers, read scopes and counter evidence."""
 
-import json
 import sqlite3
 from dataclasses import replace
 
@@ -583,99 +582,6 @@ def test_provider_registration_failure_is_atomic_and_replay_is_a_noop(tmp_path, 
         with pytest.raises(StateMachineError):
             sm.environment.bind_providers(sid, p, context=context)
         assert stored_rows(db) == before
-
-
-def test_schema35_migration_is_atomic_and_preserves_all_original_rows(
-    tmp_path, context, monkeypatch, pre_frozen_python
-):
-    import io
-    import os
-    import subprocess
-    import zipfile
-    from pathlib import Path
-
-    from test_migrations import assert_original_rows_equal
-
-    root = Path(__file__).resolve().parents[1]
-    source = tmp_path / "old-source"
-    archive = subprocess.run(
-        ["git", "archive", "--format=zip", "382a4ae", "src"],
-        cwd=root,
-        check=True,
-        capture_output=True,
-    ).stdout
-    with zipfile.ZipFile(io.BytesIO(archive)) as zipped:
-        zipped.extractall(source)
-    code = """
-from pathlib import Path
-from world_support import setup
-from test_environment_service import seed
-from test_object_protection import large_data
-from trpg_state_machine import TrustedContext
-import sys,json
-c=TrustedContext('authenticated:alice','player.alice')
-sm,sid,p,db=setup(Path(sys.argv[1]),c,large_data());seed(sm,sid,p,c)
-(Path(sys.argv[1])/'old-package.json').write_text(json.dumps(large_data()),encoding='utf-8')
-print(json.dumps([sid,sm._conn.execute('PRAGMA user_version').fetchone()[0]]));sm.close()
-"""
-    result = subprocess.run(
-        [str(pre_frozen_python), "-c", code, str(tmp_path)],
-        cwd=tmp_path,
-        check=True,
-        capture_output=True,
-        text=True,
-        env={
-            **os.environ,
-            "PYTHONPATH": os.pathsep.join((str(source / "src"), str(root / "tests"))),
-        },
-    )
-    sid, version = json.loads(result.stdout)
-    assert version == 35
-    db = tmp_path / "world.db"
-    before = stored_rows(db)
-    read = Path.read_text
-
-    def broken(path, *a, **k):
-        text = read(path, *a, **k)
-        return (
-            text.replace("PRAGMA user_version = 36;", "INVALID MIGRATION;")
-            if path.name == "_migration_36.sql"
-            else text
-        )
-
-    monkeypatch.setattr(Path, "read_text", broken)
-    with pytest.raises(StateMachineError):
-        StateMachine(db, dnd_loader=lock_loader())
-    assert stored_rows(db) == before
-    monkeypatch.undo()
-    from trpg_state_machine.package import _validate
-
-    p = _validate(json.loads((tmp_path / "old-package.json").read_text("utf-8")))
-    with StateMachine(db, dnd_loader=lock_loader()) as sm:
-        sm.upgrade_instance_configs(sid, p, context=context)
-        with pytest.raises(StateMachineError) as error:
-            sm.resume_session(sid, p, context=context)
-        assert error.value.code == "ruleset_binding_mismatch"
-        assert_original_rows_equal(before, stored_rows(db))
-        assert sm.environment.versions.current(sid, A) == (0, 0)
-        baseline = project(sm, sid, p)
-        submit(
-            sm,
-            sid,
-            p,
-            gm(context),
-            SetEnvironmentBase(A, replace(WEATHER, temperature=Temperature(19))),
-            "new",
-        )
-        assert sm.environment.versions.current(sid, A) == (1, 0)
-        current = project(sm, sid, p)
-        assert current != baseline
-    with StateMachine(db, dnd_loader=lock_loader()) as restored:
-        with pytest.raises(StateMachineError) as error:
-            restored.resume_session(sid, p, context=context)
-        assert error.value.code == "ruleset_binding_mismatch"
-        assert restored.environment.versions.current(sid, A) == (1, 0)
-        assert project(restored, sid, p) == current
 
 
 def test_static_protection_and_grid_writes_advance_only_protection(tmp_path, context):

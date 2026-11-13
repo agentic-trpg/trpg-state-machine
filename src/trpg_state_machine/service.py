@@ -440,51 +440,6 @@ class StateMachine(
                 return self.save_session(session_id, package, context=context)
         return self.save_session(session_id, package, context=context)
 
-    def upgrade_instance_configs(self, session_id, package, *, context):
-        """Explicit source-checked upgrade of pre-39 saves; never changes live facts.
-
-        The caller must supply the exact pinned Package. Missing or unprovable
-        source identities fail atomically. This does not rebind an old evaluator.
-        """
-        with self._transaction(write=True):
-            row = self._session(session_id, package, context)
-            # The Store gate drains current mutations. Evict the old runtime
-            # representation; the validation below accepts the installed records.
-            driver = self._session_runtime.time.drivers.get(session_id)
-            if driver is not None:
-                driver.close()
-            self._store.memory.release(session_id)
-            self._world_facts.maps.release(session_id)
-            self.environment.release_session(session_id)
-            facts = self._world_facts
-            scenes = tuple(
-                r[0]
-                for r in self._conn.execute(
-                    "SELECT scene_id FROM scene_instances WHERE session_id=?", (session_id,)
-                )
-            )
-            known = {o.object_id for s in package.scenes for o in s.objects}
-            from .inventory_migration import is_generated_placeholder
-
-            if any(
-                r[0] not in known and not is_generated_placeholder(self._conn, session_id, r[0])
-                for r in self._conn.execute(
-                    "SELECT object_id FROM objects WHERE session_id=?", (session_id,)
-                )
-            ):
-                raise StateMachineError("incomplete_instance_config", "Cannot prove object source")
-            facts.instances.initialize_world(session_id, package)
-            for scene_id in scenes:
-                facts.instances.initialize_scene(session_id, scene_id, package)
-                facts.instances.finish_scene(session_id, scene_id)
-            self.scene_lifecycle.validate_initialized(row, package)
-            # Validate moved/carried objects as well as original scene members.
-            for obj in self._conn.execute(
-                "SELECT object_id FROM objects WHERE session_id=?", (session_id,)
-            ):
-                facts.object_definition(session_id, obj[0])
-            return self._snapshot(row, package)
-
     def query_world_action(self, session_id, actor_id, operation, package, *, context):
         """Delegate world action availability querying."""
         return self._world.query_world_action(

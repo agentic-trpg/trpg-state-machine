@@ -1,26 +1,21 @@
 """Existing lawful synthetic observations, independent processing and logical expiry."""
 
-import io
 import json
 import sqlite3
 import subprocess
 import sys
-import zipfile
-from concurrent.futures import ThreadPoolExecutor
 from dataclasses import asdict, replace
 from pathlib import Path
-from threading import Barrier
 
 import pytest
 import yaml
 from perception_support import synthetic_notice
 from test_game_time import tick, tick_command
-from test_migrations import assert_preserved, stored_rows
+from test_migrations import stored_rows
 from test_npc_evaluation_tasks import create_task, prepare
 from test_npc_evaluation_tasks import evaluation_package as evaluation_package
 from test_npc_modes import new_observation
 from test_npc_results import full_result
-from test_npc_state import enter
 
 from trpg_state_machine import MoveActor, StateMachine, StateMachineError, load_adventure_package
 from trpg_state_machine.npc_results import NPCEvaluationResult
@@ -298,57 +293,3 @@ def test_projection_adoption_failure_atomic_retry(tmp_path, ob_package, context)
             == "resolved"
         )
         assert sm.get_pending_npc_observation_work(sid, ob_package, context=npc)
-
-
-def test_actual_schema15_upgrade_unknown_times_concurrent_and_repeat(tmp_path, ob_package, context):
-    source = tmp_path / "old"
-    archive = subprocess.run(
-        ["git", "archive", "--format=zip", "491e98c", "src"],
-        cwd=ROOT,
-        check=True,
-        capture_output=True,
-    ).stdout
-    with zipfile.ZipFile(io.BytesIO(archive)) as contents:
-        contents.extractall(source)
-    db = tmp_path / "old.db"
-    process = subprocess.run(
-        [
-            sys.executable,
-            str(ROOT / "tests/_ob_legacy_worker.py"),
-            str(source / "src"),
-            str(db),
-            str(tmp_path / "evaluation.yaml"),
-        ],
-        cwd=tmp_path,
-        capture_output=True,
-        text=True,
-        encoding="utf-8",
-    )
-    assert process.returncode == 0, process.stderr
-    sid = process.stdout.strip()
-    before = stored_rows(db)
-    barrier = Barrier(3)
-
-    def upgrade(_):
-        barrier.wait()
-        with StateMachine(db) as sm:
-            return sm._conn.execute("PRAGMA user_version").fetchone()[0]
-
-    with ThreadPoolExecutor(3) as pool:
-        assert list(pool.map(upgrade, range(3))) == [40] * 3
-    assert_preserved(db, before)
-    npc = NPCContext("agent:npc.caretaker", sid, "npc.caretaker")
-    with StateMachine(db) as sm:
-        assert sm.read_observations(sid, ob_package, context=npc) == ()
-        unknown = sm.get_npc_observation_retention(sid, ob_package, context=npc)
-        assert unknown and {x.retention_status for x in unknown} == {"legacy_unknown"}
-        assert all(x.accepted_game_tick is x.expires_game_tick is None for x in unknown)
-        sm.upgrade_instance_configs(sid, ob_package, context=context)
-        enter(sm, sid, ob_package, context, "scene.workshop")
-        enter(sm, sid, ob_package, context, "scene.platform")
-        new_observation(sm, sid, ob_package, context)
-        assert sm.read_observations(sid, ob_package, context=npc)
-    after = stored_rows(db)
-    with StateMachine(db):
-        pass
-    assert stored_rows(db) == after

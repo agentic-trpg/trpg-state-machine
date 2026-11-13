@@ -1,10 +1,7 @@
 """V2 facts before combat, unique SQL ownership, isolation and migration rollback."""
 
 import json
-import os
 import sqlite3
-import subprocess
-from pathlib import Path
 
 import pytest
 import yaml
@@ -109,45 +106,6 @@ def test_noncombat_creation_sql_fault_rolls_back_every_table(tmp_path, package_d
         sm._conn.execute("DROP TRIGGER fail_native")
         sid = create(sm, package, context)
         assert create(sm, package, context) == sid
-
-
-def test_schema9_interrupt_rolls_back_and_restart_completes(tmp_path, monkeypatch, legacy_python):
-    database = tmp_path / "schema8.db"
-    subprocess.run(
-        [
-            legacy_python,
-            "-c",
-            "import sys; from trpg_state_machine import StateMachine; "
-            "StateMachine(sys.argv[1]).close()",
-            str(database),
-        ],
-        cwd=tmp_path,
-        env={**os.environ, "PYTHONPATH": str(Path(legacy_python).parents[2] / "src")},
-        check=True,
-        capture_output=True,
-    )
-    original = stored_state(database)
-    real = Path.read_text
-
-    def fault(path, *args, **kwargs):
-        text = real(path, *args, **kwargs)
-        return (
-            text.replace("PRAGMA user_version = 9;", "INVALID MIGRATION;")
-            if path.name == "_migration_9.sql"
-            else text
-        )
-
-    with monkeypatch.context() as patch:
-        patch.setattr(Path, "read_text", fault)
-        with pytest.raises(StateMachineError):
-            StateMachine(database)
-    assert stored_state(database) == original
-    with sqlite3.connect(database) as db:
-        assert db.execute("PRAGMA user_version").fetchone()[0] == 8
-        assert "xp" not in {r[1] for r in db.execute("PRAGMA table_info(characters)")}
-    for _ in range(2):
-        with StateMachine(database) as sm:
-            assert sm._conn.execute("PRAGMA user_version").fetchone()[0] == 41
 
 
 def test_check_only_package_has_no_encounter_dependency(tmp_path, package_data, context):

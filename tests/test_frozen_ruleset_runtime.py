@@ -1,9 +1,7 @@
 """Count real SM loading/evaluation work, without replacing RE implementations."""
 
 import json
-import os
 import random
-import subprocess
 from collections import Counter
 from dataclasses import asdict, replace
 from pathlib import Path
@@ -23,85 +21,6 @@ from world_support import command
 
 from trpg_state_machine import PickLock, StateMachine, StateMachineError
 from trpg_state_machine.package import _validate
-
-
-def test_real_predecessor_save_is_auditable_but_never_silently_repinned(
-    tmp_path, context, pre_frozen_python
-):
-    root = Path(__file__).resolve().parents[1]
-    historical = pre_frozen_python.parents[2]
-    producer = r"""
-import json, sys
-from pathlib import Path
-import trpg_state_machine
-assert Path(trpg_state_machine.__file__).resolve().is_relative_to(Path(sys.argv[3]).resolve())
-sys.path.insert(0, sys.argv[1])
-from test_openable_checks import setup_check, check_data
-from world_support import command
-from lock_support import A, DOOR, CRED
-from trpg_state_machine import PickLock, TrustedContext
-directory = Path(sys.argv[2])
-context = TrustedContext("authenticated:alice", "player.alice", ("npc.caretaker", "npc.attendant"))
-sm, sid, package, _ = setup_check(directory, context, dc=100)
-with sm:
-    assert package.ruleset_binding.evaluator_version == "dnd5e-evaluation/36"
-    op = PickLock(A, DOOR, "lock.outer", CRED, "0,0")
-    cmd = command(sm, sid, package, context, op, "old.pick")
-    assert sm.submit_command(cmd, package, context=context).status == "committed"
-    sm.save_session(sid, package, context=context)
-data, _ = check_data(dc=100)
-payload = json.dumps({"data": data, "sid": sid})
-(directory / "predecessor.json").write_text(payload, encoding="utf-8")
-"""
-    environment = dict(os.environ, PYTHONPATH=str(historical / "src"), PYTHONUTF8="1")
-    made = subprocess.run(
-        [
-            str(pre_frozen_python),
-            "-c",
-            producer,
-            str(root / "tests"),
-            str(tmp_path),
-            str(historical),
-        ],
-        cwd=historical,
-        env=environment,
-        capture_output=True,
-        text=True,
-        encoding="utf-8",
-    )
-    assert made.returncode == 0, made.stdout + made.stderr
-    payload = json.loads((tmp_path / "predecessor.json").read_text("utf-8"))
-    package, sid = _validate(payload["data"]), payload["sid"]
-    _, source = check_data(dc=100)
-    database = tmp_path / "check.db"
-    with StateMachine(database, dnd_loader=source) as sm:
-        before = stored_state(database)
-        assert (
-            sm.read_session(sid, package, context=context).ruleset_binding.evaluator_version
-            == "dnd5e-evaluation/36"
-        )
-        # Existing explicit instance upgrade remains available, never an RE repin.
-        sm.upgrade_instance_configs(sid, package, context=context)
-        assert stored_state(database) == before
-        for action in (
-            lambda: sm.resume_session(sid, package, context=context),
-            lambda: sm.submit_command(
-                command(
-                    sm,
-                    sid,
-                    package,
-                    context,
-                    PickLock(A, DOOR, "lock.outer", CRED, "0,0"),
-                    "new.pick",
-                ),
-                package,
-                context=context,
-            ),
-        ):
-            with pytest.raises(StateMachineError) as error:
-                action()
-            assert error.value.code == "ruleset_binding_mismatch"
-            assert stored_state(database) == before
 
 
 @pytest.fixture

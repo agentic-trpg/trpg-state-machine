@@ -3,7 +3,6 @@
 import io
 import json
 import os
-import sqlite3
 import subprocess
 import sys
 import zipfile
@@ -15,14 +14,12 @@ from threading import Barrier
 import pytest
 from dnd_support import create
 from perception_support import synthetic_notice
-from test_event_local_evidence import N1, N2, A, command
-from test_migrations import assert_original_rows_equal, stored_rows
+from test_event_local_evidence import N1, A, command
+from test_migrations import stored_rows
 from test_npc_perception_queue import change, negative, prepared
 from test_npc_perception_queue import queue_data as queue_data
 
 from trpg_state_machine import ObjectState, SetSceneFlag, StateMachine, StateMachineError
-from trpg_state_machine.package import _validate
-from trpg_state_machine.perception import NPCContext
 from trpg_state_machine.perception_queue import (
     _NPC_PERCEPTION_CURSOR_SQL,
     _PENDING_PERCEPTION_SQL,
@@ -231,132 +228,6 @@ print(sid)
     return db, result.stdout.strip()
 
 
-@pytest.mark.parametrize(
-    "crash_at",
-    [
-        "CREATE INDEX npc_perception_pending",
-        "DROP TABLE npc_perception_cursors",
-        "DROP TABLE scene_instances",
-        "DROP TABLE objects",
-        "ALTER TABLE actors ADD COLUMN cell",
-    ],
-)
-def test_schema20_21_process_crash_rollback_and_multiprocess_recovery(
-    tmp_path, queue_data, context, crash_at
-):
-    db, sid = schema19_save(tmp_path, queue_data)
-    before = stored_rows(db)
-    script = """
-import os,sqlite3,sys
-connect=sqlite3.connect
-class Crashing(sqlite3.Connection):
-    def execute(self,sql,*args):
-        result=super().execute(sql,*args)
-        if sys.argv[2] in sql:
-            os._exit(73)
-        return result
-sqlite3.connect=lambda *a,**k: connect(*a,factory=Crashing,**k)
-from trpg_state_machine import StateMachine
-StateMachine(sys.argv[1])
-"""
-    result = subprocess.run(
-        [sys.executable, "-c", script, str(db), crash_at],
-        cwd=tmp_path,
-        env=dict(os.environ, PYTHONPATH=str(ROOT / "src")),
-        capture_output=True,
-    )
-    assert result.returncode == 73, result.stderr
-    assert stored_rows(db) == before
-    with sqlite3.connect(db) as conn:
-        assert conn.execute("PRAGMA user_version").fetchone()[0] == 19
-        assert not conn.execute(
-            "SELECT 1 FROM sqlite_master WHERE name='npc_perception_pending'"
-        ).fetchone()
-    opener = """
-from trpg_state_machine import StateMachine
-import sys
-with StateMachine(sys.argv[1]) as sm:
-    print(sm._conn.execute('PRAGMA user_version').fetchone()[0])
-"""
-    workers = [
-        subprocess.Popen(
-            [sys.executable, "-c", opener, str(db)],
-            cwd=tmp_path,
-            env=dict(os.environ, PYTHONPATH=str(ROOT / "src")),
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-        )
-        for _ in range(3)
-    ]
-    for worker in workers:
-        stdout, stderr = worker.communicate(timeout=30)
-        assert worker.returncode == 0 and stdout.strip() == b"40", stderr
-    package = _validate(queue_data)
-    for _ in range(2):
-        with StateMachine(db) as sm:
-            for npc in (N1, N2):
-                ctx = NPCContext("worker:" + npc, sid, npc)
-                assert sm.npc_perception_cursor(sid, package, context=ctx) == 2
-                assert [
-                    r.event_seq
-                    for r in sm.get_pending_npc_perception_queue(sid, package, context=ctx)
-                ] == [3]
-            assert sm._conn.execute("PRAGMA integrity_check").fetchone()[0] == "ok"
-            assert sm._conn.execute("PRAGMA foreign_key_check").fetchall() == []
-    after = stored_rows(db)
-    assert "npc_perception_cursors" not in after
-    assert after["instance_configs"][1] == set()
-    assert set(before) - {"npc_perception_cursors"} == set(after) - {
-        "object_spatial_cells",
-        "scene_integrity",
-        "scene_integrity_dependencies",
-        "instance_configs",
-        "session_time_waits",
-        "session_time_runs",
-        "session_time_progress",
-        "time_command_admissions",
-        "scene_environment_versions",
-        "environment_provider_bindings",
-        "scene_environments",
-        "mechanism_activations",
-        "world_time_bindings",
-        "navigation_activities",
-        "mechanical_components",
-        "door_locks",
-        "door_credentials",
-        "object_durability",
-        "world_result_adoptions",
-        "object_openables",
-        "object_lights",
-        "object_mechanisms",
-    }
-    assert after["navigation_activities"][1] == set()
-    assert after["mechanical_components"][1] == set()
-    assert after["door_locks"][1] == set()
-    assert after["door_credentials"][1] == set()
-    assert after["environment_provider_bindings"][1] == set()
-    assert all(row[-2:] == (0, 0) for row in after["scene_environment_versions"][1])
-    assert {(row[0], row[1]) for row in before["scene_instances"][1]} <= {
-        (row[0], row[1]) for row in after["scene_environment_versions"][1]
-    }
-    for table in (
-        "session_time_waits",
-        "session_time_runs",
-        "session_time_progress",
-        "time_command_admissions",
-        "scene_environments",
-        "mechanism_activations",
-        "world_time_bindings",
-        "object_durability",
-        "world_result_adoptions",
-        "object_openables",
-        "object_lights",
-        "object_mechanisms",
-    ):
-        assert after[table][1] == set()
-    assert_original_rows_equal(before, after, excluded=("npc_perception_cursors",))
-
-
 def test_event_submit_and_pending_read_concurrent(tmp_path, queue_data, context):
     sm, db, sid, package, (one, _) = prepared(tmp_path, queue_data, context)
     with sm:
@@ -388,27 +259,3 @@ def test_event_submit_and_pending_read_concurrent(tmp_path, queue_data, context)
             receipt = future.result(timeout=10)
         assert sm.get_pending_npc_perception_queue(sid, package, context=one) == ()
         assert sm.npc_perception_cursor(sid, package, context=one) == receipt.event_seqs[-1]
-
-
-def test_schema20_sql_failure_rolls_back_then_reopens(tmp_path, queue_data, monkeypatch):
-    db, _ = schema19_save(tmp_path, queue_data)
-    before = stored_rows(db)
-    connect = sqlite3.connect
-
-    class Failing(sqlite3.Connection):
-        def execute(self, sql, *args):
-            result = super().execute(sql, *args)
-            if "DROP TABLE npc_perception_cursors" in sql:
-                raise sqlite3.OperationalError("injected migration failure after DROP")
-            return result
-
-    monkeypatch.setattr(sqlite3, "connect", lambda *a, **k: connect(*a, factory=Failing, **k))
-    with pytest.raises(StateMachineError) as error:
-        StateMachine(db)
-    assert error.value.code == "storage_error"
-    monkeypatch.undo()
-    assert stored_rows(db) == before
-    with sqlite3.connect(db) as conn:
-        assert conn.execute("PRAGMA user_version").fetchone()[0] == 19
-    with StateMachine(db) as sm:
-        assert sm._conn.execute("PRAGMA user_version").fetchone()[0] == 41

@@ -4,7 +4,6 @@ DeadlinePort is a persistent contract fixture, NOT a production Effects system.
 Production mechanism and RE Combat integration are tested separately below.
 """
 
-import sqlite3
 from dataclasses import asdict, replace
 from fractions import Fraction
 
@@ -384,39 +383,6 @@ def test_restart_no_offline_time_and_saved_rate(session):
         assert (dto.rate_numerator, dto.rate_denominator) == (3, 2)
         restored.attach_time_driver(sid, p, context=ctx, clock_ns=clock, scheduler=scheduler)
         assert restored.read_time_sync(sid, p, context=ctx).estimated_target_tick == 15
-
-
-def test_schema36_migration_preserves_every_old_row_and_does_not_create_run_rows(session):
-    from test_migrations import assert_original_rows_equal, stored_rows
-
-    sm = session[0]
-    path = sm._conn.execute("PRAGMA database_list").fetchone()[2]
-    sm.close()
-    with sqlite3.connect(path) as db:
-        from test_migrations import remove_post39_derived_storage
-
-        remove_post39_derived_storage(db)
-        db.execute("DROP TABLE instance_configs")
-        for table in (
-            "session_time_waits",
-            "session_time_runs",
-            "session_time_progress",
-            "time_command_admissions",
-        ):
-            db.execute(f"DROP TABLE {table}")
-        db.execute("DROP INDEX mechanism_time_boundary")
-        db.execute("PRAGMA user_version=36")
-    before = stored_rows(path)
-    with StateMachine(path) as restored:
-        assert restored._conn.execute("PRAGMA user_version").fetchone()[0] == 41
-        assert_original_rows_equal(before, stored_rows(path))
-        for table in (
-            "session_time_waits",
-            "session_time_runs",
-            "session_time_progress",
-            "time_command_admissions",
-        ):
-            assert restored._conn.execute(f"SELECT * FROM {table}").fetchall() == []
 
 
 def test_real_mechanism_resets_once_at_18_before_endpoint(tmp_path, context):
