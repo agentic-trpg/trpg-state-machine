@@ -293,6 +293,8 @@ class CharacterFacts:
         )
         if state.get("held_weapon_instance_id") is not None:
             del state["weapon_in_hands"]
+        else:
+            state.pop("held_weapon_instance_id", None)
         self._conn.execute(
             "INSERT INTO mechanical_actors VALUES (?,?,?)",
             (sid, actor.entity_id, canonical_json(state)),

@@ -8,7 +8,7 @@
     "ruleset_binding": {
       "ruleset_id": "dnd-2024-srd-5.2.1",
       "data_revision": "sha256:d67e647f7657f919adac89211ff235ff5f7054e679c99907cdf07b97a8605247",
-      "evaluator_version": "dnd5e-evaluation/37"
+      "evaluator_version": "dnd5e-evaluation/38"
     },
     "player_setup": {
       "player_count": 1,
@@ -337,7 +337,7 @@
   "rule_bindings": {
     "combat_foundation": {
       "snapshot": {
-        "snapshot_schema_version": "engine-snapshot/17",
+        "snapshot_schema_version": "engine-snapshot/18",
         "session_id": "package.lantern",
         "world_version": 0,
         "character_states": [
@@ -448,6 +448,7 @@
             "spells_known": [],
             "custom_counters": {},
             "weapon_in_hands": "rapier",
+            "held_weapon_instance_id": "inventory.lantern_blade",
             "weapon_grip": "one_handed",
             "other_hand_occupied": false,
             "weapon_mastery_slugs": []
@@ -1311,7 +1312,7 @@
     },
     "noncombat_foundation": {
       "snapshot": {
-        "snapshot_schema_version": "engine-snapshot/17",
+        "snapshot_schema_version": "engine-snapshot/18",
         "session_id": "package.lantern",
         "world_version": 0,
         "character_states": [
@@ -1422,6 +1423,7 @@
             "spells_known": [],
             "custom_counters": {},
             "weapon_in_hands": "rapier",
+            "held_weapon_instance_id": "inventory.lantern_blade",
             "weapon_grip": "one_handed",
             "other_hand_occupied": false,
             "weapon_mastery_slugs": []

@@ -98,9 +98,10 @@ class CombatHandler:
             else {}
         )
         for actor in snapshot.character_states:
-            if current_actors and current_actors.get(actor.entity_id) != actor.model_dump(
-                mode="json"
-            ):
+            expected_actor = actor.model_dump(mode="json")
+            if expected_actor.get("held_weapon_instance_id") is None:
+                expected_actor.pop("held_weapon_instance_id", None)
+            if current_actors and current_actors.get(actor.entity_id) != expected_actor:
                 raise StateMachineError(
                     "version_conflict", "Actor facts changed during combat preparation"
                 )

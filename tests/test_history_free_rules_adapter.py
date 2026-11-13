@@ -220,7 +220,7 @@ def test_explicit_complete_predecessor_package_migration_and_real_new_session(
     original = deepcopy(old)
     new = migrate_package_16(old, loader=assets, package_version="rf4.migrated")
     assert old == original
-    assert new["manifest"]["ruleset_binding"]["evaluator_version"] == "dnd5e-evaluation/37"
+    assert new["manifest"]["ruleset_binding"]["evaluator_version"] == "dnd5e-evaluation/38"
     assert new["manifest"]["package_version"] != old["manifest"]["package_version"]
     for kind, foundation in new["rule_bindings"].items():
         assert foundation["rng_state"] == old["rule_bindings"][kind]["rng_state"]

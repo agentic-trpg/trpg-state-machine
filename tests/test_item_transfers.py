@@ -649,8 +649,10 @@ def test_combat_initialization_and_real_availability_keep_current_inventory(tmp_
         assert without_receipts(stored_rows(db)) == without_receipts(stored)
 
 
-@pytest.mark.parametrize("move_spare", [False, True])
-def test_attack_uses_the_held_rapier_instance(tmp_path, context, move_spare):
+@pytest.mark.parametrize(
+    "move_spare,swap_before_commit", [(False, False), (True, False), (False, True)]
+)
+def test_attack_uses_the_held_rapier_instance(tmp_path, context, move_spare, swap_before_commit):
     """Use the instance on both public RE paths and permit moving its spare."""
     from dnd5e_engine.evaluation_contracts import CombatIntentPayload
 
@@ -707,7 +709,26 @@ def test_attack_uses_the_held_rapier_instance(tmp_path, context, move_spare):
         attack = TypedCommand(
             sid, "attack.held", pc, "combat.intent", selected, state.world_version
         )
+        if swap_before_commit:
+            real = sm._rules._evaluate_dnd
+
+            async def swap_after_evaluation(request):
+                result = await real(request)
+                sm._conn.execute(
+                    "UPDATE mechanical_actors SET state_json="
+                    "json_set(state_json,'$.held_weapon_instance_id',?) "
+                    "WHERE session_id=? AND actor_id=?",
+                    (SECOND, sid, pc),
+                )
+                return result
+
+            sm._rules._evaluate_dnd = swap_after_evaluation
         receipt = sm.submit_command(attack, package, context=context)
+        if swap_before_commit:
+            assert (receipt.status, receipt.error_code) == ("conflict", "version_conflict")
+            assert receipt.event_seqs == ()
+            assert sm.read_rng_context(sid, package, context=context) == rng
+            return
         assert receipt.status == "committed", receipt
         after = sm.read_rng_context(sid, package, context=context)
         assert after != rng

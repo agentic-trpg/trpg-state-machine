@@ -7,7 +7,7 @@ manifest:
   ruleset_binding:
     ruleset_id: dnd-2024-srd-5.2.1
     data_revision: sha256:d499e13ab58b79d98e1381b3b9f28061474d1770eff94ce193e26295dec9fc09
-    evaluator_version: dnd5e-evaluation/37
+    evaluator_version: dnd5e-evaluation/38
   player_setup:
     player_count: 1
     pc_count: 1
@@ -285,7 +285,7 @@ events: []
 rule_bindings:
   noncombat_foundation:
     snapshot:
-      snapshot_schema_version: engine-snapshot/17
+      snapshot_schema_version: engine-snapshot/18
       session_id: package.lantern
       world_version: 0
       character_states:
@@ -390,6 +390,7 @@ rule_bindings:
         spells_known: []
         custom_counters: {}
         weapon_in_hands: rapier
+        held_weapon_instance_id: inventory.lantern_blade
         weapon_grip: one_handed
         other_hand_occupied: false
         weapon_mastery_slugs: []

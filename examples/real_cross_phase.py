@@ -45,7 +45,7 @@ def author_fixture(loader):
     root = Path(__file__).resolve().parents[1] / "tests/fixtures"
     package = yaml.safe_load((root / "lantern_station.yaml").read_text("utf-8"))
     initial = json.loads((root / "dnd_lantern_combat.json").read_text("utf-8"))["snapshot"]
-    initial["snapshot_schema_version"] = "engine-snapshot/17"
+    initial["snapshot_schema_version"] = "engine-snapshot/18"
     for actor in initial["character_states"]:
         actor.update(
             weapon_in_hands=None,
@@ -59,6 +59,7 @@ def author_fixture(loader):
     pc.update(
         carried_item_slugs=["rapier"],
         weapon_in_hands="rapier",
+        held_weapon_instance_id=initial["inventory_state"]["entries"][0]["instance_id"],
         weapon_grip="one_handed",
         dexterity=18,
         strength=16,
@@ -220,7 +221,9 @@ def main():
             package,
             "attack.pc",
             "combat.intent",
-            CombatIntentPayload(intent_type="attack", weapon_id="rapier", target_id=NPC),
+            CombatIntentPayload(
+                intent_type="attack", weapon_instance_id="inventory.lantern_blade", target_id=NPC
+            ),
         )
         send(
             sm,

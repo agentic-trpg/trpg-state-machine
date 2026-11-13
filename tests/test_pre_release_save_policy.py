@@ -69,7 +69,7 @@ def test_unversioned_nonempty_database_is_refused_without_writes(tmp_path):
     assert hashlib.sha256(path.read_bytes()).digest() == before
 
 
-def test_fresh_schema41_save_reopens_without_inventory_aggregate_columns(
+def test_current_save_reopens_without_inventory_aggregate_columns(
     tmp_path, package, request_for, context
 ):
     """Empty database setup and current noncombat save/resume stay usable."""
@@ -77,7 +77,7 @@ def test_fresh_schema41_save_reopens_without_inventory_aggregate_columns(
     with StateMachine(path) as sm:
         created = sm.create_session(request_for(), package, context=context)
         saved = sm.save_session(created.session_id, package, context=context)
-        assert sm._conn.execute("PRAGMA user_version").fetchone()[0] == 41
+        assert sm._conn.execute("PRAGMA user_version").fetchone()[0] == 42
         for table in ("characters", "mechanical_components"):
             columns = {row[1] for row in sm._conn.execute(f"PRAGMA table_info({table})")}
             assert "inventory_json" not in columns

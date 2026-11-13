@@ -27,7 +27,7 @@ def snapshot(db):
 
 
 def assert_current(sm):
-    assert sm._conn.execute("PRAGMA user_version").fetchone()[0] == 41
+    assert sm._conn.execute("PRAGMA user_version").fetchone()[0] == 42
     assert sm._conn.execute("PRAGMA foreign_key_check").fetchall() == []
     assert sm._conn.execute("PRAGMA integrity_check").fetchone()[0] == "ok"
     assert sm._conn.execute("PRAGMA foreign_keys").fetchone()[0] == 1
