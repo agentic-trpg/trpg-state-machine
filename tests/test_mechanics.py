@@ -98,10 +98,11 @@ def test_cross_domain_atomic_commit_and_restart(
         assert json.loads(snapshot.rng.state_json) == {"counter": 1}
         assert evaluator.calls == 1
     with sqlite3.connect(database) as conn:
-        assert conn.execute("SELECT current_hp,resources_json FROM characters").fetchone() == (
-            hp,
-            '{"resource.tokens":2}',
-        )
+        assert conn.execute("SELECT current_hp FROM characters").fetchone() == (hp,)
+        assert conn.execute(
+            "SELECT kind,current,maximum FROM character_resources "
+            "WHERE resource_id='resource.tokens'"
+        ).fetchone() == ("synthetic", 2, 3)
         assert conn.execute("PRAGMA foreign_key_check").fetchall() == []
 
 

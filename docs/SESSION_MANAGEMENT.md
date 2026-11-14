@@ -1,5 +1,20 @@
 # Session Management
 
+## 2026-11-14 STORAGE-01 角色资源行
+
+新建 Schema44 数据库把角色资源余额存于 `character_resources` 的
+`(session_id, actor_id, resource_id)` 唯一行。合成规则资源、D&D 显式资源池与
+无显式 `ResourceState` 时的独立法术位以 `kind` 区分；独立法术位没有虚构的上限。
+显式资源池保留原始顺序，`mechanical_components.resource_state_present` 区分
+`None` 和空池组件。角色法术位及 feature-use 镜像从显式资源行派生；无显式组件时
+非池的任意 `custom_counters` 仍属于角色规则元数据。角色 UI／感知余额与 RE
+Snapshot 都读取相同资源行；合成规则扣减仅更新目标行。
+
+资源行由已有 SessionMemory 范围、UnitOfWork 候选、保存点和提交后发布管理。
+创建、热读取、回滚、关闭重开与发布失败的准入沿原协议。旧 Schema1–43 开发数据库
+在可写打开前拒绝；不从旧聚合 JSON 回填。施法、效果、物品充能及 D&D 扣减命令
+不在本批改动范围。
+
 ## 2026-11-14 装备实例绑定
 
 新建 Schema43 可保存机械快照 /19。角色机械事实保存所穿护甲、装备盾牌、另一只手物品的

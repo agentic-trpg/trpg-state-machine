@@ -444,7 +444,7 @@ class SessionMemory:
             if old is not None and new is not None:
                 identity = ("session_id", "actor_id")
                 if table == "characters":
-                    relevant = (*identity, "resources_json", "effects_json")
+                    relevant = (*identity, "effects_json")
                     if all(old[c] == new[c] for c in relevant):
                         return
                 elif all(old[c] == new[c] for c in identity):

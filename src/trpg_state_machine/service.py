@@ -367,7 +367,7 @@ class StateMachine(
                 pc["actor_id"],
                 pc["current_hp"],
                 pc["max_hp"],
-                json.loads(pc["resources_json"]),
+                self._characters.resource_balances(sid, pc["actor_id"]),
                 tuple(self._characters.carried_slugs(sid, pc["actor_id"])),
                 tuple(json.loads(pc["effects_json"])),
                 pc["xp"],

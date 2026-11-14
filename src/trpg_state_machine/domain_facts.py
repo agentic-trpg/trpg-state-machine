@@ -78,16 +78,78 @@ class CharacterFacts:
             (sid, actor_id, scene_id, pc.initial_cell),
         )
         self._conn.execute(
-            "INSERT INTO characters(session_id,actor_id,current_hp,max_hp,"
-            "resources_json) VALUES (?,?,?,?,?)",
-            (
-                sid,
-                actor_id,
-                pc.current_hp,
-                pc.max_hp,
-                canonical_json(dict(pc.resources)),
-            ),
+            "INSERT INTO characters(session_id,actor_id,current_hp,max_hp) VALUES (?,?,?,?)",
+            (sid, actor_id, pc.current_hp, pc.max_hp),
         )
+        for ordinal, (resource_id, current) in enumerate(pc.resources):
+            self._insert_resource(
+                sid, actor_id, resource_id, "synthetic", current, current, ordinal, {}
+            )
+
+    def _insert_resource(
+        self, sid, actor_id, resource_id, kind, current, maximum, ordinal, metadata
+    ):
+        """Persist one owned pool; SessionMemory captures its candidate row."""
+        self.store.require_write()
+        self._conn.execute(
+            "INSERT INTO character_resources VALUES (?,?,?,?,?,?,?,?)",
+            (sid, actor_id, resource_id, kind, current, maximum, ordinal, canonical_json(metadata)),
+        )
+
+    def resources(self, sid, actor_id, *, kind=None):
+        """Read current owned balances from the keyed RAM relation in a fixed scope."""
+        if kind is None:
+            return tuple(
+                self._conn.execute(
+                    "SELECT * FROM character_resources WHERE session_id=? AND actor_id=?",
+                    (sid, actor_id),
+                )
+            )
+        return tuple(
+            self._conn.execute(
+                "SELECT * FROM character_resources WHERE session_id=? AND actor_id=? AND kind=?",
+                (sid, actor_id, kind),
+            )
+        )
+
+    def resource_balances(self, sid, actor_id):
+        """Project UI balances from the same owned resource rows used by rules."""
+        return {row["resource_id"]: row["current"] for row in self.resources(sid, actor_id)}
+
+    def _typed_resources(self, sid, owner_ids, present):
+        """Assemble a stable typed closure from requested owner rows only."""
+        if not present:
+            return None
+        pools = []
+        for owner in owner_ids:
+            for row in self.resources(sid, owner):
+                if row["kind"] == "synthetic":
+                    continue
+                metadata = self.store.memory.json(row["metadata_json"])
+                required = {
+                    "hit_dice": {"class_slug", "die_size"},
+                    "spell_slot": {"level"},
+                    "pact_slot": {"level"},
+                    "feature_uses": {"feature_slug"},
+                }.get(row["kind"])
+                if not isinstance(metadata, dict) or required is None or set(metadata) != required:
+                    raise StateMachineError(
+                        "invalid_mechanical_state", "Stored resource metadata is incomplete"
+                    )
+                pools.append(
+                    (
+                        row["ordinal"],
+                        {
+                            **metadata,
+                            "owner_id": owner,
+                            "pool_id": row["resource_id"],
+                            "kind": row["kind"],
+                            "current": row["current"],
+                            "maximum": row["maximum"],
+                        },
+                    )
+                )
+        return {"pools": [value for _, value in sorted(pools, key=lambda entry: entry[0])]}
 
     def initialize_legacy_items(self, sid, actor_id, slugs):
         """Materialize each explicit core-only Package occurrence as an owned item."""
@@ -206,14 +268,18 @@ class CharacterFacts:
         """Read and debit the named character resource, persisting its remaining balance."""
         self.store.require_write()
         row = self._conn.execute(
-            "SELECT resources_json FROM characters WHERE session_id=? AND actor_id=?",
-            (sid, actor_id),
+            "SELECT current FROM character_resources "
+            "WHERE session_id=? AND actor_id=? AND resource_id=?",
+            (sid, actor_id, resource_id),
         ).fetchone()
-        resources = self.store.memory.json(row[0])
-        resources[resource_id] -= amount
+        if row is None or not 0 < amount <= row[0]:
+            raise StateMachineError(
+                "invalid_delta", "Resource debit is outside its current balance"
+            )
         self._conn.execute(
-            "UPDATE characters SET resources_json=? WHERE session_id=? AND actor_id=?",
-            (canonical_json(resources), sid, actor_id),
+            "UPDATE character_resources SET current=current-? "
+            "WHERE session_id=? AND actor_id=? AND resource_id=?",
+            (amount, sid, actor_id, resource_id),
         )
 
     def award_xp(self, sid, actor_id, value):
@@ -255,7 +321,7 @@ class CharacterFacts:
                     raise StateMachineError(
                         "invalid_combat_foundation", "Initialization cannot reset HP"
                     )
-                if self.store.memory.json(core["resources_json"]) or self.store.memory.json(
+                if self.resources(sid, actor.entity_id, kind="synthetic") or self.store.memory.json(
                     core["effects_json"]
                 ):
                     raise StateMachineError(
@@ -264,7 +330,7 @@ class CharacterFacts:
                     )
             if (
                 (core["current_hp"], core["max_hp"]) != (actor.hp_current, actor.hp_max)
-                or self.store.memory.json(core["resources_json"])
+                or self.resources(sid, actor.entity_id, kind="synthetic")
                 or self.store.memory.json(core["effects_json"])
             ):
                 raise StateMachineError(
@@ -277,14 +343,13 @@ class CharacterFacts:
                 )
         else:
             self._conn.execute(
-                "INSERT INTO characters(session_id,actor_id,current_hp,max_hp,resources_json,"
-                "effects_json,xp) VALUES (?,?,?,?,?,?,?)",
+                "INSERT INTO characters(session_id,actor_id,current_hp,max_hp,effects_json,xp) "
+                "VALUES (?,?,?,?,?,?)",
                 (
                     sid,
                     actor.entity_id,
                     actor.hp_current,
                     actor.hp_max,
-                    "{}",
                     "[]",
                     0 if xp is None else xp,
                 ),
@@ -348,17 +413,24 @@ class CharacterFacts:
     def initialize_rule_components(self, sid, snapshot):
         """Initial explicit facts only; an existing owner record may never be reset."""
         self.store.require_write()
-        fields = ("resource_state", "casting_state", "effect_states")
-        data = snapshot.model_dump(mode="json", include=set(fields))
+        fields = ("casting_state", "effect_states")
+        data = snapshot.model_dump(mode="json", include={*fields, "resource_state"})
         encoded = tuple(canonical_json(data[field]) for field in fields)
         old = self._conn.execute(
-            "SELECT schema_version,resources_json,casting_json,effects_json "
+            "SELECT schema_version,casting_json,effects_json,resource_state_present "
             "FROM mechanical_components WHERE session_id=?",
             (sid,),
         ).fetchone()
-        expected = (snapshot.snapshot_schema_version, *encoded)
+        present = data["resource_state"] is not None
+        expected = (snapshot.snapshot_schema_version, *encoded, int(present))
         if old is not None:
-            if tuple(old) != expected:
+            if (
+                tuple(old) != expected
+                or self._typed_resources(
+                    sid, {actor.entity_id for actor in snapshot.character_states}, present
+                )
+                != data["resource_state"]
+            ):
                 raise StateMachineError(
                     "invalid_combat_foundation", "Initialization cannot reset component facts"
                 )
@@ -386,10 +458,66 @@ class CharacterFacts:
             return
         self._conn.execute(
             "INSERT INTO mechanical_components "
-            "(session_id,schema_version,resources_json,casting_json,effects_json) "
+            "(session_id,schema_version,casting_json,effects_json,resource_state_present) "
             "VALUES (?,?,?,?,?)",
             (sid, *expected),
         )
+        if present:
+            for ordinal, pool in enumerate(data["resource_state"]["pools"]):
+                metadata = {
+                    k: v
+                    for k, v in pool.items()
+                    if k not in ("owner_id", "pool_id", "kind", "current", "maximum")
+                }
+                self._insert_resource(
+                    sid,
+                    pool["owner_id"],
+                    pool["pool_id"],
+                    pool["kind"],
+                    pool["current"],
+                    pool["maximum"],
+                    ordinal,
+                    metadata,
+                )
+        else:
+            for actor in snapshot.character_states:
+                ordinal = 0
+                for field, kind in (
+                    ("spell_slots", "standalone_spell_slot"),
+                    ("pact_slots", "standalone_pact_slot"),
+                ):
+                    for level, balance in getattr(actor, field).items():
+                        self._insert_resource(
+                            sid,
+                            actor.entity_id,
+                            f"{field}:{level}",
+                            kind,
+                            balance,
+                            None,
+                            ordinal,
+                            {"level": int(level)},
+                        )
+                        ordinal += 1
+        for actor in snapshot.character_states:
+            retained = (
+                {
+                    key: value
+                    for key, value in actor.custom_counters.items()
+                    if not key.startswith("feature_use:")
+                }
+                if present
+                else actor.custom_counters
+            )
+            self._conn.execute(
+                "UPDATE mechanical_actors SET state_json=json_remove(state_json,"
+                "'$.spell_slots','$.pact_slots') WHERE session_id=? AND actor_id=?",
+                (sid, actor.entity_id),
+            )
+            self._conn.execute(
+                "UPDATE mechanical_actors SET state_json=json_set(state_json,"
+                "'$.custom_counters',json(?)) WHERE session_id=? AND actor_id=?",
+                (canonical_json(retained), sid, actor.entity_id),
+            )
         # The snapshot is ingress data. Materialize each owned unit once in the
         # World object relation before ordinary item initialization checks it.
         for entry in snapshot.inventory_state.entries:
@@ -438,7 +566,7 @@ class CharacterFacts:
         return ComponentInputs(
             {
                 field: self.store.memory.json(row[field])
-                for field in ("resources_json", "casting_json", "effects_json")
+                for field in ("casting_json", "effects_json")
             }
         )
 
@@ -458,13 +586,9 @@ class CharacterFacts:
             )
         try:
             values = self._component_inputs(row).select({actor_id})
-            resources = values["resources_json"]
+            resources = self._typed_resources(sid, {actor_id}, row["resource_state_present"])
             if resources is not None:
-                ResourceState.model_validate(
-                    {**resources, "pools": tuple(resources["pools"])}
-                    if isinstance(resources["pools"], list)
-                    else resources
-                )
+                ResourceState.model_validate({**resources, "pools": tuple(resources["pools"])})
             casting = values["casting_json"]
             if casting is not None:
                 casting = self.store.memory.model_json(
@@ -500,6 +624,30 @@ class CharacterFacts:
                 "unsupported_mechanical_version", "Explicit component facts are missing"
             )
         try:
+            if full_audit:
+                all_rows = tuple(
+                    self._conn.execute(
+                        "SELECT * FROM character_resources WHERE session_id=?", (sid,)
+                    )
+                )
+                typed_kinds = {"hit_dice", "spell_slot", "pact_slot", "feature_uses"}
+                if any(
+                    (r["kind"] not in typed_kinds)
+                    if row["resource_state_present"]
+                    else (r["kind"] in typed_kinds)
+                    for r in all_rows
+                ):
+                    raise StateMachineError(
+                        "invalid_mechanical_state", "Resource kind disagrees with component"
+                    )
+                audit_owners = {r["actor_id"] for r in all_rows}
+                audit_resources = self._typed_resources(
+                    sid, audit_owners, row["resource_state_present"]
+                )
+                if audit_resources is not None:
+                    ResourceState.model_validate(
+                        {**audit_resources, "pools": tuple(audit_resources["pools"])}
+                    )
             _, item_entries = self.world.portable_inventory(
                 sid, owner_ids=None if full_audit else owner_ids
             )
@@ -511,16 +659,18 @@ class CharacterFacts:
                 values = {
                     field: self.store.memory.json(row[field])
                     for field in (
-                        "resources_json",
                         "casting_json",
                         "effects_json",
                     )
                 }
                 values["inventory"] = item_inventory
-            inventory, resources, casting, effects = (
-                values[field]
-                for field in ("inventory", "resources_json", "casting_json", "effects_json")
+            values["resource_state"] = self._typed_resources(
+                sid, owner_ids, row["resource_state_present"]
             )
+            inventory = values["inventory"]
+            resources = values["resource_state"]
+            casting = values["casting_json"]
+            effects = values["effects_json"]
             typed_inventory = self._inventory_model(inventory)
             inventory = typed_inventory.model_dump(mode="json")
             resources = (
@@ -547,6 +697,15 @@ class CharacterFacts:
                 references |= {v["owner_id"] for v in resources["pools"]}
             if casting is not None:
                 references |= {v["actor_id"] for v in casting["actors"]}
+            if full_audit:
+                # Initialization/recovery diagnostics include rows omitted by a
+                # caller's mechanical roster; ordinary owner reads stay local.
+                references |= {
+                    r["actor_id"]
+                    for r in self._conn.execute(
+                        "SELECT actor_id FROM character_resources WHERE session_id=?", (sid,)
+                    )
+                }
             for owner in references:
                 if (
                     self._conn.execute(
@@ -687,11 +846,44 @@ class CharacterFacts:
         if actor is None or core is None:
             return None
         parse = self.store.memory.json
-        if parse(core["resources_json"]) or parse(core["effects_json"]):
+        if self.resources(sid, actor_id, kind="synthetic") or parse(core["effects_json"]):
             raise StateMachineError(
                 "invalid_mechanical_state", "Legacy core resources/effects have no typed source"
             )
         data = parse(actor[0])
+        component = self._conn.execute(
+            "SELECT resource_state_present FROM mechanical_components WHERE session_id=?", (sid,)
+        ).fetchone()
+        if component is not None and component[0]:
+            pools = self._typed_resources(sid, {actor_id}, True)["pools"]
+            data["spell_slots"] = {
+                str(p["level"]): p["current"] for p in pools if p["kind"] == "spell_slot"
+            }
+            data["pact_slots"] = {
+                str(p["level"]): p["current"] for p in pools if p["kind"] == "pact_slot"
+            }
+            other = data.get("custom_counters", {})
+            data["custom_counters"] = {
+                **other,
+                **{
+                    "feature_use:" + p["feature_slug"]: {"spent": p["maximum"] - p["current"]}
+                    for p in pools
+                    if p["kind"] == "feature_uses"
+                },
+            }
+        elif component is not None:
+            rows = self.resources(sid, actor_id)
+            data["spell_slots"] = {
+                str(self.store.memory.json(r["metadata_json"])["level"]): r["current"]
+                for r in rows
+                if r["kind"] == "standalone_spell_slot"
+            }
+            data["pact_slots"] = {
+                str(self.store.memory.json(r["metadata_json"])["level"]): r["current"]
+                for r in rows
+                if r["kind"] == "standalone_pact_slot"
+            }
+            data.setdefault("custom_counters", {})
         explicit_equipment = "worn_armor_instance_id" in data
         held = data.get("held_weapon_instance_id")
         if held is not None and include_carried:

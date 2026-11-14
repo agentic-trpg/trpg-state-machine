@@ -91,8 +91,8 @@ def test_unknown_component_facts_never_fall_back_to_package(tmp_path, package_da
             sm._conn.execute("DELETE FROM mechanical_components WHERE session_id=?", (sid,))
         elif fault == "core_resource":
             sm._conn.execute(
-                "UPDATE characters SET resources_json=? WHERE session_id=? AND actor_id=?",
-                ('{"unknown":1}', sid, command.actor_id),
+                "INSERT INTO character_resources VALUES (?,?,?,?,?,?,?,?)",
+                (sid, command.actor_id, "unknown", "synthetic", 1, 1, 0, "{}"),
             )
         else:
             if fault == "unknown_owner":
@@ -346,6 +346,57 @@ def test_explicit_resource_and_casting_stocks_are_current_read_only_facts(
         assert after.casting_state == before.casting_state
         assert after.inventory_state == before.inventory_state
         assert after.character_states[0].spell_slots == {1: 2}
+
+
+def test_typed_resource_one_row_debit_reaches_ui_and_rule_snapshot(tmp_path, package_data, context):
+    assets = modern_loader()
+    data = modern_data(package_data, assets, npc_hp=50)
+    for foundation in data["rule_bindings"].values():
+        snapshot = foundation["snapshot"]
+        pc = snapshot["character_states"][0]
+        pc["spell_slots"] = {"1": 2}
+        snapshot["resource_state"] = {
+            "pools": [
+                {
+                    "owner_id": pc["entity_id"],
+                    "pool_id": "pc.slot.1",
+                    "kind": "spell_slot",
+                    "level": 1,
+                    "current": 2,
+                    "maximum": 2,
+                }
+            ]
+        }
+    package = _validate(data)
+    database = tmp_path / "typed-resource.db"
+    with StateMachine(database, dnd_loader=assets) as sm:
+        sid = create(sm, package, context)
+        fixed = sm.read_noncombat_snapshot(sid, package, context=context)
+        assert fixed.resource_state.pools[0].current == 2
+        assert sm.read_session(sid, package, context=context).character.resources["pc.slot.1"] == 2
+        actor = fixed.resource_state.pools[0].owner_id
+        with sm._transaction(write=True) as scope:
+            with pytest.raises(RuntimeError), scope.savepoint():
+                sm._characters.spend_resource(sid, actor, "pc.slot.1", 1)
+                assert sm._characters.resource_balances(sid, actor)["pc.slot.1"] == 1
+                raise RuntimeError("rollback resource candidate")
+            assert sm._characters.resource_balances(sid, actor)["pc.slot.1"] == 2
+            sm._characters.spend_resource(sid, actor, "pc.slot.1", 1)
+        assert fixed.resource_state.pools[0].current == 2
+        current = sm.read_noncombat_snapshot(sid, package, context=context)
+        assert current.resource_state.pools[0].current == 1
+        assert next(a for a in current.character_states if a.entity_id == actor).spell_slots == {
+            1: 1
+        }
+        assert sm.read_session(sid, package, context=context).character.resources["pc.slot.1"] == 1
+    with StateMachine(database, dnd_loader=assets) as sm:
+        reopened = sm.read_noncombat_snapshot(sid, package, context=context)
+        assert reopened.resource_state.pools[0].current == 1
+        assert sm.read_session(sid, package, context=context).character.resources["pc.slot.1"] == 1
+    with sqlite3.connect(database) as conn:
+        assert conn.execute(
+            "SELECT current,maximum FROM character_resources WHERE resource_id='pc.slot.1'"
+        ).fetchone() == (1, 2)
 
 
 def test_noncombat_setup_is_rejected_instead_of_silently_dropped(package_data):

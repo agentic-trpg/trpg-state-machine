@@ -249,6 +249,7 @@ def test_production_writers_and_dependency_direction():
     owners = {
         "actors": "CharacterFacts",
         "characters": "CharacterFacts",
+        "character_resources": "CharacterFacts",
         "mechanical_actors": "CharacterFacts",
         "mechanical_components": "CharacterFacts",
         "objects": "WorldFacts",

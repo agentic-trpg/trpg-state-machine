@@ -18,7 +18,6 @@ class ComponentInputs:
         object.__setattr__(self, "data", _freeze(values))
         indices = {}
         for field, path, identity in (
-            ("resources_json", "pools", "owner_id"),
             ("casting_json", "actors", "actor_id"),
             ("effects_json", None, "target_id"),
         ):
@@ -45,10 +44,9 @@ class ComponentInputs:
         return f"ComponentInputs({self.data!r}, {self.indices!r})"
 
     def select(self, owners):
-        """Select resources, casting and effects for the required owner closure."""
+        """Select casting and effects for the required owner closure."""
         result = {}
         for field, path in (
-            ("resources_json", "pools"),
             ("casting_json", "actors"),
             ("effects_json", None),
         ):
