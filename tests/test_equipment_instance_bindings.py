@@ -14,6 +14,7 @@ from test_scoped_runtime_validation import grow, measure
 from test_world_containers import BOX, container_data
 from world_support import command, setup
 
+from examples.real_cross_phase import author_fixture
 from trpg_state_machine import (
     DropItem,
     PickupItem,
@@ -95,6 +96,53 @@ def combat_equipment_data():
                     "accessible": True,
                 }
             )
+    return data
+
+
+def ingress_equipment_data(kind, *, combat_only=False):
+    """Use the ordinary /2 ingress inventory without portable declarations."""
+    data = author_fixture(item_loader())
+    owner = data["pc_templates"][0]["pc_template_id"]
+    slug = {"armor": "leather-armor", "shield": "shield", "offhand": "rope"}[kind]
+    identity = f"inventory.{kind}_bound"
+    data["pc_templates"][0]["character"]["inventory"].append(slug)
+    for foundation in data["rule_bindings"].values():
+        snapshot = foundation["snapshot"]
+        actor = snapshot["character_states"][0]
+        actor["carried_item_slugs"].append(slug)
+        if kind == "armor":
+            actor.update(worn_armor="light", worn_armor_instance_id=identity)
+        elif kind == "shield":
+            actor.update(
+                shield_equipped=True, other_hand_occupied=True, equipped_shield_instance_id=identity
+            )
+        else:
+            actor.update(other_hand_occupied=True, offhand_item_instance_id=identity)
+        snapshot["inventory_state"]["entries"].append(
+            {
+                "instance_id": identity,
+                "owner_id": owner,
+                "item_slug": slug,
+                "quantity": 1,
+                "charges_remaining_per_unit": 0,
+                "accessible": True,
+            }
+        )
+    if combat_only:
+        del data["rule_bindings"]["noncombat_foundation"]
+        combat = data["rule_bindings"]["combat_foundation"]["snapshot"]
+        npc = next(a for a in combat["character_states"] if a["entity_id"] == "npc.caretaker")
+        npc["carried_item_slugs"].append("rope")
+        combat["inventory_state"]["entries"].append(
+            {
+                "instance_id": "inventory.npc_rope",
+                "owner_id": "npc.caretaker",
+                "item_slug": "rope",
+                "quantity": 1,
+                "charges_remaining_per_unit": 0,
+                "accessible": True,
+            }
+        )
     return data
 
 
@@ -217,7 +265,9 @@ def test_wrong_initial_equipment_kind_rolls_back_creation(tmp_path, context):
     """An ID that names the wrong materialized kind cannot enter live actor facts."""
     data = equipment_data("armor")
     next(t for t in data["item_transfers"] if t["instance_id"] == CRED)["item_slug"] = "rope"
+    data["pc_templates"][0]["character"]["inventory"].append("rope")
     for foundation in data["rule_bindings"].values():
+        foundation["snapshot"]["character_states"][0]["carried_item_slugs"].append("rope")
         next(
             e
             for e in foundation["snapshot"]["inventory_state"]["entries"]
@@ -228,6 +278,32 @@ def test_wrong_initial_equipment_kind_rolls_back_creation(tmp_path, context):
         with pytest.raises(StateMachineError, match="Worn armor identity differs"):
             create(sm, package, context)
         assert sm._conn.execute("SELECT COUNT(*) FROM sessions").fetchone()[0] == 0
+
+
+@pytest.mark.parametrize("kind", ["armor", "shield", "offhand"])
+@pytest.mark.parametrize("combat_only", [False, True])
+def test_ingress_inventory_equipment_resolves_after_materialization(
+    tmp_path, context, kind, combat_only
+):
+    """The standard /2 inventory path can bind gear before and at combat start."""
+    package = _validate(ingress_equipment_data(kind, combat_only=combat_only))
+    with StateMachine(tmp_path / "ingress.db", dnd_loader=item_loader()) as sm:
+        sid = create(sm, package, context)
+        if combat_only:
+            assert initialize(sm, sid, package, context).status == "committed"
+            snapshot = sm.read_combat_snapshot(sid, package, context=context)
+            assert "inventory.npc_rope" in {e.instance_id for e in snapshot.inventory_state.entries}
+        else:
+            snapshot = sm.read_noncombat_snapshot(sid, package, context=context)
+        actor = sm.read_session(sid, package, context=context).pc_actor_id
+        pc = next(a for a in snapshot.character_states if a.entity_id == actor)
+        field = {
+            "armor": "worn_armor_instance_id",
+            "shield": "equipped_shield_instance_id",
+            "offhand": "offhand_item_instance_id",
+        }[kind]
+        assert getattr(pc, field) == f"inventory.{kind}_bound"
+        assert sm._conn.execute("PRAGMA user_version").fetchone()[0] == 43
 
 
 @pytest.mark.parametrize("fault", ["missing_actor", "active_effect"])

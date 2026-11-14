@@ -71,6 +71,7 @@ class CombatHandler:
                 schema_version=snapshot.snapshot_schema_version,
             )
         self.characters.initialize_rule_components(row["session_id"], snapshot)
+        self.characters.validate_initial_equipment(row["session_id"], snapshot)
         self.runtime.set_mechanical_schema(row["session_id"], snapshot.snapshot_schema_version)
         self.runtime.select_rule_rng(row["session_id"], canonical_json(initial["rng_state"]))
 
@@ -135,6 +136,7 @@ class CombatHandler:
             self.runtime.prepare_scene_maps(sid, (snapshot.scene_state.scene_id,), self.facts.maps)
         if not self.facts.instances.session_value(row["session_id"], "has_noncombat"):
             self.characters.initialize_rule_components(sid, snapshot)
+            self.characters.validate_initial_equipment(sid, snapshot)
         elif self.characters.rule_components(
             sid, {a.entity_id for a in snapshot.character_states}
         ) != snapshot.model_dump(

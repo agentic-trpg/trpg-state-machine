@@ -243,11 +243,7 @@ class CharacterFacts:
         )
 
     def initialize_rule_actor(self, row, actor, *, xp=None, encounter=False, schema_version=None):
-        """Initialize actor facts; /19 stores equipment IDs and derives their mirrors.
-
-        Resolve the proposed bindings against materialized World items inside the
-        creation/encounter transaction before accepting the actor.
-        """
+        """Initialize actor facts; /19 stores IDs and omits derived equipment mirrors."""
         self.store.require_write()
         sid = row["session_id"]
         core = self._conn.execute(
@@ -321,8 +317,13 @@ class CharacterFacts:
             "INSERT INTO mechanical_actors VALUES (?,?,?)",
             (sid, actor.entity_id, canonical_json(state)),
         )
-        if schema_version == "engine-snapshot/19":
-            # Resolve against materialized World instances before accepting initial facts.
+
+    def validate_initial_equipment(self, sid, snapshot):
+        """Resolve /19 bindings after ingress inventory is materialized in the same UoW."""
+        self.store.require_write()
+        if snapshot.snapshot_schema_version != "engine-snapshot/19":
+            return
+        for actor in snapshot.character_states:
             resolved = self._rule_actor(sid, actor.entity_id)
             if any(
                 resolved[field] != getattr(actor, field)
