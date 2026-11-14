@@ -480,14 +480,25 @@ class CharacterFacts:
                 "invalid_mechanical_state", "Stored binding facts are incomplete"
             ) from exc
 
-    def rule_components(self, sid, owner_ids, *, full_audit=False):
-        """Validate and return rule components for the requested owners."""
-        inventory, values = self._validated_rule_components(sid, owner_ids, full_audit=full_audit)
+    def rule_components(self, sid, owner_ids, *, full_audit=False, inventory_entries=None):
+        """Validate rule components, optionally reusing a fixed snapshot's item entries."""
+        if inventory_entries is None:
+            inventory, values = self._validated_rule_components(
+                sid, owner_ids, full_audit=full_audit
+            )
+        else:
+            inventory, values = self._component_values(
+                sid, owner_ids, full_audit=full_audit, inventory_entries=inventory_entries
+            )
         return {"inventory_state": inventory.model_dump(mode="json"), **values}
 
     @scoped_read
     def _validated_rule_components(self, sid, owner_ids, *, full_audit=False):
-        """Read persisted facts, then project owners; absence is never an empty component."""
+        """Cache the ordinary component projection within its dependency scope."""
+        return self._component_values(sid, owner_ids, full_audit=full_audit)
+
+    def _component_values(self, sid, owner_ids, *, full_audit=False, inventory_entries=None):
+        """Validate components using one optional snapshot-local inventory bundle."""
         row = self._conn.execute(
             "SELECT * FROM mechanical_components WHERE session_id=?", (sid,)
         ).fetchone()
@@ -500,10 +511,11 @@ class CharacterFacts:
                 "unsupported_mechanical_version", "Explicit component facts are missing"
             )
         try:
-            _, item_entries = self.world.portable_inventory(
-                sid, owner_ids=None if full_audit else owner_ids
-            )
-            item_inventory = {"entries": list(item_entries.values())}
+            if inventory_entries is None:
+                _, inventory_entries = self.world.portable_inventory(
+                    sid, owner_ids=None if full_audit else owner_ids
+                )
+            item_inventory = {"entries": list(inventory_entries.values())}
             if not full_audit:
                 values = self._component_inputs(row).select(owner_ids)
                 values["inventory"] = item_inventory
@@ -670,11 +682,12 @@ class CharacterFacts:
             )
 
     @scoped_read
-    def _rule_actor(self, sid, actor_id, *, include_carried=True):
+    def _rule_actor(self, sid, actor_id, *, include_carried=True, carried_slugs=None):
         """Combine core facts and resolve /19 equipment IDs from current World items.
 
         A binding read skips inventory projection. Complete snapshot reads verify
-        owner, accessibility and kind for only the bound instances.
+        owner, accessibility and kind for only the bound instances. A supplied
+        snapshot-local carried slugs only replace the carried-slug projection.
         """
         actor = self._conn.execute(
             "SELECT state_json FROM mechanical_actors WHERE session_id=? AND actor_id=?",
@@ -756,7 +769,11 @@ class CharacterFacts:
         data.update(
             hp_current=core["current_hp"],
             hp_max=core["max_hp"],
-            carried_item_slugs=self.carried_slugs(sid, actor_id) if include_carried else [],
+            carried_item_slugs=(
+                self.carried_slugs(sid, actor_id) if carried_slugs is None else list(carried_slugs)
+            )
+            if include_carried
+            else [],
         )
         return data
 
@@ -779,6 +796,24 @@ class CharacterFacts:
             for owner in sorted(owner_ids)
             if (data := self._rule_actor(sid, owner)) is not None
         }
+
+    def combat_rule_actors(self, sid, owner_ids):
+        """Build combat actors and return their inventory for later components.
+
+        This bundle lives only in the caller's fixed read scope. Equipment bindings
+        still resolve their selected instances directly from World facts.
+        """
+        _, entries = self.world.portable_inventory(sid, owner_ids=owner_ids)
+        slugs = {owner: {} for owner in owner_ids}
+        for entry in entries.values():
+            if entry["owner_id"] in slugs:
+                slugs[entry["owner_id"]][entry["item_slug"]] = None
+        actors = {
+            owner: data
+            for owner in sorted(owner_ids)
+            if (data := self._rule_actor(sid, owner, carried_slugs=tuple(slugs[owner]))) is not None
+        }
+        return actors, entries
 
     def position(self, sid, actor_id):
         """Read authoritative actor position, rejecting a missing character."""

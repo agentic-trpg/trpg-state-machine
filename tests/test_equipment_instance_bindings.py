@@ -385,6 +385,42 @@ def test_combat_availability_uses_bound_equipment_and_spares(tmp_path, context):
         assert sm.submit_command(attack, package, context=context).status == "committed"
 
 
+def test_combat_snapshot_shares_inventory_projection(tmp_path, context, monkeypatch):
+    """The public read derives carried slugs and full inventory from one item bundle."""
+    package = _validate(combat_equipment_data())
+    with StateMachine(tmp_path / "shared.db", dnd_loader=item_loader()) as sm:
+        sid = create(sm, package, context)
+        assert initialize(sm, sid, package, context).status == "committed"
+        actor = sm.read_session(sid, package, context=context).pc_actor_id
+        original = sm._world_facts.portable_inventory
+        calls = []
+
+        def counted(*args, **kwargs):
+            calls.append((args, kwargs))
+            return original(*args, **kwargs)
+
+        monkeypatch.setattr(sm._world_facts, "portable_inventory", counted)
+        snapshot = sm.read_combat_snapshot(sid, package, context=context)
+        assert len(calls) == 1
+        assert calls[0][1]["owner_ids"] == set(snapshot.combat_state.initiative_ids)
+        _, entries = original(sid, owner_ids=set(snapshot.combat_state.initiative_ids))
+        assert [
+            entry.model_dump(mode="json") for entry in snapshot.inventory_state.entries
+        ] == list(entries.values())
+        for projected in snapshot.character_states:
+            assert projected.carried_item_slugs == tuple(
+                dict.fromkeys(
+                    entry["item_slug"]
+                    for entry in entries.values()
+                    if entry["owner_id"] == projected.entity_id
+                )
+            )
+        pc = next(value for value in snapshot.character_states if value.entity_id == actor)
+        assert pc.carried_item_slugs.count("shield") == 1
+        npc = next(value for value in snapshot.character_states if value.entity_id != actor)
+        assert "rope" in npc.carried_item_slugs
+
+
 def test_bound_transfer_query_cost_is_independent_of_unrelated_items(
     tmp_path, context, monkeypatch
 ):

@@ -398,7 +398,8 @@ class RulesAdapter:
         if combat is None:
             raise StateMachineError("combat_not_initialized", "Session has no mechanical encounter")
         state = json.loads(combat["state_json"])
-        actors = self.characters.rule_actors(sid, set(state["initiative_ids"]))
+        roster = set(state["initiative_ids"])
+        actors, inventory_entries = self.characters.combat_rule_actors(sid, roster)
         scene = self.facts.mechanical_scene(sid, combat["scene_id"])
         if not state["ended"]:
             state["actor_zone"] = self._current_cells(
@@ -416,7 +417,9 @@ class RulesAdapter:
                         "session_id": sid,
                         "world_version": row["world_version"],
                         "character_states": [actors[a] for a in state["initiative_ids"]],
-                        **self.characters.rule_components(sid, set(state["initiative_ids"])),
+                        **self.characters.rule_components(
+                            sid, roster, inventory_entries=inventory_entries
+                        ),
                         "scene_state": scene,
                         "combat_state": state,
                     }
