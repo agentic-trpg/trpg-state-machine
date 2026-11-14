@@ -60,6 +60,20 @@ def test_schema44_casting_aggregate_is_refused_before_writable_open(tmp_path):
         assert conn.execute("SELECT value FROM old_casting").fetchone() == ("preserve",)
 
 
+def test_schema46_life_aggregate_is_refused_before_writable_open(tmp_path):
+    """The former JSON life facts cannot be implicitly promoted on reopen."""
+    path = tmp_path / "schema46.db"
+    with sqlite3.connect(path) as conn:
+        conn.execute("CREATE TABLE old_life (state_json TEXT)")
+        conn.execute("INSERT INTO old_life VALUES ('{\"temp_hp\":3}')")
+        conn.execute("PRAGMA user_version = 46")
+    before = hashlib.sha256(path.read_bytes()).digest()
+    with pytest.raises(StateMachineError) as error:
+        StateMachine(path)
+    assert error.value.code == "unsupported_storage_schema"
+    assert hashlib.sha256(path.read_bytes()).digest() == before
+
+
 def test_pre41_crashed_wal_is_refused_without_checkpointing_source(tmp_path):
     """An orphan WAL keeps its committed stock and original main/WAL bytes."""
     path = tmp_path / "orphan.db"
@@ -109,7 +123,7 @@ def test_current_save_reopens_without_inventory_aggregate_columns(
     with StateMachine(path) as sm:
         created = sm.create_session(request_for(), package, context=context)
         saved = sm.save_session(created.session_id, package, context=context)
-        assert sm._conn.execute("PRAGMA user_version").fetchone()[0] == 46
+        assert sm._conn.execute("PRAGMA user_version").fetchone()[0] == 47
         for table in ("characters", "mechanical_components"):
             columns = {row[1] for row in sm._conn.execute(f"PRAGMA table_info({table})")}
             assert "inventory_json" not in columns

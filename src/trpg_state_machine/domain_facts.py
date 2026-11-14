@@ -23,15 +23,11 @@ _EFFECTS = TypeAdapter(tuple[EffectState, ...])
 
 
 class CharacterFacts:
-    """Maintain character mechanics and project inventory from World item facts."""
+    """Maintain character mechanics, narrow life facts, and World item projections."""
 
     RULE_FIELDS = frozenset(
         (
-            "temp_hp",
-            "is_alive",
-            "death_saves",
             "conditions",
-            "last_damaged_by",
             "action_available",
             "bonus_action_available",
             "reaction_available",
@@ -309,8 +305,11 @@ class CharacterFacts:
         )
 
     def update_rule_metadata(self, sid, actor_id, field, value):
-        """Validate and persist character rules metadata."""
+        """Route approved rule fields to the life row or remaining rules JSON."""
         self.store.require_write()
+        if field in ("temp_hp", "is_alive", "death_saves", "last_damaged_by"):
+            self.update_life_state(sid, actor_id, field, value)
+            return
         if field not in self.RULE_FIELDS:
             raise StateMachineError("invalid_rule_result", "Unsupported actor fact")
         self._conn.execute(
@@ -319,8 +318,61 @@ class CharacterFacts:
             ("$." + field, canonical_json(value), sid, actor_id),
         )
 
+    def update_life_state(self, sid, actor_id, field, value):
+        """Persist one approved life delta in the narrow owner row without rewriting rules JSON."""
+        self.store.require_write()
+        if field == "temp_hp" and type(value) is int and 0 <= value <= 2**63 - 1:
+            assignments, params = "temp_hp=?", (value,)
+        elif field == "is_alive" and type(value) is bool:
+            assignments, params = "is_alive=?", (int(value),)
+        elif field == "last_damaged_by" and (value is None or type(value) is str):
+            assignments, params = "last_damaged_by=?", (value,)
+        elif field == "death_saves" and value is None:
+            assignments, params = (
+                "death_save_successes=?,death_save_failures=?,death_save_stable=?",
+                (None, None, None),
+            )
+        elif (
+            field == "death_saves"
+            and type(value) is dict
+            and set(value) == {"successes", "failures", "is_stable"}
+            and type(value["successes"]) is int
+            and 0 <= value["successes"] <= 3
+            and type(value["failures"]) is int
+            and 0 <= value["failures"] <= 4
+            and type(value["is_stable"]) is bool
+        ):
+            assignments, params = (
+                "death_save_successes=?,death_save_failures=?,death_save_stable=?",
+                (value["successes"], value["failures"], int(value["is_stable"])),
+            )
+        else:
+            raise StateMachineError("invalid_rule_result", "Invalid actor life fact")
+        changed = self._conn.execute(
+            f"UPDATE mechanical_life SET {assignments} WHERE session_id=? AND actor_id=?",
+            (*params, sid, actor_id),
+        )
+        if changed.rowcount != 1:
+            raise StateMachineError("invalid_mechanical_state", "Actor life component is missing")
+
+    def life(self, sid, actor_id):
+        """Read one required life component, or None for an actor without mechanics."""
+        row = self._conn.execute(
+            "SELECT * FROM mechanical_life WHERE session_id=? AND actor_id=?",
+            (sid, actor_id),
+        ).fetchone()
+        if (
+            row is None
+            and self._conn.execute(
+                "SELECT 1 FROM mechanical_actors WHERE session_id=? AND actor_id=?",
+                (sid, actor_id),
+            ).fetchone()
+        ):
+            raise StateMachineError("invalid_mechanical_state", "Actor life component is missing")
+        return row
+
     def initialize_rule_actor(self, row, actor, *, xp=None, encounter=False, schema_version=None):
-        """Initialize actor facts; /19 stores IDs and omits derived equipment mirrors."""
+        """Initialize JSON plus a required life row; /19 omits derived equipment mirrors."""
         self.store.require_write()
         sid = row["session_id"]
         core = self._conn.execute(
@@ -367,7 +419,16 @@ class CharacterFacts:
             )
         state = actor.model_dump(
             mode="json",
-            exclude={"hp_current", "hp_max", "carried_item_slugs", "concentration_effect_id"},
+            exclude={
+                "hp_current",
+                "hp_max",
+                "carried_item_slugs",
+                "concentration_effect_id",
+                "temp_hp",
+                "is_alive",
+                "death_saves",
+                "last_damaged_by",
+            },
         )
         if state.get("held_weapon_instance_id") is not None:
             del state["weapon_in_hands"]
@@ -390,9 +451,26 @@ class CharacterFacts:
             ):
                 if state.get(field) is None:
                     state.pop(field, None)
+        if actor.temp_hp > 2**63 - 1:
+            raise StateMachineError(
+                "invalid_mechanical_state", "Temporary HP exceeds storage range"
+            )
         self._conn.execute(
             "INSERT INTO mechanical_actors VALUES (?,?,?)",
             (sid, actor.entity_id, canonical_json(state)),
+        )
+        self._conn.execute(
+            "INSERT INTO mechanical_life VALUES (?,?,?,?,?,?,?,?)",
+            (
+                sid,
+                actor.entity_id,
+                actor.temp_hp,
+                int(actor.is_alive),
+                None if actor.death_saves is None else actor.death_saves.successes,
+                None if actor.death_saves is None else actor.death_saves.failures,
+                None if actor.death_saves is None else int(actor.death_saves.is_stable),
+                actor.last_damaged_by,
+            ),
         )
 
     def validate_initial_equipment(self, sid, snapshot):
@@ -1043,7 +1121,22 @@ class CharacterFacts:
             raise StateMachineError(
                 "invalid_mechanical_state", "Legacy core resources/effects have no typed source"
             )
-        data = parse(actor[0])
+        life = self.life(sid, actor_id)
+        data = parse(actor["state_json"])
+        data.update(
+            temp_hp=life["temp_hp"],
+            is_alive=bool(life["is_alive"]),
+            death_saves=(
+                None
+                if life["death_save_successes"] is None
+                else {
+                    "successes": life["death_save_successes"],
+                    "failures": life["death_save_failures"],
+                    "is_stable": bool(life["death_save_stable"]),
+                }
+            ),
+            last_damaged_by=life["last_damaged_by"],
+        )
         data["conditions"] = self.effects.actor_conditions(sid, actor_id, data["conditions"])
         data["concentration_effect_id"] = self.effects.concentration_reference(sid, actor_id)
         if (

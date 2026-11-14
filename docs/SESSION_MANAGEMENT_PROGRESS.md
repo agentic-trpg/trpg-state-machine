@@ -221,3 +221,12 @@ pending_choice 以及历史兼容测试复用现有真实公开路径。
 逐项能力、读取范围、存档兼容、实际计数及本批验证结果见
 [系统性重构验收](reviews/SCOPED_RUNTIME_VALIDATION_REFACTOR.md)。
 上文历史测试数字与旧 Schema/待办保持原批次语境，不作为本轮验证结果。
+# 2026-11-15 STORAGE-02 life-state candidate
+
+Schema47 candidate extracts `temp_hp`, `is_alive`, nullable bounded death saves,
+and nullable `last_damaged_by` into one keyed `mechanical_life` row per mechanical
+actor. Current HP/max HP/XP remain in `characters`. New databases, public attack
+application, injected life-write rollback, old fixed Snapshot, replay, and cold
+reopen passed focused tests in `tests/test_storage_life_state.py` (3 passed).
+The earlier Schema1–46 saves are development artifacts and are rejected before
+writable open. Full candidate suite and independent review remain pending.
