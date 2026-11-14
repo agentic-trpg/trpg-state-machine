@@ -64,7 +64,12 @@ class CombatHandler:
         }:
             raise StateMachineError("invalid_noncombat_foundation", "Expected the selected PC only")
         for actor in snapshot.character_states:
-            self.characters.initialize_rule_actor(row, actor, xp=initial["xp"][actor.entity_id])
+            self.characters.initialize_rule_actor(
+                row,
+                actor,
+                xp=initial["xp"][actor.entity_id],
+                schema_version=snapshot.snapshot_schema_version,
+            )
         self.characters.initialize_rule_components(row["session_id"], snapshot)
         self.runtime.set_mechanical_schema(row["session_id"], snapshot.snapshot_schema_version)
         self.runtime.select_rule_rng(row["session_id"], canonical_json(initial["rng_state"]))
@@ -119,7 +124,9 @@ class CombatHandler:
                 )
             if self.facts.instances.session_value(row["session_id"], "has_noncombat"):
                 continue
-            self.characters.initialize_rule_actor(row, actor, encounter=True)
+            self.characters.initialize_rule_actor(
+                row, actor, encounter=True, schema_version=snapshot.snapshot_schema_version
+            )
         if (
             not self.facts.instances.session_value(row["session_id"], "has_noncombat")
             and spatial is None

@@ -413,51 +413,8 @@ class WorldHandler:
             ).fetchone()
         ):
             raise StateMachineError("item_out_of_reach", "Item destination is occupied")
-        state = self.characters.binding_actor(sid, actor_id)
-        if state is None:
-            raise StateMachineError(
-                "unsupported_actor_state", "Carrier needs explicit mechanical facts"
-            )
-        components = self.characters.binding_components(sid, actor_id)
-        if any(e["target_id"] == actor_id for e in components["effect_states"]):
-            raise StateMachineError(
-                "unsupported_actor_state", "Active effects need unsupported adjudication"
-            )
         if type(operation) is DropItem:
-            if self.facts.contents(sid, operation.instance_id):
-                self.objects.containers.require_unbound(sid, actor_id, operation.instance_id)
-            casting = components["casting_state"]
-            if casting is not None and any(
-                material["inventory_instance_id"] == operation.instance_id
-                for actor in casting["actors"]
-                for material in actor["materials"]
-            ):
-                raise StateMachineError(
-                    "unsupported_actor_activity", "Item has a casting material binding"
-                )
-            slug = self.store.memory.json(item["item_json"])["item_slug"]
-            armor = state["worn_armor"]
-            asset = self.loader.get_item(slug) if self.loader else None
-            held = state.get("held_weapon_instance_id")
-            if (
-                (
-                    operation.instance_id == held
-                    if held is not None
-                    else state.get("weapon_in_hands") == slug
-                )
-                or state["other_hand_occupied"]
-                or (state["shield_equipped"] and slug == "shield")
-                or (
-                    armor is not None
-                    and asset is not None
-                    and asset.item_kind == "armor"
-                    and slug != "shield"
-                )
-            ):
-                raise StateMachineError(
-                    "equipped_item_unsupported",
-                    "Slug equipment cannot identify a safe instance to drop",
-                )
+            self.objects.containers.require_unbound(sid, actor_id, operation.instance_id, drop=True)
         return position, item
 
     def _operate_item_transfer(self, row, actor_id, operation, package):

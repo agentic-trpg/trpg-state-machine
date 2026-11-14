@@ -331,16 +331,22 @@ class ContainerService:
                             "container_capacity_exceeded", "Container capacity exceeded"
                         )
 
-    def require_unbound(self, sid, actor, iid, *, rows=None, affected=None):
-        """Check supported equipment, material, attunement and effect bindings on the
-        moving subtree.
+    def require_unbound(self, sid, actor, iid, *, rows=None, affected=None, drop=False):
+        """Protect the moving subtree's exact equipment and casting dependencies.
+
+        Current /19 equipment checks compare instance IDs. Older snapshots retain
+        conservative slug guards; the Drop flag preserves its previous broad armor
+        and disabled-effect policy without reading unrelated actor equipment.
         """
         h = self.h
         state = h.characters.binding_actor(sid, actor)
         if state is None:
             raise StateMachineError("unsupported_actor_state", "Explicit mechanical facts required")
         components = h.characters.binding_components(sid, actor)
-        if any(e["target_id"] == actor and not e["disabled"] for e in components["effect_states"]):
+        if any(
+            e["target_id"] == actor and (drop or not e["disabled"])
+            for e in components["effect_states"]
+        ):
             raise StateMachineError("unsupported_actor_state", "Active effect transfer unsupported")
         rows = self._rows(sid, (iid,)) if rows is None else rows
         affected = self.subtree(iid, rows) if affected is None else affected
@@ -353,30 +359,53 @@ class ContainerService:
             raise StateMachineError(
                 "unsupported_actor_activity", "Casting-bound item transfer unsupported"
             )
+        bound = {
+            state.get(field)
+            for field in (
+                "held_weapon_instance_id",
+                "worn_armor_instance_id",
+                "equipped_shield_instance_id",
+                "offhand_item_instance_id",
+            )
+        }
+        explicit_equipment = "worn_armor_instance_id" in state
         for oid in affected:
             obj = self.facts.object(sid, oid)
             if not obj["item_json"]:
                 continue
             slug = self.facts.require_item_unit(obj)["item_slug"]
             asset = h.loader.get_item(slug)
-            if asset and (asset.requires_attunement or asset.passive_effects):
+            if (
+                asset
+                and (asset.requires_attunement or asset.passive_effects)
+                and (not drop or len(affected) > 1)
+            ):
                 raise StateMachineError(
                     "unsupported_item_binding", "Item effect/attunement lifecycle is unsupported"
                 )
-            # Equipment fields are slug-based. Only already-owned instances can be
-            # bound to the actor's equipment; ground instances with the same slug cannot.
+            # Legacy equipment without an instance identity retains its conservative
+            # transfer policy. Explicit identities protect only the bound object.
             if self.facts.placement(sid, oid)["carrier_id"] != actor:
                 continue
             held = state.get("held_weapon_instance_id")
             if (
-                (oid == held if held is not None else state.get("weapon_in_hands") == slug)
-                or state["other_hand_occupied"]
-                or (state["shield_equipped"] and slug == "shield")
+                oid in bound
+                or (held is None and state.get("weapon_in_hands") == slug)
                 or (
-                    state["worn_armor"] is not None
-                    and asset is not None
-                    and asset.item_kind == "armor"
-                    and asset.armor_category == state["worn_armor"]
+                    not explicit_equipment
+                    and (
+                        state.get("other_hand_occupied")
+                        or (state.get("shield_equipped") and slug == "shield")
+                        or (
+                            state.get("worn_armor") is not None
+                            and asset is not None
+                            and asset.item_kind == "armor"
+                            and (
+                                (drop and slug != "shield")
+                                or asset.armor_category == state["worn_armor"]
+                            )
+                        )
+                    )
                 )
             ):
                 raise StateMachineError(

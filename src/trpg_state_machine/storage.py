@@ -149,7 +149,7 @@ class SqliteStore:
         boundary.
         """
         scripts = [Path(__file__).with_name("_schema.sql")] + [
-            Path(__file__).with_name(f"_migration_{v}.sql") for v in range(2, 43)
+            Path(__file__).with_name(f"_migration_{v}.sql") for v in range(2, 44)
         ]
         steps = [_migration_statements(path.read_text("utf-8")) for path in scripts]
         # Fresh databases apply the registered DDL under one opening transaction.
@@ -158,7 +158,7 @@ class SqliteStore:
             self._conn.execute("BEGIN IMMEDIATE")
             # Read AFTER acquiring the cross-process SQLite migration write lock.
             version = self._conn.execute("PRAGMA user_version").fetchone()[0]
-            if version not in range(43):
+            if version not in range(44):
                 raise StateMachineError(
                     "unsupported_storage_schema", f"Unsupported storage version: {version}"
                 )
@@ -178,7 +178,7 @@ class SqliteStore:
             validate_environment_versions(self._conn, required=version >= 36)
             if version >= 34:
                 reconcile_schema34(self._conn, version, steps[33])
-            for target in range(version + 1, 43):
+            for target in range(version + 1, 44):
                 for statement in steps[target - 1]:
                     self._conn.execute(statement)
                 if self._conn.execute("PRAGMA user_version").fetchone()[0] != target:

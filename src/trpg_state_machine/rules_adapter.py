@@ -306,7 +306,11 @@ class RulesAdapter:
         """
         self.records.require_noncombat_save(row)
         sid = row["session_id"]
-        if row["mechanical_schema_version"] not in ("engine-snapshot/17", "engine-snapshot/18"):
+        if row["mechanical_schema_version"] not in (
+            "engine-snapshot/17",
+            "engine-snapshot/18",
+            "engine-snapshot/19",
+        ):
             raise StateMachineError(
                 "unsupported_mechanical_version", "Complete noncombat state was not initialized"
             )
@@ -358,7 +362,11 @@ class RulesAdapter:
         no mechanical profile. A later rule request still requires a complete
         local snapshot; recovery must not create those missing profiles.
         """
-        if row["mechanical_schema_version"] not in ("engine-snapshot/17", "engine-snapshot/18"):
+        if row["mechanical_schema_version"] not in (
+            "engine-snapshot/17",
+            "engine-snapshot/18",
+            "engine-snapshot/19",
+        ):
             raise StateMachineError(
                 "unsupported_mechanical_version", "Old mechanical facts need migration"
             )
@@ -378,7 +386,11 @@ class RulesAdapter:
     def _combat_snapshot(self, row):
         """Build a complete fixed combat snapshot from current facts and combat records."""
         sid = row["session_id"]
-        if row["mechanical_schema_version"] not in ("engine-snapshot/17", "engine-snapshot/18"):
+        if row["mechanical_schema_version"] not in (
+            "engine-snapshot/17",
+            "engine-snapshot/18",
+            "engine-snapshot/19",
+        ):
             raise StateMachineError(
                 "unsupported_mechanical_version", "Old save lacks proven current component facts"
             )
@@ -527,7 +539,7 @@ class RulesAdapter:
             return "intent.capability"
         selected = (
             payload.weapon_instance_id
-            if snapshot.snapshot_schema_version == "engine-snapshot/18"
+            if snapshot.snapshot_schema_version in ("engine-snapshot/18", "engine-snapshot/19")
             else payload.weapon_id
         )
         if selected is None and payload.stat_block_action_id is None:
@@ -574,7 +586,9 @@ class RulesAdapter:
         row = row if row is not None else self._pinned_row(command.session_id, package)
         return RuleEvaluationRequest(
             schema_version=(
-                "engine-evaluation/25"
+                "engine-evaluation/26"
+                if snapshot.snapshot_schema_version == "engine-snapshot/19"
+                else "engine-evaluation/25"
                 if snapshot.snapshot_schema_version == "engine-snapshot/18"
                 else "engine-evaluation/24"
             ),
@@ -599,7 +613,9 @@ class RulesAdapter:
         try:
             request = ActionAvailabilityRequest(
                 schema_version=(
-                    "engine-availability/14"
+                    "engine-availability/15"
+                    if snapshot.snapshot_schema_version == "engine-snapshot/19"
+                    else "engine-availability/14"
                     if snapshot.snapshot_schema_version == "engine-snapshot/18"
                     else "engine-availability/13"
                 ),

@@ -45,7 +45,7 @@ def author_fixture(loader):
     root = Path(__file__).resolve().parents[1] / "tests/fixtures"
     package = yaml.safe_load((root / "lantern_station.yaml").read_text("utf-8"))
     initial = json.loads((root / "dnd_lantern_combat.json").read_text("utf-8"))["snapshot"]
-    initial["snapshot_schema_version"] = "engine-snapshot/18"
+    initial["snapshot_schema_version"] = "engine-snapshot/19"
     for actor in initial["character_states"]:
         actor.update(
             weapon_in_hands=None,
@@ -54,7 +54,9 @@ def author_fixture(loader):
             weapon_mastery_slugs=[],
             carried_item_slugs=[],
         )
-    initial["inventory_state"]["entries"][0]["item_slug"] = "rapier"
+    initial["inventory_state"]["entries"][0].update(
+        instance_id="object.held_rapier", item_slug="rapier"
+    )
     pc, npc = initial["character_states"]
     pc.update(
         carried_item_slugs=["rapier"],
@@ -72,7 +74,7 @@ def author_fixture(loader):
     initial["combat_state"].update(
         current_turn_index=1, turn_serial=2, monster_turn_start_done=[2, NPC]
     )
-    package["manifest"]["schema_version"] = "state-machine-foundation/2"
+    package["manifest"]["schema_version"] = "state-machine-foundation/4"
     for scene in package["scenes"]:
         scene.update(
             grid=deepcopy(initial["scene_state"]["grid"]), access_policy="public_interactions"
@@ -83,6 +85,15 @@ def author_fixture(loader):
             obj.update(movable=False, blocks_passage=False, initial_cell="2,2")
     for actor in package["actors"]:
         actor["initial_cell"] = "1,0" if actor["initial_scene_id"] == "scene.platform" else "1,1"
+    next(s for s in package["scenes"] if s["scene_id"] == "scene.platform")["objects"].append(
+        {
+            "object_id": "object.held_rapier",
+            "state": None,
+            "movable": False,
+            "blocks_passage": False,
+            "initial_cell": "0,0",
+        }
+    )
     package["passages"] = [
         {
             "passage_id": "passage.mechanical",
@@ -96,6 +107,34 @@ def author_fixture(loader):
     package["pc_templates"] = [package["pc_templates"][0]]
     package["pc_templates"][0]["initial_cell"] = "0,0"
     package["pc_templates"][0]["character"]["inventory"] = ["rapier"]
+    package["item_transfers"] = [
+        {
+            "instance_id": "object.held_rapier",
+            "item_slug": "rapier",
+            "initial_owner_id": package["pc_templates"][0]["pc_template_id"],
+            "quantity": 1,
+            "charges_remaining_per_unit": 0,
+            "policy": "ordinary_public",
+        }
+    ]
+    package["navigation"] = {
+        "regions": [
+            {
+                "region_id": "region.public",
+                "scene_ids": [s["scene_id"] for s in package["scenes"]],
+                "passage_ids": ["passage.mechanical"],
+            }
+        ],
+        "actor_grants": [
+            {"actor_id": a["actor_id"], "region_ids": ["region.public"]} for a in package["actors"]
+        ],
+        "pc_template_grants": [
+            {
+                "pc_template_id": package["pc_templates"][0]["pc_template_id"],
+                "region_ids": ["region.public"],
+            }
+        ],
+    }
     for actor in package["actors"]:
         actor["senses"] = {"visual": True, "auditory": True}
     noncombat = deepcopy(initial)
@@ -222,7 +261,7 @@ def main():
             "attack.pc",
             "combat.intent",
             CombatIntentPayload(
-                intent_type="attack", weapon_instance_id="inventory.lantern_blade", target_id=NPC
+                intent_type="attack", weapon_instance_id="object.held_rapier", target_id=NPC
             ),
         )
         send(

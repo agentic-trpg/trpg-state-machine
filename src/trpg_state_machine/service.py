@@ -96,7 +96,7 @@ class StateMachine(
         self._store = SqliteStore(database)
         self._sessions = SessionAccess(self._store)
         self._world_facts = WorldFacts(self._store)
-        self._characters = CharacterFacts(self._store, self._world_facts)
+        self._characters = CharacterFacts(self._store, self._world_facts, loader)
         self._combat_records = CombatRecords(self._store)
         self._npc_bootstrap = NPCBootstrap(self._store)
         self._activity_records = ActivityRecords(self._store)

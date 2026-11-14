@@ -58,10 +58,11 @@ class CharacterFacts:
         )
     )
 
-    def __init__(self, store, world):
+    def __init__(self, store, world, loader):
         """Bind character storage and its cooperating world facts interface."""
         self.store = store
         self.world = world
+        self.loader = loader
 
     @property
     def _conn(self):
@@ -241,8 +242,12 @@ class CharacterFacts:
             ("$." + field, canonical_json(value), sid, actor_id),
         )
 
-    def initialize_rule_actor(self, row, actor, *, xp=None, encounter=False):
-        """Initialize mechanical actor state consistently with existing character facts."""
+    def initialize_rule_actor(self, row, actor, *, xp=None, encounter=False, schema_version=None):
+        """Initialize actor facts; /19 stores equipment IDs and derives their mirrors.
+
+        Resolve the proposed bindings against materialized World items inside the
+        creation/encounter transaction before accepting the actor.
+        """
         self.store.require_write()
         sid = row["session_id"]
         core = self._conn.execute(
@@ -295,10 +300,37 @@ class CharacterFacts:
             del state["weapon_in_hands"]
         else:
             state.pop("held_weapon_instance_id", None)
+        if schema_version == "engine-snapshot/19":
+            for field in ("worn_armor", "shield_equipped", "other_hand_occupied"):
+                state.pop(field, None)
+            for field in (
+                "worn_armor_instance_id",
+                "equipped_shield_instance_id",
+                "offhand_item_instance_id",
+            ):
+                state.setdefault(field, None)
+        else:
+            for field in (
+                "worn_armor_instance_id",
+                "equipped_shield_instance_id",
+                "offhand_item_instance_id",
+            ):
+                if state.get(field) is None:
+                    state.pop(field, None)
         self._conn.execute(
             "INSERT INTO mechanical_actors VALUES (?,?,?)",
             (sid, actor.entity_id, canonical_json(state)),
         )
+        if schema_version == "engine-snapshot/19":
+            # Resolve against materialized World instances before accepting initial facts.
+            resolved = self._rule_actor(sid, actor.entity_id)
+            if any(
+                resolved[field] != getattr(actor, field)
+                for field in ("worn_armor", "shield_equipped", "other_hand_occupied")
+            ):
+                raise StateMachineError(
+                    "invalid_mechanical_state", "Equipment declaration differs from bound items"
+                )
 
     def initial_rule_actor(self, sid, approved):
         """Overlay existing core balances at the first mechanical initialization."""
@@ -415,7 +447,11 @@ class CharacterFacts:
         row = self._conn.execute(
             "SELECT * FROM mechanical_components WHERE session_id=?", (sid,)
         ).fetchone()
-        if row is None or row["schema_version"] not in ("engine-snapshot/17", "engine-snapshot/18"):
+        if row is None or row["schema_version"] not in (
+            "engine-snapshot/17",
+            "engine-snapshot/18",
+            "engine-snapshot/19",
+        ):
             raise StateMachineError(
                 "unsupported_mechanical_version", "Explicit component facts are missing"
             )
@@ -454,7 +490,11 @@ class CharacterFacts:
         row = self._conn.execute(
             "SELECT * FROM mechanical_components WHERE session_id=?", (sid,)
         ).fetchone()
-        if row is None or row["schema_version"] not in ("engine-snapshot/17", "engine-snapshot/18"):
+        if row is None or row["schema_version"] not in (
+            "engine-snapshot/17",
+            "engine-snapshot/18",
+            "engine-snapshot/19",
+        ):
             raise StateMachineError(
                 "unsupported_mechanical_version", "Explicit component facts are missing"
             )
@@ -630,7 +670,11 @@ class CharacterFacts:
 
     @scoped_read
     def _rule_actor(self, sid, actor_id, *, include_carried=True):
-        """Read a mechanical actor and combine its current core character facts."""
+        """Combine core facts and resolve /19 equipment IDs from current World items.
+
+        A binding read skips inventory projection. Complete snapshot reads verify
+        owner, accessibility and kind for only the bound instances.
+        """
         actor = self._conn.execute(
             "SELECT state_json FROM mechanical_actors WHERE session_id=? AND actor_id=?",
             (sid, actor_id),
@@ -646,6 +690,7 @@ class CharacterFacts:
                 "invalid_mechanical_state", "Legacy core resources/effects have no typed source"
             )
         data = parse(actor[0])
+        explicit_equipment = "worn_armor_instance_id" in data
         held = data.get("held_weapon_instance_id")
         if held is not None and include_carried:
             item = self.world.object(sid, held)
@@ -655,6 +700,58 @@ class CharacterFacts:
                     "invalid_mechanical_state", "Held weapon requires an accessible owned item"
                 )
             data["weapon_in_hands"] = entry["item_slug"]
+        if include_carried and explicit_equipment:
+            for field, expected_kind in (
+                ("worn_armor_instance_id", "armor"),
+                ("equipped_shield_instance_id", "shield"),
+                ("offhand_item_instance_id", "offhand"),
+            ):
+                identity = data.get(field)
+                if identity is None:
+                    continue
+                item = self.world.object(sid, identity)
+                entry = self.world.item_entry(item) if item is not None else None
+                if entry is None or entry["owner_id"] != actor_id or not entry["accessible"]:
+                    raise StateMachineError(
+                        "invalid_mechanical_state", "Equipment requires an accessible owned item"
+                    )
+                asset = self.loader.get_item(entry["item_slug"])
+                if expected_kind == "armor":
+                    if (
+                        asset is None
+                        or asset.item_kind != "armor"
+                        or asset.armor_category == "shield"
+                    ):
+                        raise StateMachineError(
+                            "invalid_mechanical_state", "Worn armor identity differs"
+                        )
+                    data["worn_armor"] = asset.armor_category
+                elif expected_kind == "shield":
+                    if (
+                        asset is None
+                        or asset.item_kind != "armor"
+                        or asset.armor_category != "shield"
+                    ):
+                        raise StateMachineError(
+                            "invalid_mechanical_state", "Shield identity differs"
+                        )
+                    data["shield_equipped"] = True
+                elif asset is None or (
+                    asset.item_kind == "armor" and asset.armor_category == "shield"
+                ):
+                    raise StateMachineError("invalid_mechanical_state", "Offhand item is a shield")
+            data["other_hand_occupied"] = bool(
+                data.get("equipped_shield_instance_id") or data.get("offhand_item_instance_id")
+            )
+            data.setdefault("worn_armor", None)
+            data.setdefault("shield_equipped", False)
+            for field in (
+                "worn_armor_instance_id",
+                "equipped_shield_instance_id",
+                "offhand_item_instance_id",
+            ):
+                if data[field] is None:
+                    data.pop(field)
         data.update(
             hp_current=core["current_hp"],
             hp_max=core["max_hp"],
