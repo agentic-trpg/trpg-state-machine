@@ -53,9 +53,8 @@ def sync_npc_schedules(runtime, sid, command_id, package):
         state = json.loads(mechanical[0]) if mechanical else None
         available = state is None or (
             state["is_alive"]
-            and not runtime._characters.effects.actor_conditions(
-                sid, npc["npc_id"], state["conditions"]
-            )
+            and not state["conditions"]
+            and not runtime._characters.effects.has_linked_conditions(sid, npc["npc_id"])
         )
         changed = False
 

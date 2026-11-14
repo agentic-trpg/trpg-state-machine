@@ -250,12 +250,8 @@ class EventCapture:
                 None
                 if data is None
                 else {
-                    "conditions": [
-                        c["condition"]
-                        for c in self.characters.effects.actor_conditions(
-                            sid, actor["actor_id"], data["conditions"]
-                        )
-                    ],
+                    "conditions": [c["condition"] for c in data["conditions"]]
+                    + self.characters.effects.linked_condition_names(sid, actor["actor_id"]),
                     "senses": data["senses"],
                     "traits": data["trait_mechanics"],
                     "is_alive": data["is_alive"],

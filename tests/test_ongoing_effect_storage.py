@@ -1,9 +1,11 @@
 """Keyed effect ownership through public snapshots and shared Store scopes."""
 
+import sqlite3
+
 import pytest
 from dnd_support import create, initialize, loader, make_package
 
-from trpg_state_machine import StateMachine
+from trpg_state_machine import StateMachine, StateMachineError
 
 
 def _effect(target, effect_id, *, status="restrained"):
@@ -89,23 +91,25 @@ def test_multi_target_effect_ids_survive_member_removal_reopen_and_group_removal
                     }
                 ],
             )
-            owner.add_concentration(sid, "group.one", caster, "effect.two", 7)
-            owner.add_effect(
+            owner.create_concentration(
                 sid,
-                _effect(caster, "effect.one"),
-                ordinal=0,
-                concentration_id="group.one",
-                chain_ordinal=0,
-                conditions=["restrained"],
-                lifecycle=_clock(caster, "effect.one"),
-            )
-            owner.add_effect(
-                sid,
-                _effect(target, "effect.two"),
-                ordinal=1,
-                concentration_id="group.one",
-                chain_ordinal=1,
-                conditions=["restrained"],
+                "group.one",
+                caster,
+                "effect.two",
+                7,
+                [
+                    {
+                        "effect": _effect(caster, "effect.one"),
+                        "ordinal": 0,
+                        "conditions": ["restrained"],
+                        "lifecycle": _clock(caster, "effect.one"),
+                    },
+                    {
+                        "effect": _effect(target, "effect.two"),
+                        "ordinal": 1,
+                        "conditions": ["restrained"],
+                    },
+                ],
             )
             owner.add_effect(
                 sid,
@@ -200,6 +204,19 @@ def test_effect_savepoint_rollback_and_fixed_target_read(tmp_path, package_data,
         owner = sm._characters.effects
         with sm._store.transaction(write=True):
             owner.add_effect(sid, _effect(actors[0], "keep"), ordinal=0)
+            assert owner.concentration_reference(sid, actors[0]) is None
+            with pytest.raises(StateMachineError):
+                owner.create_concentration(sid, "empty", actors[0], "keep", 1, [])
+            with pytest.raises(sqlite3.IntegrityError):
+                owner.create_concentration(
+                    sid,
+                    "invalid",
+                    actors[0],
+                    "keep",
+                    1,
+                    [{"effect": _effect(actors[0], "duplicate"), "ordinal": 0}],
+                )
+            assert owner.concentration_reference(sid, actors[0]) is None
             with pytest.raises(RuntimeError), sm._store.savepoint():
                 owner.add_effect(sid, _effect(actors[1], "rolled-back"), ordinal=1)
                 raise RuntimeError("rollback")

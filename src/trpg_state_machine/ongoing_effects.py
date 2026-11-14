@@ -32,13 +32,29 @@ class OngoingEffects:
         for ordinal, effect in enumerate(effects):
             self.add_effect(sid, effect, ordinal=ordinal)
 
-    def add_concentration(self, sid, concentration_id, caster_id, effect_id, rounds_remaining):
-        """Persist one concentration instance and its stable caster reference."""
+    def create_concentration(
+        self, sid, concentration_id, caster_id, effect_id, rounds_remaining, members
+    ):
+        """Create a nonempty group and every identified member in one savepoint."""
         self.store.require_write()
-        self._conn.execute(
-            "INSERT INTO effect_concentrations VALUES (?,?,?,?,?)",
-            (sid, concentration_id, caster_id, effect_id, rounds_remaining),
-        )
+        members = tuple(members)
+        if not members:
+            raise StateMachineError("invalid_effect", "Concentration needs a target effect")
+        with self.store.savepoint():
+            self._conn.execute(
+                "INSERT INTO effect_concentrations VALUES (?,?,?,?,?)",
+                (sid, concentration_id, caster_id, effect_id, rounds_remaining),
+            )
+            for chain_ordinal, member in enumerate(members):
+                self.add_effect(
+                    sid,
+                    member["effect"],
+                    ordinal=member["ordinal"],
+                    concentration_id=concentration_id,
+                    chain_ordinal=chain_ordinal,
+                    conditions=member.get("conditions"),
+                    lifecycle=member.get("lifecycle"),
+                )
 
     def add_effect(
         self,
@@ -188,6 +204,46 @@ class OngoingEffects:
                 current, row["effect_id"], self.store.memory.json(row["conditions_json"])
             )
         return [condition.model_dump(mode="json") for condition in current]
+
+    def linked_condition_names(self, sid, target_id):
+        """Read effect-linked condition names without parsing independent actor records."""
+        names, seen = [], set()
+        rows = self._conn.execute(
+            "SELECT effect_id,conditions_json,ordinal FROM ongoing_effects "
+            "WHERE session_id=? AND target_id=? ORDER BY ordinal",
+            (sid, target_id),
+        )
+        for row in rows:
+            if row["conditions_json"] is None:
+                continue
+            for name in self.store.memory.json(row["conditions_json"]):
+                key = (name, row["effect_id"])
+                if key not in seen:
+                    names.append(name)
+                    seen.add(key)
+        return names
+
+    def has_linked_conditions(self, sid, target_id):
+        """Check one target's linked statuses for conservative predicate callers."""
+        return any(
+            row["conditions_json"] is not None
+            and bool(self.store.memory.json(row["conditions_json"]))
+            for row in self._conn.execute(
+                "SELECT conditions_json FROM ongoing_effects WHERE session_id=? AND target_id=?",
+                (sid, target_id),
+            )
+        )
+
+    def has_concentration(self, sid, caster_id):
+        """Check the caster's keyed group without constructing its RE wire token."""
+        return (
+            self._conn.execute(
+                "SELECT concentration_id FROM effect_concentrations "
+                "WHERE session_id=? AND caster_id=?",
+                (sid, caster_id),
+            ).fetchone()
+            is not None
+        )
 
     @scoped_read
     def combat_fields(self, sid, target_ids):

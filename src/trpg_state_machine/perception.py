@@ -724,9 +724,8 @@ class PerceptionRuntime:
                 (sid, scene),
             ).fetchall()
             if any(
-                self._characters.effects.actor_conditions(
-                    sid, r["actor_id"], json.loads(r["state_json"])["conditions"]
-                )
+                json.loads(r["state_json"])["conditions"]
+                or self._characters.effects.has_linked_conditions(sid, r["actor_id"])
                 for r in states
             ):
                 return False

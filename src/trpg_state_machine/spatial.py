@@ -192,8 +192,9 @@ class WorldHandler:
             or state
             and (
                 not state["is_alive"]
-                or self.characters.effects.actor_conditions(sid, actor_id, state["conditions"])
-                or self.characters.effects.concentration_reference(sid, actor_id)
+                or state["conditions"]
+                or self.characters.effects.has_linked_conditions(sid, actor_id)
+                or self.characters.effects.has_concentration(sid, actor_id)
             )
         ):
             raise StateMachineError(
@@ -239,7 +240,10 @@ class WorldHandler:
             "SELECT state_json FROM mechanical_actors WHERE session_id=? AND actor_id=?",
             (sid, actor_id),
         ).fetchone()
-        if mechanical and self.store.memory.json(mechanical[0])["conditions"]:
+        if mechanical and (
+            self.store.memory.json(mechanical[0])["conditions"]
+            or self.characters.effects.has_linked_conditions(sid, actor_id)
+        ):
             raise StateMachineError(
                 "unsupported_target_visibility",
                 "Condition-aware target authorization is unavailable",
