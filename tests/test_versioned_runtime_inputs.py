@@ -86,18 +86,11 @@ def expanded(sm, sid, n, package):
             "WHERE session_id=? AND scene_id=?",
             (n + 10, json.dumps([f"{i + 5},2" for i in range(n)]), sid, A),
         )
-        unit = json.dumps(
-            {
-                "item_slug": "amulet",
-                "quantity": 1,
-                "charges_remaining_per_unit": 0,
-                "accessible": True,
-            }
-        )
         for i in range(n):
             sm._conn.execute(
-                "INSERT INTO objects(session_id,object_id,carrier_id,item_json) VALUES (?,?,?,?)",
-                (sid, f"unrelated.stock_{i}", "npc.caretaker", unit),
+                "INSERT INTO objects(session_id,object_id,carrier_id,portable_marker,"
+                "item_slug,item_charges,item_accessible) VALUES (?,?,?,'{}',?,0,1)",
+                (sid, f"unrelated.stock_{i}", "npc.caretaker", "amulet"),
             )
         sm.scene_lifecycle._validate_scene(sid, A, package)
 
@@ -187,8 +180,7 @@ def test_models_follow_candidate_stages_rollback_reload_and_complete_schema(tmp_
 
         def set_charges(value):
             sm._conn.execute(
-                "UPDATE objects SET item_json=json_set(item_json,'$.charges_remaining_per_unit',?) "
-                "WHERE session_id=? AND object_id=?",
+                "UPDATE objects SET item_charges=? WHERE session_id=? AND object_id=?",
                 (value, sid, legacy.instance_id),
             )
 
@@ -366,8 +358,7 @@ def test_inventory_model_reflects_candidate_object_changes(tmp_path, context, ch
         with pytest.raises(RuntimeError), sm._transaction(write=True):
             if change == "accessible":
                 sm._conn.execute(
-                    "UPDATE objects SET item_json=json_set(item_json,'$.accessible',json('false')) "
-                    "WHERE session_id=? AND object_id=?",
+                    "UPDATE objects SET item_accessible=0 WHERE session_id=? AND object_id=?",
                     (sid, CRED),
                 )
             elif change == "location":

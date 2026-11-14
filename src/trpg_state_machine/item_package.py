@@ -55,7 +55,10 @@ def validate_items(raw, scenes, foundation, definitions, *, world=False):
             or obj.blocks_passage
         ):
             _fail("unsupported_mechanism", path, "Portable objects need ordinary public scope")
-        if item["policy"] != "ordinary_public" or type(item["quantity"]) is not int:
+        if (
+            item["policy"] not in ("ordinary_public", "charge_exhaust_retain")
+            or type(item["quantity"]) is not int
+        ):
             _fail("unsupported_mechanism", path, "Only reviewed ordinary portable units")
         if item["quantity"] != 1:
             _fail("unsupported_mechanism", path, "New portable instances have quantity one")

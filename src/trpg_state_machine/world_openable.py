@@ -118,7 +118,7 @@ class OpenableService:
             item is None
             or self.h.facts.placement(sid, operation.credential_instance_id)["carrier_id"]
             != actor_id
-            or item["item_json"] is None
+            or item["item_slug"] is None
             or not self.facts.instances.is_portable(sid, operation.credential_instance_id)
             or not self.h.facts.item_accessible(sid, operation.credential_instance_id)
             or not self.h.facts.accepts_credential(

@@ -64,6 +64,13 @@ class TakeItem:
 
 
 @dataclass(frozen=True, slots=True)
+class SpendItemCharge:
+    """Trusted fixed-one charge spend on an exact retained portable item instance."""
+
+    instance_id: str
+
+
+@dataclass(frozen=True, slots=True)
 class RepositionObject:
     """Request privileged object placement or facing adjustment."""
 
@@ -169,6 +176,7 @@ WORLD_CAPABILITY_COMMANDS = {
     "world.reposition_object": RepositionObject,
     "world.put_item": PutItem,
     "world.take_item": TakeItem,
+    "world.spend_item_charge": SpendItemCharge,
     "world.lock_object": LockObject,
     "world.unlock_object": UnlockObject,
     "world.bar_object": BarObject,
@@ -182,6 +190,7 @@ WORLD_CAPABILITY_OPERATIONS = (
     UnlockObject,
     PutItem,
     TakeItem,
+    SpendItemCharge,
     RepositionObject,
     SetLightEnabled,
     SwitchLightMode,

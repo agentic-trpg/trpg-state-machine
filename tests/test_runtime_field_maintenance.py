@@ -303,12 +303,9 @@ def change_weight(sm, sid, oid, weight):
 
 
 def test_weight_mutations_use_candidate_version_and_rollback(tmp_path, context):
-    import json
-
     from test_lockable_passages import acquire
 
     from trpg_state_machine import StateMachine
-    from trpg_state_machine.package import canonical_json
 
     sm, sid, package, db = setup(tmp_path, context, container_data())
     with sm:
@@ -325,29 +322,15 @@ def test_weight_mutations_use_candidate_version_and_rollback(tmp_path, context):
         assert svc.contents_weight(sid, BOX) == 3
         assert svc.current_weight(sid, BOX) == 5
         with sm._transaction(write=True):
-            # The boundary observes quantity/own mass even though public partial
-            # stack transfer remains unsupported. Restore the unit before commit.
-            item = sm._world_facts.object(sid, CRED)
-            data = json.loads(item["item_json"])
-            data["quantity"] = 2
-            sm._conn.execute(
-                "UPDATE objects SET item_json=? WHERE session_id=? AND object_id=?",
-                (canonical_json(data), sid, CRED),
-            )
-            assert svc.own_weight(sid, CRED) == 2
-            assert svc.contents_weight(sid, BOX) == 4
+            # Each portable object is one unit; changing its own mass must
+            # invalidate the cached total for every containing ancestor.
             change_weight(sm, sid, CRED, 3)
-            assert svc.contents_weight(sid, BOX) == 8
+            assert svc.contents_weight(sid, BOX) == 5
             # A computed candidate value cannot survive rollback with a new stamp.
             with pytest.raises(ValueError), sm._store.savepoint():
                 change_weight(sm, sid, CRED, None)
                 assert svc.contents_weight(sid, BOX) is None
                 raise ValueError("savepoint")
-            assert svc.contents_weight(sid, BOX) == 8
-            sm._conn.execute(
-                "UPDATE objects SET item_json=? WHERE session_id=? AND object_id=?",
-                (item["item_json"], sid, CRED),
-            )
             assert svc.contents_weight(sid, BOX) == 5
             sm.scene_lifecycle._validate_scene(sid, A, package)
         with pytest.raises(ValueError), sm._transaction(write=True):

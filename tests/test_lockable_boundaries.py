@@ -1,6 +1,6 @@
 """GC4 admission, static knowledge, automatic effects and race regressions."""
 
-import json
+import sqlite3
 from concurrent.futures import ThreadPoolExecutor
 from copy import deepcopy
 from dataclasses import asdict, replace
@@ -392,9 +392,7 @@ def test_concurrent_lock_and_open_with_occ_then_current_state_refusal(tmp_path, 
         assert len(after["command_receipts"][1]) == len(before["command_receipts"][1]) + 3
 
 
-@pytest.mark.parametrize(
-    "fault", ["missing_lock", "open_locked", "inventory", "charges", "quantity"]
-)
+@pytest.mark.parametrize("fault", ["missing_lock", "open_locked", "inventory"])
 def test_corrupt_current_facts_fail_closed_without_repair(tmp_path, context, fault):
     sm, sid, p, db = setup(tmp_path, context)
     with sm:
@@ -417,20 +415,8 @@ def test_corrupt_current_facts_fail_closed_without_repair(tmp_path, context, fau
             )
         elif fault == "inventory":
             sm._conn.execute(
-                "UPDATE objects SET item_json='{}' WHERE session_id=? AND object_id=?", (sid, CRED)
-            )
-        else:
-            unit = json.loads(
-                sm._conn.execute(
-                    "SELECT item_json FROM objects WHERE session_id=? AND object_id=?", (sid, CRED)
-                ).fetchone()[0]
-            )
-            unit["quantity" if fault == "quantity" else "charges_remaining_per_unit"] = (
-                2 if fault == "quantity" else -1
-            )
-            sm._conn.execute(
-                "UPDATE objects SET item_json=? WHERE session_id=? AND object_id=?",
-                (json.dumps(unit), sid, CRED),
+                "UPDATE objects SET item_slug='INVALID' WHERE session_id=? AND object_id=?",
+                (sid, CRED),
             )
         for i, cmd in enumerate(commands):
             if fault not in ("missing_lock", "open_locked") and i:
@@ -439,6 +425,22 @@ def test_corrupt_current_facts_fail_closed_without_repair(tmp_path, context, fau
             result = sm.submit_command(cmd, p, context=context)
             assert result.status == "rejected"
             unchanged_except_receipt(before, stored_rows(db))
+
+
+@pytest.mark.parametrize(
+    "column,value", [("portable_marker", '{"quantity":2}'), ("item_charges", -1)]
+)
+def test_invalid_item_unit_facts_are_rejected_by_schema(tmp_path, context, column, value):
+    sm, sid, package, db = setup(tmp_path, context)
+    with sm:
+        acquire(sm, sid, package, context)
+        before = stored_rows(db)
+        with pytest.raises(sqlite3.IntegrityError):
+            sm._conn.execute(
+                f"UPDATE objects SET {column}=? WHERE session_id=? AND object_id=?",
+                (value, sid, CRED),
+            )
+        assert stored_rows(db) == before
 
 
 @pytest.mark.parametrize(

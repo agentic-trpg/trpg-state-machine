@@ -168,11 +168,11 @@ class ContainerService:
         encoded = self.facts.instances.get(sid, "object", oid)["definition"]
         definition = self.h.store.memory.json(encoded)
         row = self.h._conn.execute(
-            "SELECT item_json FROM objects WHERE session_id=? AND object_id=?", (sid, oid)
+            "SELECT item_slug FROM objects WHERE session_id=? AND object_id=?", (sid, oid)
         ).fetchone()
         if row is None:
             raise StateMachineError("invalid_target", "Object does not exist")
-        data = self.h.store.memory.json(row["item_json"]) if row["item_json"] else {}
+        data = {"quantity": 1} if row["item_slug"] else {}
         weight = definition["fields"]["weight_lb"] if definition else None
         return None if weight is None else weight * data.get("quantity", 1)
 
@@ -230,7 +230,7 @@ class ContainerService:
         children = state.contents(oid)
         if children and (d is None or d.capability("container") is None):
             raise StateMachineError("unsupported_object_capability", "Parent is not a container")
-        data = self.h.store.memory.json(state[oid]["item_json"]) if state[oid]["item_json"] else {}
+        data = {"quantity": 1} if state[oid]["item_slug"] else {}
         total = None if d is None or d.weight_lb is None else d.weight_lb * data.get("quantity", 1)
         for child in children:
             weight = self._weight(child["object_id"], state, path | {oid})
@@ -311,7 +311,7 @@ class ContainerService:
                         "container_rejects_item", "Content or opening policy rejects item"
                     )
                 weights.append(self.total_weight(item["object_id"], rows, package))
-                quantity = self.h.store.memory.json(item["item_json"])["quantity"]
+                quantity = self.facts.require_item_unit(item)["quantity"]
                 volumes.append(None if d.volume_cu_ft is None else d.volume_cu_ft * quantity)
             for limit, values in (
                 (c.capacity_weight_lb, weights),
@@ -366,7 +366,7 @@ class ContainerService:
         explicit_equipment = "worn_armor_instance_id" in state
         for oid in affected:
             obj = self.facts.object(sid, oid)
-            if not obj["item_json"]:
+            if not obj["item_slug"]:
                 continue
             slug = self.facts.require_item_unit(obj)["item_slug"]
             asset = h.loader.get_item(slug)

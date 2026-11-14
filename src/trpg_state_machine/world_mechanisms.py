@@ -417,7 +417,7 @@ class MechanismService:
         if method.required_tool is not None:
             obj = self.h.facts.object(sid, op.tool_instance_id)
             location = self.h.facts.placement(sid, op.tool_instance_id) if obj else None
-            data = json.loads(obj["item_json"]) if obj and obj["item_json"] else {}
+            data = self.h.facts.require_item_unit(obj) if obj and obj["item_slug"] else {}
             if (
                 not location
                 or location["carrier_id"] != actor

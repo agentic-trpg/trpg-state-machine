@@ -57,6 +57,7 @@ from .world_commands import (
     RepositionObject,
     ServiceMechanism,
     SetLightEnabled,
+    SpendItemCharge,
     SwitchLightMode,
     TakeItem,
     UnbarObject,
@@ -127,6 +128,7 @@ class TypedCommand:
         | RepositionObject
         | PutItem
         | TakeItem
+        | SpendItemCharge
         | LockObject
         | UnlockObject
         | BarObject

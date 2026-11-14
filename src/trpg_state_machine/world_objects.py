@@ -15,6 +15,7 @@ from .world_commands import (
     RepositionObject,
     ServiceMechanism,
     SetLightEnabled,
+    SpendItemCharge,
     SwitchLightMode,
     TakeItem,
     UnbarObject,
@@ -60,6 +61,8 @@ class WorldObjectService:
         if type(operation) in (PutItem, TakeItem):
             self.containers.validate(row, actor_id, operation, package)
             return
+        if type(operation) is SpendItemCharge:
+            return self._charge_plan(row, actor_id, operation, package)
         if type(operation) in (LockObject, UnlockObject):
             return self.openable.validate_lock(row, actor_id, operation, package)
         return self.openable.validate_bar(row, actor_id, operation, package)
@@ -78,6 +81,9 @@ class WorldObjectService:
             h._spatial_reader(sid, actor_id, package, context)
             row = h._conn.execute("SELECT * FROM sessions WHERE session_id=?", (sid,)).fetchone()
             try:
+                if type(operation) is SpendItemCharge:
+                    h.sessions._authorize_command(row, actor_id, operation, context)
+                    h._world_operation_capability(row, operation)
                 if type(operation) is RepositionObject and not getattr(
                     context, "can_place_world_objects", False
                 ):
@@ -106,9 +112,57 @@ class WorldObjectService:
             return self.spatial.operate(row, actor_id, operation, package)
         if type(operation) in (PutItem, TakeItem):
             return self.containers.operate(row, actor_id, operation, package)
+        if type(operation) is SpendItemCharge:
+            item = self._charge_plan(row, actor_id, operation, package)
+            sid = row["session_id"]
+            self.facts.spend_item_charge(sid, item)
+            return [
+                self.handler._capture_event(
+                    sid,
+                    package,
+                    "item.charge_spent",
+                    {"actor_id": actor_id, "instance_id": operation.instance_id},
+                    phase="world.after_item_charge_spent",
+                    source_actor_id=actor_id,
+                )
+            ]
         if type(operation) in (LockObject, UnlockObject):
             return self.openable.operate_lock(row, actor_id, operation, package)
         return self.openable.operate_bar(row, actor_id, operation, package)
+
+    def _charge_plan(self, row, actor_id, operation, package):
+        """Check exact ownership, access, portable policy, durability and balance."""
+        sid, iid = row["session_id"], operation.instance_id
+        item = self.facts.object(sid, iid)
+        if item is None or item["item_slug"] is None:
+            raise StateMachineError("invalid_target", "No usable owned item")
+        if (
+            self.facts.placement(sid, iid)["carrier_id"] != actor_id
+            or not self.facts.instances.is_portable(sid, iid)
+            or self.facts.instances.get(sid, "object", iid)["portable_policy"]
+            != "charge_exhaust_retain"
+            or not self.facts.require_item_unit(item)["accessible"]
+        ):
+            raise StateMachineError("invalid_target", "No usable owned item")
+        self.containers.reachable(sid, actor_id, iid, package)
+        if not self.facts.item_accessible(sid, iid):
+            raise StateMachineError("invalid_target", "No usable owned item")
+        asset = self.handler.loader.get_item(item["item_slug"])
+        uses = getattr(asset, "uses", None)
+        if (
+            asset is None
+            or uses is None
+            or uses.auto_destroy
+            or getattr(asset, "requires_attunement", False)
+            or getattr(asset, "passive_effects", ())
+            or getattr(asset, "activities", ())
+        ):
+            raise StateMachineError(
+                "unsupported_item_policy", "Retained charge policy is unavailable"
+            )
+        if item["item_charges"] < 1:
+            raise StateMachineError("item_charges_exhausted", "No item charges remain")
+        return item
 
     def _visible(self, sid, actor_id, oid, package):
         """Check actual object placement and visible/touchable eligibility."""
@@ -117,7 +171,7 @@ class WorldObjectService:
         obj = self.facts.object(sid, oid)
         if obj is None:
             raise StateMachineError("invalid_target", "No authorized local object")
-        if obj["item_json"] is not None and not self.facts.instances.is_portable(sid, oid):
+        if obj["item_slug"] is not None and not self.facts.instances.is_portable(sid, oid):
             raise StateMachineError("invalid_target", "No authorized local object")
         if obj["container_id"] is not None:
             try:
@@ -191,7 +245,7 @@ class WorldObjectService:
         )
         contents_weight = self.containers.contents_weight(sid, oid) if contents_visible else None
         return {
-            "contents": tuple(c["object_id"] for c in self.facts.contents(sid, oid))
+            "contents": tuple(c.object_id for c in self.facts.active_contents(sid, oid))
             if contents_visible
             else None,
             "contents_weight_lb": contents_weight

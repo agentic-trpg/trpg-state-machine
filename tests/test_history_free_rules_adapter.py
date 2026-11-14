@@ -82,7 +82,7 @@ def test_submit_occ_and_availability_do_not_select_audit_history(tmp_path, packa
         )
 
 
-@pytest.mark.parametrize("fault", ["missing", "unknown_owner", "unknown_field", "core_resource"])
+@pytest.mark.parametrize("fault", ["missing", "unknown_owner", "core_resource"])
 def test_unknown_component_facts_never_fall_back_to_package(tmp_path, package_data, context, fault):
     sm, sid, package, _, db = setup(tmp_path, package_data, context)
     with sm:
@@ -95,17 +95,10 @@ def test_unknown_component_facts_never_fall_back_to_package(tmp_path, package_da
                 (sid, command.actor_id, "unknown", "synthetic", 1, 1, 0, "{}"),
             )
         else:
-            if fault == "unknown_owner":
-                sm._conn.execute(
-                    "DELETE FROM mechanical_actors WHERE session_id=? AND actor_id=?",
-                    (sid, command.actor_id),
-                )
-            else:
-                sm._conn.execute(
-                    "UPDATE objects SET item_json=json_set(item_json,'$.unknown_field',?) "
-                    "WHERE session_id=? AND carrier_id=?",
-                    ("invalid", sid, command.actor_id),
-                )
+            sm._conn.execute(
+                "DELETE FROM mechanical_actors WHERE session_id=? AND actor_id=?",
+                (sid, command.actor_id),
+            )
         before = stored_state(db)
         calls = []
         real = sm._rules._evaluate_dnd
@@ -138,9 +131,7 @@ def test_component_dependency_change_conflicts_without_committing_real_result(
             assert result.status == "accepted"
             with sqlite3.connect(db) as other:
                 other.execute(
-                    "UPDATE objects SET item_json="
-                    "json_set(item_json,'$.charges_remaining_per_unit',2) "
-                    "WHERE session_id=? AND carrier_id=?",
+                    "UPDATE objects SET item_charges=2 WHERE session_id=? AND carrier_id=?",
                     (sid, command.actor_id),
                 )
             return result

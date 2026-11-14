@@ -17,7 +17,7 @@ from dnd5e_engine.types.conditions import ActiveCondition
 from pydantic import TypeAdapter
 
 from .errors import StateMachineError
-from .item_units import core_item_id, valid_item_unit
+from .item_units import core_item_id, item_unit_from_row, valid_item_unit
 from .package import canonical_json
 from .runtime_instances import instance_read
 from .scoped_reads import scoped_read
@@ -210,9 +210,7 @@ class CharacterFacts:
                 "SELECT * FROM objects WHERE session_id=? AND carrier_id=? AND object_id LIKE ?",
                 (sid, owner, prefix + "%"),
             ).fetchall()
-            if row["object_id"].startswith(prefix)
-            and row["item_json"] is not None
-            and self.store.memory.json(row["item_json"])["item_slug"] == slug
+            if row["object_id"].startswith(prefix) and row["item_slug"] == slug
         ]
         if not candidates:
             return
@@ -225,7 +223,7 @@ class CharacterFacts:
             (sid, old["object_id"]),
         ).fetchone()
         if (
-            self.store.memory.json(old["item_json"])
+            item_unit_from_row(old)
             != {
                 "item_slug": slug,
                 "quantity": 1,
@@ -1186,7 +1184,7 @@ class CharacterFacts:
     def prepare_inventory_change(self, sid, roots):
         """Validate the old moving/accessibility subtree and affected owner closure."""
         rows = self.world.descendant_objects(sid, roots)
-        portable = [r for r in rows if r["item_json"] is not None]
+        portable = [r for r in rows if r["item_slug"] is not None]
         if not portable:
             return None
         identities = {r["object_id"] for r in portable}
@@ -1232,7 +1230,9 @@ class CharacterFacts:
         transfer.
         """
         self.store.require_write()
-        if before["object_id"] != after["object_id"] or before["item_json"] != after["item_json"]:
+        if before["object_id"] != after["object_id"] or item_unit_from_row(
+            before
+        ) != item_unit_from_row(after):
             raise StateMachineError("invalid_mechanical_state", "Invalid instance transition")
         if prepared is None:
             # Compatibility for trusted direct participants: reconstruct the old
@@ -1914,7 +1914,7 @@ class WorldFacts:
     def require_ordinary_object(self, sid, object_id):
         """Reject an object that does not qualify for ordinary object operations."""
         row = self._conn.execute(
-            "SELECT item_json FROM objects WHERE session_id=? AND object_id=?", (sid, object_id)
+            "SELECT item_slug FROM objects WHERE session_id=? AND object_id=?", (sid, object_id)
         ).fetchone()
         if row and row[0] is not None:
             raise StateMachineError(
@@ -1930,16 +1930,23 @@ class WorldFacts:
         if old is not None:
             if (
                 allow_existing
-                and old["item_json"] is not None
-                and self.store.memory.json(old["item_json"]) == unit
+                and item_unit_from_row(old) == unit
                 and self.placement(sid, iid)["carrier_id"] == owner
             ):
                 return
             raise StateMachineError("invalid_item_foundation", "Initial item identity conflicts")
         self._conn.execute(
             "INSERT INTO objects(session_id,object_id,scene_id,state,cell,"
-            "carrier_id,item_json) VALUES (?,?,NULL,NULL,NULL,?,?)",
-            (sid, iid, owner, canonical_json(unit)),
+            "carrier_id,portable_marker,item_slug,item_charges,item_accessible) "
+            "VALUES (?,?,NULL,NULL,NULL,?,'{}',?,?,?)",
+            (
+                sid,
+                iid,
+                owner,
+                unit["item_slug"],
+                unit["charges_remaining_per_unit"],
+                int(unit["accessible"]),
+            ),
         )
         self.instances.put(
             sid,
@@ -1996,17 +2003,21 @@ class WorldFacts:
                 raise StateMachineError(
                     "invalid_item_foundation", "Portable instance must exist exactly once"
                 )
-            if old["item_json"] is not None:
-                if self.store.memory.json(old["item_json"]) != data or old["carrier_id"] != owner:
+            if old["item_slug"] is not None:
+                if item_unit_from_row(old) != data or old["carrier_id"] != owner:
                     raise StateMachineError(
                         "invalid_item_foundation", "Portable instance differs from item facts"
                     )
                 continue
             self._conn.execute(
-                "UPDATE objects SET item_json=?,carrier_id=?,scene_id=?,cell=? "
+                "UPDATE objects SET portable_marker='{}',item_slug=?,"
+                "item_charges=?,item_accessible=?,"
+                "carrier_id=?,scene_id=?,cell=? "
                 "WHERE session_id=? AND object_id=?",
                 (
-                    canonical_json(data),
+                    data["item_slug"],
+                    data["charges_remaining_per_unit"],
+                    int(data["accessible"]),
                     owner,
                     None if owner else old["scene_id"],
                     None if owner else old["cell"],
@@ -2058,11 +2069,30 @@ class WorldFacts:
 
     @instance_read("object", "container", "contents")
     def contents(self, sid, oid):
-        """Read the direct contents of the parent object."""
+        """Read only immutable direct-member identities for row-based consumers."""
         return self._conn.execute(
-            "SELECT * FROM objects WHERE session_id=? AND container_id=? ORDER BY object_id",
+            "SELECT object_id FROM objects WHERE session_id=? AND container_id=? "
+            "ORDER BY object_id",
             (sid, oid),
         ).fetchall()
+
+    @instance_read("object", "container", "active_contents", maintained="container_members")
+    def active_contents(self, sid, oid):
+        """Resolve direct portable members to stable current identities in a read scope.
+
+        The enclosing contents field owns the relationship. Handles share its
+        item identity without copying or retaining a second container membership.
+        """
+        from .session_memory import ActiveContents
+
+        return ActiveContents(
+            self.store.memory.active_item(row)
+            for row in self._conn.execute(
+                "SELECT * FROM objects WHERE session_id=? AND container_id=? ORDER BY object_id",
+                (sid, oid),
+            )
+            if row["item_slug"] is not None
+        )
 
     def descendant_objects(self, sid, roots):
         """Read the complete descendant closure of the specified root object."""
@@ -2233,7 +2263,7 @@ class WorldFacts:
 
     def require_item_unit(self, row):
         """Validate and return quantity data for one portable item instance."""
-        data = self.store.memory.json(row["item_json"]) if row["item_json"] is not None else None
+        data = item_unit_from_row(row)
         if not valid_item_unit(data):
             raise StateMachineError("invalid_mechanical_state", "Portable unit metadata is invalid")
         return data
@@ -2245,7 +2275,7 @@ class WorldFacts:
         identities, entries = set(), {}
         if owner_ids is None:
             rows = self._conn.execute(
-                "SELECT * FROM objects WHERE session_id=? AND item_json IS NOT NULL", (sid,)
+                "SELECT * FROM objects WHERE session_id=? AND item_slug IS NOT NULL", (sid,)
             )
         else:
             roots = [
@@ -2261,11 +2291,11 @@ class WorldFacts:
                 if (row := self.object(sid, oid)) is not None:
                     selected[oid] = row
             rows = [
-                selected[oid] for oid in sorted(selected) if selected[oid]["item_json"] is not None
+                selected[oid] for oid in sorted(selected) if selected[oid]["item_slug"] is not None
             ]
         for row in rows:
             identities.add(row["object_id"])
-            data = self.store.memory.json(row["item_json"])
+            data = item_unit_from_row(row)
             # Ground metadata is validated without constructing a fictional owner.
             if not valid_item_unit(data):
                 raise StateMachineError(
@@ -2285,7 +2315,7 @@ class WorldFacts:
         current = self._conn.execute(
             "SELECT * FROM objects WHERE session_id=? AND object_id=?", (sid, before["object_id"])
         ).fetchone()
-        if current is None or dict(current) != dict(before) or current["item_json"] is None:
+        if current is None or dict(current) != dict(before) or current["item_slug"] is None:
             raise StateMachineError("position_conflict", "Item location changed")
         self._conn.execute(
             "UPDATE objects SET carrier_id=?,scene_id=?,cell=?,container_id=? "
@@ -2295,6 +2325,23 @@ class WorldFacts:
         return self._conn.execute(
             "SELECT * FROM objects WHERE session_id=? AND object_id=?", (sid, before["object_id"])
         ).fetchone()
+
+    def spend_item_charge(self, sid, before):
+        """Persist a fixed-one spend against the exact candidate item row.
+
+        The row remains after exhaustion. The outer command scope owns rollback,
+        durable receipt, version, event and RAM publication.
+        """
+        self.store.require_write()
+        if before["item_slug"] is None or before["item_charges"] < 1:
+            raise StateMachineError("item_charges_exhausted", "No item charges remain")
+        cursor = self._conn.execute(
+            "UPDATE objects SET item_charges=item_charges-1 "
+            "WHERE session_id=? AND object_id=? AND item_slug=? AND item_charges=?",
+            (sid, before["object_id"], before["item_slug"], before["item_charges"]),
+        )
+        if cursor.rowcount != 1:
+            raise StateMachineError("version_conflict", "Item balance changed")
 
     def object_position(self, sid, object_id):
         """Resolve the object's current spatial position."""

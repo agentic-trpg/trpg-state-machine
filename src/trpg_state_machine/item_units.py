@@ -23,3 +23,15 @@ def valid_item_unit(data):
         and 0 <= data["charges_remaining_per_unit"] <= 2**63 - 1
         and type(data["accessible"]) is bool
     )
+
+
+def item_unit_from_row(row):
+    """Rebuild the fixed mechanical unit DTO from Schema49 scalar item facts."""
+    if row["item_slug"] is None:
+        return None
+    return {
+        "item_slug": row["item_slug"],
+        "quantity": 1,
+        "charges_remaining_per_unit": row["item_charges"],
+        "accessible": bool(row["item_accessible"]),
+    }

@@ -214,8 +214,7 @@ def test_changed_inventory_is_validated_once_and_pruning_keeps_composite_stamp(
         identity = old.entries[0].instance_id
         with sm._transaction(write=True):
             sm._conn.execute(
-                "UPDATE objects SET item_json=json_set(item_json,'$.charges_remaining_per_unit',3) "
-                "WHERE session_id=? AND object_id=?",
+                "UPDATE objects SET item_charges=3 WHERE session_id=? AND object_id=?",
                 (sid, identity),
             )
         with counts_for(sm, monkeypatch) as counts:

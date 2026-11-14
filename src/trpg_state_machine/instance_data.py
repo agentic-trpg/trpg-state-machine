@@ -512,15 +512,16 @@ class InstanceData:
         obj = self.facts.object(sid, oid)
         return bool(
             obj is not None
-            and obj["item_json"] is not None
-            and self.get(sid, "object", oid)["portable_policy"] == "ordinary_public"
+            and obj["item_slug"] is not None
+            and self.get(sid, "object", oid)["portable_policy"]
+            in ("ordinary_public", "charge_exhaust_retain")
         )
 
     def has_portable(self, sid):
         """Return whether the Session contains portable items."""
         return (
             self.conn.execute(
-                "SELECT 1 FROM objects WHERE session_id=? AND item_json IS NOT NULL LIMIT 1", (sid,)
+                "SELECT 1 FROM objects WHERE session_id=? AND item_slug IS NOT NULL LIMIT 1", (sid,)
             ).fetchone()
             is not None
         )

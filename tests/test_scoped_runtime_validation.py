@@ -122,24 +122,18 @@ def grow(sm, sid, n):
             }
             conn.execute(
                 "INSERT INTO "
-                "objects(session_id,object_id,scene_id,cell,orientation,item_json) "
-                "VALUES (?,?,?,?,?,?)",
+                "objects(session_id,object_id,scene_id,cell,orientation,portable_marker,"
+                "item_slug,item_charges,item_accessible) VALUES (?,?,?,?,?,?,?,?,?)",
                 (
                     sid,
                     oid,
                     A if i % 2 else remote,
                     "2,2",
                     "north",
-                    canonical_json(
-                        {
-                            "item_slug": "amulet",
-                            "quantity": 1,
-                            "charges_remaining_per_unit": 0,
-                            "accessible": True,
-                        }
-                    )
-                    if i % 3 == 0
-                    else None,
+                    "{}" if i % 3 == 0 else None,
+                    "amulet" if i % 3 == 0 else None,
+                    0 if i % 3 == 0 else None,
+                    1 if i % 3 == 0 else None,
                 ),
             )
             f.instances.put(sid, "object", oid, config)
@@ -714,7 +708,7 @@ def test_schema40_object_lookup_addendum_preserves_facts_and_old_read_scope(tmp_
         old.execute("BEGIN")
         fixed = old.execute("SELECT * FROM objects ORDER BY object_id").fetchall()
         with StateMachine(database, dnd_loader=sm._rules.loader) as reopened:
-            assert reopened._conn.execute("PRAGMA user_version").fetchone()[0] == 48
+            assert reopened._conn.execute("PRAGMA user_version").fetchone()[0] == 49
             assert reopened._conn.execute(
                 "SELECT sql FROM sqlite_master WHERE name='spatial_object_lookup'"
             ).fetchone()[0] == (

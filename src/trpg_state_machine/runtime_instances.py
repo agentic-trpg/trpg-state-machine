@@ -28,6 +28,7 @@ class FieldValue:
         # Dependencies are charged twice to cover the owner's retention metadata.
         """Compute field dependency and retained-size metadata."""
         size = len(repr((self.parameter, self.value, self.dependencies, self.stamps)).encode())
+        size += getattr(self.value, "retained_item_bytes", 0)
         size += len(repr(self.dependencies).encode()) + 256
         object.__setattr__(self, "retained_bytes", size)
 
@@ -63,6 +64,7 @@ class ContainerFields:
     """Retain immutable contents/weight fields on the existing runtime owner."""
 
     contents: tuple = ()
+    active_contents: tuple = ()
     own_weight: tuple = ()
     total_weight: tuple = ()
     contents_weight: tuple = ()

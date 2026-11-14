@@ -15,6 +15,7 @@ from collections import OrderedDict
 from copy import deepcopy
 from dataclasses import replace
 from itertools import combinations
+from weakref import WeakValueDictionary
 
 from .errors import StateMachineError
 from .version_map import VersionMap
@@ -94,6 +95,78 @@ class Record:
 
     def __deepcopy__(self, memo):
         """Share the immutable record when deep-copied."""
+        return self
+
+
+class ActiveItem:
+    """Bounded internal identity with an immutable committed row payload.
+
+    Only a current read scope can dereference it. Fixed snapshots retain their
+    detached values, and an evicted or recovery-invalidated identity cannot be read.
+    """
+
+    __slots__ = ("_memory", "_payload", "_valid", "__weakref__")
+
+    def __init__(self, memory, row):
+        self._memory = memory
+        self._payload = (row["session_id"], row["object_id"], row["item_charges"])
+        self._valid = True
+
+    @property
+    def object_id(self):
+        """Read immutable identity even from a fixed older relationship view."""
+        return self._payload[1]
+
+    @property
+    def charges(self):
+        """Read the committed balance through the active item identity."""
+        return self._current()[2]
+
+    def _current(self):
+        scope = self._memory.store._scope
+        self._memory.guard(self._payload[0])
+        coordinator = self._memory.store._coordinator
+        if (
+            not self._valid
+            or scope is None
+            or scope.write
+            or scope.commit_generation != coordinator.commit_generation
+            or scope.recovery_generation != coordinator.recovery_generation
+            or scope.recovery_generations.get(self._payload[0], 0)
+            != coordinator.recovery_generations.get(self._payload[0], 0)
+        ):
+            raise StateMachineError(
+                "invalid_transaction", "Active item requires a current read scope"
+            )
+        return self._payload
+
+    def _publish(self, row):
+        """Swap one immutable payload after durable SQL commit."""
+        self._payload = (row["session_id"], row["object_id"], row["item_charges"])
+
+    def _invalidate(self):
+        """Retire a stale identity on eviction or recovery."""
+        self._valid = False
+
+    def __deepcopy__(self, memo):
+        """Preserve the same internal item identity in immutable owner tuples."""
+        return self
+
+
+class ActiveContents(tuple):
+    """Immutable direct-member identity tuple shared on warm owner-field reads."""
+
+    __slots__ = ()
+
+    @property
+    def retained_item_bytes(self):
+        """Charge bounded identity and balance payloads to the owning field."""
+        return sum(
+            len(sid.encode()) + len(oid.encode()) + 64 for sid, oid, _ in (i._payload for i in self)
+        )
+
+    def __deepcopy__(self, memo):
+        """Share the bounded immutable membership tuple without per-item copying."""
         return self
 
 
@@ -218,6 +291,7 @@ class SessionMemory:
         self.capacity, self.byte_limit = capacity, byte_limit
         self.columns, self.primary = {}, {}
         self.values = OrderedDict()
+        self.item_refs = WeakValueDictionary()
         self.range_keys = {}
         self.range_shapes = {}
         self.dependency_shapes = {}
@@ -296,6 +370,9 @@ class SessionMemory:
 
     def clear(self):
         """Discard rebuildable caches/version structures and advance their generation."""
+        for item in tuple(self.item_refs.values()):
+            item._invalidate()
+        self.item_refs.clear()
         self.values.clear()
         self.range_keys.clear()
         self.range_shapes.clear()
@@ -320,6 +397,10 @@ class SessionMemory:
 
     def release(self, sid):
         """Release the Session's facts, fields, parsed values and versions."""
+        for key, item in tuple(self.item_refs.items()):
+            if key[0] == sid:
+                item._invalidate()
+                del self.item_refs[key]
         for key, item in tuple(self.values.items()):
             if isinstance(item, Range):
                 owns = dict(item.predicates).get("session_id") in (sid, None)
@@ -418,6 +499,7 @@ class SessionMemory:
             "light_sources",
             "light_result",
             "inventory",
+            "container_members",
             "passage_index",
         ):
             raise ValueError("Unknown maintained field protocol")
@@ -466,7 +548,9 @@ class SessionMemory:
                 "object_id",
                 "container_id",
                 "carrier_id",
-                "item_json",
+                "item_slug",
+                "item_charges",
+                "item_accessible",
                 "state",
             )
             if old is not None and new is not None and all(old[c] == new[c] for c in columns):
@@ -798,7 +882,7 @@ class SessionMemory:
         """
         roots = []
         if table == "objects":
-            relevant = ("object_id", "session_id", "container_id", "item_json")
+            relevant = ("object_id", "session_id", "container_id", "item_slug")
             if old is not None and new is not None and all(old[c] == new[c] for c in relevant):
                 return
             roots = [r for r in (old, new) if r is not None]
@@ -827,6 +911,22 @@ class SessionMemory:
                 seen.add((sid, oid))
                 self._advance_field("weight", sid, oid)
                 row = self._object(sid, row["container_id"]) if row["container_id"] else None
+
+    def _container_members_changes(self, table, old, new):
+        """Invalidate direct member tuples only when a parent relationship changes."""
+        if table != "objects":
+            return
+        if (
+            old is not None
+            and new is not None
+            and all(
+                old[c] == new[c] for c in ("session_id", "object_id", "container_id", "item_slug")
+            )
+        ):
+            return
+        for row in (old, new):
+            if row is not None and row["container_id"] is not None:
+                self._advance_field("container_members", row["session_id"], row["container_id"])
 
     def _subtree_capabilities(self, sid, oid, *, tables=("object_lights", "object_mechanisms")):
         """Only the moving subtree, through parent/member buckets; no Scene walk.
@@ -1002,6 +1102,18 @@ class SessionMemory:
             self.values.move_to_end(key)
             return self.values[key]
         return None
+
+    def active_item(self, row):
+        """Reuse one bounded item identity for a current direct containment member."""
+        scope = self.store._scope
+        if scope is None or scope.write or row["item_slug"] is None:
+            raise StateMachineError("invalid_transaction", "Expected current portable item read")
+        key = (row["session_id"], row["object_id"])
+        item = self.item_refs.get(key)
+        if item is None:
+            item = ActiveItem(self, row)
+            self.item_refs[key] = item
+        return item
 
     def put(self, key, value):
         """Place a value in the current candidate's pending publication set."""
@@ -1197,6 +1309,7 @@ class SessionMemory:
         try:
             self._passage_changes(table, old, new)
             self._weight_changes(table, old, new)
+            self._container_members_changes(table, old, new)
             self._association_changes(table, old, new)
             self._light_candidate_changes(table, old, new)
             self._inventory_changes(table, old, new)
@@ -1361,6 +1474,20 @@ class SessionMemory:
 
     def publish(self, scope):
         """No SQL, domain work or callbacks during current-fact publication."""
+        for table, old, new in scope.memory_changes:
+            if table != "objects":
+                continue
+            row = new if new is not None else old
+            if row is None:
+                continue
+            key = (row["session_id"], row["object_id"])
+            item = self.item_refs.get(key)
+            if item is not None:
+                if new is None or new["item_slug"] is None:
+                    item._invalidate()
+                    del self.item_refs[key]
+                else:
+                    item._publish(new)
         # Resolve changed query shapes by their indexed predicate values. The
         # number of entities in a loaded range never affects publication work.
         shapes = {table: set(signatures) for table, signatures in self.range_shapes.items()}

@@ -842,7 +842,7 @@ def test_slug_equipment_ambiguity_refuses_drop_without_mutating_any_facts(
 
 @pytest.mark.parametrize(
     "fault",
-    ["missing", "invalid_item_unit"],
+    ["missing", "invalid_slug"],
 )
 def test_local_item_facts_and_explicit_full_validation(tmp_path, context, fault):
     sm, sid, package, db = setup(tmp_path, context)
@@ -856,8 +856,7 @@ def test_local_item_facts_and_explicit_full_validation(tmp_path, context, fault)
             sm._conn.execute("DELETE FROM mechanical_components WHERE session_id=?", (sid,))
         else:
             sm._conn.execute(
-                "UPDATE objects SET item_json=json_set(item_json,'$.quantity',2) "
-                "WHERE session_id=? AND object_id=?",
+                "UPDATE objects SET item_slug='INVALID' WHERE session_id=? AND object_id=?",
                 (sid, DAGGER),
             )
         before = stored_rows(db)

@@ -21,6 +21,7 @@ class TrustedContext:
     can_advance_time: bool = False
     can_place_world_objects: bool = False
     can_manage_environment: bool = False
+    can_spend_item_charge: bool = False
 
 
 @dataclass(frozen=True, slots=True)

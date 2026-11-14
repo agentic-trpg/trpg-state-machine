@@ -26,7 +26,7 @@ from .npc_outputs import _handoff_command
 from .package import AdventurePackage, RulesetBinding
 from .perception import NPCContext
 from .time_coordination import AdvanceSessionTime, SetTimeRunning
-from .world_commands import WORLD_CAPABILITY_OPERATIONS, RepositionObject
+from .world_commands import WORLD_CAPABILITY_OPERATIONS, RepositionObject, SpendItemCharge
 
 
 def _trusted(context: TrustedContext) -> None:
@@ -45,6 +45,7 @@ def _trusted(context: TrustedContext) -> None:
         or type(context.can_adjudicate_checks) is not bool
         or type(context.can_advance_time) is not bool
         or type(context.can_manage_environment) is not bool
+        or type(context.can_spend_item_charge) is not bool
     ):
         raise StateMachineError(
             "invalid_context", "GM adjudication grant must be a trusted boolean"
@@ -107,6 +108,8 @@ class SessionAccess:
             raise StateMachineError("unauthorized", "Trusted environment management grant required")
         if type(payload) is RepositionObject and not context.can_place_world_objects:
             raise StateMachineError("unauthorized", "Trusted GM placement grant required")
+        if type(payload) is SpendItemCharge and not context.can_spend_item_charge:
+            raise StateMachineError("unauthorized", "Trusted item charge grant required")
         if (
             type(payload) in (AdvanceGameTime, AdvanceSessionTime, SetTimeRunning)
             and not context.can_advance_time
