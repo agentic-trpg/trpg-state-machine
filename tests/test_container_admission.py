@@ -321,8 +321,9 @@ def test_authorized_npc_put_take_uses_same_admission(tmp_path, context):
 
 @pytest.mark.parametrize("descendant", [False, True])
 @pytest.mark.parametrize("related", [False, True])
+@pytest.mark.parametrize("available", [False, True])
 def test_casting_binding_tracks_exact_moved_instance_and_subtree(
-    tmp_path, context, descendant, related
+    tmp_path, context, descendant, related, available
 ):
     sm, sid, p, _ = setup(tmp_path, context, container_data())
     with sm:
@@ -331,34 +332,22 @@ def test_casting_binding_tracks_exact_moved_instance_and_subtree(
         actor = sm.read_session(sid, p, context=context).pc_actor_id
         if descendant:
             assert_admission(sm, sid, p, context, PutItem(A, CRED, BAG, "0,0"), "fill")
-        casting = {
-            "actors": [
-                {
-                    "actor_id": actor,
-                    "verbal_available": True,
-                    "sources": [
-                        {
-                            "source_id": "class.wizard",
-                            "class_slug": "wizard",
-                            "ability": "int",
-                            "known_spells": ["hold-person"],
-                            "prepared_spells": ["hold-person"],
-                        }
-                    ],
-                    "materials": [
-                        {
-                            "spell_slug": "hold-person",
-                            "source_id": "class.wizard",
-                            "inventory_instance_id": CRED if related else TWIN,
-                            "available": True,
-                        }
-                    ],
-                }
-            ]
-        }
         sm._conn.execute(
-            "UPDATE mechanical_components SET casting_json=? WHERE session_id=?",
-            (json.dumps(casting), sid),
+            "UPDATE mechanical_components SET casting_state_present=1 WHERE session_id=?",
+            (sid,),
+        )
+        sm._conn.execute("INSERT INTO character_casting VALUES (?,?,?,?)", (sid, actor, 0, 1))
+        sm._conn.execute(
+            "INSERT INTO character_spell_sources VALUES (?,?,?,?,?,?)",
+            (sid, actor, "class.wizard", "wizard", "int", 0),
+        )
+        sm._conn.execute(
+            "INSERT INTO character_spells VALUES (?,?,?,?,?,?)",
+            (sid, actor, "class.wizard", "hold-person", 0, 0),
+        )
+        sm._conn.execute(
+            "INSERT INTO character_spell_materials VALUES (?,?,?,?,?,?,?)",
+            (sid, actor, "class.wizard", "hold-person", CRED if related else TWIN, available, 0),
         )
         op = PutItem(A, BAG if descendant else CRED, BOX, "0,0")
         assert_admission(

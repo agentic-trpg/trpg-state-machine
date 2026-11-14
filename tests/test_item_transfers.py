@@ -789,7 +789,8 @@ def test_initial_carrier_legacy_stack_charges_and_other_components_preserved(tmp
         for table in ("mechanical_actors", "rng_states"):
             assert before[table] == after[table]
         current = sm._conn.execute(
-            "SELECT casting_json,effects_json,resource_state_present FROM mechanical_components "
+            "SELECT casting_state_present,effects_json,resource_state_present "
+            "FROM mechanical_components "
             "WHERE session_id=?",
             (sid,),
         ).fetchone()
@@ -797,7 +798,7 @@ def test_initial_carrier_legacy_stack_charges_and_other_components_preserved(tmp
         previous = next(iter(values))
         assert tuple(current) == tuple(
             previous[columns.index(k)]
-            for k in ("casting_json", "effects_json", "resource_state_present")
+            for k in ("casting_state_present", "effects_json", "resource_state_present")
         )
 
 

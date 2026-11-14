@@ -361,7 +361,7 @@ def test_sqlite_direct_contents_uses_existing_index(tmp_path, context):
             (sid, BOX),
         ).fetchall()
         assert "objects_container" in " ".join(r[3] for r in plan)
-        assert sm._conn.execute("PRAGMA user_version").fetchone()[0] == 44
+        assert sm._conn.execute("PRAGMA user_version").fetchone()[0] == 45
         configs = sm._conn.execute(
             "SELECT config_json FROM instance_configs WHERE domain='object'"
         ).fetchall()

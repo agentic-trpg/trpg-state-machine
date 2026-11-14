@@ -350,12 +350,7 @@ class ContainerService:
             raise StateMachineError("unsupported_actor_state", "Active effect transfer unsupported")
         rows = self._rows(sid, (iid,)) if rows is None else rows
         affected = self.subtree(iid, rows) if affected is None else affected
-        casting = components["casting_state"]
-        if casting and any(
-            m["inventory_instance_id"] in affected
-            for owner in casting["actors"]
-            for m in owner["materials"]
-        ):
+        if h.characters.casting_material_bound(sid, actor, affected):
             raise StateMachineError(
                 "unsupported_actor_activity", "Casting-bound item transfer unsupported"
             )

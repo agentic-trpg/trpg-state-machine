@@ -1,5 +1,18 @@
 # Session Management
 
+## 2026-11-14 STORAGE-01 角色施法来源
+
+新建 Schema45 把显式 `CastingState` 存为角色、职业来源、已知／准备法术、
+材料绑定及角色法术顺序的带键记录；`casting_state_present` 区分 `None` 与显式空组件。
+同一组记录供战斗和探索 Snapshot 使用，显式角色的 `spells_known` 从法术顺序引用
+派生；没有显式施法角色记录时保留角色原有的独立列表。初始输入检查显式角色列表
+与来源已知法术集合一致。材料绑定保存对象 ID 及独立的 `available` 标志；World
+转移沿实际移动子树的对象 ID 使用反向索引检查绑定，包括标志为不可用的材料。
+
+这些记录沿现有 SessionMemory／UnitOfWork 的候选、保存点、提交后发布及恢复边界
+运行。旧 Schema1–44 开发数据库在可写打开前拒绝；不回填旧施法 JSON。本批没有
+新增施法规则、支付、效果或物品施法操作。
+
 ## 2026-11-14 STORAGE-01 角色资源行
 
 新建 Schema44 数据库把角色资源余额存于 `character_resources` 的

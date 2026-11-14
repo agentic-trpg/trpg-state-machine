@@ -44,6 +44,22 @@ def test_schema43_resource_aggregate_is_refused_before_writable_open(tmp_path):
         assert conn.execute("SELECT balance FROM old_resources").fetchone() == ("preserve",)
 
 
+def test_schema44_casting_aggregate_is_refused_before_writable_open(tmp_path):
+    """Old casting JSON stays byte-for-byte intact when the former schema is opened."""
+    path = tmp_path / "schema44.db"
+    with sqlite3.connect(path) as conn:
+        conn.execute("CREATE TABLE old_casting (value TEXT)")
+        conn.execute("INSERT INTO old_casting VALUES ('preserve')")
+        conn.execute("PRAGMA user_version = 44")
+    before = hashlib.sha256(path.read_bytes()).digest()
+    with pytest.raises(StateMachineError) as error:
+        StateMachine(path)
+    assert error.value.code == "unsupported_storage_schema"
+    assert hashlib.sha256(path.read_bytes()).digest() == before
+    with sqlite3.connect(path) as conn:
+        assert conn.execute("SELECT value FROM old_casting").fetchone() == ("preserve",)
+
+
 def test_pre41_crashed_wal_is_refused_without_checkpointing_source(tmp_path):
     """An orphan WAL keeps its committed stock and original main/WAL bytes."""
     path = tmp_path / "orphan.db"
@@ -93,10 +109,11 @@ def test_current_save_reopens_without_inventory_aggregate_columns(
     with StateMachine(path) as sm:
         created = sm.create_session(request_for(), package, context=context)
         saved = sm.save_session(created.session_id, package, context=context)
-        assert sm._conn.execute("PRAGMA user_version").fetchone()[0] == 44
+        assert sm._conn.execute("PRAGMA user_version").fetchone()[0] == 45
         for table in ("characters", "mechanical_components"):
             columns = {row[1] for row in sm._conn.execute(f"PRAGMA table_info({table})")}
             assert "inventory_json" not in columns
+            assert "casting_json" not in columns
     with StateMachine(path) as sm:
         assert sm.resume_session(created.session_id, package, context=context) == saved
 

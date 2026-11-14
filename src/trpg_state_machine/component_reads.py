@@ -1,4 +1,4 @@
-"""Immutable owner indices over the remaining encoded mechanical components.
+"""Immutable owner indices over the remaining encoded effect component.
 
 Building an index parses each remaining aggregate JSON value once. Selecting
 a mechanical closure then visits requested owners, not every other owner's
@@ -17,10 +17,7 @@ class ComponentInputs:
         """Freeze noninventory components and build owner lookup indices."""
         object.__setattr__(self, "data", _freeze(values))
         indices = {}
-        for field, path, identity in (
-            ("casting_json", "actors", "actor_id"),
-            ("effects_json", None, "target_id"),
-        ):
+        for field, path, identity in (("effects_json", None, "target_id"),):
             data = values[field]
             entries = () if data is None else data if path is None else data[path]
             by_owner = {}
@@ -44,12 +41,9 @@ class ComponentInputs:
         return f"ComponentInputs({self.data!r}, {self.indices!r})"
 
     def select(self, owners):
-        """Select casting and effects for the required owner closure."""
+        """Select effects for the required owner closure."""
         result = {}
-        for field, path in (
-            ("casting_json", "actors"),
-            ("effects_json", None),
-        ):
+        for field, path in (("effects_json", None),):
             raw = self.data[field]
             if raw is None:
                 result[field] = None
