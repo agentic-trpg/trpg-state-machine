@@ -51,8 +51,9 @@ def sync_npc_schedules(runtime, sid, command_id, package):
             (sid, npc["npc_id"]),
         ).fetchone()
         state = json.loads(mechanical[0]) if mechanical else None
+        life = runtime._characters.life(sid, npc["npc_id"]) if mechanical else None
         available = state is None or (
-            state["is_alive"]
+            bool(life["is_alive"])
             and not state["conditions"]
             and not runtime._characters.effects.has_linked_conditions(sid, npc["npc_id"])
         )

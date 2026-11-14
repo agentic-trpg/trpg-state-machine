@@ -187,11 +187,12 @@ class WorldHandler:
             (sid, actor_id),
         ).fetchone()
         state = self.store.memory.json(mechanical[0]) if mechanical else None
+        life = self.characters.life(sid, actor_id) if mechanical else None
         if (
             (core and (core[0] <= 0 or self.store.memory.json(core[1])))
             or state
             and (
-                not state["is_alive"]
+                not life["is_alive"]
                 or state["conditions"]
                 or self.characters.effects.has_linked_conditions(sid, actor_id)
                 or self.characters.effects.has_concentration(sid, actor_id)

@@ -246,6 +246,7 @@ class EventCapture:
                 (sid, actor["actor_id"]),
             ).fetchone()
             data = self.store.memory.json(stored[0]) if stored else None
+            life = self.characters.life(sid, actor["actor_id"]) if stored else None
             actor["mechanical"] = (
                 None
                 if data is None
@@ -254,7 +255,7 @@ class EventCapture:
                     + self.characters.effects.linked_condition_names(sid, actor["actor_id"]),
                     "senses": data["senses"],
                     "traits": data["trait_mechanics"],
-                    "is_alive": data["is_alive"],
+                    "is_alive": bool(life["is_alive"]),
                     "dead_recorded": bool(
                         state is not None and actor["actor_id"] in state["dead_ids"]
                     ),

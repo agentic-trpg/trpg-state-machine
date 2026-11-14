@@ -1,5 +1,18 @@
 # Session Management
 
+## 2026-11-15 STORAGE-02 生命与伤害事实（候选分支）
+
+Schema47 将每位机械角色的临时生命值、存活标志、可空且有界的死亡豁免计数／稳定标志及
+最近伤害来源保存到按 `(session_id, actor_id)` 定位的 `mechanical_life` 行。
+原 `mechanical_actors.state_json` 不再保存这些字段；当前 HP、最大 HP 和 XP 仍在
+`characters`。角色机械快照从同一角色的 JSON、生命行和现有其他领域事实投影，
+缺失生命行会被拒绝。未获机械状态的 NPC 不要求生命行。
+
+规则伤害仍由冻结 RE 计算、RulesAdapter 审核，再由 CharacterFacts 参与原有
+UnitOfWork／SessionMemory 候选、回滚与提交后发布；生命写入只更新窄行，
+不会重写规则 JSON。新库直接建表，Schema1–46 的预发布数据库在可写打开前拒绝。
+本批不改变规则、战斗轮次或条件归属。
+
 ## 2026-11-14 STORAGE-01 持续效果实例
 
 新建 Schema46 将持续效果保存为 `(session_id, target_id, effect_id, origin)`
