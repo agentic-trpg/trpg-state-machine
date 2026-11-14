@@ -59,7 +59,7 @@ class CharacterFacts:
     )
 
     def __init__(self, store, world, loader):
-        """Bind character storage and its cooperating world facts interface."""
+        """Bind shared facts and the frozen rules loader used to resolve /19 item kinds."""
         self.store = store
         self.world = world
         self.loader = loader
