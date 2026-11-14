@@ -71,6 +71,17 @@ def work(sm, monkeypatch):
                         counts["life_point_queries"] += 1
                     else:
                         counts["unscoped_life_queries"] += 1
+                if _label == "ram_queries" and "FROM character_attributes" in args[0]:
+                    rows = memory.stats["ram_rows"] - before_rows
+                    if args[0] == (
+                        "SELECT darkvision,blindsight,tremorsense,truesight "
+                        "FROM character_attributes WHERE session_id=? AND actor_id=?"
+                    ):
+                        counts["sense_ram_rows"] += rows
+                        counts[f"sense_actor:{args[1][1]}"] += rows
+                        counts["sense_point_queries"] += 1
+                    else:
+                        counts["unscoped_sense_queries"] += 1
                 if _label == "dependency_checks":
                     if args[0][0] == "character_conditions":
                         counts["condition_checks"] += 1
@@ -228,7 +239,13 @@ def test_nonmatching_mechanism_records(tmp_path, context, monkeypatch, n, family
         assert counts[f"life_actor:{motion.actor_id}"] == 2
         assert counts[f"life_actor:{NPC}"] == 1
         assert counts["unscoped_life_queries"] == 0
-        assert counts["ram_rows"] - counts["life_ram_rows"] <= 32
+        # Event evidence reads two fixed mechanical sense owners, independent
+        # of the number of unrelated mechanism records.
+        assert counts["sense_point_queries"] == counts["sense_ram_rows"] == 2
+        assert counts[f"sense_actor:{motion.actor_id}"] == 1
+        assert counts[f"sense_actor:{NPC}"] == 1
+        assert counts["unscoped_sense_queries"] == 0
+        assert counts["ram_rows"] - counts["life_ram_rows"] - counts["sense_ram_rows"] <= 32
         key = ("instance", sid, "scene", A)
         entry = sm._store.memory.values[key][0].mechanisms.index[0]
         assert (

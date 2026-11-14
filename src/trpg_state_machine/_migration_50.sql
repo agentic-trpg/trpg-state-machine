@@ -1,21 +1,34 @@
--- Fresh-development Schema50: durable identity of an exactly consumed item.
-CREATE TABLE consumed_items (
+-- Fresh-development Schema50: stable per-actor attributes and ordered proficiency facts.
+CREATE TABLE character_attributes (
     session_id TEXT NOT NULL,
-    object_id TEXT NOT NULL,
-    command_id TEXT NOT NULL,
-    authored_scene_id TEXT,
-    PRIMARY KEY(session_id,object_id),
-    UNIQUE(session_id,command_id,object_id),
-    FOREIGN KEY(session_id,command_id) REFERENCES command_receipts(session_id,command_id)
-        DEFERRABLE INITIALLY DEFERRED,
-    FOREIGN KEY(session_id,authored_scene_id)
-        REFERENCES scene_instances(session_id,scene_id)
+    actor_id TEXT NOT NULL,
+    strength INTEGER NOT NULL,
+    dexterity INTEGER NOT NULL,
+    constitution INTEGER NOT NULL,
+    intelligence INTEGER NOT NULL,
+    wisdom INTEGER NOT NULL,
+    charisma INTEGER NOT NULL,
+    ac INTEGER NOT NULL,
+    character_level INTEGER NOT NULL,
+    proficiency_bonus_override INTEGER,
+    darkvision INTEGER,
+    blindsight INTEGER,
+    tremorsense INTEGER,
+    truesight INTEGER,
+    weapon_proficiencies_present INTEGER NOT NULL CHECK(weapon_proficiencies_present IN (0,1)),
+    PRIMARY KEY(session_id,actor_id),
+    FOREIGN KEY(session_id,actor_id) REFERENCES mechanical_actors(session_id,actor_id) ON DELETE CASCADE
 );
-CREATE INDEX door_credentials_instance ON door_credentials(session_id,instance_id);
-CREATE INDEX door_locks_object ON door_locks(session_id,object_id);
-CREATE INDEX character_spell_materials_instance
-    ON character_spell_materials(session_id,inventory_instance_id);
-CREATE TRIGGER consumed_item_identity_guard BEFORE INSERT ON objects
-WHEN EXISTS (SELECT 1 FROM consumed_items WHERE session_id=NEW.session_id AND object_id=NEW.object_id)
-BEGIN SELECT RAISE(ABORT,'Consumed item identity cannot be recreated'); END;
+CREATE TABLE character_proficiencies (
+    session_id TEXT NOT NULL,
+    actor_id TEXT NOT NULL,
+    kind TEXT NOT NULL CHECK(kind IN ('save','skill','tool','weapon')),
+    ordinal INTEGER NOT NULL CHECK(ordinal >= 0),
+    proficiency_id TEXT NOT NULL,
+    proficient INTEGER NOT NULL CHECK(proficient IN (0,1)),
+    expertise_ordinal INTEGER,
+    PRIMARY KEY(session_id,actor_id,kind,ordinal),
+    FOREIGN KEY(session_id,actor_id) REFERENCES character_attributes(session_id,actor_id) ON DELETE CASCADE
+);
+CREATE INDEX character_proficiencies_identity ON character_proficiencies(session_id,actor_id,kind,proficiency_id);
 PRAGMA user_version = 50;

@@ -20,7 +20,7 @@ publication succeeds. A fault rolls that transaction back; an ordinary live
 binding refusal records a rejected receipt after the effects savepoint rolls
 back. Events retain the exact selected instance ID alongside the RE event.
 
-Schema50 adds `consumed_items(session_id, object_id, command_id,
+Schema51 adds `consumed_items(session_id, object_id, command_id,
 authored_scene_id)`, tied to the command receipt by a deferred foreign key.
 WorldFacts checks the current row, configuration, children, credentials,
 capabilities, casting material and selected actor equipment before deleting
@@ -29,7 +29,7 @@ item's object/config integrity dependencies first. Scene certification and
 explicit lifecycle validation accept the missing authored object only with
 its matching durable consumption record; other missing rows and reintroduced
 consumed objects remain invalid. The ordinary command does not recertify the
-scene. Old pre-release Schema49 saves are refused; fresh current-schema saves
+scene. Old pre-release Schema50 saves are refused; fresh current-schema saves
 must be used.
 
 Focused evidence: `tests/test_combat_healing_potion.py` uses two same-slug

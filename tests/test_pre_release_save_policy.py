@@ -110,6 +110,35 @@ def test_schema49_save_is_refused_before_writable_open(tmp_path):
         assert conn.execute("SELECT item_slug FROM old_items").fetchone() == ("item.kept",)
 
 
+def test_storage02_schema50_is_refused_without_modifying_source(tmp_path):
+    """The real attribute/proficiency DDL at Schema50 is an old save, not an upgrade target."""
+    path = tmp_path / "storage02.db"
+    with StateMachine(path):
+        pass
+    with sqlite3.connect(path) as conn:
+        # Reconstruct the immediately preceding schema from a fresh database:
+        # only ITEM-01's Schema51 additions are removed.
+        conn.execute("DROP TRIGGER consumed_item_identity_guard")
+        conn.execute("DROP INDEX character_spell_materials_instance")
+        conn.execute("DROP INDEX door_locks_object")
+        conn.execute("DROP INDEX door_credentials_instance")
+        conn.execute("DROP TABLE consumed_items")
+        conn.execute("PRAGMA user_version = 50")
+        assert conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='character_attributes'"
+        ).fetchone() == (1,)
+        assert conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='character_proficiencies'"
+        ).fetchone() == (1,)
+    before = hashlib.sha256(path.read_bytes()).digest()
+    with pytest.raises(StateMachineError) as error:
+        StateMachine(path)
+    assert error.value.code == "unsupported_storage_schema"
+    assert hashlib.sha256(path.read_bytes()).digest() == before
+    with sqlite3.connect(path) as conn:
+        assert conn.execute("PRAGMA user_version").fetchone()[0] == 50
+
+
 def test_pre41_crashed_wal_is_refused_without_checkpointing_source(tmp_path):
     """An orphan WAL keeps its committed stock and original main/WAL bytes."""
     path = tmp_path / "orphan.db"
@@ -159,7 +188,7 @@ def test_current_save_reopens_without_inventory_aggregate_columns(
     with StateMachine(path) as sm:
         created = sm.create_session(request_for(), package, context=context)
         saved = sm.save_session(created.session_id, package, context=context)
-        assert sm._conn.execute("PRAGMA user_version").fetchone()[0] == 50
+        assert sm._conn.execute("PRAGMA user_version").fetchone()[0] == 51
         for table in ("characters", "mechanical_components"):
             columns = {row[1] for row in sm._conn.execute(f"PRAGMA table_info({table})")}
             assert "inventory_json" not in columns
