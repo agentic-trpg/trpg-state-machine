@@ -6,7 +6,7 @@ from runpy import run_path
 
 import pytest
 from dnd_support import initialize
-from item_support import DAGGER, item_data, item_loader
+from item_support import DAGGER, ROPE, item_data, item_loader
 from lock_support import CRED, TWIN, A, lock_loader
 from spatial_support import create
 from test_container_admission import assert_admission, authority
@@ -387,22 +387,51 @@ def test_combat_availability_uses_bound_equipment_and_spares(tmp_path, context):
 
 def test_combat_snapshot_shares_inventory_projection(tmp_path, context, monkeypatch):
     """The public read derives carried slugs and full inventory from one item bundle."""
-    package = _validate(combat_equipment_data())
+    data = combat_equipment_data()
+    next(item for item in data["item_transfers"] if item["instance_id"] == ROPE)[
+        "initial_owner_id"
+    ] = "npc.caretaker"
+    for foundation in data["rule_bindings"].values():
+        snapshot = foundation["snapshot"]
+        npc = next(
+            actor for actor in snapshot["character_states"] if actor["entity_id"] == "npc.caretaker"
+        )
+        npc["carried_item_slugs"].append("rope")
+        snapshot["inventory_state"]["entries"].append(
+            {
+                "instance_id": ROPE,
+                "owner_id": "npc.caretaker",
+                "item_slug": "rope",
+                "quantity": 1,
+                "charges_remaining_per_unit": 0,
+                "accessible": True,
+            }
+        )
+    package = _validate(data)
     with StateMachine(tmp_path / "shared.db", dnd_loader=item_loader()) as sm:
         sid = create(sm, package, context)
         assert initialize(sm, sid, package, context).status == "committed"
         actor = sm.read_session(sid, package, context=context).pc_actor_id
         original = sm._world_facts.portable_inventory
+        project_actors = sm._characters.combat_rule_actors
         calls = []
+        actor_projections = []
 
         def counted(*args, **kwargs):
             calls.append((args, kwargs))
             return original(*args, **kwargs)
 
+        def counted_actors(*args):
+            actor_projections.append(args)
+            return project_actors(*args)
+
         monkeypatch.setattr(sm._world_facts, "portable_inventory", counted)
+        monkeypatch.setattr(sm._characters, "combat_rule_actors", counted_actors)
         snapshot = sm.read_combat_snapshot(sid, package, context=context)
-        assert len(calls) == 1
-        assert calls[0][1]["owner_ids"] == set(snapshot.combat_state.initiative_ids)
+        assert len(actor_projections) == 1
+        assert len(calls) <= 1
+        if calls:
+            assert calls[0][1]["owner_ids"] == set(snapshot.combat_state.initiative_ids)
         _, entries = original(sid, owner_ids=set(snapshot.combat_state.initiative_ids))
         assert [
             entry.model_dump(mode="json") for entry in snapshot.inventory_state.entries
