@@ -253,7 +253,7 @@ class EventCapture:
                 else {
                     "conditions": self.characters.condition_names(sid, actor["actor_id"])
                     + self.characters.effects.linked_condition_names(sid, actor["actor_id"]),
-                    "senses": data["senses"],
+                    "senses": self.characters.senses(sid, actor["actor_id"]),
                     "traits": data["trait_mechanics"],
                     "is_alive": bool(life["is_alive"]),
                     "dead_recorded": bool(

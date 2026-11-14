@@ -1,5 +1,11 @@
 # Session Management
 
+## 2026-11-15 STORAGE-02 核心属性与熟练事实（候选分支）
+
+Schema50 将机械角色的六项属性、既有规则 AC、等级、可空熟练加值覆盖、四项可空机械感官和武器熟练列表是否显式提供保存到按角色定位的 `character_attributes` 行。四类熟练按有序项保存于 `character_proficiencies`；技能行记录精通顺序，保留列表重复与技能精通不在普通熟练列表中的现有输入形状。`skill_check_bonuses` 等其他规则字段仍属原规则元数据。`mechanical_actors.state_json` 不再保存这些属性；规则输入从同一角色的字段行和原有元数据、生命、条件、资源及物品事实投影。
+
+初始化、回滚、保存点和提交后 RAM 发布沿用既有 UnitOfWork／SessionMemory；新库直接建表，Schema1–49 预发布存档在可写打开前拒绝。超出 SQLite 有符号 64 位整数范围的机械输入在写入前明确拒绝并回滚，不提供另一种编码。此批不改变 AC 计算、RE 规则、战斗操作或公共 DTO。完整角色快照仍需读取其全部熟练项；按角色 ID 的属性读取和按角色／类型／熟练 ID 的单项 SQL 读取有组合索引。
+
 ## 2026-11-15 STORAGE-02 独立角色条件（候选分支）
 
 Schema48 将每个独立条件保存为 `character_conditions` 的带身份、顺序角色行。

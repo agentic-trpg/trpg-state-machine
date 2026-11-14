@@ -708,7 +708,7 @@ def test_schema40_object_lookup_addendum_preserves_facts_and_old_read_scope(tmp_
         old.execute("BEGIN")
         fixed = old.execute("SELECT * FROM objects ORDER BY object_id").fetchall()
         with StateMachine(database, dnd_loader=sm._rules.loader) as reopened:
-            assert reopened._conn.execute("PRAGMA user_version").fetchone()[0] == 49
+            assert reopened._conn.execute("PRAGMA user_version").fetchone()[0] == 50
             assert reopened._conn.execute(
                 "SELECT sql FROM sqlite_master WHERE name='spatial_object_lookup'"
             ).fetchone()[0] == (

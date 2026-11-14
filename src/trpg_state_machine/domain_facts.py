@@ -26,7 +26,26 @@ _EFFECTS = TypeAdapter(tuple[EffectState, ...])
 
 
 class CharacterFacts:
-    """Maintain character mechanics, narrow life facts, and World item projections."""
+    """Maintain character mechanics, typed attributes, and World item projections."""
+
+    ATTRIBUTE_FIELDS = (
+        "strength",
+        "dexterity",
+        "constitution",
+        "intelligence",
+        "wisdom",
+        "charisma",
+        "ac",
+        "character_level",
+        "proficiency_bonus_override",
+    )
+    SENSE_FIELDS = ("darkvision", "blindsight", "tremorsense", "truesight")
+    PROFICIENCY_FIELDS = (
+        ("save", "save_proficiencies"),
+        ("skill", "skill_proficiencies"),
+        ("tool", "tool_proficiencies"),
+        ("weapon", "weapon_proficiencies"),
+    )
 
     RULE_FIELDS = frozenset(
         (
@@ -538,7 +557,7 @@ class CharacterFacts:
         return deleted.rowcount == 1
 
     def initialize_rule_actor(self, row, actor, *, xp=None, encounter=False, schema_version=None):
-        """Initialize JSON plus a required life row; /19 omits derived equipment mirrors."""
+        """Initialize narrow core, life, attribute and proficiency rows with rules metadata."""
         self.store.require_write()
         if any(condition.source_effect_id is not None for condition in actor.conditions):
             raise StateMachineError(
@@ -602,6 +621,10 @@ class CharacterFacts:
                 "death_saves",
                 "last_damaged_by",
                 "conditions",
+                *self.ATTRIBUTE_FIELDS,
+                *self.PROFICIENCY_FIELDS_NAMES,
+                "skill_expertise",
+                "senses",
             },
         )
         if state.get("held_weapon_instance_id") is not None:
@@ -633,6 +656,7 @@ class CharacterFacts:
             "INSERT INTO mechanical_actors VALUES (?,?,?)",
             (sid, actor.entity_id, canonical_json(state)),
         )
+        self._insert_attributes(sid, actor)
         self._conn.execute(
             "INSERT INTO mechanical_life VALUES (?,?,?,?,?,?,?,?)",
             (
@@ -647,6 +671,99 @@ class CharacterFacts:
             ),
         )
         self.replace_conditions(sid, actor.entity_id, actor.conditions)
+
+    @property
+    def PROFICIENCY_FIELDS_NAMES(self):
+        """Return the exact RE proficiency fields owned by narrow rows."""
+        return tuple(field for _, field in self.PROFICIENCY_FIELDS)
+
+    def _insert_attributes(self, sid, actor):
+        """Write approved initialization facts in the caller's existing UnitOfWork."""
+        aid = actor.entity_id
+        senses = actor.senses.model_dump(mode="python")
+        values = tuple(getattr(actor, name) for name in self.ATTRIBUTE_FIELDS)
+        sense_values = tuple(senses[name] for name in self.SENSE_FIELDS)
+        if any(
+            value is not None and not -(2**63) <= value < 2**63
+            for value in (*values, *sense_values)
+        ):
+            raise StateMachineError(
+                "invalid_mechanical_state", "Actor attribute exceeds storage range"
+            )
+        self._conn.execute(
+            "INSERT INTO character_attributes VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            (
+                sid,
+                aid,
+                *values,
+                *sense_values,
+                int(actor.weapon_proficiencies is not None),
+            ),
+        )
+        expertise = list(actor.skill_expertise)
+        used = [False] * len(expertise)
+        expertise_by_name = defaultdict(deque)
+        for index, name in enumerate(expertise):
+            expertise_by_name[name].append(index)
+        for kind, field in self.PROFICIENCY_FIELDS:
+            entries = getattr(actor, field) or []
+            for ordinal, name in enumerate(entries):
+                expertise_ordinal = None
+                if kind == "skill" and expertise_by_name[name]:
+                    expertise_ordinal = expertise_by_name[name].popleft()
+                    used[expertise_ordinal] = True
+                self._conn.execute(
+                    "INSERT INTO character_proficiencies VALUES (?,?,?,?,?,?,?)",
+                    (sid, aid, kind, ordinal, name, 1, expertise_ordinal),
+                )
+        for index, name in enumerate(expertise):
+            if not used[index]:
+                self._conn.execute(
+                    "INSERT INTO character_proficiencies VALUES (?,?,?,?,?,?,?)",
+                    (sid, aid, "skill", len(actor.skill_proficiencies) + index, name, 0, index),
+                )
+
+    def attributes(self, sid, actor_id, *, include_proficiencies=True):
+        """Read one required attribute owner; binding reads can omit list projection."""
+        row = self._conn.execute(
+            "SELECT * FROM character_attributes WHERE session_id=? AND actor_id=?",
+            (sid, actor_id),
+        ).fetchone()
+        if row is None:
+            raise StateMachineError("invalid_mechanical_state", "Actor attributes are missing")
+        data = {field: row[field] for field in self.ATTRIBUTE_FIELDS}
+        data["senses"] = {field: row[field] for field in self.SENSE_FIELDS}
+        if not include_proficiencies:
+            return data
+        proficiencies = {field: [] for _, field in self.PROFICIENCY_FIELDS}
+        expertise = []
+        field_by_kind = dict(self.PROFICIENCY_FIELDS)
+        for entry in self._conn.execute(
+            "SELECT kind,proficiency_id,proficient,expertise_ordinal FROM character_proficiencies "
+            "WHERE session_id=? AND actor_id=? ORDER BY kind,ordinal",
+            (sid, actor_id),
+        ):
+            field = field_by_kind[entry["kind"]]
+            if entry["proficient"]:
+                proficiencies[field].append(entry["proficiency_id"])
+            if entry["expertise_ordinal"] is not None:
+                expertise.append((entry["expertise_ordinal"], entry["proficiency_id"]))
+        data.update(proficiencies)
+        data["skill_expertise"] = [name for _, name in sorted(expertise)]
+        if not row["weapon_proficiencies_present"]:
+            data["weapon_proficiencies"] = None
+        return data
+
+    def senses(self, sid, actor_id):
+        """Read only one actor's four typed mechanical senses for event evidence."""
+        row = self._conn.execute(
+            "SELECT darkvision,blindsight,tremorsense,truesight FROM character_attributes "
+            "WHERE session_id=? AND actor_id=?",
+            (sid, actor_id),
+        ).fetchone()
+        if row is None:
+            raise StateMachineError("invalid_mechanical_state", "Actor attributes are missing")
+        return {field: row[field] for field in self.SENSE_FIELDS}
 
     def validate_initial_equipment(self, sid, snapshot):
         """Resolve /19 bindings after ingress inventory is materialized in the same UoW."""
@@ -1276,7 +1393,14 @@ class CharacterFacts:
 
     @scoped_read
     def _rule_actor(
-        self, sid, actor_id, *, include_carried=True, carried_slugs=None, include_resources=True
+        self,
+        sid,
+        actor_id,
+        *,
+        include_carried=True,
+        carried_slugs=None,
+        include_resources=True,
+        include_proficiencies=True,
     ):
         """Combine core facts and resolve /19 equipment IDs from current World items.
 
@@ -1300,6 +1424,7 @@ class CharacterFacts:
             )
         life = self.life(sid, actor_id)
         data = parse(actor["state_json"])
+        data.update(self.attributes(sid, actor_id, include_proficiencies=include_proficiencies))
         data.update(
             temp_hp=life["temp_hp"],
             is_alive=bool(life["is_alive"]),
@@ -1441,7 +1566,13 @@ class CharacterFacts:
 
     def binding_actor(self, sid, actor_id):
         """Read equipment metadata without assembling inventory or resource mirrors."""
-        return self._rule_actor(sid, actor_id, include_carried=False, include_resources=False)
+        return self._rule_actor(
+            sid,
+            actor_id,
+            include_carried=False,
+            include_resources=False,
+            include_proficiencies=False,
+        )
 
     @scoped_read
     def rule_actors(self, sid, owner_ids=None):
