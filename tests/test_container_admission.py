@@ -1,6 +1,5 @@
 """Scoped containment admission through public queries and commands."""
 
-import json
 from copy import deepcopy
 
 import pytest
@@ -254,10 +253,8 @@ def test_effect_guards_only_active_operating_actor(tmp_path, context, related, d
             "lifecycle": None,
             "end_effects": [],
         }
-        sm._conn.execute(
-            "UPDATE mechanical_components SET effects_json=? WHERE session_id=?",
-            (json.dumps([effect]), sid),
-        )
+        with sm._store.transaction(write=True):
+            sm._characters.effects.add_effect(sid, effect, ordinal=0)
         assert_admission(
             sm,
             sid,

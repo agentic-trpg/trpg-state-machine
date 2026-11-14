@@ -51,7 +51,12 @@ def sync_npc_schedules(runtime, sid, command_id, package):
             (sid, npc["npc_id"]),
         ).fetchone()
         state = json.loads(mechanical[0]) if mechanical else None
-        available = state is None or (state["is_alive"] and not state["conditions"])
+        available = state is None or (
+            state["is_alive"]
+            and not runtime._characters.effects.actor_conditions(
+                sid, npc["npc_id"], state["conditions"]
+            )
+        )
         changed = False
 
         def record(entry, status, previous=None, *, npc=npc):

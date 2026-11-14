@@ -60,9 +60,12 @@ class CharacterFacts:
 
     def __init__(self, store, world, loader):
         """Bind shared facts and the frozen rules loader used to resolve /19 item kinds."""
+        from .ongoing_effects import OngoingEffects
+
         self.store = store
         self.world = world
         self.loader = loader
+        self.effects = OngoingEffects(store)
 
     @property
     def _conn(self):
@@ -363,7 +366,8 @@ class CharacterFacts:
                 ),
             )
         state = actor.model_dump(
-            mode="json", exclude={"hp_current", "hp_max", "carried_item_slugs"}
+            mode="json",
+            exclude={"hp_current", "hp_max", "carried_item_slugs", "concentration_effect_id"},
         )
         if state.get("held_weapon_instance_id") is not None:
             del state["weapon_in_hands"]
@@ -425,7 +429,7 @@ class CharacterFacts:
             mode="json", include={"casting_state", "effect_states", "resource_state"}
         )
         old = self._conn.execute(
-            "SELECT schema_version,effects_json,resource_state_present,casting_state_present "
+            "SELECT schema_version,resource_state_present,casting_state_present "
             "FROM mechanical_components WHERE session_id=?",
             (sid,),
         ).fetchone()
@@ -433,13 +437,13 @@ class CharacterFacts:
         casting_present = data["casting_state"] is not None
         expected = (
             snapshot.snapshot_schema_version,
-            canonical_json(data["effect_states"]),
             int(present),
             int(casting_present),
         )
         if old is not None:
             if (
                 tuple(old) != expected
+                or self.effects.for_targets(sid) != data["effect_states"]
                 or self._casting_state(
                     sid, {actor.entity_id for actor in snapshot.character_states}
                 )
@@ -476,10 +480,11 @@ class CharacterFacts:
             return
         self._conn.execute(
             "INSERT INTO mechanical_components "
-            "(session_id,schema_version,effects_json,resource_state_present,casting_state_present) "
-            "VALUES (?,?,?,?,?)",
+            "(session_id,schema_version,resource_state_present,casting_state_present) "
+            "VALUES (?,?,?,?)",
             (sid, *expected),
         )
+        self.effects.initialize(sid, data["effect_states"])
         if casting_present:
             snapshot_actors = {actor.entity_id: actor for actor in snapshot.character_states}
             for actor_ordinal, actor in enumerate(data["casting_state"]["actors"]):
@@ -637,13 +642,6 @@ class CharacterFacts:
                     iid = core_item_id(sid, actor.entity_id, position)
                     self.world.materialize_owned_item(sid, iid, actor.entity_id, unit)
 
-    @scoped_read
-    def _component_inputs(self, row):
-        """Decode remaining aggregate effects with a reusable owner index."""
-        from .component_reads import ComponentInputs
-
-        return ComponentInputs({"effects_json": self.store.memory.json(row["effects_json"])})
-
     def _casting_state(self, sid, owner_ids=None):
         """Project keyed casting facts in original actor, source, spell and material order.
 
@@ -758,7 +756,7 @@ class CharacterFacts:
                 "unsupported_mechanical_version", "Explicit component facts are missing"
             )
         try:
-            values = self._component_inputs(row).select({actor_id})
+            values = {"effects_json": self.effects.for_targets(sid, {actor_id})}
             resources = self._typed_resources(sid, {actor_id}, row["resource_state_present"])
             if resources is not None:
                 ResourceState.model_validate({**resources, "pools": tuple(resources["pools"])})
@@ -824,10 +822,10 @@ class CharacterFacts:
             )
             item_inventory = {"entries": list(item_entries.values())}
             if not full_audit:
-                values = self._component_inputs(row).select(owner_ids)
+                values = {"effects_json": self.effects.for_targets(sid, owner_ids)}
                 values["inventory"] = item_inventory
             else:
-                values = {"effects_json": self.store.memory.json(row["effects_json"])}
+                values = {"effects_json": self.effects.for_targets(sid)}
                 values["inventory"] = item_inventory
             values["resource_state"] = (
                 audit_resources
@@ -1046,6 +1044,8 @@ class CharacterFacts:
                 "invalid_mechanical_state", "Legacy core resources/effects have no typed source"
             )
         data = parse(actor[0])
+        data["conditions"] = self.effects.actor_conditions(sid, actor_id, data["conditions"])
+        data["concentration_effect_id"] = self.effects.concentration_reference(sid, actor_id)
         if (
             include_carried
             and self._conn.execute(
@@ -2183,13 +2183,26 @@ class CombatRecords:
     def initialize(self, sid, snapshot, *, spatial, process_id):
         """Initialize combat runtime records."""
         self.store.require_write()
+        effect_fields = (
+            "concentration_chain",
+            "concentration_rounds_remaining",
+            "conditions_by_effect",
+            "effect_lifecycles",
+        )
+        state = snapshot.combat_state.model_dump(mode="json", exclude={"actor_zone"})
+        if any(state[field] for field in effect_fields):
+            raise StateMachineError(
+                "unsupported_combat_foundation", "Initial ongoing effects are not admitted"
+            )
+        for field in effect_fields:
+            del state[field]
         self._conn.execute(
             "INSERT INTO combats VALUES (?,?,?,?,?)",
             (
                 sid,
                 snapshot.combat_state.combat_id,
                 snapshot.scene_state.scene_id,
-                snapshot.combat_state.model_dump_json(exclude={"actor_zone"}),
+                canonical_json(state),
                 process_id,
             ),
         )

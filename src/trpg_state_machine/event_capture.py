@@ -226,8 +226,7 @@ class EventCapture:
                     and combat["scene_id"] == scene_id
                     and (
                         state["persistent_areas"]["areas"]
-                        or state["conditions_by_effect"]
-                        or state["effect_lifecycles"]
+                        or self.characters.effects.has_linked_effects(sid, state["initiative_ids"])
                     )
                 ),
             }
@@ -251,7 +250,12 @@ class EventCapture:
                 None
                 if data is None
                 else {
-                    "conditions": [c["condition"] for c in data["conditions"]],
+                    "conditions": [
+                        c["condition"]
+                        for c in self.characters.effects.actor_conditions(
+                            sid, actor["actor_id"], data["conditions"]
+                        )
+                    ],
                     "senses": data["senses"],
                     "traits": data["trait_mechanics"],
                     "is_alive": data["is_alive"],

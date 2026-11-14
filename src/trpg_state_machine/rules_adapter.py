@@ -399,6 +399,7 @@ class RulesAdapter:
             raise StateMachineError("combat_not_initialized", "Session has no mechanical encounter")
         state = json.loads(combat["state_json"])
         roster = set(state["initiative_ids"])
+        state.update(self.characters.effects.combat_fields(sid, roster))
         scene = self.facts.mechanical_scene(sid, combat["scene_id"])
         if not state["ended"]:
             state["actor_zone"] = self._current_cells(

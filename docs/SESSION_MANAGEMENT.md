@@ -1,5 +1,20 @@
 # Session Management
 
+## 2026-11-14 STORAGE-01 持续效果实例
+
+新建 Schema46 将持续效果保存为 `(session_id, target_id, effect_id, origin)`
+独立目标行；一次专注保存为一条 `effect_concentrations` 记录，成员通过专注 ID
+关联。效果本体、条件链接与完整生命周期时钟同属目标行；角色的非效果条件
+继续由角色机械事实独立持有。专注组保存施法者的稳定 `concentration_effect_id`
+引用，单个目标效果结束不重新选取该引用。空组在读取时拒绝；移除最后一个成员
+会清除组。战斗与探索 RE Snapshot 从这些行投影既有字段与顺序，Event
+和 World 状态检查读取同一有效目标范围。
+
+效果写入由 Effects 领域接口使用现有 UnitOfWork、SessionMemory 和提交后
+发布协议；新库及重开无需旧聚合回填。Schema1–45 预发布开发数据库在可写
+打开前拒绝。本批仅有内部效果事实增删接口，没有开放施法、轮次推进或 RE
+效果采用命令；角色本身的非效果条件写入仍保留原路径。
+
 ## 2026-11-14 STORAGE-01 角色施法来源
 
 新建 Schema45 把显式 `CastingState` 存为角色、职业来源、已知／准备法术、

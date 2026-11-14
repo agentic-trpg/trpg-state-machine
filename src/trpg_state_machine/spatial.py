@@ -190,7 +190,11 @@ class WorldHandler:
         if (
             (core and (core[0] <= 0 or self.store.memory.json(core[1])))
             or state
-            and (not state["is_alive"] or state["conditions"] or state["concentration_effect_id"])
+            and (
+                not state["is_alive"]
+                or self.characters.effects.actor_conditions(sid, actor_id, state["conditions"])
+                or self.characters.effects.concentration_reference(sid, actor_id)
+            )
         ):
             raise StateMachineError(
                 "unsupported_actor_state", "Actor state needs unsupported rules"
