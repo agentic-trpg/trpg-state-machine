@@ -415,6 +415,18 @@ class WorldHandler:
             raise StateMachineError("item_out_of_reach", "Item destination is occupied")
         if type(operation) is DropItem:
             self.objects.containers.require_unbound(sid, actor_id, operation.instance_id, drop=True)
+        else:
+            # Pickup has no moving owned subtree, but still requires the actor's
+            # typed mechanical facts and the original active-effect boundary.
+            if self.characters.binding_actor(sid, actor_id) is None:
+                raise StateMachineError(
+                    "unsupported_actor_state", "Carrier needs explicit mechanical facts"
+                )
+            components = self.characters.binding_components(sid, actor_id)
+            if any(e["target_id"] == actor_id for e in components["effect_states"]):
+                raise StateMachineError(
+                    "unsupported_actor_state", "Active effects need unsupported adjudication"
+                )
         return position, item
 
     def _operate_item_transfer(self, row, actor_id, operation, package):

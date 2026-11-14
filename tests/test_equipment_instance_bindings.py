@@ -8,12 +8,15 @@ from item_support import DAGGER, item_data, item_loader
 from lock_support import CRED, TWIN, A, lock_loader
 from spatial_support import create
 from test_container_admission import assert_admission, authority
+from test_item_transfers import ready
+from test_item_transfers import setup as item_setup
 from test_scoped_runtime_validation import grow, measure
 from test_world_containers import BOX, container_data
 from world_support import command, setup
 
 from trpg_state_machine import (
     DropItem,
+    PickupItem,
     PutItem,
     StateMachine,
     StateMachineError,
@@ -225,6 +228,51 @@ def test_wrong_initial_equipment_kind_rolls_back_creation(tmp_path, context):
         with pytest.raises(StateMachineError, match="Worn armor identity differs"):
             create(sm, package, context)
         assert sm._conn.execute("SELECT COUNT(*) FROM sessions").fetchone()[0] == 0
+
+
+@pytest.mark.parametrize("fault", ["missing_actor", "active_effect"])
+def test_pickup_preserves_typed_actor_and_effect_boundary(tmp_path, context, fault):
+    """Preview and command refuse Pickup when its original actor guard fails."""
+    sm, sid, package, _ = item_setup(tmp_path, context, item_data())
+    with sm:
+        ready(sm, sid, package, context)
+        state = sm.read_session(sid, package, context=context)
+        actor, version = state.pc_actor_id, state.world_version
+        if fault == "missing_actor":
+            sm._conn.execute(
+                "DELETE FROM mechanical_actors WHERE session_id=? AND actor_id=?", (sid, actor)
+            )
+        else:
+            effect = {
+                "id": "effect.test",
+                "name": "active pickup guard",
+                "origin": "test",
+                "target_id": actor,
+                "disabled": False,
+                "transfer": False,
+                "duration": {
+                    k: None for k in ("rounds", "turns", "seconds", "start_round", "start_turn")
+                },
+                "changes": [],
+                "action_policy": None,
+                "statuses": [],
+                "flags": {},
+                "lifecycle": None,
+                "end_effects": [],
+            }
+            sm._conn.execute(
+                "UPDATE mechanical_components SET effects_json=? WHERE session_id=?",
+                (json.dumps([effect]), sid),
+            )
+        before = authority(sm)
+        operation = PickupItem(DAGGER, A, "2,1")
+        preview = sm.query_world_action(sid, actor, operation, package, context=context)
+        assert (preview.status, preview.reason) == ("unavailable", "unsupported_actor_state")
+        assert authority(sm) == before
+        cmd = TypedCommand(sid, "pickup.guard", actor, "world.pickup_item", operation, version)
+        receipt = sm.submit_command(cmd, package, context=context)
+        assert (receipt.status, receipt.error_code) == ("rejected", "unsupported_actor_state")
+        assert authority(sm) == before
 
 
 def test_combat_availability_uses_bound_equipment_and_spares(tmp_path, context):
