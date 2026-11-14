@@ -6,6 +6,7 @@ from copy import deepcopy
 from dataclasses import replace
 
 import pytest
+from dnd_support import NPC
 from lock_support import CRED, A
 from test_mechanism_service import extended_data, trigger
 from test_scoped_runtime_validation import grow, measure
@@ -58,7 +59,18 @@ def work(sm, monkeypatch):
 
             def counted(*args, _original=original, _label=label, **kwargs):
                 counts[_label] += 1
+                before_rows = memory.stats["ram_rows"] if _label == "ram_queries" else 0
                 result = _original(*args, **kwargs)
+                if _label == "ram_queries" and "FROM mechanical_life" in args[0]:
+                    rows = memory.stats["ram_rows"] - before_rows
+                    counts["life_ram_rows"] += rows
+                    if args[0] == (
+                        "SELECT * FROM mechanical_life WHERE session_id=? AND actor_id=?"
+                    ):
+                        counts[f"life_actor:{args[1][1]}"] += rows
+                        counts["life_point_queries"] += 1
+                    else:
+                        counts["unscoped_life_queries"] += 1
                 if _label == "dependency_checks":
                     for domain in ("weight", "mechanism_index", "light_candidates"):
                         if args[0][0].startswith(domain + ":"):
@@ -204,7 +216,14 @@ def test_nonmatching_mechanism_records(tmp_path, context, monkeypatch, n, family
         assert counts["index_candidate_records"] == 0
         assert counts["mechanism_index_checks"] == 1
         # Scene record/version lookup now replaces content-key map lookup.
-        assert counts["dependency_checks"] <= 114 and counts["ram_rows"] <= 32
+        assert counts["dependency_checks"] <= 114
+        # Admission reads the PC once; event evidence reads the PC and one NPC.
+        # Keep their new narrow-row cost separate from the preexisting scope.
+        assert counts["life_point_queries"] == counts["life_ram_rows"] == 3
+        assert counts[f"life_actor:{motion.actor_id}"] == 2
+        assert counts[f"life_actor:{NPC}"] == 1
+        assert counts["unscoped_life_queries"] == 0
+        assert counts["ram_rows"] - counts["life_ram_rows"] <= 32
         key = ("instance", sid, "scene", A)
         entry = sm._store.memory.values[key][0].mechanisms.index[0]
         assert (
