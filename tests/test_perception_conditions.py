@@ -437,6 +437,10 @@ def test_event_time_conditions_and_darkness_survive_current_change(tmp_path, pac
         ).fetchone()[0]
         evidence = json.loads(saved)
         observer = next(a for a in evidence["actors"] if a["actor_id"] == NPC)
+        assert sm._conn.execute(
+            "SELECT condition FROM character_conditions WHERE session_id=? AND actor_id=?",
+            (sid, NPC),
+        ).fetchall()
         event = sm._read_event(sid, seq)
         for signal in event.signals:
             assert (
@@ -450,7 +454,14 @@ def test_event_time_conditions_and_darkness_survive_current_change(tmp_path, pac
             "state_json=json_set(state_json,'$.grid.default_lighting','bright')"
         )
         sm._conn.execute(
-            "UPDATE mechanical_actors SET state_json=json_set(state_json,'$.conditions',json('[]'))"
+            "DELETE FROM character_conditions WHERE session_id=? AND actor_id=?", (sid, NPC)
+        )
+        assert (
+            sm._conn.execute(
+                "SELECT 1 FROM character_conditions WHERE session_id=? AND actor_id=?",
+                (sid, NPC),
+            ).fetchone()
+            is None
         )
     with StateMachine(db, dnd_loader=assets) as sm:
 
@@ -458,7 +469,7 @@ def test_event_time_conditions_and_darkness_survive_current_change(tmp_path, pac
             return (
                 sqlite3.SQLITE_DENY
                 if action == sqlite3.SQLITE_READ
-                and table in ("mechanical_actors", "mechanical_scenes")
+                and table in ("mechanical_actors", "mechanical_scenes", "character_conditions")
                 else sqlite3.SQLITE_OK
             )
 

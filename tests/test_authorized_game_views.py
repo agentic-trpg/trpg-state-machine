@@ -220,16 +220,19 @@ def test_mechanical_unknown_visibility_fails_closed(tmp_path, package_data, cont
         if kind == "dark":
             scene["grid"]["default_lighting"] = "dark"
         elif kind == "condition":
-            actor = json.loads(
-                sm._conn.execute(
-                    "SELECT state_json FROM mechanical_actors WHERE session_id=? LIMIT 1", (sid,)
-                ).fetchone()[0]
-            )
-            actor["conditions"] = [{"condition": "invisible"}]
-            sm._conn.execute(
-                "UPDATE mechanical_actors SET state_json=? WHERE session_id=? AND actor_id=?",
-                (json.dumps(actor), sid, actor["entity_id"]),
-            )
+            actor_id = sm._conn.execute(
+                "SELECT actor_id FROM mechanical_actors WHERE session_id=? LIMIT 1", (sid,)
+            ).fetchone()[0]
+            with sm._store.transaction(write=True):
+                sm._characters.add_condition(
+                    sid,
+                    actor_id,
+                    {
+                        "condition": "invisible",
+                        "source_entity_id": "implied:condition",
+                        "scope": "session",
+                    },
+                )
         else:
             scene["grid"]["obscurement_cells"] = {"0,0": "heavy"}
         sm._conn.execute(

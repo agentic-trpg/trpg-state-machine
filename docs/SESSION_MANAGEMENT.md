@@ -13,6 +13,8 @@ CharacterFacts 按角色读取、增删和投影；同名记录与重复记录�
 建表；Schema1–47 的旧预发布存档在可写打开前拒绝。本批不增加条件施加命令、
 自动过期或规则裁决。现有战斗 Foundation 准入本身拒绝带初始条件的输入；
 该边界未在本批放宽。
+非战斗 Foundation 可以接受独立初始条件；若输入带 `source_effect_id`，
+初始化在写入角色前以 `unsupported_noncombat_foundation` 拒绝，避免形成无主链接。
 
 ## 2026-11-15 STORAGE-02 生命与伤害事实（候选分支）
 

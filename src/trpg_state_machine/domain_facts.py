@@ -542,6 +542,13 @@ class CharacterFacts:
     def initialize_rule_actor(self, row, actor, *, xp=None, encounter=False, schema_version=None):
         """Initialize JSON plus a required life row; /19 omits derived equipment mirrors."""
         self.store.require_write()
+        if any(condition.source_effect_id is not None for condition in actor.conditions):
+            raise StateMachineError(
+                "unsupported_combat_foundation"
+                if encounter
+                else "unsupported_noncombat_foundation",
+                "Initial linked conditions require effect adoption",
+            )
         sid = row["session_id"]
         core = self._conn.execute(
             "SELECT * FROM characters WHERE session_id=? AND actor_id=?", (sid, actor.entity_id)
@@ -641,10 +648,6 @@ class CharacterFacts:
                 actor.last_damaged_by,
             ),
         )
-        if any(condition.source_effect_id is not None for condition in actor.conditions):
-            raise StateMachineError(
-                "unsupported_combat_foundation", "Initial linked conditions require effect adoption"
-            )
         self.replace_conditions(sid, actor.entity_id, actor.conditions)
 
     def validate_initial_equipment(self, sid, snapshot):

@@ -494,17 +494,16 @@ def test_admission_refusals_preserve_all_current_and_historical_facts(tmp_path, 
                 "UPDATE characters SET current_hp=0 WHERE session_id=? AND actor_id=?", (sid, pc)
             )
         elif case == "condition":
-            raw = json.loads(
-                sm._conn.execute(
-                    "SELECT state_json FROM mechanical_actors WHERE session_id=? AND actor_id=?",
-                    (sid, pc),
-                ).fetchone()[0]
-            )
-            raw["conditions"] = ["incapacitated"]
-            sm._conn.execute(
-                "UPDATE mechanical_actors SET state_json=? WHERE session_id=? AND actor_id=?",
-                (json.dumps(raw), sid, pc),
-            )
+            with sm._store.transaction(write=True):
+                sm._characters.add_condition(
+                    sid,
+                    pc,
+                    {
+                        "condition": "incapacitated",
+                        "source_entity_id": "implied:condition",
+                        "scope": "session",
+                    },
+                )
         elif case == "combat":
             ok(submit(sm, sid, p, context, UnlockDoor(A, DOOR, CRED, "0,0"), "unlock"))
             ok(submit(sm, sid, p, context, SetObjectState(A, DOOR, ObjectState.OPEN), "open"))
