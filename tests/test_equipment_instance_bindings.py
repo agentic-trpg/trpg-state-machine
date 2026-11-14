@@ -1,6 +1,8 @@
 """Public transfers protect only actual instance-bound equipment on snapshot /19."""
 
 import json
+from pathlib import Path
+from runpy import run_path
 
 import pytest
 from dnd_support import initialize
@@ -14,7 +16,6 @@ from test_scoped_runtime_validation import grow, measure
 from test_world_containers import BOX, container_data
 from world_support import command, setup
 
-from examples.real_cross_phase import author_fixture
 from trpg_state_machine import (
     DropItem,
     PickupItem,
@@ -25,6 +26,10 @@ from trpg_state_machine import (
     TypedCommand,
 )
 from trpg_state_machine.package import _validate
+
+author_fixture = run_path(
+    str(Path(__file__).resolve().parents[1] / "examples" / "real_cross_phase.py")
+)["author_fixture"]
 
 
 def combat_equipment_data():
