@@ -6,11 +6,14 @@ Rules metadata edits have a closed field set matching the pinned adapter.
 """
 
 import json
+from collections import defaultdict, deque
+from uuid import uuid4
 
 from dnd5e_engine.evaluation_casting import CastingState
 from dnd5e_engine.evaluation_effects import EffectState
 from dnd5e_engine.evaluation_resources import ResourceState
 from dnd5e_engine.evaluation_state import InventoryState
+from dnd5e_engine.types.conditions import ActiveCondition
 from pydantic import TypeAdapter
 
 from .errors import StateMachineError
@@ -27,7 +30,6 @@ class CharacterFacts:
 
     RULE_FIELDS = frozenset(
         (
-            "conditions",
             "action_available",
             "bonus_action_available",
             "reaction_available",
@@ -305,8 +307,11 @@ class CharacterFacts:
         )
 
     def update_rule_metadata(self, sid, actor_id, field, value):
-        """Route approved rule fields to the life row or remaining rules JSON."""
+        """Route approved rule fields to their narrow owner or remaining rules JSON."""
         self.store.require_write()
+        if field == "conditions":
+            self.replace_conditions(sid, actor_id, value)
+            return
         if field in ("temp_hp", "is_alive", "death_saves", "last_damaged_by"):
             self.update_life_state(sid, actor_id, field, value)
             return
@@ -371,6 +376,169 @@ class CharacterFacts:
             raise StateMachineError("invalid_mechanical_state", "Actor life component is missing")
         return row
 
+    def conditions(self, sid, actor_id):
+        """Read ordered independent conditions for one actor from keyed current facts."""
+        rows = self._conn.execute(
+            "SELECT * FROM character_conditions WHERE session_id=? AND actor_id=? ORDER BY ordinal",
+            (sid, actor_id),
+        )
+        return [self._condition_data(row) for row in rows]
+
+    @staticmethod
+    def _condition_data(row):
+        """Restore the unchanged RE wire fields from one owned condition row."""
+        return {
+            key: row[key]
+            for key in (
+                "condition",
+                "source_entity_id",
+                "scope",
+                "applied_round",
+                "duration_rounds",
+                "save_dc",
+                "exhaustion_level",
+            )
+        } | {"source_effect_id": None}
+
+    def condition(self, sid, actor_id, condition_id):
+        """Read one independent record by stable identity within its actor scope."""
+        row = self._conn.execute(
+            "SELECT * FROM character_conditions WHERE session_id=? AND actor_id=? "
+            "AND condition_id=?",
+            (sid, actor_id, condition_id),
+        ).fetchone()
+        return self._condition_data(row) if row is not None else None
+
+    def condition_names(self, sid, actor_id):
+        """Read only one actor's independent condition names in record order."""
+        return [
+            row[0]
+            for row in self._conn.execute(
+                "SELECT condition FROM character_conditions WHERE session_id=? AND actor_id=? "
+                "ORDER BY ordinal",
+                (sid, actor_id),
+            )
+        ]
+
+    def has_conditions(self, sid, actor_id):
+        """Test one actor's independent condition existence without decoding records."""
+        return (
+            self._conn.execute(
+                "SELECT 1 FROM character_conditions WHERE session_id=? AND actor_id=? LIMIT 1",
+                (sid, actor_id),
+            ).fetchone()
+            is not None
+        )
+
+    def replace_conditions(self, sid, actor_id, values):
+        """Adopt an independent projection, retaining IDs of unchanged duplicate records."""
+        self.store.require_write()
+        if type(values) not in (list, tuple):
+            raise StateMachineError("invalid_rule_result", "Invalid independent conditions")
+        normalized = []
+        for value in values:
+            condition = ActiveCondition.model_validate(
+                value.model_dump(mode="json") if hasattr(value, "model_dump") else value
+            )
+            if condition.source_effect_id is not None:
+                raise StateMachineError(
+                    "invalid_rule_result", "Linked condition belongs to Effects"
+                )
+            normalized.append(condition.model_dump(mode="json"))
+        old = self._conn.execute(
+            "SELECT * FROM character_conditions WHERE session_id=? AND actor_id=? ORDER BY ordinal",
+            (sid, actor_id),
+        ).fetchall()
+        by_value = defaultdict(deque)
+        for row in old:
+            by_value[canonical_json(self._condition_data(row))].append(row)
+        matched = []
+        for condition in normalized:
+            bucket = by_value[canonical_json(condition)]
+            matched.append(bucket.popleft() if bucket else None)
+        surviving = [row["ordinal"] for row in matched if row is not None]
+        first_new = next((i for i, row in enumerate(matched) if row is None), len(matched))
+        append_only = all(row is None for row in matched[first_new:])
+        preserve_order = append_only and surviving == sorted(surviving)
+        next_ordinal = max((row["ordinal"] for row in old), default=-1) + 1
+        retained = set()
+        for ordinal, (condition, row) in enumerate(zip(normalized, matched, strict=True)):
+            if row is None:
+                assigned = next_ordinal if preserve_order else ordinal
+                next_ordinal += 1
+                self._conn.execute(
+                    "INSERT INTO character_conditions VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+                    (
+                        sid,
+                        actor_id,
+                        uuid4().hex,
+                        condition["condition"],
+                        condition["source_entity_id"],
+                        condition["scope"],
+                        condition["applied_round"],
+                        condition["duration_rounds"],
+                        condition["save_dc"],
+                        condition["exhaustion_level"],
+                        assigned,
+                    ),
+                )
+            else:
+                retained.add(row["condition_id"])
+                if not preserve_order and row["ordinal"] != ordinal:
+                    self._conn.execute(
+                        "UPDATE character_conditions SET ordinal=? WHERE session_id=? "
+                        "AND actor_id=? AND condition_id=?",
+                        (ordinal, sid, actor_id, row["condition_id"]),
+                    )
+        for row in old:
+            if row["condition_id"] not in retained:
+                self._conn.execute(
+                    "DELETE FROM character_conditions WHERE session_id=? AND actor_id=? "
+                    "AND condition_id=?",
+                    (sid, actor_id, row["condition_id"]),
+                )
+
+    def add_condition(self, sid, actor_id, value):
+        """Append one independent condition and return its stable internal identity."""
+        self.store.require_write()
+        condition = ActiveCondition.model_validate(
+            value.model_dump(mode="json") if hasattr(value, "model_dump") else value
+        )
+        if condition.source_effect_id is not None:
+            raise StateMachineError("invalid_rule_result", "Linked condition belongs to Effects")
+        ordinal = self._conn.execute(
+            "SELECT COALESCE(MAX(ordinal),-1)+1 FROM character_conditions "
+            "WHERE session_id=? AND actor_id=?",
+            (sid, actor_id),
+        ).fetchone()[0]
+        cid = uuid4().hex
+        self._conn.execute(
+            "INSERT INTO character_conditions VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+            (
+                sid,
+                actor_id,
+                cid,
+                condition.condition,
+                condition.source_entity_id,
+                condition.scope,
+                condition.applied_round,
+                condition.duration_rounds,
+                condition.save_dc,
+                condition.exhaustion_level,
+                ordinal,
+            ),
+        )
+        return cid
+
+    def remove_condition(self, sid, actor_id, condition_id):
+        """Remove one independent record by identity without editing siblings."""
+        self.store.require_write()
+        deleted = self._conn.execute(
+            "DELETE FROM character_conditions WHERE session_id=? AND actor_id=? AND condition_id=?",
+            (sid, actor_id, condition_id),
+        )
+        return deleted.rowcount == 1
+
     def initialize_rule_actor(self, row, actor, *, xp=None, encounter=False, schema_version=None):
         """Initialize JSON plus a required life row; /19 omits derived equipment mirrors."""
         self.store.require_write()
@@ -428,6 +596,7 @@ class CharacterFacts:
                 "is_alive",
                 "death_saves",
                 "last_damaged_by",
+                "conditions",
             },
         )
         if state.get("held_weapon_instance_id") is not None:
@@ -472,6 +641,11 @@ class CharacterFacts:
                 actor.last_damaged_by,
             ),
         )
+        if any(condition.source_effect_id is not None for condition in actor.conditions):
+            raise StateMachineError(
+                "unsupported_combat_foundation", "Initial linked conditions require effect adoption"
+            )
+        self.replace_conditions(sid, actor.entity_id, actor.conditions)
 
     def validate_initial_equipment(self, sid, snapshot):
         """Resolve /19 bindings after ingress inventory is materialized in the same UoW."""
@@ -1137,7 +1311,9 @@ class CharacterFacts:
             ),
             last_damaged_by=life["last_damaged_by"],
         )
-        data["conditions"] = self.effects.actor_conditions(sid, actor_id, data["conditions"])
+        data["conditions"] = self.effects.actor_conditions(
+            sid, actor_id, self.conditions(sid, actor_id)
+        )
         data["concentration_effect_id"] = self.effects.concentration_reference(sid, actor_id)
         if (
             include_carried

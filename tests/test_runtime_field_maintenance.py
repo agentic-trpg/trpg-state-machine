@@ -72,6 +72,8 @@ def work(sm, monkeypatch):
                     else:
                         counts["unscoped_life_queries"] += 1
                 if _label == "dependency_checks":
+                    if args[0][0] == "character_conditions":
+                        counts["condition_checks"] += 1
                     for domain in ("weight", "mechanism_index", "light_candidates"):
                         if args[0][0].startswith(domain + ":"):
                             counts[domain + "_checks"] += 1
@@ -216,7 +218,10 @@ def test_nonmatching_mechanism_records(tmp_path, context, monkeypatch, n, family
         assert counts["index_candidate_records"] == 0
         assert counts["mechanism_index_checks"] == 1
         # Scene record/version lookup now replaces content-key map lookup.
-        assert counts["dependency_checks"] <= 114
+        # Four point condition probes now guard mechanical actors at admission
+        # and evidence capture. They are fixed target dependencies, not scene scans.
+        assert counts["condition_checks"] == 4
+        assert counts["dependency_checks"] - counts["condition_checks"] <= 114
         # Admission reads the PC once; event evidence reads the PC and one NPC.
         # Keep their new narrow-row cost separate from the preexisting scope.
         assert counts["life_point_queries"] == counts["life_ram_rows"] == 3

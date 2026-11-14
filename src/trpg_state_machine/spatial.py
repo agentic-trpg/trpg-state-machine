@@ -183,17 +183,16 @@ class WorldHandler:
             (sid, actor_id),
         ).fetchone()
         mechanical = self._conn.execute(
-            "SELECT state_json FROM mechanical_actors WHERE session_id=? AND actor_id=?",
+            "SELECT actor_id FROM mechanical_actors WHERE session_id=? AND actor_id=?",
             (sid, actor_id),
         ).fetchone()
-        state = self.store.memory.json(mechanical[0]) if mechanical else None
         life = self.characters.life(sid, actor_id) if mechanical else None
         if (
             (core and (core[0] <= 0 or self.store.memory.json(core[1])))
-            or state
+            or mechanical
             and (
                 not life["is_alive"]
-                or state["conditions"]
+                or self.characters.has_conditions(sid, actor_id)
                 or self.characters.effects.has_linked_conditions(sid, actor_id)
                 or self.characters.effects.has_concentration(sid, actor_id)
             )
@@ -238,11 +237,11 @@ class WorldHandler:
                 "unsupported_target_visibility", "Target authorization is unproven"
             )
         mechanical = self._conn.execute(
-            "SELECT state_json FROM mechanical_actors WHERE session_id=? AND actor_id=?",
+            "SELECT actor_id FROM mechanical_actors WHERE session_id=? AND actor_id=?",
             (sid, actor_id),
         ).fetchone()
         if mechanical and (
-            self.store.memory.json(mechanical[0])["conditions"]
+            self.characters.has_conditions(sid, actor_id)
             or self.characters.effects.has_linked_conditions(sid, actor_id)
         ):
             raise StateMachineError(

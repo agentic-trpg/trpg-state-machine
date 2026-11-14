@@ -123,7 +123,7 @@ def test_current_save_reopens_without_inventory_aggregate_columns(
     with StateMachine(path) as sm:
         created = sm.create_session(request_for(), package, context=context)
         saved = sm.save_session(created.session_id, package, context=context)
-        assert sm._conn.execute("PRAGMA user_version").fetchone()[0] == 47
+        assert sm._conn.execute("PRAGMA user_version").fetchone()[0] == 48
         for table in ("characters", "mechanical_components"):
             columns = {row[1] for row in sm._conn.execute(f"PRAGMA table_info({table})")}
             assert "inventory_json" not in columns

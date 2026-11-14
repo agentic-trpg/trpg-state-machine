@@ -719,12 +719,12 @@ class PerceptionRuntime:
             ):
                 return False
             states = self._conn.execute(
-                "SELECT m.actor_id,m.state_json FROM mechanical_actors m JOIN actors a "
+                "SELECT m.actor_id FROM mechanical_actors m JOIN actors a "
                 "USING(session_id,actor_id) WHERE m.session_id=? AND a.current_scene_id=?",
                 (sid, scene),
             ).fetchall()
             if any(
-                json.loads(r["state_json"])["conditions"]
+                self._characters.has_conditions(sid, r["actor_id"])
                 or self._characters.effects.has_linked_conditions(sid, r["actor_id"])
                 for r in states
             ):

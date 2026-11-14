@@ -565,12 +565,26 @@ class RulesAdapter:
         self.store.require_write()
         sid = row["session_id"]
         for component, identity, field, value in changes:
+            if component == "actor" and field == "conditions":
+                independent = [
+                    condition for condition in value if condition["source_effect_id"] is None
+                ]
+                if self.characters.effects.actor_conditions(sid, identity, independent) != value:
+                    _invalid("Delta changed effect-linked conditions")
+        for component, identity, field, value in changes:
             if component == "xp":
                 self.characters.award_xp(sid, identity, value)
             elif component == "actor" and field == "hp_current":
                 self.characters.set_hp(sid, identity, value)
             elif component == "actor":
-                self.characters.update_rule_metadata(sid, identity, field, value)
+                self.characters.update_rule_metadata(
+                    sid,
+                    identity,
+                    field,
+                    [condition for condition in value if condition["source_effect_id"] is None]
+                    if field == "conditions"
+                    else value,
+                )
             elif component == "combat":
                 if field == "ended" and value:
                     combat = self._conn.execute(
