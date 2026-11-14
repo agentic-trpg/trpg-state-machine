@@ -36,6 +36,11 @@ This batch excludes combat transfers, contested/hidden property, containers,
 stealing, locks, breakage, equipment changes, use/consumption, stack operations,
 encumbrance rules, automatic pickup, automatic time and free-text plans.
 
+2026-11-15 follow-up: [ITEM-01 Batch B](ITEM_01_COMBAT_HEALING_POTION.md)
+implements only self-drinking an ordinary healing potion during active combat.
+The exclusions above describe this historical GC-3 transfer batch; they do not
+describe the later narrow consumption implementation.
+
 ## Implemented local contract
 
 All writes use the existing `submit_command(TypedCommand, package, context=...)`.

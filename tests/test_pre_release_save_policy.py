@@ -93,6 +93,23 @@ def test_schema48_item_json_is_refused_before_writable_open(tmp_path):
         )
 
 
+def test_schema49_save_is_refused_before_writable_open(tmp_path):
+    """The previous development schema stays intact when opening is refused."""
+    path = tmp_path / "schema49.db"
+    with sqlite3.connect(path) as conn:
+        conn.execute("CREATE TABLE old_items (item_slug TEXT NOT NULL)")
+        conn.execute("INSERT INTO old_items VALUES ('item.kept')")
+        conn.execute("PRAGMA user_version = 49")
+    before = hashlib.sha256(path.read_bytes()).digest()
+    with pytest.raises(StateMachineError) as error:
+        StateMachine(path)
+    assert error.value.code == "unsupported_storage_schema"
+    assert hashlib.sha256(path.read_bytes()).digest() == before
+    with sqlite3.connect(path) as conn:
+        assert conn.execute("PRAGMA user_version").fetchone()[0] == 49
+        assert conn.execute("SELECT item_slug FROM old_items").fetchone() == ("item.kept",)
+
+
 def test_pre41_crashed_wal_is_refused_without_checkpointing_source(tmp_path):
     """An orphan WAL keeps its committed stock and original main/WAL bytes."""
     path = tmp_path / "orphan.db"
@@ -142,7 +159,7 @@ def test_current_save_reopens_without_inventory_aggregate_columns(
     with StateMachine(path) as sm:
         created = sm.create_session(request_for(), package, context=context)
         saved = sm.save_session(created.session_id, package, context=context)
-        assert sm._conn.execute("PRAGMA user_version").fetchone()[0] == 49
+        assert sm._conn.execute("PRAGMA user_version").fetchone()[0] == 50
         for table in ("characters", "mechanical_components"):
             columns = {row[1] for row in sm._conn.execute(f"PRAGMA table_info({table})")}
             assert "inventory_json" not in columns

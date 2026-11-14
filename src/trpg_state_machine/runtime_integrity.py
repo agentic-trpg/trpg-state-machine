@@ -63,6 +63,22 @@ def certify_scene(conn, sid, scene):
         for actor in data["actor_initial_ids"]:
             required.update((("actors", actor), ("config:actor", actor)))
         for oid in data["object_ids"]:
+            consumed = conn.execute(
+                "SELECT 1 FROM consumed_items WHERE session_id=? AND object_id=? "
+                "AND authored_scene_id=?",
+                (sid, oid, scene),
+            ).fetchone()
+            if consumed is not None:
+                # An authored item may be absent only after its exact command receipt
+                # records consumption. Other missing rows remain corruption.
+                if (
+                    conn.execute(
+                        "SELECT 1 FROM objects WHERE session_id=? AND object_id=?", (sid, oid)
+                    ).fetchone()
+                    is not None
+                ):
+                    complete = False
+                continue
             required.update((("objects", oid), ("config:object", oid)))
             if oid in legacy_locks:
                 required.add(("door_locks", "lock." + oid))

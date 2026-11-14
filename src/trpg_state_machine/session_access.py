@@ -3,7 +3,12 @@
 import json
 import sqlite3
 
-from dnd5e_engine.evaluation_contracts import CheckPayload, CombatClosePayload, CombatIntentPayload
+from dnd5e_engine.evaluation_contracts import (
+    CheckPayload,
+    CombatClosePayload,
+    CombatIntentPayload,
+    ItemUsePayload,
+)
 
 from ._operations import (
     DropItem,
@@ -104,6 +109,8 @@ class SessionAccess:
 
     def _authorize_command(self, row, actor_id, payload, context):
         """Authorize the command actor and operation for the trusted context."""
+        if type(payload) is ItemUsePayload and actor_id != row["pc_actor_id"]:
+            raise StateMachineError("unauthorized", "Only the selected PC can drink a potion")
         if type(payload) in ENVIRONMENT_OPERATIONS and not context.can_manage_environment:
             raise StateMachineError("unauthorized", "Trusted environment management grant required")
         if type(payload) is RepositionObject and not context.can_place_world_objects:

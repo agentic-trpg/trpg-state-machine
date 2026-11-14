@@ -75,10 +75,20 @@ class SceneLifecycleService:
         """Bounded structural check of currently persisted instance records."""
         conn = self.store.connection
         for oid in self.facts.instances.scene(sid, scene_id).object_ids:
-            if self.facts.object(sid, oid) is None:
+            existing = self.facts.object(sid, oid)
+            consumed = conn.execute(
+                "SELECT 1 FROM consumed_items WHERE session_id=? AND object_id=? "
+                "AND authored_scene_id=?",
+                (sid, oid, scene_id),
+            ).fetchone()
+            if existing is None:
+                if consumed is not None:
+                    continue
                 raise StateMachineError(
                     "incomplete_session", "Instantiated scene is missing an object"
                 )
+            if consumed is not None:
+                raise StateMachineError("incomplete_session", "Consumed object has reappeared")
             definition = self.facts.object_definition(sid, oid)
             if definition is not None:
                 for capability, reader in (

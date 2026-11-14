@@ -14,6 +14,7 @@ from dnd5e_engine.evaluation_availability import (
 from dnd5e_engine.evaluation_contracts import (
     CheckPayload,
     CombatClosePayload,
+    ItemUsePayload,
     ReadVersion,
     RuleError,
     RuleEvaluationRequest,
@@ -49,16 +50,20 @@ def _json(value):
 
 
 def delta_changes(request, result):
-    """Check every pre-value and ownership; return only closed component-field edits.
+    """Check pre-values and ownership for the attack or narrow potion Delta.
 
     A temporary candidate validates invariants; it is never persisted as a Snapshot.
     Whole-session OCC covers all Engine dependencies in this candidate API.
     """
     snapshot = request.state_snapshot
+    item_use = type(request.payload) is ItemUsePayload
+    turn_advanced = any(type(op) is delta.TurnUpdate for op in result.state_delta.operations)
     actors = {a.entity_id: a.model_dump(mode="json") for a in snapshot.character_states}
     combat = snapshot.combat_state.model_dump(mode="json")
     changes = []
     seen = set()
+    consumed = False
+    paid = False
     turn = next(
         (
             op.value.current_turn_index
@@ -71,6 +76,7 @@ def delta_changes(request, result):
         _invalid("Turn delta is outside the encounter")
     budget_owners = {request.actor_id, snapshot.combat_state.initiative_ids[turn]}
     affected_actors = budget_owners | {request.payload.target_id}
+    inventory = snapshot.inventory_state.model_dump(mode="json") if item_use else None
 
     def edit(component, identity, field, expected, value):
         """Validate one edit and update the isolated candidate and change list."""
@@ -91,6 +97,37 @@ def delta_changes(request, result):
         changes.append((component, identity, field, _json(value)))
 
     for op in result.state_delta.operations:
+        if item_use and type(op) not in (
+            delta.InventoryConsume,
+            delta.HPDelta,
+            delta.ActionBudgetUpdate,
+            delta.TurnUpdate,
+            delta.MovementLedgerUpdate,
+        ):
+            _invalid("Unsupported item-use consequence")
+        if type(op) is delta.InventoryConsume:
+            if not item_use or consumed or op.amount != 1:
+                _invalid("Unexpected inventory consumption")
+            consumed = True
+            expected = op.expected.model_dump(mode="json")
+            value = op.value.model_dump(mode="json")
+            if (
+                expected["instance_id"] != request.payload.instance_id
+                or expected["owner_id"] != request.actor_id
+                or expected["item_slug"] != "potion-of-healing"
+                or expected["quantity"] != 1
+                or expected["charges_remaining_per_unit"] != 1
+                or not expected["accessible"]
+                or value != {**expected, "quantity": 0}
+                or expected not in inventory["entries"]
+            ):
+                _invalid("Item consumption differs from the selected potion")
+            inventory["entries"] = [
+                entry if entry["instance_id"] != expected["instance_id"] else value
+                for entry in inventory["entries"]
+            ]
+            changes.append(("item", expected["instance_id"], "consume", expected))
+            continue
         target = getattr(op, "target_id", None)
         actor_id = getattr(op, "actor_id", None)
         if target is not None and (target not in actors or target != request.payload.target_id):
@@ -101,19 +138,58 @@ def delta_changes(request, result):
             # even when a different Actor receives the next turn.
             allowed_owners = affected_actors
         if actor_id is not None and (actor_id not in actors or actor_id not in allowed_owners):
-            _invalid("Action/movement delta actor is outside the authorized attack")
+            _invalid("Action/movement delta actor is outside the authorized command")
         if hasattr(op, "combat_id") and op.combat_id != combat["combat_id"]:
             _invalid("Delta belongs to another combat")
         if type(op) is delta.HPDelta:
-            if op.amount > 0:
-                _invalid("A basic attack cannot heal")
+            if (item_use and op.amount <= 0) or (not item_use and op.amount > 0):
+                _invalid("HP direction differs from the authorized command")
+            if item_use and op.resulting_hp > actors[target]["hp_max"]:
+                _invalid("Potion healing exceeds maximum hit points")
             edit("actor", target, "hp_current", op.expected_hp, op.resulting_hp)
         elif type(op) is delta.TempHPSet:
             if op.temp_hp > op.expected_temp_hp:
                 _invalid("A basic attack cannot grant temporary HP")
             edit("actor", target, "temp_hp", op.expected_temp_hp, op.temp_hp)
         elif type(op) in (delta.DeathStateUpdate, delta.ActionBudgetUpdate, delta.TurnUpdate):
+            if item_use and type(op) is delta.ActionBudgetUpdate:
+                changed_budget = {
+                    field
+                    for field in type(op.value).model_fields
+                    if getattr(op.expected, field) != getattr(op.value, field)
+                }
+                if op.actor_id == request.actor_id:
+                    permitted = {"bonus_action_available", "bonus_action_taken_this_turn"}
+                    if turn_advanced:
+                        permitted |= {"movement_remaining", "sneak_attack_spent_this_turn"}
+                    if not changed_budget <= permitted or (
+                        not turn_advanced and changed_budget != permitted
+                    ):
+                        _invalid("Potion changed an unrelated action budget")
+                    paid = (
+                        op.expected.bonus_action_available
+                        and not op.expected.bonus_action_taken_this_turn
+                        and not op.value.bonus_action_available
+                        and op.value.bonus_action_taken_this_turn
+                    )
+                elif not turn_advanced or op.actor_id != snapshot.combat_state.initiative_ids[turn]:
+                    _invalid("Potion changed another actor's budget outside turn start")
             if type(op) is delta.TurnUpdate:
+                if item_use:
+                    source = next(
+                        actor
+                        for actor in snapshot.character_states
+                        if actor.entity_id == request.actor_id
+                    )
+                    if (
+                        source.action_available
+                        or source.movement_remaining > 0
+                        or (source.attack_action_engaged and source.attacks_remaining > 0)
+                        or op.value.last_ended_turn
+                        != (snapshot.combat_state.round_number, request.actor_id)
+                        or op.value.turn_serial != op.expected.turn_serial + 1
+                    ):
+                        _invalid("Potion turn advance differs from the spent turn")
                 if op.value.ended != op.expected.ended:
                     _invalid("Combat completion is not supported by this attack slice")
                 for field in ("monster_turn_start_done", "last_ended_turn", "departed_actor_id"):
@@ -140,6 +216,8 @@ def delta_changes(request, result):
                 _invalid("Damage attribution belongs to another actor")
             edit("actor", target, "last_damaged_by", op.expected, op.value)
         elif type(op) is delta.MovementLedgerUpdate:
+            if item_use and not turn_advanced:
+                _invalid("Potion changed movement outside turn start")
             field = "movement_ledgers"
             if combat[field][actor_id] != _json(op.expected):
                 _invalid("Movement ledger pre-value differs")
@@ -197,6 +275,7 @@ def delta_changes(request, result):
     data.update(
         character_states=[actors[a.entity_id] for a in snapshot.character_states],
         combat_state=combat,
+        **({"inventory_state": inventory} if item_use else {}),
     )
     try:
         CombatSnapshot.model_validate_json(canonical_json(data))
@@ -206,6 +285,8 @@ def delta_changes(request, result):
         ) from exc
     if not changes:
         _invalid("Event-only commit/version policy is not implemented")
+    if item_use and (not consumed or not paid):
+        _invalid("Potion use must consume its instance and bonus action")
     return tuple(changes)
 
 
@@ -229,7 +310,7 @@ def validate_dnd_result(request, result):
     if result.read_set != required:
         _invalid("Expected the pinned Engine's complete whole-session read fence")
     if result.status == "needs_choice":
-        _invalid("Unexpected choice after explicit basic-attack capability admission")
+        _invalid("Unexpected choice after explicit command capability admission")
     actors = {a.entity_id for a in request.state_snapshot.character_states}
     for event in result.proposed_events:
         for field in ("actor_id", "target_id", "source_actor_id", "attacker_id", "killer_id"):
@@ -240,6 +321,34 @@ def validate_dnd_result(request, result):
         return result, ()
     if request.operation_kind == "rules.check":
         return result, check_changes(request, result)
+    if type(request.payload) is ItemUsePayload:
+        submitted = [event for event in result.proposed_events if event.type == "intent_submitted"]
+        healed = [event for event in result.proposed_events if event.type == "healing_applied"]
+        if (
+            len(submitted) != 1
+            or submitted[0].actor_id != request.actor_id
+            or submitted[0].target_id != request.actor_id
+            or submitted[0].intent_type != "use_item"
+            or submitted[0].item_id != "potion-of-healing"
+            or len(healed) != 1
+            or healed[0].target_id != request.actor_id
+        ):
+            _invalid("Potion events do not match the authorized drinker")
+        changes = delta_changes(request, result)
+        actor = next(
+            actor
+            for actor in request.state_snapshot.character_states
+            if actor.entity_id == request.actor_id
+        )
+        expected_healing = min(healed[0].amount, actor.hp_max - actor.hp_current)
+        hp_changes = [
+            value
+            for component, identity, field, value in changes
+            if component == "actor" and identity == request.actor_id and field == "hp_current"
+        ]
+        if hp_changes != ([actor.hp_current + expected_healing] if expected_healing else []):
+            _invalid("Potion healing differs from the rolled event")
+        return result, changes
     return result, (
         closure_changes(request, result)
         if request.operation_kind == "combat.close"
@@ -540,6 +649,22 @@ class RulesAdapter:
             return "pending_choice_unsupported" if payload.dc is None else None
         if type(payload) is CombatClosePayload:
             return None
+        if type(payload) is ItemUsePayload:
+            if payload.target_id != actor_id or actor_id not in snapshot.combat_state.party_ids:
+                return "item_unauthorized"
+            entry = next(
+                (
+                    e
+                    for e in snapshot.inventory_state.entries
+                    if e.instance_id == payload.instance_id
+                ),
+                None,
+            )
+            if entry is None:
+                return "item_missing"
+            if entry.item_slug != "potion-of-healing":
+                return "item.capability"
+            return None
         if payload.intent_type != "attack":
             return "intent.capability"
         selected = (
@@ -558,7 +683,7 @@ class RulesAdapter:
                 return "unsupported_stat_block_action"
         return None
 
-    def _apply_dnd_changes(self, row, changes):
+    def _apply_dnd_changes(self, row, changes, *, command_id=None):
         """Adopt verified rules changes through domain interfaces in the shared write
         scope.
         """
@@ -572,7 +697,12 @@ class RulesAdapter:
                 if self.characters.effects.actor_conditions(sid, identity, independent) != value:
                     _invalid("Delta changed effect-linked conditions")
         for component, identity, field, value in changes:
-            if component == "xp":
+            if component == "item" and field == "consume":
+                before = self.facts.object(sid, identity)
+                if before is None or self.facts.item_entry(before) != value or command_id is None:
+                    _invalid("Selected inventory instance changed")
+                self.facts.consume_item(sid, before, command_id)
+            elif component == "xp":
                 self.characters.award_xp(sid, identity, value)
             elif component == "actor" and field == "hp_current":
                 self.characters.set_hp(sid, identity, value)

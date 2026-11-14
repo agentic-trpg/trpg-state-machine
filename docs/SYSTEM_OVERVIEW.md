@@ -23,6 +23,9 @@ World、Character、Combat、Time、NPC 等组件已有实际实现；SessionMem
 生命周期时钟和战斗快照投影使用同一记录；独立角色条件归 CharacterFacts 的
 带身份顺序行，战斗与探索从独立行和效果链接投影原有 RE 列表。
 RE 负责受支持机械规则，SM 负责输入准备、结果校验和采用，不能另算一套规则。
+`combat.item` 已通过既有 RuleExecution 接入所选 PC 自饮普通治疗药水的受限路径；
+WorldFacts 按实例删除并记录消费，CharacterFacts 写入 HP，详见
+[ITEM-01 Batch B](ITEM_01_COMBAT_HEALING_POTION.md)。
 完整 Agent Host、通用规则采用、完整活跃战斗恢复及未来多人负载不是已验收能力。
 
 ## 2. 公开入口和主要协作模块

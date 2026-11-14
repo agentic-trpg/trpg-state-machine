@@ -2343,6 +2343,93 @@ class WorldFacts:
         if cursor.rowcount != 1:
             raise StateMachineError("version_conflict", "Item balance changed")
 
+    def consume_item(self, sid, before, command_id):
+        """Remove one exact owned potion and record its receipt-linked absence.
+
+        The caller owns the shared write scope and validated mechanical Delta.
+        Authored scene dependencies are retired before deletion, so the ordinary
+        integrity trigger preserves only the certificate's still-required rows.
+        """
+        self.store.require_write()
+        oid = before["object_id"]
+        current = self.object(sid, oid)
+        if current is None or dict(current) != dict(before):
+            raise StateMachineError("version_conflict", "Consumed item changed")
+        config = self._conn.execute(
+            "SELECT config_json FROM instance_configs WHERE session_id=? AND domain='object' "
+            "AND instance_id=?",
+            (sid, oid),
+        ).fetchone()
+        if config is None:
+            raise StateMachineError("incomplete_session", "Item configuration is missing")
+        if self.store.memory.json(config[0]).get("portable_policy") == "charge_exhaust_retain":
+            raise StateMachineError(
+                "unsupported_item_binding", "Retained charge item cannot vanish"
+            )
+        if self._conn.execute(
+            "SELECT 1 FROM objects WHERE session_id=? AND container_id=? LIMIT 1", (sid, oid)
+        ).fetchone():
+            raise StateMachineError("unsupported_item_binding", "Item contains other objects")
+        for table, column in (
+            ("door_credentials", "instance_id"),
+            ("door_locks", "object_id"),
+            ("object_openables", "object_id"),
+            ("object_lights", "object_id"),
+            ("object_mechanisms", "object_id"),
+            ("object_durability", "object_id"),
+            ("character_spell_materials", "inventory_instance_id"),
+        ):
+            if self._conn.execute(
+                f"SELECT 1 FROM {table} WHERE session_id=? AND {column}=? LIMIT 1",
+                (sid, oid),
+            ).fetchone():
+                raise StateMachineError("unsupported_item_binding", "Live item reference")
+        owner = self.placement(sid, oid, row=current)["carrier_id"]
+        actor = self._conn.execute(
+            "SELECT state_json FROM mechanical_actors WHERE session_id=? AND actor_id=?",
+            (sid, owner),
+        ).fetchone()
+        if actor is not None and any(
+            self.store.memory.json(actor[0]).get(field) == oid
+            for field in (
+                "held_weapon_instance_id",
+                "worn_armor_instance_id",
+                "equipped_shield_instance_id",
+                "offhand_item_instance_id",
+            )
+        ):
+            raise StateMachineError("equipped_item_unsupported", "Item remains equipped")
+        scenes = self._conn.execute(
+            "SELECT scene_id FROM scene_integrity_dependencies "
+            "WHERE session_id=? AND domain='objects' AND instance_id=?",
+            (sid, oid),
+        ).fetchall()
+        if len(scenes) > 1:
+            raise StateMachineError("incomplete_session", "Item has ambiguous authored scene")
+        scene = scenes[0][0] if scenes else None
+        if scene is not None:
+            for domain in ("objects", "config:object"):
+                deleted = self._conn.execute(
+                    "DELETE FROM scene_integrity_dependencies WHERE session_id=? "
+                    "AND scene_id=? AND domain=? AND instance_id=?",
+                    (sid, scene, domain, oid),
+                )
+                if deleted.rowcount != 1:
+                    raise StateMachineError("incomplete_session", "Item dependency is incomplete")
+        self._conn.execute(
+            "INSERT INTO consumed_items VALUES (?,?,?,?)", (sid, oid, command_id, scene)
+        )
+        self._conn.execute(
+            "DELETE FROM instance_configs WHERE session_id=? AND domain='object' AND instance_id=?",
+            (sid, oid),
+        )
+        removed = self._conn.execute(
+            "DELETE FROM objects WHERE session_id=? AND object_id=? AND item_slug=?",
+            (sid, oid, before["item_slug"]),
+        )
+        if removed.rowcount != 1:
+            raise StateMachineError("version_conflict", "Consumed item changed")
+
     def object_position(self, sid, object_id):
         """Resolve the object's current spatial position."""
         obj = self.object(sid, object_id)

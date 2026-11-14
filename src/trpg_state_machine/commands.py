@@ -5,7 +5,12 @@ import re
 from copy import deepcopy
 from dataclasses import asdict, dataclass
 
-from dnd5e_engine.evaluation_contracts import CheckPayload, CombatClosePayload, CombatIntentPayload
+from dnd5e_engine.evaluation_contracts import (
+    CheckPayload,
+    CombatClosePayload,
+    CombatIntentPayload,
+    ItemUsePayload,
+)
 from pydantic import ValidationError
 
 from ._operations import (
@@ -82,6 +87,7 @@ OPERATIONS = {
     "rules.check": CheckPayload,
     "combat.close": CombatClosePayload,
     "combat.intent": CombatIntentPayload,
+    "combat.item": ItemUsePayload,
     "combat.initialize": InitializeCombat,
     "rule_operation": RuleOperation,
     "enter_scene": EnterScene,
@@ -143,6 +149,7 @@ class TypedCommand:
         | RuleOperation
         | InitializeCombat
         | CombatIntentPayload
+        | ItemUsePayload
         | CombatClosePayload
         | CheckPayload
         | AdvanceGameTime
@@ -296,7 +303,12 @@ def validate_command(command: TypedCommand) -> None:
         if command.payload.next_tick < command.payload.expected_tick:
             raise StateMachineError("invalid_operation", "Game time cannot move backwards")
         return
-    if type(command.payload) in (CombatIntentPayload, CombatClosePayload, CheckPayload):
+    if type(command.payload) in (
+        CombatIntentPayload,
+        CombatClosePayload,
+        CheckPayload,
+        ItemUsePayload,
+    ):
         try:
             type(command.payload).model_validate(deepcopy(command.payload))
         except ValidationError as exc:
@@ -306,6 +318,11 @@ def validate_command(command: TypedCommand) -> None:
             command.actor_id,
         ):
             raise StateMachineError("invalid_actor", "Intent source differs from trusted actor")
+        if (
+            isinstance(command.payload, ItemUsePayload)
+            and command.payload.target_id != command.actor_id
+        ):
+            raise StateMachineError("invalid_target", "Drinking a potion requires self target")
         if (
             isinstance(command.payload, CheckPayload)
             and command.payload.actor_id != command.actor_id
@@ -388,6 +405,7 @@ class CommandRuntime:
             )
         if type(command.payload) in (
             CombatIntentPayload,
+            ItemUsePayload,
             CombatClosePayload,
             CheckPayload,
             *OPENABLE_CHECK_OPERATIONS,

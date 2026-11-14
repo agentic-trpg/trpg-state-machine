@@ -1,5 +1,14 @@
 # W-01 场景生命周期切片进度
 
+## 2026-11-15 ITEM-01 Batch B 接入
+
+受限实现：普通治疗药水经 `combat.item` 消费后，按 exact instance ID 在同一
+命令事务写入与回执关联的 `consumed_items`，并移除该物品的场景结构依赖。
+已消费的已创作物品可合法缺席；未记录消费的缺失对象／配置仍拒绝。
+普通消费不重新审计整个 Scene；新连接读取仍检查持久场景证书。
+详见 [ITEM-01 Batch B](ITEM_01_COMBAT_HEALING_POTION.md)。
+活跃战斗跨进程恢复仍不支持；本条不改写以下历史 W-01 验收范围。
+
 ## 2026-10-21 文档目标补充（未实施）
 
 Architecture Decision Status **[DECIDED]**；完整 Session 内存运行层 Implementation Status **[NOT IMPLEMENTED]**；Acceptance Status **本次未执行运行验收**。 区分首次创建、已有实例加载到 RAM、实际入场，冷加载版本一致；加载／释放不得重置位置／访问或制造入场。完整 Session 生命周期仍待实施。 统一责任与验收引用 [Session Management](SESSION_MANAGEMENT.md#session-内存运行生命周期与事实访问2026-10-21)，沿既有 C-25／C-27／A2／DS 跟踪，不另造任务体系。本轮仅修改文档，未执行本领域业务或性能测试；下述历史日期／SHA／测试数字保留原证据范围。

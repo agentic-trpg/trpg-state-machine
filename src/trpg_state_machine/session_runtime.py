@@ -7,7 +7,12 @@ apply facts; this component coordinates versions, RNG, events and receipts.
 import hashlib
 from dataclasses import asdict, replace
 
-from dnd5e_engine.evaluation_contracts import CheckPayload, CombatClosePayload, CombatIntentPayload
+from dnd5e_engine.evaluation_contracts import (
+    CheckPayload,
+    CombatClosePayload,
+    CombatIntentPayload,
+    ItemUsePayload,
+)
 from dnd5e_engine.evaluation_rng import RNGContext, RNGState
 from pydantic import ValidationError
 
@@ -36,7 +41,12 @@ def _fingerprint(command, digest, binding, context):
     if command.check_world_effects is None:
         # Preserve canonical fingerprints of all pre-SM21 stored commands.
         data.pop("check_world_effects")
-    if type(command.payload) in (CombatIntentPayload, CombatClosePayload, CheckPayload):
+    if type(command.payload) in (
+        CombatIntentPayload,
+        CombatClosePayload,
+        CheckPayload,
+        ItemUsePayload,
+    ):
         data["payload"] = command.payload.model_dump(mode="json")
     return hashlib.sha256(
         canonical_json(
@@ -200,6 +210,7 @@ class SessionRuntime:
                 "rules.check",
                 "combat.initialize",
                 "combat.intent",
+                "combat.item",
                 "combat.close",
                 "enter_scene",
                 "move_actor",

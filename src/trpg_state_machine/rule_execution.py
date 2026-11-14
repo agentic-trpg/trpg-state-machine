@@ -3,7 +3,7 @@
 import copy
 from dataclasses import asdict, replace
 
-from dnd5e_engine.evaluation_contracts import CheckPayload
+from dnd5e_engine.evaluation_contracts import CheckPayload, ItemUsePayload
 from dnd5e_engine.evaluation_openable import OpenableCheckRequest, evaluate_openable
 from dnd5e_engine.evaluation_ruleset import EVALUATOR_VERSION, RulesetBindingError
 from pydantic import ValidationError
@@ -210,7 +210,7 @@ class RuleExecution:
                         if hasattr(snapshot, "combat_state")
                         else None
                     )
-                    self.rules._apply_dnd_changes(row, changes)
+                    self.rules._apply_dnd_changes(row, changes, command_id=command.command_id)
                     # Failure consequences and automatic hooks both consume the
                     # original rule result's candidate RNG successor. Never
                     # overwrite a mechanism successor with this earlier state.
@@ -254,7 +254,14 @@ class RuleExecution:
                                         }
                                     }
                                     if type(command.payload) is CheckPayload or domain_check
-                                    else {"combat_id": snapshot.combat_state.combat_id}
+                                    else {
+                                        "combat_id": snapshot.combat_state.combat_id,
+                                        **(
+                                            {"item_instance_id": command.payload.instance_id}
+                                            if type(command.payload) is ItemUsePayload
+                                            else {}
+                                        ),
+                                    }
                                 ),
                                 "scene_id": snapshot.scene_state.scene_id,
                                 "engine_event": event.model_dump(mode="json"),
@@ -344,6 +351,8 @@ class RuleExecution:
                         "invalid_mechanism_targets",
                         "mechanism_rule_rejected",
                         "mechanism_needs_choice",
+                        "unsupported_item_binding",
+                        "equipped_item_unsupported",
                     }:
                         # Malformed rule results/storage failures remain faults: the
                         # outer transaction rolls back without persisting a refusal.
