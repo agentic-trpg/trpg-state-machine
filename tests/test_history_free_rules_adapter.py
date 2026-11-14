@@ -399,6 +399,95 @@ def test_typed_resource_one_row_debit_reaches_ui_and_rule_snapshot(tmp_path, pac
         ).fetchone() == (1, 2)
 
 
+def test_typed_pool_projection_is_shared_by_actor_and_component(
+    tmp_path, package_data, context, monkeypatch
+):
+    """A cold public snapshot decodes each selected typed owner only once."""
+    assets = modern_loader()
+    data = modern_data(package_data, assets, npc_hp=50)
+    for foundation in data["rule_bindings"].values():
+        snapshot = foundation["snapshot"]
+        pc = snapshot["character_states"][0]
+        pc["spell_slots"] = {"1": 2}
+        snapshot["resource_state"] = {
+            "pools": [
+                {
+                    "owner_id": pc["entity_id"],
+                    "pool_id": "pc.slot.1",
+                    "kind": "spell_slot",
+                    "level": 1,
+                    "current": 2,
+                    "maximum": 2,
+                }
+            ]
+        }
+    package = _validate(data)
+    with StateMachine(tmp_path / "projection.db", dnd_loader=assets) as sm:
+        sid = create(sm, package, context)
+        target = next(
+            r["actor_id"]
+            for r in sm._conn.execute(
+                "SELECT actor_id FROM character_resources WHERE session_id=? "
+                "AND resource_id='pc.slot.1'",
+                (sid,),
+            )
+        )
+        sm._store.memory.clear()
+        original = sm._characters.resources
+        reads = []
+
+        def counted(session_id, actor_id, *, kind=None):
+            if actor_id == target and kind is None:
+                reads.append((session_id, actor_id))
+            return original(session_id, actor_id, kind=kind)
+
+        monkeypatch.setattr(sm._characters, "resources", counted)
+        fixed = sm.read_noncombat_snapshot(sid, package, context=context)
+        assert fixed.resource_state.pools[0].current == 2
+        assert len(reads) == 1
+        with sm._transaction(write=True):
+            sm._characters.spend_resource(sid, target, "pc.slot.1", 1)
+        current = sm.read_noncombat_snapshot(sid, package, context=context)
+        assert current.resource_state.pools[0].current == 1
+        assert fixed.resource_state.pools[0].current == 2
+        assert len(reads) == 2
+        sm._store.memory.clear()
+        sm._characters.binding_actor(sid, target)
+        assert len(reads) == 2
+        sm._characters.binding_components(sid, target)
+        assert len(reads) == 3
+
+
+def test_standalone_slot_has_no_invented_typed_pool_or_maximum(tmp_path, package_data, context):
+    """A valid absent component keeps an actor slot as its own unbounded fact."""
+    assets = modern_loader()
+    data = modern_data(package_data, assets, npc_hp=50)
+    for foundation in data["rule_bindings"].values():
+        snapshot = foundation["snapshot"]
+        snapshot["character_states"][0]["spell_slots"] = {"1": 2}
+        assert snapshot["resource_state"] is None
+    package = _validate(data)
+    with StateMachine(tmp_path / "standalone-slot.db", dnd_loader=assets) as sm:
+        sid = create(sm, package, context)
+        fixed = sm.read_noncombat_snapshot(sid, package, context=context)
+        actor = next(a for a in fixed.character_states if a.spell_slots == {1: 2})
+        assert fixed.resource_state is None
+        with sm._transaction(write=True):
+            sm._characters.spend_resource(sid, actor.entity_id, "spell_slots:1", 1)
+        current = sm.read_noncombat_snapshot(sid, package, context=context)
+        assert current.resource_state is None
+        assert next(
+            a for a in current.character_states if a.entity_id == actor.entity_id
+        ).spell_slots == {1: 1}
+        assert actor.spell_slots == {1: 2}
+        row = sm._conn.execute(
+            "SELECT kind,current,maximum FROM character_resources WHERE session_id=? "
+            "AND actor_id=? AND resource_id='spell_slots:1'",
+            (sid, actor.entity_id),
+        ).fetchone()
+        assert tuple(row) == ("standalone_spell_slot", 1, None)
+
+
 def test_noncombat_setup_is_rejected_instead_of_silently_dropped(package_data):
     assets = modern_loader()
     data = modern_data(package_data, assets)

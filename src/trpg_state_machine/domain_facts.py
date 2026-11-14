@@ -116,39 +116,47 @@ class CharacterFacts:
         """Project UI balances from the same owned resource rows used by rules."""
         return {row["resource_id"]: row["current"] for row in self.resources(sid, actor_id)}
 
+    def _typed_pool(self, row):
+        """Decode one typed pool with scalar columns authoritative over metadata."""
+        metadata = self.store.memory.json(row["metadata_json"])
+        required = {
+            "hit_dice": {"class_slug", "die_size"},
+            "spell_slot": {"level"},
+            "pact_slot": {"level"},
+            "feature_uses": {"feature_slug"},
+        }.get(row["kind"])
+        if not isinstance(metadata, dict) or required is None or set(metadata) != required:
+            raise StateMachineError(
+                "invalid_mechanical_state", "Stored resource metadata is incomplete"
+            )
+        return row["ordinal"], {
+            **metadata,
+            "owner_id": row["actor_id"],
+            "pool_id": row["resource_id"],
+            "kind": row["kind"],
+            "current": row["current"],
+            "maximum": row["maximum"],
+        }
+
+    @scoped_read
+    def _typed_owner_resources(self, sid, actor_id):
+        """Reuse an owner's decoded typed rows across actor and component projections.
+
+        The scoped dependency follows the owner's keyed resource range. Writes and
+        savepoint rollback invalidate the candidate stage; cached values are copied
+        before a consumer can mutate its own snapshot projection.
+        """
+        return tuple(
+            self._typed_pool(row)
+            for row in self.resources(sid, actor_id)
+            if row["kind"] != "synthetic"
+        )
+
     def _typed_resources(self, sid, owner_ids, present):
-        """Assemble a stable typed closure from requested owner rows only."""
+        """Assemble a stable typed closure from reusable requested owner projections."""
         if not present:
             return None
-        pools = []
-        for owner in owner_ids:
-            for row in self.resources(sid, owner):
-                if row["kind"] == "synthetic":
-                    continue
-                metadata = self.store.memory.json(row["metadata_json"])
-                required = {
-                    "hit_dice": {"class_slug", "die_size"},
-                    "spell_slot": {"level"},
-                    "pact_slot": {"level"},
-                    "feature_uses": {"feature_slug"},
-                }.get(row["kind"])
-                if not isinstance(metadata, dict) or required is None or set(metadata) != required:
-                    raise StateMachineError(
-                        "invalid_mechanical_state", "Stored resource metadata is incomplete"
-                    )
-                pools.append(
-                    (
-                        row["ordinal"],
-                        {
-                            **metadata,
-                            "owner_id": owner,
-                            "pool_id": row["resource_id"],
-                            "kind": row["kind"],
-                            "current": row["current"],
-                            "maximum": row["maximum"],
-                        },
-                    )
-                )
+        pools = [pool for owner in owner_ids for pool in self._typed_owner_resources(sid, owner)]
         return {"pools": [value for _, value in sorted(pools, key=lambda entry: entry[0])]}
 
     def initialize_legacy_items(self, sid, actor_id, slugs):
@@ -624,6 +632,8 @@ class CharacterFacts:
                 "unsupported_mechanical_version", "Explicit component facts are missing"
             )
         try:
+            all_rows = ()
+            audit_resources = None
             if full_audit:
                 all_rows = tuple(
                     self._conn.execute(
@@ -640,14 +650,16 @@ class CharacterFacts:
                     raise StateMachineError(
                         "invalid_mechanical_state", "Resource kind disagrees with component"
                     )
-                audit_owners = {r["actor_id"] for r in all_rows}
-                audit_resources = self._typed_resources(
-                    sid, audit_owners, row["resource_state_present"]
-                )
-                if audit_resources is not None:
-                    ResourceState.model_validate(
-                        {**audit_resources, "pools": tuple(audit_resources["pools"])}
-                    )
+                if row["resource_state_present"]:
+                    audit_resources = {
+                        "pools": [
+                            value
+                            for _, value in sorted(
+                                (self._typed_pool(resource) for resource in all_rows),
+                                key=lambda entry: entry[0],
+                            )
+                        ]
+                    }
             _, item_entries = self.world.portable_inventory(
                 sid, owner_ids=None if full_audit else owner_ids
             )
@@ -664,8 +676,10 @@ class CharacterFacts:
                     )
                 }
                 values["inventory"] = item_inventory
-            values["resource_state"] = self._typed_resources(
-                sid, owner_ids, row["resource_state_present"]
+            values["resource_state"] = (
+                audit_resources
+                if full_audit
+                else self._typed_resources(sid, owner_ids, row["resource_state_present"])
             )
             inventory = values["inventory"]
             resources = values["resource_state"]
@@ -700,12 +714,7 @@ class CharacterFacts:
             if full_audit:
                 # Initialization/recovery diagnostics include rows omitted by a
                 # caller's mechanical roster; ordinary owner reads stay local.
-                references |= {
-                    r["actor_id"]
-                    for r in self._conn.execute(
-                        "SELECT actor_id FROM character_resources WHERE session_id=?", (sid,)
-                    )
-                }
+                references |= {r["actor_id"] for r in all_rows}
             for owner in references:
                 if (
                     self._conn.execute(
@@ -829,7 +838,9 @@ class CharacterFacts:
             )
 
     @scoped_read
-    def _rule_actor(self, sid, actor_id, *, include_carried=True, carried_slugs=None):
+    def _rule_actor(
+        self, sid, actor_id, *, include_carried=True, carried_slugs=None, include_resources=True
+    ):
         """Combine core facts and resolve /19 equipment IDs from current World items.
 
         A binding read skips inventory projection. Complete snapshot reads verify
@@ -854,8 +865,8 @@ class CharacterFacts:
         component = self._conn.execute(
             "SELECT resource_state_present FROM mechanical_components WHERE session_id=?", (sid,)
         ).fetchone()
-        if component is not None and component[0]:
-            pools = self._typed_resources(sid, {actor_id}, True)["pools"]
+        if include_resources and component is not None and component[0]:
+            pools = [value for _, value in self._typed_owner_resources(sid, actor_id)]
             data["spell_slots"] = {
                 str(p["level"]): p["current"] for p in pools if p["kind"] == "spell_slot"
             }
@@ -871,7 +882,7 @@ class CharacterFacts:
                     if p["kind"] == "feature_uses"
                 },
             }
-        elif component is not None:
+        elif include_resources and component is not None:
             rows = self.resources(sid, actor_id)
             data["spell_slots"] = {
                 str(self.store.memory.json(r["metadata_json"])["level"]): r["current"]
@@ -958,8 +969,8 @@ class CharacterFacts:
         return data
 
     def binding_actor(self, sid, actor_id):
-        """Read current actor equipment metadata without assembling carried items."""
-        return self._rule_actor(sid, actor_id, include_carried=False)
+        """Read equipment metadata without assembling inventory or resource mirrors."""
+        return self._rule_actor(sid, actor_id, include_carried=False, include_resources=False)
 
     @scoped_read
     def rule_actors(self, sid, owner_ids=None):
