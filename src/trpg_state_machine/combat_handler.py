@@ -105,7 +105,12 @@ class CombatHandler:
             else {}
         )
         for actor in snapshot.character_states:
-            expected_actor = actor.model_dump(mode="json")
+            expected_actor = actor.model_dump(
+                mode="json",
+                exclude={"spells_known"}
+                if snapshot.snapshot_schema_version == "engine-snapshot/20"
+                else None,
+            )
             if expected_actor.get("held_weapon_instance_id") is None:
                 expected_actor.pop("held_weapon_instance_id", None)
             if current_actors and current_actors.get(actor.entity_id) != expected_actor:

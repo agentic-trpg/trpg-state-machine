@@ -15,7 +15,7 @@ SQLite 持久化和受控 RAM 发布。外部适配层负责认证后提供 `Tru
 World、Character、Combat、Time、NPC 等组件已有实际实现；SessionMemory、
 实例字段、重量／机关／通路关联及相关消费者已有受限生产接线。
 角色资源池按拥有者／资源 ID 保存独立余额行，SessionMemory 沿原提交边界发布；
-角色 UI 和规则 Snapshot 读取同一持久事实。角色装备 /19 的护甲、盾牌及另一只手物品按 World 物品实例 ID 绑定，快照机械
+角色 UI 和规则 Snapshot 读取同一持久事实。角色装备 /19 与 /20 的护甲、盾牌及另一只手物品按 World 物品实例 ID 绑定，快照机械
 镜像由角色与当前物品事实派生；World 转移按实例保护实际装备。
 探索命令 `world.equip_weapon` 和 `world.unequip_weapon` 可按确切实例 ID
 拿起、替换或放回直接携带的武器。CharacterFacts 保存手持 ID 与握法，
@@ -30,6 +30,8 @@ World、Character、Combat、Time、NPC 等组件已有实际实现；SessionMem
 角色属性、AC、等级、机械感官与熟练项各由按角色定位的字段／有序项行持有，规则 Snapshot 与事件机械感官从同一事实投影。
 角色显式施法来源、已知／准备法术和材料对象绑定以带键记录归 CharacterFacts；
 战斗与探索共用施法投影，World 转移按实际对象 ID 的材料反向索引保护绑定。
+在 SPELL-01 候选中，材料绑定与法术同一行，角色已知与已准备列表引用同一记录，
+`engine-snapshot/20` 以每个来源的一份法术列表表达这些事实。
 持续效果以目标效果 ID 行及单条专注组记录归 Effects；角色条件链接、
 生命周期时钟和战斗快照投影使用同一记录；独立角色条件归 CharacterFacts 的
 带身份顺序行，战斗与探索从独立行和效果链接投影原有 RE 列表。
@@ -37,6 +39,8 @@ RE 负责受支持机械规则，SM 负责输入准备、结果校验和采用�
 `combat.item` 已通过既有 RuleExecution 接入所选 PC 自饮普通治疗药水的受限路径；
 WorldFacts 按实例删除并记录消费，CharacterFacts 写入 HP，详见
 [ITEM-01 Batch B](ITEM_01_COMBAT_HEALING_POTION.md)。
+SPELL-01 候选沿同一 RuleExecution 接入战斗内一环 Cure Wounds，角色余额与本场
+支出分别归 CharacterFacts 和 CombatRecords，治疗及支付一起采用。
 完整 Agent Host、通用规则采用、完整活跃战斗恢复及未来多人负载不是已验收能力。
 
 ## 2. 公开入口和主要协作模块
@@ -116,7 +120,7 @@ NPC 评估固定授权观察和版本输入；外部模型推理后调用
 
 ## 4. 数据与状态归属
 
-/19 装备由 CharacterFacts 按角色保存到 `character_equipment`，角色运行时字段
+/19 与 /20 装备由 CharacterFacts 按角色保存到 `character_equipment`，角色运行时字段
 共享 World 的物品实例引用。RulesAdapter 将绑定及其派生规则值随固定战斗快照交给 RE。
 可用性与提交共享相同的装备事实，提交前重验世界版本及快照。
 

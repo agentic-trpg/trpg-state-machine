@@ -3,7 +3,7 @@
 import copy
 from dataclasses import asdict, replace
 
-from dnd5e_engine.evaluation_contracts import CheckPayload, ItemUsePayload
+from dnd5e_engine.evaluation_contracts import CheckPayload, CombatIntentPayload, ItemUsePayload
 from dnd5e_engine.evaluation_openable import OpenableCheckRequest, evaluate_openable
 from dnd5e_engine.evaluation_ruleset import EVALUATOR_VERSION, RulesetBindingError
 from pydantic import ValidationError
@@ -54,6 +54,7 @@ class RuleExecution:
             self.world.objects.mechanisms if mechanism_check else self.world.objects.openable
         )
         plan, prepare_error, rule_command = None, None, command
+        spell_prepared = True
 
         def build_snapshot(value):
             """Build the required mechanical snapshot for the command and current combat
@@ -91,6 +92,20 @@ class RuleExecution:
                     prepare_error = exc.code
 
             self.sessions._npc_combat_target_guard(command, package, snapshot)
+            payload = command.payload
+            if (
+                type(payload) is CombatIntentPayload
+                and payload.intent_type == "cast_spell"
+                and payload.spell_id == "cure-wounds"
+                and row["world_version"] == command.expected_world_version
+            ):
+                spell_prepared = any(
+                    spell.spell_id == payload.spell_id
+                    and spell.source.source_id == payload.spell_source_id
+                    for spell in self.rules.characters.prepared_spells(
+                        command.session_id, command.actor_id
+                    )
+                )
             world_ready = (
                 world_effects_ready(self.world, row, command)
                 if row["world_version"] == command.expected_world_version
@@ -118,6 +133,8 @@ class RuleExecution:
             capability = self.rules._dnd_capability(
                 rule_command.payload, command.actor_id, snapshot
             )
+            if capability is None and not spell_prepared:
+                capability = "spell.source"
         spec = (
             OpenableCheckRequest(
                 schema_version="engine-openable/1",

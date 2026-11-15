@@ -33,6 +33,7 @@ from .errors import StateMachineError
 from .package import canonical_json
 from .scoped_reads import scoped_read
 from .session_access import _binding
+from .spell_adoption import cure_wounds_changes
 
 
 def _invalid(message):
@@ -58,8 +59,9 @@ def delta_changes(request, result):
     snapshot = request.state_snapshot
     item_use = type(request.payload) is ItemUsePayload
     turn_advanced = any(type(op) is delta.TurnUpdate for op in result.state_delta.operations)
-    actors = {a.entity_id: a.model_dump(mode="json") for a in snapshot.character_states}
-    combat = snapshot.combat_state.model_dump(mode="json")
+    data = snapshot.model_dump(mode="json")
+    actors = {a["entity_id"]: a for a in data["character_states"]}
+    combat = data["combat_state"]
     changes = []
     seen = set()
     consumed = False
@@ -271,7 +273,6 @@ def delta_changes(request, result):
             edit("combat", op.combat_id, "deaths_recorded", op.expected_records, op.records)
         else:
             _invalid("Unrecognized delta operation")
-    data = snapshot.model_dump(mode="json")
     data.update(
         character_states=[actors[a.entity_id] for a in snapshot.character_states],
         combat_state=combat,
@@ -349,6 +350,8 @@ def validate_dnd_result(request, result):
         if hp_changes != ([actor.hp_current + expected_healing] if expected_healing else []):
             _invalid("Potion healing differs from the rolled event")
         return result, changes
+    if getattr(request.payload, "intent_type", None) == "cast_spell":
+        return result, cure_wounds_changes(request, result)
     return result, (
         closure_changes(request, result)
         if request.operation_kind == "combat.close"
@@ -419,6 +422,7 @@ class RulesAdapter:
             "engine-snapshot/17",
             "engine-snapshot/18",
             "engine-snapshot/19",
+            "engine-snapshot/20",
         ):
             raise StateMachineError(
                 "unsupported_mechanical_version", "Complete noncombat state was not initialized"
@@ -475,6 +479,7 @@ class RulesAdapter:
             "engine-snapshot/17",
             "engine-snapshot/18",
             "engine-snapshot/19",
+            "engine-snapshot/20",
         ):
             raise StateMachineError(
                 "unsupported_mechanical_version", "Old mechanical facts need migration"
@@ -499,6 +504,7 @@ class RulesAdapter:
             "engine-snapshot/17",
             "engine-snapshot/18",
             "engine-snapshot/19",
+            "engine-snapshot/20",
         ):
             raise StateMachineError(
                 "unsupported_mechanical_version", "Old save lacks proven current component facts"
@@ -603,8 +609,15 @@ class RulesAdapter:
                 )
             data["snapshot"]["scene_state"] = spatial
         if not self.facts.instances.session_value(row["session_id"], "has_noncombat"):
+            exclude = (
+                {"spells_known"}
+                if original.snapshot_schema_version == "engine-snapshot/20"
+                else None
+            )
             data["snapshot"]["character_states"] = [
-                self.characters.initial_rule_actor(row["session_id"], actor).model_dump(mode="json")
+                self.characters.initial_rule_actor(row["session_id"], actor).model_dump(
+                    mode="json", exclude=exclude
+                )
                 for actor in CombatSnapshot.model_validate_json(
                     canonical_json(data["snapshot"])
                 ).character_states
@@ -665,11 +678,32 @@ class RulesAdapter:
             if entry.item_slug != "potion-of-healing":
                 return "item.capability"
             return None
+        if payload.intent_type == "cast_spell" and payload.spell_id == "cure-wounds":
+            basic = type(payload)(
+                intent_type="cast_spell",
+                source_id=payload.source_id,
+                spell_id="cure-wounds",
+                target_id=payload.target_id,
+                slot_level=1,
+                spell_source_id=payload.spell_source_id,
+            )
+            if (
+                payload != basic
+                or payload.source_id not in (None, actor_id)
+                or payload.spell_source_id is None
+                or payload.target_id is None
+                or actor_id not in snapshot.combat_state.party_ids
+                or snapshot.combat_state.pending_reactions
+                or snapshot.effect_states
+            ):
+                return "spell.capability"
+            return None
         if payload.intent_type != "attack":
             return "intent.capability"
         selected = (
             payload.weapon_instance_id
-            if snapshot.snapshot_schema_version in ("engine-snapshot/18", "engine-snapshot/19")
+            if snapshot.snapshot_schema_version
+            in ("engine-snapshot/18", "engine-snapshot/19", "engine-snapshot/20")
             else payload.weapon_id
         )
         if selected is None and payload.stat_block_action_id is None:
@@ -704,6 +738,21 @@ class RulesAdapter:
                 self.facts.consume_item(sid, before, command_id)
             elif component == "xp":
                 self.characters.award_xp(sid, identity, value)
+            elif component == "resource":
+                expected_current, amount = value
+                self.characters.spend_resource(
+                    sid, identity, field, amount, expected_current=expected_current
+                )
+            elif component == "slot_ledger":
+                self.records.spend_slot(
+                    sid,
+                    value.combat_id,
+                    identity,
+                    value.slot_kind,
+                    value.level,
+                    value.expected,
+                    value.value,
+                )
             elif component == "actor" and field == "hp_current":
                 self.characters.set_hp(sid, identity, value)
             elif component == "actor":
@@ -735,7 +784,9 @@ class RulesAdapter:
         row = row if row is not None else self._pinned_row(command.session_id, package)
         return RuleEvaluationRequest(
             schema_version=(
-                "engine-evaluation/26"
+                "engine-evaluation/27"
+                if snapshot.snapshot_schema_version == "engine-snapshot/20"
+                else "engine-evaluation/26"
                 if snapshot.snapshot_schema_version == "engine-snapshot/19"
                 else "engine-evaluation/25"
                 if snapshot.snapshot_schema_version == "engine-snapshot/18"
@@ -762,7 +813,9 @@ class RulesAdapter:
         try:
             request = ActionAvailabilityRequest(
                 schema_version=(
-                    "engine-availability/15"
+                    "engine-availability/16"
+                    if snapshot.snapshot_schema_version == "engine-snapshot/20"
+                    else "engine-availability/15"
                     if snapshot.snapshot_schema_version == "engine-snapshot/19"
                     else "engine-availability/14"
                     if snapshot.snapshot_schema_version == "engine-snapshot/18"

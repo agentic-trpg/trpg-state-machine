@@ -19,7 +19,14 @@ from pydantic import TypeAdapter
 from .errors import StateMachineError
 from .item_units import core_item_id, item_unit_from_row, valid_item_unit
 from .package import canonical_json
-from .runtime_instances import EQUIPMENT_SLOTS, EquipmentBinding, EquipmentItem, instance_read
+from .runtime_instances import (
+    EQUIPMENT_SLOTS,
+    EquipmentBinding,
+    EquipmentItem,
+    SpellRef,
+    SpellSourceRef,
+    instance_read,
+)
 from .scoped_reads import scoped_read
 
 _EFFECTS = TypeAdapter(tuple[EffectState, ...])
@@ -84,7 +91,7 @@ class CharacterFacts:
     )
 
     def __init__(self, store, world, loader):
-        """Bind shared facts and the frozen rules loader used to resolve /19 item kinds."""
+        """Bind shared facts and the frozen rules loader used to resolve /19–/20 item kinds."""
         from .ongoing_effects import OngoingEffects
 
         self.store = store
@@ -298,8 +305,8 @@ class CharacterFacts:
             (value, sid, actor_id),
         )
 
-    def spend_resource(self, sid, actor_id, resource_id, amount):
-        """Read and debit the named character resource, persisting its remaining balance."""
+    def spend_resource(self, sid, actor_id, resource_id, amount, *, expected_current=None):
+        """Debit one keyed pool, optionally checking the evaluator's fixed starting balance."""
         self.store.require_write()
         row = self._conn.execute(
             "SELECT current FROM character_resources "
@@ -310,10 +317,12 @@ class CharacterFacts:
             raise StateMachineError(
                 "invalid_delta", "Resource debit is outside its current balance"
             )
+        if expected_current is not None and (amount != 1 or row[0] != expected_current):
+            raise StateMachineError("invalid_rule_result", "Resource balance changed")
         self._conn.execute(
             "UPDATE character_resources SET current=current-? "
-            "WHERE session_id=? AND actor_id=? AND resource_id=?",
-            (amount, sid, actor_id, resource_id),
+            "WHERE session_id=? AND actor_id=? AND resource_id=? AND current=?",
+            (amount, sid, actor_id, resource_id, row[0]),
         )
 
     def award_xp(self, sid, actor_id, value):
@@ -604,7 +613,7 @@ class CharacterFacts:
         return deleted.rowcount == 1
 
     def initialize_rule_actor(self, row, actor, *, xp=None, encounter=False, schema_version=None):
-        """Initialize owned actor facts, including exact equipment for /19."""
+        """Initialize owned actor facts, including exact equipment for /19 and /20."""
         self.store.require_write()
         if any(condition.source_effect_id is not None for condition in actor.conditions):
             raise StateMachineError(
@@ -675,7 +684,7 @@ class CharacterFacts:
             },
         )
         equipment = None
-        if schema_version == "engine-snapshot/19":
+        if schema_version in ("engine-snapshot/19", "engine-snapshot/20"):
             slots = tuple(state.pop(field, None) for _, field in EQUIPMENT_SLOTS)
             weapon_slug = state.pop("weapon_in_hands")
             equipment = (
@@ -898,9 +907,9 @@ class CharacterFacts:
         )
 
     def validate_initial_equipment(self, sid, snapshot):
-        """Resolve /19 bindings after ingress inventory is materialized in the same UoW."""
+        """Resolve /19 and /20 bindings after ingress inventory materializes in the same UoW."""
         self.store.require_write()
-        if snapshot.snapshot_schema_version != "engine-snapshot/19":
+        if snapshot.snapshot_schema_version not in ("engine-snapshot/19", "engine-snapshot/20"):
             return
         for actor in snapshot.character_states:
             resolved = self._rule_actor(sid, actor.entity_id)
@@ -937,6 +946,48 @@ class CharacterFacts:
         ).fetchone()
         present = data["resource_state"] is not None
         casting_present = data["casting_state"] is not None
+        modern_casting = snapshot.snapshot_schema_version == "engine-snapshot/20"
+        if casting_present:
+            snapshot_actors = {actor.entity_id: actor for actor in snapshot.character_states}
+            inventory_owners = {
+                entry.instance_id: entry.owner_id for entry in snapshot.inventory_state.entries
+            }
+            for actor in data["casting_state"]["actors"]:
+                aid = actor["actor_id"]
+                if aid not in snapshot_actors:
+                    raise StateMachineError("invalid_combat_foundation", "Casting actor is missing")
+                if modern_casting:
+                    for source in actor["sources"]:
+                        for spell in source["spells"]:
+                            material = spell["material"]
+                            if (
+                                material is not None
+                                and inventory_owners.get(material["inventory_instance_id"]) != aid
+                            ):
+                                raise StateMachineError(
+                                    "invalid_combat_foundation",
+                                    "Spell material must belong to its caster",
+                                )
+                else:
+                    known = {slug for source in actor["sources"] for slug in source["known_spells"]}
+                    if set(snapshot_actors[aid].spells_known) != known:
+                        raise StateMachineError(
+                            "invalid_combat_foundation",
+                            "Actor spell mirror differs from casting sources",
+                        )
+                    known_pairs = {
+                        (source["source_id"], spell_id)
+                        for source in actor["sources"]
+                        for spell_id in source["known_spells"]
+                    }
+                    if any(
+                        (material["source_id"], material["spell_slug"]) not in known_pairs
+                        for material in actor["materials"]
+                    ):
+                        raise StateMachineError(
+                            "invalid_combat_foundation",
+                            "Spell material requires a known spell in its source",
+                        )
         expected = (
             snapshot.snapshot_schema_version,
             int(present),
@@ -988,15 +1039,8 @@ class CharacterFacts:
         )
         self.effects.initialize(sid, data["effect_states"])
         if casting_present:
-            snapshot_actors = {actor.entity_id: actor for actor in snapshot.character_states}
             for actor_ordinal, actor in enumerate(data["casting_state"]["actors"]):
                 aid = actor["actor_id"]
-                known = {slug for source in actor["sources"] for slug in source["known_spells"]}
-                if aid not in snapshot_actors or set(snapshot_actors[aid].spells_known) != known:
-                    raise StateMachineError(
-                        "invalid_combat_foundation",
-                        "Actor spell mirror differs from casting sources",
-                    )
                 self._conn.execute(
                     "INSERT INTO character_casting VALUES (?,?,?,?)",
                     (sid, aid, actor_ordinal, int(actor["verbal_available"])),
@@ -1014,40 +1058,45 @@ class CharacterFacts:
                             source_ordinal,
                         ),
                     )
-                    prepared = {slug: n for n, slug in enumerate(source["prepared_spells"])}
-                    for known_ordinal, slug in enumerate(source["known_spells"]):
-                        self._conn.execute(
-                            "INSERT INTO character_spells VALUES (?,?,?,?,?,?)",
-                            (sid, aid, source_id, slug, known_ordinal, prepared.get(slug)),
-                        )
-                spell_source = {
-                    slug: source["source_id"]
-                    for source in reversed(actor["sources"])
-                    for slug in source["known_spells"]
-                }
-                for ordinal, slug in enumerate(snapshot_actors[aid].spells_known):
-                    self._conn.execute(
-                        "INSERT INTO character_spell_order VALUES (?,?,?,?,?)",
-                        (sid, aid, ordinal, spell_source[slug], slug),
+                    prepared = {slug: n for n, slug in enumerate(source.get("prepared_spells", ()))}
+                    legacy_materials = {
+                        (material["source_id"], material["spell_slug"]): material
+                        for material in actor.get("materials", ())
+                    }
+                    spells = (
+                        source["spells"]
+                        if modern_casting
+                        else [
+                            {
+                                "spell_id": slug,
+                                "prepared_order": prepared.get(slug),
+                                "material": legacy_materials.get((source_id, slug)),
+                            }
+                            for slug in source["known_spells"]
+                        ]
                     )
+                    for known_ordinal, spell in enumerate(spells):
+                        material = spell["material"]
+                        self._conn.execute(
+                            "INSERT INTO character_spells "
+                            "(session_id,actor_id,source_id,spell_slug,known_ordinal,prepared_ordinal,"
+                            "material_instance_id,material_available) VALUES (?,?,?,?,?,?,?,?)",
+                            (
+                                sid,
+                                aid,
+                                source_id,
+                                spell["spell_id"],
+                                known_ordinal,
+                                spell["prepared_order"],
+                                None if material is None else material["inventory_instance_id"],
+                                None if material is None else int(material["available"]),
+                            ),
+                        )
                 self._conn.execute(
                     "UPDATE mechanical_actors SET state_json=json_remove(state_json,"
                     "'$.spells_known') WHERE session_id=? AND actor_id=?",
                     (sid, aid),
                 )
-                for material_ordinal, material in enumerate(actor["materials"]):
-                    self._conn.execute(
-                        "INSERT INTO character_spell_materials VALUES (?,?,?,?,?,?,?)",
-                        (
-                            sid,
-                            aid,
-                            material["source_id"],
-                            material["spell_slug"],
-                            material["inventory_instance_id"],
-                            int(material["available"]),
-                            material_ordinal,
-                        ),
-                    )
         if present:
             for ordinal, pool in enumerate(data["resource_state"]["pools"]):
                 metadata = {
@@ -1151,10 +1200,13 @@ class CharacterFacts:
         unfiltered form is reserved for explicit initialization and recovery audits.
         """
         component = self._conn.execute(
-            "SELECT casting_state_present FROM mechanical_components WHERE session_id=?", (sid,)
+            "SELECT schema_version,casting_state_present FROM mechanical_components "
+            "WHERE session_id=?",
+            (sid,),
         ).fetchone()
-        if component is None or not component[0]:
+        if component is None or not component["casting_state_present"]:
             return None
+        modern = component["schema_version"] == "engine-snapshot/20"
         actors = []
         if owner_ids is None:
             rows = self._conn.execute(
@@ -1172,50 +1224,102 @@ class CharacterFacts:
         for row in rows:
             aid = row["actor_id"]
             sources = []
+            retained = None
+            grouped = {}
+            if modern and self.store._scope is not None and not self.store._scope.write:
+                retained = self.all_spells(sid, aid)
+                for spell in retained:
+                    grouped.setdefault(spell.source.source_id, []).append(spell)
             for source in self._conn.execute(
                 "SELECT * FROM character_spell_sources WHERE session_id=? AND actor_id=? "
                 "ORDER BY ordinal",
                 (sid, aid),
             ):
-                spells = tuple(
-                    self._conn.execute(
-                        "SELECT spell_slug,known_ordinal,prepared_ordinal FROM character_spells "
-                        "WHERE session_id=? AND actor_id=? AND source_id=? ORDER BY known_ordinal",
-                        (sid, aid, source["source_id"]),
+                spells = (
+                    ()
+                    if retained is not None
+                    else tuple(
+                        self._conn.execute(
+                            "SELECT spell_slug,known_ordinal,prepared_ordinal,material_instance_id,"
+                            "material_available FROM character_spells "
+                            "WHERE session_id=? AND actor_id=? AND source_id=? "
+                            "ORDER BY known_ordinal",
+                            (sid, aid, source["source_id"]),
+                        )
                     )
                 )
-                sources.append(
-                    {
-                        "source_id": source["source_id"],
-                        "class_slug": source["class_slug"],
-                        "ability": source["ability"],
-                        "known_spells": [spell["spell_slug"] for spell in spells],
-                        "prepared_spells": [
-                            spell["spell_slug"]
-                            for spell in sorted(
-                                (
-                                    spell
-                                    for spell in spells
-                                    if spell["prepared_ordinal"] is not None
-                                ),
-                                key=lambda spell: spell["prepared_ordinal"],
-                            )
-                        ],
-                    }
-                )
-            materials = [
-                {
-                    "source_id": material["source_id"],
-                    "spell_slug": material["spell_slug"],
-                    "inventory_instance_id": material["inventory_instance_id"],
-                    "available": bool(material["available"]),
+                base = {
+                    "source_id": source["source_id"],
+                    "class_slug": source["class_slug"],
+                    "ability": source["ability"],
                 }
-                for material in self._conn.execute(
-                    "SELECT * FROM character_spell_materials WHERE session_id=? AND actor_id=? "
-                    "ORDER BY ordinal",
-                    (sid, aid),
-                )
-            ]
+                if modern:
+                    selected = (
+                        grouped.get(source["source_id"], ()) if retained is not None else spells
+                    )
+                    base["spells"] = [
+                        {
+                            "spell_id": spell.spell_id
+                            if retained is not None
+                            else spell["spell_slug"],
+                            "prepared_order": (
+                                spell.prepared_order
+                                if retained is not None
+                                else spell["prepared_ordinal"]
+                            ),
+                            "material": (
+                                None
+                                if (
+                                    spell.material_item
+                                    if retained is not None
+                                    else spell["material_instance_id"]
+                                )
+                                is None
+                                else {
+                                    "inventory_instance_id": (
+                                        spell.material_item.object_id
+                                        if retained is not None
+                                        else spell["material_instance_id"]
+                                    ),
+                                    "available": (
+                                        spell.material_available
+                                        if retained is not None
+                                        else bool(spell["material_available"])
+                                    ),
+                                }
+                            ),
+                        }
+                        for spell in selected
+                    ]
+                else:
+                    base["known_spells"] = [spell["spell_slug"] for spell in spells]
+                    base["prepared_spells"] = [
+                        spell["spell_slug"]
+                        for spell in sorted(
+                            (s for s in spells if s["prepared_ordinal"] is not None),
+                            key=lambda spell: spell["prepared_ordinal"],
+                        )
+                    ]
+                sources.append(base)
+            materials = (
+                []
+                if modern
+                else [
+                    {
+                        "source_id": spell["source_id"],
+                        "spell_slug": spell["spell_slug"],
+                        "inventory_instance_id": spell["material_instance_id"],
+                        "available": bool(spell["material_available"]),
+                    }
+                    for spell in self._conn.execute(
+                        "SELECT source_id,spell_slug,material_instance_id,material_available "
+                        "FROM character_spells WHERE session_id=? AND actor_id=? "
+                        "AND material_instance_id IS NOT NULL "
+                        "ORDER BY source_id,known_ordinal",
+                        (sid, aid),
+                    )
+                ]
+            )
             actors.append(
                 (
                     row["ordinal"],
@@ -1223,11 +1327,66 @@ class CharacterFacts:
                         "actor_id": aid,
                         "verbal_available": bool(row["verbal_available"]),
                         "sources": sources,
-                        "materials": materials,
+                        **({} if modern else {"materials": materials}),
                     },
                 )
             )
         return {"actors": [actor for _, actor in sorted(actors, key=lambda entry: entry[0])]}
+
+    @instance_read("actor", None, "all_spells")
+    def all_spells(self, sid, actor_id):
+        """Retain this actor's ordered spell and source identities under one owner field."""
+        sources = tuple(
+            self._conn.execute(
+                "SELECT source_id,class_slug,ability,ordinal FROM character_spell_sources "
+                "WHERE session_id=? AND actor_id=? ORDER BY ordinal",
+                (sid, actor_id),
+            )
+        )
+        result = []
+        for source in sources:
+            reference = SpellSourceRef(
+                source["source_id"], source["class_slug"], source["ability"], source["ordinal"]
+            )
+            for spell in self._conn.execute(
+                "SELECT spell_slug,known_ordinal,prepared_ordinal,material_instance_id,"
+                "material_available FROM character_spells "
+                "WHERE session_id=? AND actor_id=? AND source_id=? ORDER BY known_ordinal",
+                (sid, actor_id, reference.source_id),
+            ):
+                item = None
+                if spell["material_instance_id"] is not None:
+                    row = self.world.object(sid, spell["material_instance_id"])
+                    if row is None:
+                        raise StateMachineError(
+                            "invalid_mechanical_state", "Spell material is missing"
+                        )
+                    item = self.store.memory.active_item(row)
+                result.append(
+                    SpellRef(
+                        spell["spell_slug"],
+                        spell["known_ordinal"],
+                        spell["prepared_ordinal"],
+                        reference,
+                        item,
+                        None if item is None else bool(spell["material_available"]),
+                    )
+                )
+        return tuple(result)
+
+    @instance_read("actor", None, "prepared_spells")
+    def prepared_spells(self, sid, actor_id):
+        """Retain ordered prepared selections sharing all-spell material identities."""
+        return tuple(
+            sorted(
+                (
+                    spell
+                    for spell in self.all_spells(sid, actor_id)
+                    if spell.prepared_order is not None
+                ),
+                key=lambda spell: (spell.source.ordinal, spell.prepared_order),
+            )
+        )
 
     def casting_material_bound(self, sid, actor_id, object_ids):
         """Check exact moved object IDs through the material reverse index.
@@ -1236,8 +1395,8 @@ class CharacterFacts:
         """
         return any(
             self._conn.execute(
-                "SELECT inventory_instance_id FROM character_spell_materials "
-                "WHERE session_id=? AND actor_id=? AND inventory_instance_id=?",
+                "SELECT material_instance_id FROM character_spells "
+                "WHERE session_id=? AND actor_id=? AND material_instance_id=?",
                 (sid, actor_id, oid),
             ).fetchone()
             for oid in object_ids
@@ -1253,6 +1412,7 @@ class CharacterFacts:
             "engine-snapshot/17",
             "engine-snapshot/18",
             "engine-snapshot/19",
+            "engine-snapshot/20",
         ):
             raise StateMachineError(
                 "unsupported_mechanical_version", "Explicit component facts are missing"
@@ -1286,6 +1446,7 @@ class CharacterFacts:
             "engine-snapshot/17",
             "engine-snapshot/18",
             "engine-snapshot/19",
+            "engine-snapshot/20",
         ):
             raise StateMachineError(
                 "unsupported_mechanical_version", "Explicit component facts are missing"
@@ -1337,37 +1498,16 @@ class CharacterFacts:
             inventory = values["inventory"]
             resources = values["resource_state"]
             casting = self._casting_state(sid, None if full_audit else owner_ids)
-            if full_audit:
-                if casting is None:
-                    for table in (
-                        "character_casting",
-                        "character_spell_sources",
-                        "character_spells",
-                        "character_spell_materials",
-                        "character_spell_order",
-                    ):
-                        if self._conn.execute(
-                            f"SELECT session_id FROM {table} WHERE session_id=?", (sid,)
-                        ).fetchone():
-                            raise ValueError("casting rows exist without component marker")
-                else:
-                    for actor_casting in casting["actors"]:
-                        aid = actor_casting["actor_id"]
-                        mirror = [
-                            item["spell_slug"]
-                            for item in self._conn.execute(
-                                "SELECT spell_slug FROM character_spell_order "
-                                "WHERE session_id=? AND actor_id=? ORDER BY ordinal",
-                                (sid, aid),
-                            )
-                        ]
-                        known = {
-                            slug
-                            for source in actor_casting["sources"]
-                            for slug in source["known_spells"]
-                        }
-                        if set(mirror) != known:
-                            raise ValueError("casting mirror is incomplete")
+            if full_audit and casting is None:
+                for table in (
+                    "character_casting",
+                    "character_spell_sources",
+                    "character_spells",
+                ):
+                    if self._conn.execute(
+                        f"SELECT session_id FROM {table} WHERE session_id=?", (sid,)
+                    ).fetchone():
+                        raise ValueError("casting rows exist without component marker")
             effects = values["effects_json"]
             typed_inventory = self._inventory_model(inventory)
             inventory = typed_inventory.model_dump(mode="json")
@@ -1380,8 +1520,13 @@ class CharacterFacts:
                 if resources is not None
                 else None
             )
+            casting_model = CastingState
+            if row["schema_version"] == "engine-snapshot/20":
+                from dnd5e_engine.evaluation_casting import CastingStateV20
+
+                casting_model = CastingStateV20
             casting = (
-                self.store.memory.model_json(CastingState, canonical_json(casting)).model_dump(
+                self.store.memory.model_json(casting_model, canonical_json(casting)).model_dump(
                     mode="json"
                 )
                 if casting is not None
@@ -1575,25 +1720,35 @@ class CharacterFacts:
             sid, actor_id, self.conditions(sid, actor_id)
         )
         data["concentration_effect_id"] = self.effects.concentration_reference(sid, actor_id)
+        component = self._conn.execute(
+            "SELECT schema_version,resource_state_present FROM mechanical_components "
+            "WHERE session_id=?",
+            (sid,),
+        ).fetchone()
+        modern_actor = component is not None and component["schema_version"] == "engine-snapshot/20"
         if (
             include_carried
+            and not modern_actor
             and self._conn.execute(
                 "SELECT actor_id FROM character_casting WHERE session_id=? AND actor_id=?",
                 (sid, actor_id),
             ).fetchone()
         ):
-            data["spells_known"] = [
-                row["spell_slug"]
-                for row in self._conn.execute(
-                    "SELECT spell_slug FROM character_spell_order "
-                    "WHERE session_id=? AND actor_id=? ORDER BY ordinal",
-                    (sid, actor_id),
-                )
-            ]
-        component = self._conn.execute(
-            "SELECT resource_state_present FROM mechanical_components WHERE session_id=?", (sid,)
-        ).fetchone()
-        if include_resources and component is not None and component[0]:
+            seen = set()
+            data["spells_known"] = []
+            for spell in self._conn.execute(
+                "SELECT s.spell_slug AS spell_id FROM character_spells s "
+                "JOIN character_spell_sources src USING(session_id,actor_id,source_id) "
+                "WHERE s.session_id=? AND s.actor_id=? "
+                "ORDER BY src.ordinal,s.known_ordinal",
+                (sid, actor_id),
+            ):
+                if spell["spell_id"] not in seen:
+                    seen.add(spell["spell_id"])
+                    data["spells_known"].append(spell["spell_id"])
+        if modern_actor:
+            data.pop("spells_known", None)
+        if include_resources and component is not None and component["resource_state_present"]:
             pools = [value for _, value in self._typed_owner_resources(sid, actor_id)]
             data["spell_slots"] = {
                 str(p["level"]): p["current"] for p in pools if p["kind"] == "spell_slot"
@@ -2647,7 +2802,7 @@ class WorldFacts:
             ("object_lights", "object_id"),
             ("object_mechanisms", "object_id"),
             ("object_durability", "object_id"),
-            ("character_spell_materials", "inventory_instance_id"),
+            ("character_spells", "material_instance_id"),
         ):
             if self._conn.execute(
                 f"SELECT 1 FROM {table} WHERE session_id=? AND {column}=? LIMIT 1",
@@ -2909,6 +3064,35 @@ class CombatRecords:
         self._conn.execute(
             "UPDATE combats SET state_json=json_set(state_json,?,json(?)) WHERE session_id=?",
             ("$.movement_ledgers." + canonical_json(actor_id), canonical_json(value), sid),
+        )
+
+    def spend_slot(self, sid, combat_id, owner_id, slot_kind, level, expected, value):
+        """Apply one evaluator-guarded owner ledger replacement in the shared write scope."""
+        self.store.require_write()
+        row = self._conn.execute(
+            "SELECT combat_id,state_json FROM combats WHERE session_id=?", (sid,)
+        ).fetchone()
+        if row is None or row["combat_id"] != combat_id or slot_kind != "spell_slot" or level != 1:
+            raise StateMachineError("invalid_rule_result", "Unsupported spell slot ledger")
+        state = self.store.memory.json(row["state_json"])
+        ledger = state.get("expended_resources")
+        if not isinstance(ledger, dict) or ledger.get(owner_id) != expected:
+            raise StateMachineError("invalid_rule_result", "Spell slot ledger changed")
+        if expected is not None and not isinstance(expected, dict):
+            raise StateMachineError("invalid_rule_result", "Invalid prior spell slot ledger")
+        key = f"{slot_kind}:{level}"
+        prior = expected or {}
+        if value != {**prior, key: prior.get(key, 0) + 1}:
+            raise StateMachineError("invalid_rule_result", "Invalid spell slot ledger update")
+        self._conn.execute(
+            "UPDATE combats SET state_json=json_set(state_json,?,json(?)) "
+            "WHERE session_id=? AND combat_id=?",
+            (
+                "$.expended_resources." + canonical_json(owner_id),
+                canonical_json(value),
+                sid,
+                combat_id,
+            ),
         )
 
     def active(self, session_id):

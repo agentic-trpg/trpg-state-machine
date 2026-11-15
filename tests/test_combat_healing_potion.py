@@ -16,7 +16,7 @@ from trpg_state_machine.package import _validate
 FIRST, SECOND = "object.potion_first", "object.potion_second"
 
 
-def potion_world(tmp_path, context, *, last_turn=False):
+def potion_world(tmp_path, context, *, last_turn=False, version="engine-snapshot/19"):
     """Create two authored normal healing potions, then pick one before combat."""
     base = item_loader()
     bundled = BundledAssetLoader()
@@ -30,7 +30,10 @@ def potion_world(tmp_path, context, *, last_turn=False):
     data["pc_templates"][0]["character"]["hp"]["current"] = 2
     for foundation in data["rule_bindings"].values():
         snapshot = foundation["snapshot"]
-        snapshot["snapshot_schema_version"] = "engine-snapshot/19"
+        snapshot["snapshot_schema_version"] = version
+        if version == "engine-snapshot/20":
+            for actor in snapshot["character_states"]:
+                assert not actor.pop("spells_known")
         actor = snapshot["character_states"][0]
         actor.update(hp_current=2, weapon_in_hands=None, weapon_grip="none")
         if last_turn:
@@ -87,8 +90,9 @@ def potion_command(sm, sid, package, context, key="drink"):
     )
 
 
-def test_real_potion_consumes_only_selected_identity_and_reopens(tmp_path, context):
-    sm, sid, package, loader, db = potion_world(tmp_path, context)
+@pytest.mark.parametrize("version", ["engine-snapshot/19", "engine-snapshot/20"])
+def test_real_potion_consumes_only_selected_identity_and_reopens(tmp_path, context, version):
+    sm, sid, package, loader, db = potion_world(tmp_path, context, version=version)
     with sm:
         command = potion_command(sm, sid, package, context)
         before = sm.read_combat_snapshot(sid, package, context=context)

@@ -242,11 +242,14 @@ class WorldObjectService:
         return {"weapon": iid, "grip": grip, "stow_other_hand": False}
 
     def _equipment_actor(self, row, actor_id, package):
-        """Read the current /19 PC binding after ordinary actor admission."""
+        """Read the current PC instance equipment after ordinary actor admission."""
         sid = row["session_id"]
         self.handler._world_actor_ready(sid, actor_id)
-        if row["mechanical_schema_version"] != "engine-snapshot/19":
-            raise StateMachineError("unsupported_actor_state", "Instance equipment requires /19")
+        if row["mechanical_schema_version"] not in ("engine-snapshot/19", "engine-snapshot/20"):
+            raise StateMachineError(
+                "unsupported_actor_state",
+                "Explicit instance equipment requires snapshot /19 or /20",
+            )
         self.openable.rules._verify_dnd_binding(package, row)
         state = self.handler.characters.binding_actor(sid, actor_id)
         equipment = self.handler.characters.equipment(sid, actor_id)

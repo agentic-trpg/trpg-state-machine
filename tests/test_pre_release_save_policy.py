@@ -4,10 +4,13 @@ import hashlib
 import sqlite3
 import subprocess
 import sys
+from pathlib import Path
 
 import pytest
 
 from trpg_state_machine import StateMachine, StateMachineError
+from trpg_state_machine.environment_versions import protection_key, source_key, wind_key
+from trpg_state_machine.runtime_integrity import spatial_cells
 
 
 def test_pre41_database_is_refused_before_ddl_and_preserves_source_bytes(tmp_path):
@@ -111,19 +114,23 @@ def test_schema49_save_is_refused_before_writable_open(tmp_path):
 
 
 def test_storage02_schema50_is_refused_without_modifying_source(tmp_path):
-    """The real attribute/proficiency DDL at Schema50 is an old save, not an upgrade target."""
+    """A genuine empty Schema50 save is refused before a writable open."""
     path = tmp_path / "storage02.db"
-    with StateMachine(path):
-        pass
+    schema_dir = Path(__file__).resolve().parents[1] / "src" / "trpg_state_machine"
     with sqlite3.connect(path) as conn:
-        # Reconstruct the Schema50 storage shape from a fresh database.
-        conn.execute("DROP TABLE character_equipment")
-        conn.execute("DROP TRIGGER consumed_item_identity_guard")
-        conn.execute("DROP INDEX character_spell_materials_instance")
-        conn.execute("DROP INDEX door_locks_object")
-        conn.execute("DROP INDEX door_credentials_instance")
-        conn.execute("DROP TABLE consumed_items")
-        conn.execute("PRAGMA user_version = 50")
+        for name, function in (
+            ("runtime_spatial_cells", spatial_cells),
+            ("env_source_key", source_key),
+            ("env_protection_key", protection_key),
+            ("env_wind_key", wind_key),
+        ):
+            conn.create_function(
+                name, 5 if name == "runtime_spatial_cells" else 1, function, deterministic=True
+            )
+        conn.executescript((schema_dir / "_schema.sql").read_text("utf-8"))
+        for version in range(2, 51):
+            conn.executescript((schema_dir / f"_migration_{version}.sql").read_text("utf-8"))
+        assert conn.execute("PRAGMA user_version").fetchone()[0] == 50
         assert conn.execute(
             "SELECT 1 FROM sqlite_master WHERE type='table' AND name='character_attributes'"
         ).fetchone() == (1,)
@@ -203,7 +210,7 @@ def test_current_save_reopens_without_inventory_aggregate_columns(
     with StateMachine(path) as sm:
         created = sm.create_session(request_for(), package, context=context)
         saved = sm.save_session(created.session_id, package, context=context)
-        assert sm._conn.execute("PRAGMA user_version").fetchone()[0] == 52
+        assert sm._conn.execute("PRAGMA user_version").fetchone()[0] == 53
         for table in ("characters", "mechanical_components"):
             columns = {row[1] for row in sm._conn.execute(f"PRAGMA table_info({table})")}
             assert "inventory_json" not in columns
@@ -219,6 +226,18 @@ def test_current_schema_refuses_missing_required_spatial_trigger(tmp_path):
         pass
     with sqlite3.connect(path) as conn:
         conn.execute("DROP TRIGGER spatial_index_objects_update")
+    with pytest.raises(StateMachineError) as error:
+        StateMachine(path)
+    assert error.value.code == "unsupported_storage_schema"
+
+
+def test_current_schema_refuses_missing_spell_pair_guard(tmp_path):
+    """Reopen rejects a missing pair trigger before serving material bindings."""
+    path = tmp_path / "damaged-spells.db"
+    with StateMachine(path):
+        pass
+    with sqlite3.connect(path) as conn:
+        conn.execute("DROP TRIGGER character_spells_material_pair_insert")
     with pytest.raises(StateMachineError) as error:
         StateMachine(path)
     assert error.value.code == "unsupported_storage_schema"

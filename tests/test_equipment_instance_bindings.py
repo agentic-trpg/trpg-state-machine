@@ -5,6 +5,7 @@ from pathlib import Path
 from runpy import run_path
 
 import pytest
+from dnd5e_engine.evaluation_ruleset import EVALUATOR_VERSION
 from dnd_support import initialize
 from item_support import DAGGER, ROPE, item_data, item_loader
 from lock_support import CRED, TWIN, A, lock_loader
@@ -32,8 +33,8 @@ author_fixture = run_path(
 )["author_fixture"]
 
 
-def combat_equipment_data():
-    """Supply a held rapier and paired armor/shield instances for a /19 encounter."""
+def combat_equipment_data(*, version="engine-snapshot/19"):
+    """Supply a held rapier and paired armor/shield instances for an encounter."""
     data = item_data()
     owner = data["pc_templates"][0]["pc_template_id"]
     data["actors"][0]["initial_cell"] = "1,0"
@@ -66,10 +67,13 @@ def combat_equipment_data():
                     "policy": "ordinary_public",
                 }
             )
-    data["manifest"]["ruleset_binding"]["evaluator_version"] = "dnd5e-evaluation/39"
+    data["manifest"]["ruleset_binding"]["evaluator_version"] = EVALUATOR_VERSION
     for foundation in data["rule_bindings"].values():
         snapshot = foundation["snapshot"]
-        snapshot["snapshot_schema_version"] = "engine-snapshot/19"
+        snapshot["snapshot_schema_version"] = version
+        if version == "engine-snapshot/20":
+            for actor in snapshot["character_states"]:
+                assert not actor.pop("spells_known")
         next(e for e in snapshot["inventory_state"]["entries"] if e["item_slug"] == "rapier")[
             "instance_id"
         ] = DAGGER
@@ -160,7 +164,7 @@ def equipment_data(kind):
         transfer = next(t for t in data["item_transfers"] if t["instance_id"] == iid)
         transfer.update(item_slug=slug, initial_owner_id=owner)
     data["pc_templates"][0]["character"]["inventory"].append(slug)
-    data["manifest"]["ruleset_binding"]["evaluator_version"] = "dnd5e-evaluation/39"
+    data["manifest"]["ruleset_binding"]["evaluator_version"] = EVALUATOR_VERSION
     for foundation in data["rule_bindings"].values():
         snapshot = foundation["snapshot"]
         snapshot["snapshot_schema_version"] = "engine-snapshot/19"
@@ -250,7 +254,7 @@ def test_equipment_binding_survives_save_and_reopen(tmp_path, context):
     sm, sid, package, db = setup(tmp_path, context, equipment_data("shield"))
     with sm:
         sm.save_session(sid, package, context=context)
-        assert sm._conn.execute("PRAGMA user_version").fetchone()[0] == 52
+        assert sm._conn.execute("PRAGMA user_version").fetchone()[0] == 53
     with StateMachine(db, dnd_loader=lock_loader()) as restored:
         restored.resume_session(sid, package, context=context)
         actor = restored.read_session(sid, package, context=context).pc_actor_id
@@ -319,7 +323,7 @@ def test_ingress_inventory_equipment_resolves_after_materialization(
             "offhand": "offhand_item_instance_id",
         }[kind]
         assert getattr(pc, field) == f"inventory.{kind}_bound"
-        assert sm._conn.execute("PRAGMA user_version").fetchone()[0] == 52
+        assert sm._conn.execute("PRAGMA user_version").fetchone()[0] == 53
 
 
 @pytest.mark.parametrize("fault", ["missing_actor", "active_effect"])
@@ -365,11 +369,12 @@ def test_pickup_preserves_typed_actor_and_effect_boundary(tmp_path, context, fau
         assert authority(sm) == before
 
 
-def test_combat_availability_uses_bound_equipment_and_spares(tmp_path, context):
-    """The public availability path passes the /19 armor, shield and weapon IDs to RE."""
+@pytest.mark.parametrize("version", ["engine-snapshot/19", "engine-snapshot/20"])
+def test_combat_availability_uses_bound_equipment_and_spares(tmp_path, context, version):
+    """Availability and submit pass the armor, shield and weapon instance IDs to RE."""
     from dnd5e_engine.evaluation_contracts import CombatIntentPayload
 
-    package = _validate(combat_equipment_data())
+    package = _validate(combat_equipment_data(version=version))
     with StateMachine(tmp_path / "combat.db", dnd_loader=item_loader()) as sm:
         sid = create(sm, package, context)
         assert initialize(sm, sid, package, context).status == "committed"

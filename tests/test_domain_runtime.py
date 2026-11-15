@@ -253,8 +253,6 @@ def test_production_writers_and_dependency_direction():
         "character_casting": "CharacterFacts",
         "character_spell_sources": "CharacterFacts",
         "character_spells": "CharacterFacts",
-        "character_spell_materials": "CharacterFacts",
-        "character_spell_order": "CharacterFacts",
         "mechanical_actors": "CharacterFacts",
         "mechanical_components": "CharacterFacts",
         "objects": "WorldFacts",

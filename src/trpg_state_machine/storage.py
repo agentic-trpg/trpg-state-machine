@@ -15,7 +15,7 @@ from .storage_migrations import (
 )
 from .version_map import VersionMap
 
-CURRENT_SCHEMA_VERSION = 52
+CURRENT_SCHEMA_VERSION = 53
 
 
 class _Coordinator:
@@ -233,6 +233,9 @@ class SqliteStore:
                 if declaration is None:
                     continue
                 kind, name = declaration.groups()
+                if name == "character_spell_materials_instance":
+                    # Schema53 retires the table and its former reverse index.
+                    continue
                 stored = self._conn.execute(
                     "SELECT sql FROM sqlite_master WHERE type=? AND name=?",
                     (kind.lower(), name),
@@ -241,6 +244,22 @@ class SqliteStore:
                 if stored is None or " ".join(stored[0].split()) != " ".join(expected.split()):
                     raise StateMachineError(
                         "unsupported_storage_schema", "Potion lifecycle storage is incomplete"
+                    )
+            for statement in steps[52]:
+                declaration = re.search(
+                    r"CREATE\s+(INDEX|TRIGGER)\s+(\w+)", statement, re.IGNORECASE
+                )
+                if declaration is None:
+                    continue
+                kind, name = declaration.groups()
+                stored = self._conn.execute(
+                    "SELECT sql FROM sqlite_master WHERE type=? AND name=?",
+                    (kind.lower(), name),
+                ).fetchone()
+                expected = statement[declaration.start() :].strip().rstrip(";")
+                if stored is None or " ".join(stored[0].split()) != " ".join(expected.split()):
+                    raise StateMachineError(
+                        "unsupported_storage_schema", "Spell binding storage is incomplete"
                     )
             reconcile_schema34(self._conn, 35, steps[33])
             validate_environment_versions(self._conn, required=True)

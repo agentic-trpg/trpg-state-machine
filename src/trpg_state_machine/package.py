@@ -450,9 +450,8 @@ def _validate(data: dict, *, allow_legacy_audit=False) -> AdventurePackage:
     if dnd and (
         not isinstance(binding.data_revision, str)
         or not re.fullmatch(r"sha256:[0-9a-f]{64}", binding.data_revision)
-        # /36 source remains readable for pinned saves and instance upgrades.
-        # Execution/restore verifies the unchanged identity against RE /37;
-        # parsing must never silently repin an existing Session.
+        # Historical bindings can be parsed for explicit maintenance. Execution
+        # and restore verify the complete binding against the installed evaluator.
         or (
             binding.evaluator_version
             not in (
@@ -460,6 +459,7 @@ def _validate(data: dict, *, allow_legacy_audit=False) -> AdventurePackage:
                 "dnd5e-evaluation/37",
                 "dnd5e-evaluation/38",
                 "dnd5e-evaluation/39",
+                "dnd5e-evaluation/40",
             )
             and not legacy_audit
         )

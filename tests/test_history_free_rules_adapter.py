@@ -10,6 +10,7 @@ from pathlib import Path
 
 import pytest
 from dnd5e_engine.evaluation_contracts import CombatIntentPayload
+from dnd5e_engine.evaluation_ruleset import EVALUATOR_VERSION
 from dnd_support import create, initialize
 from modern_support import modern_data, modern_loader
 from test_dnd_ledger_scope import stored_state
@@ -21,7 +22,7 @@ from trpg_state_machine.package import _validate
 from trpg_state_machine.rules_migration import migrate_package_16
 
 ROOT = Path(__file__).resolve().parents[1]
-PIN = "9c31a60b674f4c68b3beb9e7c8f441df7e8bb10c"
+PIN = "d26b59d06a8e08191d70d64eb4750f697bdaecbb"
 BASELINE = "5ff7a807d5b29cceb4311dcb2fe5b1182ead6bd1"
 
 
@@ -211,7 +212,7 @@ def test_explicit_complete_predecessor_package_migration_and_real_new_session(
     original = deepcopy(old)
     new = migrate_package_16(old, loader=assets, package_version="rf4.migrated")
     assert old == original
-    assert new["manifest"]["ruleset_binding"]["evaluator_version"] == "dnd5e-evaluation/39"
+    assert new["manifest"]["ruleset_binding"]["evaluator_version"] == EVALUATOR_VERSION
     assert new["manifest"]["package_version"] != old["manifest"]["package_version"]
     for kind, foundation in new["rule_bindings"].items():
         assert foundation["rng_state"] == old["rule_bindings"][kind]["rng_state"]

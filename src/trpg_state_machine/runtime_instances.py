@@ -331,12 +331,44 @@ class EquipmentBinding:
 
 @dataclass(frozen=True)
 class CharacterRuntime:
-    """Own the actor's retained inventory and equipment fields."""
+    """Own bounded actor inventory, equipment and ordered spell relationships."""
 
     session_id: str
     actor_id: str
     inventory: tuple = ()
     equipment: tuple = ()
+    all_spells: tuple = ()
+    prepared_spells: tuple = ()
+
+
+@dataclass(frozen=True)
+class SpellSourceRef:
+    """Stable source identity shared by the actor's spell selections."""
+
+    source_id: str
+    class_slug: str
+    ability: str
+    ordinal: int
+
+    def __deepcopy__(self, memo):
+        """Share an immutable source identity across ordered owner fields."""
+        return self
+
+
+@dataclass(frozen=True)
+class SpellRef:
+    """Ordered selection with an exact material item identity when bound."""
+
+    spell_id: str
+    known_ordinal: int
+    prepared_order: int | None
+    source: SpellSourceRef
+    material_item: object | None
+    material_available: bool | None
+
+    def __deepcopy__(self, memo):
+        """Share this immutable selection and its active material identity."""
+        return self
 
 
 def resolve_field(

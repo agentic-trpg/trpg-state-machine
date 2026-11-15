@@ -334,7 +334,7 @@ class ContainerService:
     def require_unbound(self, sid, actor, iid, *, rows=None, affected=None, drop=False):
         """Protect the moving subtree's exact equipment and casting dependencies.
 
-        Current /19 equipment checks compare instance IDs. Older snapshots retain
+        Current /19 and /20 equipment checks compare instance IDs. Older snapshots retain
         conservative slug guards; the Drop flag preserves its previous broad armor
         and disabled-effect policy without reading unrelated actor equipment.
         """

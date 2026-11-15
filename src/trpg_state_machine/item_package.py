@@ -29,6 +29,7 @@ def validate_items(raw, scenes, foundation, definitions, *, world=False):
         "engine-snapshot/17",
         "engine-snapshot/18",
         "engine-snapshot/19",
+        "engine-snapshot/20",
     ):
         _fail("unsupported_mechanism", path, "Portable items require current component facts")
     known = {a["entity_id"] for a in snapshot["character_states"]}

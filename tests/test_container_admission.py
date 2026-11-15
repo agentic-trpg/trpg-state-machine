@@ -339,12 +339,10 @@ def test_casting_binding_tracks_exact_moved_instance_and_subtree(
             (sid, actor, "class.wizard", "wizard", "int", 0),
         )
         sm._conn.execute(
-            "INSERT INTO character_spells VALUES (?,?,?,?,?,?)",
-            (sid, actor, "class.wizard", "hold-person", 0, 0),
-        )
-        sm._conn.execute(
-            "INSERT INTO character_spell_materials VALUES (?,?,?,?,?,?,?)",
-            (sid, actor, "class.wizard", "hold-person", CRED if related else TWIN, available, 0),
+            "INSERT INTO character_spells "
+            "(session_id,actor_id,source_id,spell_slug,known_ordinal,prepared_ordinal,"
+            "material_instance_id,material_available) VALUES (?,?,?,?,?,?,?,?)",
+            (sid, actor, "class.wizard", "hold-person", 0, 0, CRED if related else TWIN, available),
         )
         op = PutItem(A, BAG if descendant else CRED, BOX, "0,0")
         assert_admission(
