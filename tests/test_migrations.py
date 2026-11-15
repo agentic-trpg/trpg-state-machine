@@ -83,7 +83,7 @@ def test_concurrent_fresh_initialization(tmp_path, monkeypatch):
             )
 
     with ThreadPoolExecutor(max_workers=4) as workers:
-        assert list(workers.map(open_runtime, range(4))) == [(51, 1, "wal")] * 4
+        assert list(workers.map(open_runtime, range(4))) == [(52, 1, "wal")] * 4
     assert len(version_reads) >= 4 and all(version_reads)
     monkeypatch.undo()
     assert_preserved(database, original)
