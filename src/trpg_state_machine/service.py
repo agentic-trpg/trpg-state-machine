@@ -1,6 +1,7 @@
 """Domain-owned facts, consistent Session RAM reads and durable publication."""
 
 import json
+from collections import Counter
 from pathlib import Path
 from uuid import uuid4
 
@@ -22,6 +23,7 @@ from .mechanical_runtime import MechanicalRuntime
 from .mechanics import SyntheticEvaluator
 from .models import (
     ActorState,
+    CharacterAC,
     CharacterState,
     CreateSessionRequest,
     CreationResult,
@@ -42,6 +44,7 @@ from .object_durability import ObjectDurabilityService
 from .observation_lifecycle import ObservationLifecycleRuntime
 from .package import (
     AdventurePackage,
+    canonical_json,
 )
 from .package_effects import PackageEffects
 from .perception import PerceptionRuntime
@@ -471,6 +474,36 @@ class StateMachine(
     def read_carried_items(self, session_id, actor_id, package, *, context):
         """Delegate reading authorized carried items."""
         return self._world.read_carried_items(session_id, actor_id, package, context=context)
+
+    def read_character_ac(self, session_id, actor_id, package, *, context) -> CharacterAC:
+        """Read a controlled actor's current numeric AC without changing RE's base input.
+
+        Cover is attack-specific and excluded. Only active scalar effect AC bonuses
+        can be displayed; unsupported formulas fail this narrow read alone.
+        """
+        from dnd5e_engine.evaluation_effects import EffectState
+        from dnd5e_engine.reaction_effect_rules import (
+            effect_ac_changes,
+            scalar_ac_change_delta,
+        )
+
+        with self._transaction():
+            self._world._spatial_reader(session_id, actor_id, package, context)
+            base = self._characters.attributes(session_id, actor_id, include_proficiencies=False)[
+                "ac"
+            ]
+            effects = [
+                EffectState.model_validate_json(canonical_json(value))
+                for value in self._characters.effects.for_targets(session_id, (actor_id,))
+            ]
+            active = [effect for effect in effects if not effect.disabled]
+            try:
+                bonus = scalar_ac_change_delta(Counter(), effect_ac_changes(active))
+            except (TypeError, ValueError) as exc:
+                raise StateMachineError(
+                    "unsupported_armor_class", "Active AC effect has no scalar value"
+                ) from exc
+            return CharacterAC(base, bonus, base + bonus)
 
     def _assert_spatial_consistency(self, sid, package):
         """Delegate an explicit complete spatial consistency audit."""

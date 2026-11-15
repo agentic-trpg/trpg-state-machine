@@ -101,6 +101,15 @@ class CharacterState:
 
 
 @dataclass(frozen=True, slots=True)
+class CharacterAC:
+    """Show stored equipment/stat AC and active scalar effect adjustment."""
+
+    base: int
+    effects: int
+    effective: int
+
+
+@dataclass(frozen=True, slots=True)
 class RNGState:
     """Carry persisted RNG identity, algorithm, position and encoded state/version."""
 

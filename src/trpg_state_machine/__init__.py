@@ -42,7 +42,7 @@ from .environment_models import (
 )
 from .errors import StateMachineError
 from .game_time import AdvanceGameTime
-from .models import CreateSessionRequest, PlayerSelection, TrustedContext
+from .models import CharacterAC, CreateSessionRequest, PlayerSelection, TrustedContext
 from .navigation_driver import pump_navigation
 from .navigation_models import (
     AdvanceNavigation,
@@ -59,6 +59,8 @@ from .world_commands import (
     BarObject,
     CheckMechanism,
     ClearJam,
+    EquipArmor,
+    EquipShield,
     EquipWeapon,
     ForceOpen,
     LockObject,
@@ -71,6 +73,8 @@ from .world_commands import (
     SwitchLightMode,
     TakeItem,
     UnbarObject,
+    UnequipArmor,
+    UnequipShield,
     UnequipWeapon,
     UnlockObject,
 )
@@ -121,6 +125,11 @@ __all__ = [
     "TakeItem",
     "SpendItemCharge",
     "EquipWeapon",
+    "CharacterAC",
+    "EquipArmor",
+    "UnequipArmor",
+    "EquipShield",
+    "UnequipShield",
     "UnequipWeapon",
     "LockObject",
     "UnlockObject",

@@ -20,6 +20,13 @@ World、Character、Combat、Time、NPC 等组件已有实际实现；SessionMem
 探索命令 `world.equip_weapon` 和 `world.unequip_weapon` 可按确切实例 ID
 拿起、替换或放回直接携带的武器。CharacterFacts 保存手持 ID 与握法，
 武器类型从 World 物品事实派生；普通攻击继续使用该实例绑定。
+探索命令 `world.equip_armor`／`world.unequip_armor` 和
+`world.equip_shield`／`world.unequip_shield` 在同一提交内改动确切装备栏 ID、
+冲突手持关系及角色基础 AC。可单双手武器按另一只手占用自动切换握法；
+普通护甲 AC 使用冻结 RE 的规则函数，受支持的职业与物品范围见
+[ITEM-01 装备批次](ITEM_01_EXPLORATION_ARMOR.md)。
+`StateMachine.read_character_ac` 在授权窄读中叠加已启用的标量 AC 效果，
+战斗规则输入继续读取角色基础 AC，由 RE 在攻击时叠加适用效果和掩护。
 角色属性、AC、等级、机械感官与熟练项各由按角色定位的字段／有序项行持有，规则 Snapshot 与事件机械感官从同一事实投影。
 角色显式施法来源、已知／准备法术和材料对象绑定以带键记录归 CharacterFacts；
 战斗与探索共用施法投影，World 转移按实际对象 ID 的材料反向索引保护绑定。

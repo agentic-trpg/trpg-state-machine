@@ -163,8 +163,8 @@ def test_receipt_failure_rolls_back_binding_event_and_retry(tmp_path, context):
         assert held(sm.read_noncombat_snapshot(sid, package, context=context), actor) == SECOND
 
 
-def test_shield_blocks_two_handed_grip_and_ground_weapon_is_not_carried(tmp_path, context):
-    """A shield occupies the other hand and a ground instance cannot be equipped."""
+def test_versatile_auto_grip_and_ground_weapon_is_not_carried(tmp_path, context):
+    """A shield makes a versatile weapon one-handed; ground gear stays unavailable."""
     shielded = two_rapiers()
     next(t for t in shielded["item_transfers"] if t["instance_id"] == SECOND)["item_slug"] = (
         "longsword"
@@ -182,8 +182,14 @@ def test_shield_blocks_two_handed_grip_and_ground_weapon_is_not_carried(tmp_path
         actor = sm.read_session(sid, package, context=context).pc_actor_id
         before = sm.read_noncombat_snapshot(sid, package, context=context)
         result = submit(sm, sid, package, context, EquipWeapon(SECOND, "two_handed"), "shield")
-        assert (result.status, result.error_code) == ("rejected", "weapon_grip")
-        assert sm.read_noncombat_snapshot(sid, package, context=context) == before
+        assert result.status == "committed"
+        after = sm.read_noncombat_snapshot(sid, package, context=context)
+        assert held(after, actor) == SECOND
+        assert (
+            next(a for a in after.character_states if a.entity_id == actor).weapon_grip
+            == "one_handed"
+        )
+        assert held(before, actor) == DAGGER
         assert held(before, actor) == DAGGER
 
     ground = two_rapiers()

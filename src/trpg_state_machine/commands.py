@@ -55,6 +55,8 @@ from .world_commands import (
     BarObject,
     CheckMechanism,
     ClearJam,
+    EquipArmor,
+    EquipShield,
     EquipWeapon,
     ForceOpen,
     LockObject,
@@ -67,6 +69,8 @@ from .world_commands import (
     SwitchLightMode,
     TakeItem,
     UnbarObject,
+    UnequipArmor,
+    UnequipShield,
     UnequipWeapon,
     UnlockObject,
 )
@@ -137,6 +141,10 @@ class TypedCommand:
         | PutItem
         | TakeItem
         | SpendItemCharge
+        | EquipArmor
+        | UnequipArmor
+        | EquipShield
+        | UnequipShield
         | EquipWeapon
         | UnequipWeapon
         | LockObject
@@ -286,6 +294,7 @@ def validate_command(command: TypedCommand) -> None:
             raise StateMachineError("invalid_operation", "Expected a positive activity version")
         return
     if type(command.payload) is EquipWeapon and command.payload.grip not in (
+        "auto",
         "one_handed",
         "two_handed",
     ):

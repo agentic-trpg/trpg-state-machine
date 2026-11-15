@@ -44,7 +44,21 @@ def validate_foundation(value):
     if snapshot.combat_state.ended:
         raise StateMachineError("invalid_combat_foundation", "An initial encounter must be active")
     if reason := snapshot_support_failure(snapshot):
-        raise StateMachineError("unsupported_combat_foundation", reason)
+        # /19 may carry one of RE's reviewed equipped class profiles. Keep the
+        # original broad admission for all other foundations and let the same
+        # frozen RE dependency check used by ordinary attacks decide this one.
+        reviewed_party = any(
+            actor.entity_id in snapshot.combat_state.party_ids
+            and actor.classes in ({"fighter": 1}, {"cleric": 1})
+            for actor in snapshot.character_states
+        )
+        if snapshot.snapshot_schema_version != "engine-snapshot/19" or not reviewed_party:
+            raise StateMachineError("unsupported_combat_foundation", reason)
+        from dnd5e_engine.evaluation_class_dependencies import operation_dependencies
+        from dnd5e_engine.evaluation_ruleset import get_default_ruleset
+
+        if operation_dependencies(snapshot, get_default_ruleset(), equipped=True):
+            raise StateMachineError("unsupported_combat_foundation", reason)
     return snapshot
 
 

@@ -72,15 +72,47 @@ class SpendItemCharge:
 
 @dataclass(frozen=True, slots=True)
 class EquipWeapon:
-    """Take one owned weapon instance in hand or replace the current weapon."""
+    """Take one owned weapon instance in hand with automatic grip selection.
+
+    Legacy one/two-handed values remain valid hints; actual grip follows the
+    selected weapon and whether the other hand is occupied.
+    """
 
     instance_id: str
-    grip: str
+    grip: str = "auto"
 
 
 @dataclass(frozen=True, slots=True)
 class UnequipWeapon:
     """Put away the exact currently held weapon while retaining ownership."""
+
+    instance_id: str
+
+
+@dataclass(frozen=True, slots=True)
+class EquipArmor:
+    """Wear one directly carried body armor instance, replacing the worn one."""
+
+    instance_id: str
+
+
+@dataclass(frozen=True, slots=True)
+class UnequipArmor:
+    """Put away the exact worn body armor instance."""
+
+    instance_id: str
+
+
+@dataclass(frozen=True, slots=True)
+class EquipShield:
+    """Wear one directly carried shield instance, stowing conflicting hand items."""
+
+    instance_id: str
+
+
+@dataclass(frozen=True, slots=True)
+class UnequipShield:
+    """Put away the exact equipped shield instance."""
 
     instance_id: str
 
@@ -194,6 +226,10 @@ WORLD_CAPABILITY_COMMANDS = {
     "world.spend_item_charge": SpendItemCharge,
     "world.equip_weapon": EquipWeapon,
     "world.unequip_weapon": UnequipWeapon,
+    "world.equip_armor": EquipArmor,
+    "world.unequip_armor": UnequipArmor,
+    "world.equip_shield": EquipShield,
+    "world.unequip_shield": UnequipShield,
     "world.lock_object": LockObject,
     "world.unlock_object": UnlockObject,
     "world.bar_object": BarObject,
@@ -210,6 +246,10 @@ WORLD_CAPABILITY_OPERATIONS = (
     SpendItemCharge,
     EquipWeapon,
     UnequipWeapon,
+    EquipArmor,
+    UnequipArmor,
+    EquipShield,
+    UnequipShield,
     RepositionObject,
     SetLightEnabled,
     SwitchLightMode,

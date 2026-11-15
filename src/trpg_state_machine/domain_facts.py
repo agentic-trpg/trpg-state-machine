@@ -367,6 +367,39 @@ class CharacterFacts:
         if changed.rowcount != 1:
             raise StateMachineError("invalid_mechanical_state", "Actor equipment facts are missing")
 
+    def set_equipment(self, sid, actor_id, *, armor, shield, offhand, weapon, grip, ac, stealth):
+        """Persist exact equipment bindings and their rule AC in the shared write scope.
+
+        World placement stays unchanged. These two Character-owned rows publish or
+        roll back together with the command event and receipt.
+        """
+        self.store.require_write()
+        state = self._conn.execute(
+            "UPDATE mechanical_actors SET state_json="
+            "json_set(state_json,'$.worn_armor_instance_id',json(?),"
+            "'$.equipped_shield_instance_id',json(?),"
+            "'$.offhand_item_instance_id',json(?),"
+            "'$.stealth_disadvantage',json(?)) "
+            "WHERE session_id=? AND actor_id=?",
+            (
+                canonical_json(armor),
+                canonical_json(shield),
+                canonical_json(offhand),
+                canonical_json(stealth),
+                sid,
+                actor_id,
+            ),
+        )
+        if state.rowcount != 1:
+            raise StateMachineError("invalid_mechanical_state", "Actor equipment facts are missing")
+        self.set_held_weapon(sid, actor_id, weapon, grip)
+        attributes = self._conn.execute(
+            "UPDATE character_attributes SET ac=? WHERE session_id=? AND actor_id=?",
+            (ac, sid, actor_id),
+        )
+        if attributes.rowcount != 1:
+            raise StateMachineError("invalid_mechanical_state", "Actor attributes are missing")
+
     def update_life_state(self, sid, actor_id, field, value):
         """Persist one approved life delta in the narrow owner row without rewriting rules JSON."""
         self.store.require_write()
