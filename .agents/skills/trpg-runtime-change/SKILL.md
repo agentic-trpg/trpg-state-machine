@@ -10,6 +10,14 @@ Read repository AGENTS.md, the logical sibling's `docs/MODULE_CONTRACTS.md`
 to the repository root, not this skill folder. Use `docs/CODE_DOCUMENTATION.md`
 in that sibling for explanation maintenance; report missing authority documents.
 
+Apply the storage and RE Snapshot representation rules in Module Contracts §2.3.
+Prefer typed SQL rows and columns for facts read, changed or validated independently.
+Use explicit owner fields and shared loaded instance references in RAM. If an RE
+Snapshot or its JSON encoding is cached, check the request scope, schema and
+ruleset binding, and all dependency versions. Verify that a relevant commit
+invalidates the affected result, a valid hit reuses it, and prior snapshots retain
+their values.
+
 Trace the public operation to the authoritative fact owner and existing runtime
 field owner. Inventory all writers (including background, time, effects, Meta/Task,
 configuration, import and maintenance), affected entities/relations and consumers.
