@@ -15,6 +15,8 @@ from .storage_migrations import (
 )
 from .version_map import VersionMap
 
+CURRENT_SCHEMA_VERSION = 52
+
 
 class _Coordinator:
     """Share commit gating and recovery fencing across Stores for the same database."""
@@ -140,7 +142,7 @@ class SqliteStore:
                 version = probe.execute("PRAGMA user_version").fetchone()[0]
         except sqlite3.Error as exc:
             raise StateMachineError("storage_error", "Cannot inspect SQLite database") from exc
-        if 0 < version < 51:
+        if 0 < version < CURRENT_SCHEMA_VERSION:
             raise StateMachineError(
                 "unsupported_storage_schema", f"Pre-release save schema {version} is not supported"
             )
@@ -150,7 +152,8 @@ class SqliteStore:
         boundary.
         """
         scripts = [Path(__file__).with_name("_schema.sql")] + [
-            Path(__file__).with_name(f"_migration_{v}.sql") for v in range(2, 52)
+            Path(__file__).with_name(f"_migration_{v}.sql")
+            for v in range(2, CURRENT_SCHEMA_VERSION + 1)
         ]
         steps = [_migration_statements(path.read_text("utf-8")) for path in scripts]
         # Fresh databases apply the registered DDL under one opening transaction.
@@ -159,11 +162,11 @@ class SqliteStore:
             self._conn.execute("BEGIN IMMEDIATE")
             # Read AFTER acquiring the cross-process SQLite migration write lock.
             version = self._conn.execute("PRAGMA user_version").fetchone()[0]
-            if version not in range(52):
+            if version not in range(CURRENT_SCHEMA_VERSION + 1):
                 raise StateMachineError(
                     "unsupported_storage_schema", f"Unsupported storage version: {version}"
                 )
-            if 0 < version < 51:
+            if 0 < version < CURRENT_SCHEMA_VERSION:
                 raise StateMachineError(
                     "unsupported_storage_schema",
                     f"Pre-release save schema {version} is not supported",
@@ -179,7 +182,7 @@ class SqliteStore:
             validate_environment_versions(self._conn, required=version >= 36)
             if version >= 34:
                 reconcile_schema34(self._conn, version, steps[33])
-            for target in range(version + 1, 52):
+            for target in range(version + 1, CURRENT_SCHEMA_VERSION + 1):
                 for statement in steps[target - 1]:
                     self._conn.execute(statement)
                 if self._conn.execute("PRAGMA user_version").fetchone()[0] != target:

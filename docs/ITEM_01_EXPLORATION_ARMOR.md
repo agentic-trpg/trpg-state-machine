@@ -13,9 +13,14 @@
 实际握法由武器属性和另一只手是否占用决定。拿起双手必需武器时，
 冲突的盾牌和另一只手物品自动收起。物品的归属、容纳和数量不变。
 
-角色基础 AC 保存在 `character_attributes.ac`，装备 ID 与握法保存在
-角色机械状态；CharacterFacts 在原命令 UnitOfWork 内共同写入。
-事件、回执与两行角色事实一起提交，失败一同回滚。
+Schema52 将 /19 角色的装备实例 ID、握法和指定的潜行劣势存到
+`character_equipment`。基础 AC 由 `character_attributes.ac` 持有。
+CharacterFacts 在原命令 UnitOfWork 内共同写入，两行角色事实随事件和回执一起提交，
+失败一同回滚。物品本身的状态仍由 WorldFacts 管理。
+
+当前读取沿 `CharacterRuntime` 的装备字段直接复用 `SessionMemory` 的 `ActiveItem`。
+有效字段给换装预览和规则快照提供已加载的绑定和物品资料。未提交候选和较早的固定读取
+使用隔离值。交给 RE 的快照持有装备 ID、规则标记和 AC 等独立的值。
 `StateMachine.read_character_ac` 返回 `CharacterAC(base, effects, effective)`；
 其中 `effects` 只累计当前启用且可解析为标量的目标 AC 效果，
 不含仅适用于某次攻击的掩护。RE 攻击仍接收基础 AC 并自行处理效果。

@@ -19,10 +19,18 @@ from pydantic import TypeAdapter
 from .errors import StateMachineError
 from .item_units import core_item_id, item_unit_from_row, valid_item_unit
 from .package import canonical_json
-from .runtime_instances import instance_read
+from .runtime_instances import EQUIPMENT_SLOTS, EquipmentBinding, EquipmentItem, instance_read
 from .scoped_reads import scoped_read
 
 _EFFECTS = TypeAdapter(tuple[EffectState, ...])
+_EQUIPMENT_MIRRORS = ("worn_armor", "shield_equipped", "other_hand_occupied")
+_EQUIPMENT_METADATA = (
+    *(field for _, field in EQUIPMENT_SLOTS),
+    *_EQUIPMENT_MIRRORS,
+    "weapon_grip",
+    "weapon_in_hands",
+    "stealth_disadvantage",
+)
 
 
 class CharacterFacts:
@@ -347,22 +355,11 @@ class CharacterFacts:
         exact identity, direct ownership and grip before reaching this method.
         """
         self.store.require_write()
-        if instance_id is None:
-            expression = (
-                "json_remove(json_set(state_json,'$.weapon_in_hands',json('null'),"
-                "'$.weapon_grip','none'),'$.held_weapon_instance_id')"
-            )
-            values = (sid, actor_id)
-        else:
-            expression = (
-                "json_remove(json_set(state_json,'$.held_weapon_instance_id',?,"
-                "'$.weapon_grip',?),'$.weapon_in_hands')"
-            )
-            values = (instance_id, grip, sid, actor_id)
         changed = self._conn.execute(
-            f"UPDATE mechanical_actors SET state_json={expression} "
+            "UPDATE character_equipment SET held_weapon_instance_id=?,weapon_grip=?,"
+            "legacy_weapon_slug=NULL "
             "WHERE session_id=? AND actor_id=?",
-            values,
+            (instance_id, grip, sid, actor_id),
         )
         if changed.rowcount != 1:
             raise StateMachineError("invalid_mechanical_state", "Actor equipment facts are missing")
@@ -375,24 +372,14 @@ class CharacterFacts:
         """
         self.store.require_write()
         state = self._conn.execute(
-            "UPDATE mechanical_actors SET state_json="
-            "json_set(state_json,'$.worn_armor_instance_id',json(?),"
-            "'$.equipped_shield_instance_id',json(?),"
-            "'$.offhand_item_instance_id',json(?),"
-            "'$.stealth_disadvantage',json(?)) "
+            "UPDATE character_equipment SET held_weapon_instance_id=?,worn_armor_instance_id=?,"
+            "equipped_shield_instance_id=?,offhand_item_instance_id=?,weapon_grip=?,"
+            "stealth_disadvantage=?,legacy_weapon_slug=NULL "
             "WHERE session_id=? AND actor_id=?",
-            (
-                canonical_json(armor),
-                canonical_json(shield),
-                canonical_json(offhand),
-                canonical_json(stealth),
-                sid,
-                actor_id,
-            ),
+            (weapon, armor, shield, offhand, grip, int(stealth), sid, actor_id),
         )
         if state.rowcount != 1:
             raise StateMachineError("invalid_mechanical_state", "Actor equipment facts are missing")
-        self.set_held_weapon(sid, actor_id, weapon, grip)
         attributes = self._conn.execute(
             "UPDATE character_attributes SET ac=? WHERE session_id=? AND actor_id=?",
             (ac, sid, actor_id),
@@ -617,7 +604,7 @@ class CharacterFacts:
         return deleted.rowcount == 1
 
     def initialize_rule_actor(self, row, actor, *, xp=None, encounter=False, schema_version=None):
-        """Initialize narrow core, life, attribute and proficiency rows with rules metadata."""
+        """Initialize owned actor facts, including exact equipment for /19."""
         self.store.require_write()
         if any(condition.source_effect_id is not None for condition in actor.conditions):
             raise StateMachineError(
@@ -687,25 +674,22 @@ class CharacterFacts:
                 "senses",
             },
         )
-        if state.get("held_weapon_instance_id") is not None:
-            del state["weapon_in_hands"]
-        else:
-            state.pop("held_weapon_instance_id", None)
+        equipment = None
         if schema_version == "engine-snapshot/19":
-            for field in ("worn_armor", "shield_equipped", "other_hand_occupied"):
+            slots = tuple(state.pop(field, None) for _, field in EQUIPMENT_SLOTS)
+            weapon_slug = state.pop("weapon_in_hands")
+            equipment = (
+                *slots,
+                state.pop("weapon_grip"),
+                int(state.pop("stealth_disadvantage")),
+                weapon_slug if slots[0] is None else None,
+            )
+            for field in _EQUIPMENT_MIRRORS:
                 state.pop(field, None)
-            for field in (
-                "worn_armor_instance_id",
-                "equipped_shield_instance_id",
-                "offhand_item_instance_id",
-            ):
-                state.setdefault(field, None)
         else:
-            for field in (
-                "worn_armor_instance_id",
-                "equipped_shield_instance_id",
-                "offhand_item_instance_id",
-            ):
+            if state.get("held_weapon_instance_id") is not None:
+                del state["weapon_in_hands"]
+            for _, field in EQUIPMENT_SLOTS:
                 if state.get(field) is None:
                     state.pop(field, None)
         if actor.temp_hp > 2**63 - 1:
@@ -716,6 +700,11 @@ class CharacterFacts:
             "INSERT INTO mechanical_actors VALUES (?,?,?)",
             (sid, actor.entity_id, canonical_json(state)),
         )
+        if equipment is not None:
+            self._conn.execute(
+                "INSERT INTO character_equipment VALUES (?,?,?,?,?,?,?,?,?)",
+                (sid, actor.entity_id, *equipment),
+            )
         self._insert_attributes(sid, actor)
         self._conn.execute(
             "INSERT INTO mechanical_life VALUES (?,?,?,?,?,?,?,?)",
@@ -824,6 +813,89 @@ class CharacterFacts:
         if row is None:
             raise StateMachineError("invalid_mechanical_state", "Actor attributes are missing")
         return {field: row[field] for field in self.SENSE_FIELDS}
+
+    def equipment(self, sid, actor_id):
+        """Read the actor's equipment references in a current or fixed scope."""
+        if self.store._scope is None:
+            with self.store.transaction():
+                return self.equipment(sid, actor_id)
+        if self.store.memory.in_current_read(sid):
+            return self._current_equipment(sid, actor_id)
+        return self._fixed_equipment(sid, actor_id)
+
+    @instance_read("actor", None, "equipment")
+    def _current_equipment(self, sid, actor_id):
+        """Resolve the actor-owned field through canonical current item identities."""
+        return self._load_equipment(sid, actor_id, current=True)
+
+    @scoped_read
+    def _fixed_equipment(self, sid, actor_id):
+        """Read isolated candidate or old-scope identities without active references."""
+        return self._load_equipment(sid, actor_id, current=False)
+
+    def _load_equipment(self, sid, actor_id, *, current):
+        """Validate the four selected items and build their detached rule fields."""
+        row = self._conn.execute(
+            "SELECT * FROM character_equipment WHERE session_id=? AND actor_id=?",
+            (sid, actor_id),
+        ).fetchone()
+        if row is None:
+            return None
+        slots = {}
+        direct = []
+        armor_category = None
+        weapon_slug = row["legacy_weapon_slug"]
+        for slot, field in EQUIPMENT_SLOTS:
+            oid = row[field]
+            slots[slot] = None
+            if oid is None:
+                continue
+            item = self.world.object(sid, oid)
+            if item is None:
+                raise StateMachineError("invalid_mechanical_state", "Equipment item is missing")
+            directly_carried = item["container_id"] is None
+            if directly_carried:
+                unit = self.world.require_item_unit(item)
+                owner = item["carrier_id"]
+                allowed = unit["accessible"] and self.world.object_hp(sid, oid) != 0
+            else:
+                unit = self.world.item_entry(item)
+                owner = unit["owner_id"] if unit is not None else None
+                allowed = unit is not None and unit["accessible"]
+            if owner != actor_id or not allowed:
+                raise StateMachineError(
+                    "invalid_mechanical_state", "Equipment requires an accessible owned item"
+                )
+            slug = unit["item_slug"]
+            if slot == "weapon":
+                weapon_slug = slug
+            else:
+                asset = self.loader.get_item(slug)
+                category = asset.armor_category if asset and asset.item_kind == "armor" else None
+                if (
+                    asset is None
+                    or (slot == "armor" and category in (None, "shield"))
+                    or (slot == "shield" and category != "shield")
+                    or (slot == "offhand" and category == "shield")
+                ):
+                    message = {
+                        "armor": "Worn armor identity differs",
+                        "shield": "Shield identity differs",
+                        "offhand": "Offhand item is a shield",
+                    }[slot]
+                    raise StateMachineError("invalid_mechanical_state", message)
+                if slot == "armor":
+                    armor_category = category
+            slots[slot] = self.store.memory.active_item(item) if current else EquipmentItem(oid)
+            direct.append((oid, slug if directly_carried and unit["quantity"] == 1 else None))
+        return EquipmentBinding(
+            **slots,
+            grip=row["weapon_grip"],
+            stealth_disadvantage=bool(row["stealth_disadvantage"]),
+            weapon_slug=weapon_slug,
+            armor_category=armor_category,
+            direct_slugs=tuple(direct),
+        )
 
     def validate_initial_equipment(self, sid, snapshot):
         """Resolve /19 bindings after ingress inventory is materialized in the same UoW."""
@@ -1462,7 +1534,7 @@ class CharacterFacts:
         include_resources=True,
         include_proficiencies=True,
     ):
-        """Combine core facts and resolve /19 equipment IDs from current World items.
+        """Combine core facts with detached current or fixed equipment values.
 
         A binding read skips inventory projection. Complete snapshot reads verify
         owner, accessibility and kind for only the bound instances. A supplied
@@ -1551,8 +1623,15 @@ class CharacterFacts:
                 if r["kind"] == "standalone_pact_slot"
             }
             data.setdefault("custom_counters", {})
-        explicit_equipment = "worn_armor_instance_id" in data
-        held = data.get("held_weapon_instance_id")
+        equipment = self.equipment(sid, actor_id)
+        if equipment is not None:
+            for field in _EQUIPMENT_METADATA:
+                data.pop(field, None)
+            data.update(equipment.rule_fields(resolved=include_carried))
+        elif "stealth_disadvantage" not in data:
+            raise StateMachineError("invalid_mechanical_state", "Actor equipment facts are missing")
+        explicit_equipment = equipment is None and "worn_armor_instance_id" in data
+        held = data.get("held_weapon_instance_id") if equipment is None else None
         if held is not None and include_carried:
             item = self.world.object(sid, held)
             entry = self.world.item_entry(item) if item is not None else None
@@ -1653,8 +1732,8 @@ class CharacterFacts:
     def combat_rule_actors(self, sid, owner_ids, inventory_entries):
         """Build combat actors from the validated component inventory.
 
-        The bundle belongs to the caller's fixed read scope. Equipment bindings
-        still resolve their selected instances directly from World facts.
+        The bundle belongs to the caller's fixed read scope. Equipment fields carry
+        their own exact World identity dependencies and supply detached rule values.
         """
         slugs = {owner: {} for owner in owner_ids}
         for entry in inventory_entries:
@@ -2576,19 +2655,20 @@ class WorldFacts:
             ).fetchone():
                 raise StateMachineError("unsupported_item_binding", "Live item reference")
         owner = self.placement(sid, oid, row=current)["carrier_id"]
-        actor = self._conn.execute(
-            "SELECT state_json FROM mechanical_actors WHERE session_id=? AND actor_id=?",
+        equipment = self._conn.execute(
+            "SELECT * FROM character_equipment WHERE session_id=? AND actor_id=?",
             (sid, owner),
         ).fetchone()
-        if actor is not None and any(
-            self.store.memory.json(actor[0]).get(field) == oid
-            for field in (
-                "held_weapon_instance_id",
-                "worn_armor_instance_id",
-                "equipped_shield_instance_id",
-                "offhand_item_instance_id",
-            )
-        ):
+        if equipment is None:
+            actor = self._conn.execute(
+                "SELECT state_json FROM mechanical_actors WHERE session_id=? AND actor_id=?",
+                (sid, owner),
+            ).fetchone()
+            legacy = self.store.memory.json(actor[0]) if actor is not None else {}
+            equipped = any(legacy.get(slot) == oid for _, slot in EQUIPMENT_SLOTS)
+        else:
+            equipped = any(equipment[slot] == oid for _, slot in EQUIPMENT_SLOTS)
+        if equipped:
             raise StateMachineError("equipped_item_unsupported", "Item remains equipped")
         scenes = self._conn.execute(
             "SELECT scene_id FROM scene_integrity_dependencies "

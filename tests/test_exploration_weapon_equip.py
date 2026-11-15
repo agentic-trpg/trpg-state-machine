@@ -1,7 +1,5 @@
 """Exact-instance exploration weapon bindings reach ordinary /19 combat."""
 
-import json
-
 import pytest
 from dnd5e_engine.evaluation_contracts import CombatIntentPayload
 from dnd_support import initialize
@@ -48,13 +46,14 @@ def held(snapshot, actor):
     ).held_weapon_instance_id
 
 
-def raw_actor(sm, sid, actor):
-    """Inspect the persisted hand-binding shape."""
-    return json.loads(
+def stored_weapon(sm, sid, actor):
+    """Inspect the persisted weapon ID and grip."""
+    return tuple(
         sm._conn.execute(
-            "SELECT state_json FROM mechanical_actors WHERE session_id=? AND actor_id=?",
+            "SELECT held_weapon_instance_id,weapon_grip "
+            "FROM character_equipment WHERE session_id=? AND actor_id=?",
             (sid, actor),
-        ).fetchone()[0]
+        ).fetchone()
     )
 
 
@@ -72,7 +71,7 @@ def test_replace_reopen_and_attack_only_selected_instance(tmp_path, context):
         assert receipt.status == "committed", receipt
         assert held(sm.read_noncombat_snapshot(sid, package, context=context), actor) == SECOND
         assert held(old, actor) == DAGGER
-        assert "weapon_in_hands" not in raw_actor(sm, sid, actor)
+        assert stored_weapon(sm, sid, actor) == (SECOND, "one_handed")
         assert sm.submit_command(cmd, package, context=context) == receipt
         assert (
             submit(sm, sid, package, context, DropItem(DAGGER, A, "0,0"), "drop.old").status
@@ -122,8 +121,7 @@ def test_unequip_and_stale_expected_binding(tmp_path, context):
         snapshot = sm.read_noncombat_snapshot(sid, package, context=context)
         assert held(snapshot, actor) is None
         assert SECOND in {e.instance_id for e in snapshot.inventory_state.entries}
-        assert "held_weapon_instance_id" not in raw_actor(sm, sid, actor)
-        assert raw_actor(sm, sid, actor)["weapon_in_hands"] is None
+        assert stored_weapon(sm, sid, actor) == (None, "none")
         assert (
             submit(sm, sid, package, context, DropItem(SECOND, A, "0,0"), "drop").status
             == "committed"

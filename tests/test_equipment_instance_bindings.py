@@ -215,16 +215,27 @@ def test_bound_instance_rejected_while_same_type_spare_moves(tmp_path, context, 
                 (sid, actor),
             ).fetchone()[0]
         )
-        assert not {"worn_armor", "shield_equipped", "other_hand_occupied"} & raw.keys()
         assert (
-            set(
-                (
-                    "worn_armor_instance_id",
-                    "equipped_shield_instance_id",
-                    "offhand_item_instance_id",
-                )
-            )
-            <= raw.keys()
+            not {
+                "weapon_in_hands",
+                "weapon_grip",
+                "worn_armor",
+                "shield_equipped",
+                "other_hand_occupied",
+                "held_weapon_instance_id",
+                "worn_armor_instance_id",
+                "equipped_shield_instance_id",
+                "offhand_item_instance_id",
+            }
+            & raw.keys()
+        )
+        row = sm._conn.execute(
+            "SELECT worn_armor_instance_id,equipped_shield_instance_id,offhand_item_instance_id "
+            "FROM character_equipment WHERE session_id=? AND actor_id=?",
+            (sid, actor),
+        ).fetchone()
+        assert tuple(row) == tuple(
+            CRED if slot == kind else None for slot in ("armor", "shield", "offhand")
         )
         bound = DropItem(CRED, A, "0,0") if operation == "drop" else PutItem(A, CRED, BOX, "0,0")
         spare = DropItem(TWIN, A, "0,0") if operation == "drop" else PutItem(A, TWIN, BOX, "0,0")
@@ -239,7 +250,7 @@ def test_equipment_binding_survives_save_and_reopen(tmp_path, context):
     sm, sid, package, db = setup(tmp_path, context, equipment_data("shield"))
     with sm:
         sm.save_session(sid, package, context=context)
-        assert sm._conn.execute("PRAGMA user_version").fetchone()[0] == 51
+        assert sm._conn.execute("PRAGMA user_version").fetchone()[0] == 52
     with StateMachine(db, dnd_loader=lock_loader()) as restored:
         restored.resume_session(sid, package, context=context)
         actor = restored.read_session(sid, package, context=context).pc_actor_id
@@ -308,7 +319,7 @@ def test_ingress_inventory_equipment_resolves_after_materialization(
             "offhand": "offhand_item_instance_id",
         }[kind]
         assert getattr(pc, field) == f"inventory.{kind}_bound"
-        assert sm._conn.execute("PRAGMA user_version").fetchone()[0] == 51
+        assert sm._conn.execute("PRAGMA user_version").fetchone()[0] == 52
 
 
 @pytest.mark.parametrize("fault", ["missing_actor", "active_effect"])

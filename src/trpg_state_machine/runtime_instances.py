@@ -5,11 +5,17 @@ They contain values or stable IDs, never a second writable copy of domain facts.
 No validity key enumerates entities or serializes a candidate/snapshot.
 """
 
+from __future__ import annotations
+
 from collections.abc import Mapping
 from copy import deepcopy
 from dataclasses import dataclass, field, fields, is_dataclass, replace
 from functools import wraps
 from types import MappingProxyType
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from .session_memory import ActiveItem
 
 
 @dataclass(frozen=True)
@@ -256,12 +262,81 @@ class WorldRuntime:
 
 
 @dataclass(frozen=True)
+class EquipmentItem:
+    """Fixed item identity for a candidate or older read without a live handle."""
+
+    object_id: str
+
+    @property
+    def retained_item_bytes(self):
+        """Fixed identities are already accounted for by the binding representation."""
+        return 0
+
+
+EQUIPMENT_SLOTS = (
+    ("weapon", "held_weapon_instance_id"),
+    ("armor", "worn_armor_instance_id"),
+    ("shield", "equipped_shield_instance_id"),
+    ("offhand", "offhand_item_instance_id"),
+)
+
+
+@dataclass(frozen=True)
+class EquipmentBinding:
+    """Four exact slots and their validated scalar projections for one read version."""
+
+    weapon: ActiveItem | EquipmentItem | None
+    armor: ActiveItem | EquipmentItem | None
+    shield: ActiveItem | EquipmentItem | None
+    offhand: ActiveItem | EquipmentItem | None
+    grip: str
+    stealth_disadvantage: bool
+    weapon_slug: str | None
+    armor_category: str | None
+    direct_slugs: tuple[tuple[str, str | None], ...]
+
+    def __deepcopy__(self, memo):
+        """Share immutable association metadata and internal item identities."""
+        return self
+
+    @property
+    def retained_item_bytes(self):
+        """Charge the bounded canonical item payloads to this retained field."""
+        return sum(
+            item.retained_item_bytes
+            for slot, _ in EQUIPMENT_SLOTS
+            if (item := getattr(self, slot)) is not None
+        )
+
+    def rule_fields(self, *, resolved):
+        """Build detached field values, including absent-slot tags for binding checks."""
+        values = {
+            field: item.object_id if (item := getattr(self, slot)) is not None else None
+            for slot, field in EQUIPMENT_SLOTS
+        }
+        if resolved:
+            values = {field: identity for field, identity in values.items() if identity is not None}
+            values.update(
+                weapon_in_hands=self.weapon_slug,
+                worn_armor=self.armor_category,
+                shield_equipped=self.shield is not None,
+                other_hand_occupied=self.shield is not None or self.offhand is not None,
+            )
+        elif self.weapon is None:
+            values.pop("held_weapon_instance_id")
+            values["weapon_in_hands"] = self.weapon_slug
+        values.update(weapon_grip=self.grip, stealth_disadvantage=self.stealth_disadvantage)
+        return values
+
+
+@dataclass(frozen=True)
 class CharacterRuntime:
-    """Own the actor's retained inventory projection field."""
+    """Own the actor's retained inventory and equipment fields."""
 
     session_id: str
     actor_id: str
     inventory: tuple = ()
+    equipment: tuple = ()
 
 
 def resolve_field(

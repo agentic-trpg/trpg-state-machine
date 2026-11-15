@@ -116,8 +116,8 @@ def test_storage02_schema50_is_refused_without_modifying_source(tmp_path):
     with StateMachine(path):
         pass
     with sqlite3.connect(path) as conn:
-        # Reconstruct the immediately preceding schema from a fresh database:
-        # only ITEM-01's Schema51 additions are removed.
+        # Reconstruct the Schema50 storage shape from a fresh database.
+        conn.execute("DROP TABLE character_equipment")
         conn.execute("DROP TRIGGER consumed_item_identity_guard")
         conn.execute("DROP INDEX character_spell_materials_instance")
         conn.execute("DROP INDEX door_locks_object")
@@ -137,6 +137,21 @@ def test_storage02_schema50_is_refused_without_modifying_source(tmp_path):
     assert hashlib.sha256(path.read_bytes()).digest() == before
     with sqlite3.connect(path) as conn:
         assert conn.execute("PRAGMA user_version").fetchone()[0] == 50
+
+
+def test_schema51_equipment_json_save_is_refused_without_writing(tmp_path):
+    """The previous save format is left intact after equipment becomes a typed fact."""
+    path = tmp_path / "schema51.db"
+    with StateMachine(path):
+        pass
+    with sqlite3.connect(path) as conn:
+        conn.execute("DROP TABLE character_equipment")
+        conn.execute("PRAGMA user_version = 51")
+    before = path.read_bytes()
+    with pytest.raises(StateMachineError) as error:
+        StateMachine(path)
+    assert error.value.code == "unsupported_storage_schema"
+    assert path.read_bytes() == before
 
 
 def test_pre41_crashed_wal_is_refused_without_checkpointing_source(tmp_path):
@@ -188,7 +203,7 @@ def test_current_save_reopens_without_inventory_aggregate_columns(
     with StateMachine(path) as sm:
         created = sm.create_session(request_for(), package, context=context)
         saved = sm.save_session(created.session_id, package, context=context)
-        assert sm._conn.execute("PRAGMA user_version").fetchone()[0] == 51
+        assert sm._conn.execute("PRAGMA user_version").fetchone()[0] == 52
         for table in ("characters", "mechanical_components"):
             columns = {row[1] for row in sm._conn.execute(f"PRAGMA table_info({table})")}
             assert "inventory_json" not in columns

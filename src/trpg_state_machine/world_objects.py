@@ -202,13 +202,12 @@ class WorldObjectService:
     def _weapon_plan(self, row, actor_id, operation, package):
         """Plan the selected weapon and automatic grip from current hand occupancy."""
         sid, iid = row["session_id"], operation.instance_id
-        state = self._equipment_actor(row, actor_id, package)
+        state, equipment = self._equipment_actor(row, actor_id, package)
         if type(operation) is UnequipWeapon:
             if state.get("held_weapon_instance_id") != iid:
                 raise StateMachineError("weapon_binding_conflict", "Selected weapon is not held")
             return {"weapon": None, "grip": "none", "stow_other_hand": False}
-        entry = self._direct_item(sid, actor_id, iid)
-        weapon = self.handler.loader.get_weapon(entry["item_slug"])
+        weapon = self.handler.loader.get_weapon(self._equipment_slug(sid, actor_id, iid, equipment))
         if not isinstance(weapon, Weapon):
             raise StateMachineError("invalid_target", "Selected instance is not a weapon")
         if weapon.requires_attunement or weapon.passive_effects or weapon.uses is not None:
@@ -224,7 +223,7 @@ class WorldObjectService:
             ac = state["ac"]
             if shield is not None:
                 ac, _ = self._armor_ac(
-                    sid, actor_id, state, state.get("worn_armor_instance_id"), None
+                    sid, actor_id, state, equipment, state.get("worn_armor_instance_id"), None
                 )
             return {
                 "weapon": iid,
@@ -250,12 +249,15 @@ class WorldObjectService:
             raise StateMachineError("unsupported_actor_state", "Instance equipment requires /19")
         self.openable.rules._verify_dnd_binding(package, row)
         state = self.handler.characters.binding_actor(sid, actor_id)
+        equipment = self.handler.characters.equipment(sid, actor_id)
+        if equipment is None:
+            raise StateMachineError("invalid_mechanical_state", "Actor equipment facts are missing")
         if state is None or (
             state.get("held_weapon_instance_id") is None
             and state.get("weapon_in_hands") is not None
         ):
             raise StateMachineError("unsupported_actor_state", "Explicit weapon binding required")
-        return state
+        return state, equipment
 
     def _direct_item(self, sid, actor_id, iid):
         """Return one owned, accessible and directly carried item entry by exact ID."""
@@ -277,12 +279,20 @@ class WorldObjectService:
             raise StateMachineError("invalid_target", "No accessible owned equipment")
         return entry
 
-    def _plain_armor(self, sid, actor_id, iid, category):
+    def _equipment_slug(self, sid, actor_id, iid, equipment):
+        """Use cached validation for a bound item, or admit one new target by ID."""
+        for identity, slug in equipment.direct_slugs:
+            if identity == iid:
+                if slug is None:
+                    raise StateMachineError("invalid_target", "No directly carried equipment")
+                return slug
+        return self._direct_item(sid, actor_id, iid)["item_slug"]
+
+    def _plain_armor(self, sid, actor_id, iid, category, equipment):
         """Resolve a directly carried ordinary armor piece in one supported category."""
         if iid is None:
             return None
-        entry = self._direct_item(sid, actor_id, iid)
-        asset = self.handler.loader.get_item(entry["item_slug"])
+        asset = self.handler.loader.get_item(self._equipment_slug(sid, actor_id, iid, equipment))
         if not isinstance(asset, Armor) or asset.armor_category not in category:
             raise StateMachineError("invalid_target", "Selected instance is not suitable armor")
         if (
@@ -339,7 +349,7 @@ class WorldObjectService:
                 )
         return trained
 
-    def _armor_ac(self, sid, actor_id, state, next_armor_id, next_shield_id):
+    def _armor_ac(self, sid, actor_id, state, equipment, next_armor_id, next_shield_id):
         """Return verifiable default-mode AC and the next body armor asset."""
         assets = {}
 
@@ -347,13 +357,13 @@ class WorldObjectService:
             """Reuse a selected armor asset within this one equipment transition."""
             key = (iid, category)
             if key not in assets:
-                assets[key] = self._plain_armor(sid, actor_id, iid, category)
+                assets[key] = self._plain_armor(sid, actor_id, iid, category, equipment)
             return assets[key]
 
-        old_armor = piece(state.get("worn_armor_instance_id"), ("light", "medium"))
-        old_shield = piece(state.get("equipped_shield_instance_id"), ("shield",))
         next_armor = piece(next_armor_id, ("light", "medium"))
         next_shield = piece(next_shield_id, ("shield",))
+        old_armor = piece(state.get("worn_armor_instance_id"), ("light", "medium"))
+        old_shield = piece(state.get("equipped_shield_instance_id"), ("shield",))
         trained = self._armor_training(state)
         for armor_piece in (old_armor, old_shield, next_armor, next_shield):
             if armor_piece is not None and armor_piece.armor_category not in trained:
@@ -379,7 +389,7 @@ class WorldObjectService:
     def _armor_plan(self, row, actor_id, operation, package):
         """Plan exact armor slot replacement, hand stowing, grip and character AC."""
         sid, iid = row["session_id"], operation.instance_id
-        state = self._equipment_actor(row, actor_id, package)
+        state, equipment = self._equipment_actor(row, actor_id, package)
         is_armor = type(operation) in (EquipArmor, UnequipArmor)
         equip = type(operation) in (EquipArmor, EquipShield)
         field = "worn_armor_instance_id" if is_armor else "equipped_shield_instance_id"
@@ -389,8 +399,6 @@ class WorldObjectService:
             raise StateMachineError(
                 "equipment_binding_conflict", "Selected item is already equipped"
             )
-        if equip:
-            self._plain_armor(sid, actor_id, iid, ("light", "medium") if is_armor else ("shield",))
         armor = (
             iid
             if equip and is_armor
@@ -401,13 +409,14 @@ class WorldObjectService:
             if equip and not is_armor
             else (None if not equip and not is_armor else state.get("equipped_shield_instance_id"))
         )
-        ac, armor_asset = self._armor_ac(sid, actor_id, state, armor, shield)
+        ac, armor_asset = self._armor_ac(sid, actor_id, state, equipment, armor, shield)
         offhand = None if equip and not is_armor else state.get("offhand_item_instance_id")
         weapon_id = state.get("held_weapon_instance_id")
         grip = state.get("weapon_grip", "none")
         if weapon_id is not None:
-            weapon_entry = self._direct_item(sid, actor_id, weapon_id)
-            weapon = self.handler.loader.get_weapon(weapon_entry["item_slug"])
+            weapon = self.handler.loader.get_weapon(
+                self._equipment_slug(sid, actor_id, weapon_id, equipment)
+            )
             if not isinstance(weapon, Weapon):
                 raise StateMachineError("invalid_mechanical_state", "Held item is not a weapon")
             if shield is not None and WeaponProperty.TWO_HANDED in weapon.properties:

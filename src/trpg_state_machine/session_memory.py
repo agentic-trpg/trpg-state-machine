@@ -109,7 +109,7 @@ class ActiveItem:
 
     def __init__(self, memory, row):
         self._memory = memory
-        self._payload = (row["session_id"], row["object_id"], row["item_charges"])
+        self._payload = self._row_payload(row)
         self._valid = True
 
     @property
@@ -122,19 +122,20 @@ class ActiveItem:
         """Read the committed balance through the active item identity."""
         return self._current()[2]
 
+    @property
+    def item_slug(self):
+        """Read the current bound item definition identity without a storage lookup."""
+        return self._current()[3]
+
+    @property
+    def retained_item_bytes(self):
+        """Charge identity and scalar support fields to each bounded relationship."""
+        sid, oid, _, slug = self._payload
+        return len(sid.encode()) + len(oid.encode()) + len(slug.encode()) + 64
+
     def _current(self):
-        scope = self._memory.store._scope
         self._memory.guard(self._payload[0])
-        coordinator = self._memory.store._coordinator
-        if (
-            not self._valid
-            or scope is None
-            or scope.write
-            or scope.commit_generation != coordinator.commit_generation
-            or scope.recovery_generation != coordinator.recovery_generation
-            or scope.recovery_generations.get(self._payload[0], 0)
-            != coordinator.recovery_generations.get(self._payload[0], 0)
-        ):
+        if not self._valid or not self._memory.in_current_read(self._payload[0]):
             raise StateMachineError(
                 "invalid_transaction", "Active item requires a current read scope"
             )
@@ -142,7 +143,17 @@ class ActiveItem:
 
     def _publish(self, row):
         """Swap one immutable payload after durable SQL commit."""
-        self._payload = (row["session_id"], row["object_id"], row["item_charges"])
+        self._payload = self._row_payload(row)
+
+    @staticmethod
+    def _row_payload(row):
+        """Keep the same bounded item fields on load and publication."""
+        return (
+            row["session_id"],
+            row["object_id"],
+            row["item_charges"],
+            row["item_slug"],
+        )
 
     def _invalidate(self):
         """Retire a stale identity on eviction or recovery."""
@@ -161,9 +172,7 @@ class ActiveContents(tuple):
     @property
     def retained_item_bytes(self):
         """Charge bounded identity and balance payloads to the owning field."""
-        return sum(
-            len(sid.encode()) + len(oid.encode()) + 64 for sid, oid, _ in (i._payload for i in self)
-        )
+        return sum(item.retained_item_bytes for item in self)
 
     def __deepcopy__(self, memo):
         """Share the bounded immutable membership tuple without per-item copying."""
@@ -1103,8 +1112,21 @@ class SessionMemory:
             return self.values[key]
         return None
 
+    def in_current_read(self, sid):
+        """Whether this scope can expose current, rather than fixed, item details."""
+        scope = self.store._scope
+        coordinator = self.store._coordinator
+        return (
+            scope is not None
+            and not scope.write
+            and scope.commit_generation == coordinator.commit_generation
+            and scope.recovery_generation == coordinator.recovery_generation
+            and scope.recovery_generations.get(sid, 0)
+            == coordinator.recovery_generations.get(sid, 0)
+        )
+
     def active_item(self, row):
-        """Reuse one bounded item identity for a current direct containment member."""
+        """Reuse one bounded current item identity across runtime associations."""
         scope = self.store._scope
         if scope is None or scope.write or row["item_slug"] is None:
             raise StateMachineError("invalid_transaction", "Expected current portable item read")
