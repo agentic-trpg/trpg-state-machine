@@ -17,6 +17,9 @@ World、Character、Combat、Time、NPC 等组件已有实际实现；SessionMem
 角色资源池按拥有者／资源 ID 保存独立余额行，SessionMemory 沿原提交边界发布；
 角色 UI 和规则 Snapshot 读取同一持久事实。角色装备 /19 的护甲、盾牌及另一只手物品按 World 物品实例 ID 绑定，快照机械
 镜像由角色与当前物品事实派生；World 转移按实例保护实际装备。
+探索命令 `world.equip_weapon` 和 `world.unequip_weapon` 可按确切实例 ID
+拿起、替换或放回直接携带的武器。CharacterFacts 保存手持 ID 与握法，
+武器类型从 World 物品事实派生；普通攻击继续使用该实例绑定。
 角色属性、AC、等级、机械感官与熟练项各由按角色定位的字段／有序项行持有，规则 Snapshot 与事件机械感官从同一事实投影。
 角色显式施法来源、已知／准备法术和材料对象绑定以带键记录归 CharacterFacts；
 战斗与探索共用施法投影，World 转移按实际对象 ID 的材料反向索引保护绑定。

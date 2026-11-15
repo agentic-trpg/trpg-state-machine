@@ -340,6 +340,33 @@ class CharacterFacts:
             ("$." + field, canonical_json(value), sid, actor_id),
         )
 
+    def set_held_weapon(self, sid, actor_id, instance_id, grip):
+        """Persist one approved hand-binding transition in the command's write scope.
+
+        The World item remains at its present location. The caller has checked its
+        exact identity, direct ownership and grip before reaching this method.
+        """
+        self.store.require_write()
+        if instance_id is None:
+            expression = (
+                "json_remove(json_set(state_json,'$.weapon_in_hands',json('null'),"
+                "'$.weapon_grip','none'),'$.held_weapon_instance_id')"
+            )
+            values = (sid, actor_id)
+        else:
+            expression = (
+                "json_remove(json_set(state_json,'$.held_weapon_instance_id',?,"
+                "'$.weapon_grip',?),'$.weapon_in_hands')"
+            )
+            values = (instance_id, grip, sid, actor_id)
+        changed = self._conn.execute(
+            f"UPDATE mechanical_actors SET state_json={expression} "
+            "WHERE session_id=? AND actor_id=?",
+            values,
+        )
+        if changed.rowcount != 1:
+            raise StateMachineError("invalid_mechanical_state", "Actor equipment facts are missing")
+
     def update_life_state(self, sid, actor_id, field, value):
         """Persist one approved life delta in the narrow owner row without rewriting rules JSON."""
         self.store.require_write()

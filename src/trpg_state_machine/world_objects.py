@@ -2,6 +2,8 @@
 
 from dataclasses import asdict
 
+from dnd5e_srd_data.schema.item import Weapon, WeaponProperty
+
 from .errors import StateMachineError
 from .scoped_reads import scoped_read
 from .world_commands import (
@@ -9,6 +11,7 @@ from .world_commands import (
     ActivateMechanism,
     BarObject,
     CheckMechanism,
+    EquipWeapon,
     LockObject,
     PickLock,
     PutItem,
@@ -19,6 +22,7 @@ from .world_commands import (
     SwitchLightMode,
     TakeItem,
     UnbarObject,
+    UnequipWeapon,
     UnlockObject,
 )
 from .world_containers import ContainerService
@@ -63,6 +67,8 @@ class WorldObjectService:
             return
         if type(operation) is SpendItemCharge:
             return self._charge_plan(row, actor_id, operation, package)
+        if type(operation) in (EquipWeapon, UnequipWeapon):
+            return self._weapon_plan(row, actor_id, operation)
         if type(operation) in (LockObject, UnlockObject):
             return self.openable.validate_lock(row, actor_id, operation, package)
         return self.openable.validate_bar(row, actor_id, operation, package)
@@ -81,7 +87,7 @@ class WorldObjectService:
             h._spatial_reader(sid, actor_id, package, context)
             row = h._conn.execute("SELECT * FROM sessions WHERE session_id=?", (sid,)).fetchone()
             try:
-                if type(operation) is SpendItemCharge:
+                if type(operation) in (SpendItemCharge, EquipWeapon, UnequipWeapon):
                     h.sessions._authorize_command(row, actor_id, operation, context)
                     h._world_operation_capability(row, operation)
                 if type(operation) is RepositionObject and not getattr(
@@ -126,9 +132,78 @@ class WorldObjectService:
                     source_actor_id=actor_id,
                 )
             ]
+        if type(operation) in (EquipWeapon, UnequipWeapon):
+            iid = self._weapon_plan(row, actor_id, operation)
+            self.handler.characters.set_held_weapon(
+                row["session_id"],
+                actor_id,
+                iid if type(operation) is EquipWeapon else None,
+                operation.grip if type(operation) is EquipWeapon else "none",
+            )
+            return [
+                self.handler._capture_event(
+                    row["session_id"],
+                    package,
+                    "item.weapon_equipped"
+                    if type(operation) is EquipWeapon
+                    else "item.weapon_unequipped",
+                    {"actor_id": actor_id, "instance_id": iid},
+                    phase="world.after_weapon_binding",
+                    source_actor_id=actor_id,
+                )
+            ]
         if type(operation) in (LockObject, UnlockObject):
             return self.openable.operate_lock(row, actor_id, operation, package)
         return self.openable.operate_bar(row, actor_id, operation, package)
+
+    def _weapon_plan(self, row, actor_id, operation):
+        """Admit one directly carried /19 weapon and the actor's current hand binding."""
+        sid, iid = row["session_id"], operation.instance_id
+        self.handler._world_actor_ready(sid, actor_id)
+        if row["mechanical_schema_version"] != "engine-snapshot/19":
+            raise StateMachineError("unsupported_actor_state", "Instance equipment requires /19")
+        state = self.handler.characters.binding_actor(sid, actor_id)
+        if state is None or (
+            state.get("held_weapon_instance_id") is None
+            and state.get("weapon_in_hands") is not None
+        ):
+            raise StateMachineError("unsupported_actor_state", "Explicit weapon binding required")
+        if type(operation) is UnequipWeapon and state.get("held_weapon_instance_id") != iid:
+            raise StateMachineError("weapon_binding_conflict", "Selected weapon is not held")
+        if type(operation) is UnequipWeapon:
+            return iid
+        item = self.facts.object(sid, iid)
+        if (
+            item is None
+            or item["item_slug"] is None
+            or item["carrier_id"] != actor_id
+            or item["container_id"] is not None
+        ):
+            raise StateMachineError("invalid_target", "No directly carried weapon")
+        entry = self.facts.item_entry(item)
+        if entry is None or entry["owner_id"] != actor_id or not entry["accessible"]:
+            raise StateMachineError("invalid_target", "No accessible owned weapon")
+        weapon = self.handler.loader.get_weapon(entry["item_slug"])
+        if not isinstance(weapon, Weapon):
+            raise StateMachineError("invalid_target", "Selected instance is not a weapon")
+        if weapon.requires_attunement or weapon.passive_effects or weapon.uses is not None:
+            raise StateMachineError("unsupported_item_binding", "Weapon lifecycle is unsupported")
+        two_handed = WeaponProperty.TWO_HANDED in weapon.properties
+        versatile = WeaponProperty.VERSATILE in weapon.properties
+        if (
+            (two_handed and operation.grip != "two_handed")
+            or (operation.grip == "two_handed" and not (two_handed or versatile))
+            or (
+                operation.grip == "two_handed"
+                and (
+                    state.get("equipped_shield_instance_id")
+                    or state.get("offhand_item_instance_id")
+                    or state.get("other_hand_occupied")
+                )
+            )
+        ):
+            raise StateMachineError("weapon_grip", "Weapon grip conflicts with equipment")
+        return iid
 
     def _charge_plan(self, row, actor_id, operation, package):
         """Check exact ownership, access, portable policy, durability and balance."""

@@ -59,6 +59,7 @@ from .world_commands import (
     BarObject,
     CheckMechanism,
     ClearJam,
+    EquipWeapon,
     ForceOpen,
     LockObject,
     PickLock,
@@ -70,6 +71,7 @@ from .world_commands import (
     SwitchLightMode,
     TakeItem,
     UnbarObject,
+    UnequipWeapon,
     UnlockObject,
 )
 from .world_time import (
@@ -118,6 +120,8 @@ __all__ = [
     "PutItem",
     "TakeItem",
     "SpendItemCharge",
+    "EquipWeapon",
+    "UnequipWeapon",
     "LockObject",
     "UnlockObject",
     "PickLock",

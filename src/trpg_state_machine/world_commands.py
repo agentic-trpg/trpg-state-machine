@@ -71,6 +71,21 @@ class SpendItemCharge:
 
 
 @dataclass(frozen=True, slots=True)
+class EquipWeapon:
+    """Take one owned weapon instance in hand or replace the current weapon."""
+
+    instance_id: str
+    grip: str
+
+
+@dataclass(frozen=True, slots=True)
+class UnequipWeapon:
+    """Put away the exact currently held weapon while retaining ownership."""
+
+    instance_id: str
+
+
+@dataclass(frozen=True, slots=True)
 class RepositionObject:
     """Request privileged object placement or facing adjustment."""
 
@@ -177,6 +192,8 @@ WORLD_CAPABILITY_COMMANDS = {
     "world.put_item": PutItem,
     "world.take_item": TakeItem,
     "world.spend_item_charge": SpendItemCharge,
+    "world.equip_weapon": EquipWeapon,
+    "world.unequip_weapon": UnequipWeapon,
     "world.lock_object": LockObject,
     "world.unlock_object": UnlockObject,
     "world.bar_object": BarObject,
@@ -191,6 +208,8 @@ WORLD_CAPABILITY_OPERATIONS = (
     PutItem,
     TakeItem,
     SpendItemCharge,
+    EquipWeapon,
+    UnequipWeapon,
     RepositionObject,
     SetLightEnabled,
     SwitchLightMode,
