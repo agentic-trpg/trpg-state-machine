@@ -14,6 +14,7 @@ from dnd5e_engine.evaluation_availability import (
 from dnd5e_engine.evaluation_contracts import (
     CheckPayload,
     CombatClosePayload,
+    ExplorationItemUsePayload,
     ItemUsePayload,
     ReadVersion,
     RuleError,
@@ -24,6 +25,7 @@ from dnd5e_engine.evaluation_preflight import template_support_failure
 from dnd5e_engine.evaluation_rng import RNGState
 from dnd5e_engine.evaluation_ruleset import RulesetBinding, RulesetBindingError, verify_ruleset
 from dnd5e_engine.evaluation_state import CharacterStateV2, CombatSnapshot, NonCombatSnapshot
+from dnd5e_engine.events import HealingApplied, IntentSubmitted
 from pydantic import ValidationError
 
 from .combat import DND_RULESET, _remap, process_id, validate_foundation
@@ -291,6 +293,67 @@ def delta_changes(request, result):
     return tuple(changes)
 
 
+def exploration_potion_changes(request, result):
+    """Adopt only one selected bottle and the matching bounded self-heal."""
+    snapshot = request.state_snapshot
+    actor_id = request.actor_id
+    actor = next(a for a in snapshot.character_states if a.entity_id == actor_id)
+    expected_intent = IntentSubmitted(
+        actor_id=actor_id, intent_type="use_item", target_id=actor_id, item_id="potion-of-healing"
+    )
+    events = result.proposed_events
+    if (
+        len(events) != 2
+        or events[0] != expected_intent
+        or type(events[1]) is not HealingApplied
+        or events[1].target_id != actor_id
+        or events[1].amount <= 0
+        or not result.rng_transition.state_changed
+    ):
+        _invalid("Exploration potion events or RNG differ from the expected profile")
+
+    operations = result.state_delta.operations
+    if len(operations) != 2 or {type(op) for op in operations} != {
+        delta.InventoryConsume,
+        delta.HPDelta,
+    }:
+        _invalid("Exploration potion must consume one bottle and heal its drinker")
+    consume = next(op for op in operations if type(op) is delta.InventoryConsume)
+    healing = next(op for op in operations if type(op) is delta.HPDelta)
+    entry = next(
+        (
+            e
+            for e in snapshot.inventory_state.entries
+            if e.instance_id == request.payload.instance_id
+        ),
+        None,
+    )
+    if (
+        entry is None
+        or entry.owner_id != actor_id
+        or entry.item_slug != "potion-of-healing"
+        or entry.quantity != 1
+        or entry.charges_remaining_per_unit != 1
+        or not entry.accessible
+        or consume.amount != 1
+        or consume.expected != entry
+        or consume.value != entry.model_copy(update={"quantity": 0})
+    ):
+        _invalid("Item consumption differs from the selected potion")
+    if (
+        request.payload.target_id != actor_id
+        or healing.target_id != actor_id
+        or healing.expected_hp != actor.hp_current
+        or healing.amount <= 0
+        or healing.resulting_hp != min(actor.hp_max, actor.hp_current + events[1].amount)
+    ):
+        _invalid("Potion healing differs from the rolled event")
+    return (
+        ("item", entry.instance_id, "consume", entry.model_dump(mode="json")),
+        ("actor", actor_id, "hp_current", healing.resulting_hp),
+    )
+
+
 def validate_dnd_result(request, result):
     """Strictly restore an RE result and validate request, binding, read version and Delta."""
     try:
@@ -317,11 +380,13 @@ def validate_dnd_result(request, result):
         for field in ("actor_id", "target_id", "source_actor_id", "attacker_id", "killer_id"):
             value = getattr(event, field, None)
             if value is not None and value not in actors:
-                _invalid("Proposed mechanical event refers to an actor outside the encounter")
+                _invalid("Proposed mechanical event refers to an actor outside the snapshot")
     if result.status != "accepted":
         return result, ()
     if request.operation_kind == "rules.check":
         return result, check_changes(request, result)
+    if type(request.payload) is ExplorationItemUsePayload:
+        return result, exploration_potion_changes(request, result)
     if type(request.payload) is ItemUsePayload:
         submitted = [event for event in result.proposed_events if event.type == "intent_submitted"]
         healed = [event for event in result.proposed_events if event.type == "healing_applied"]
@@ -662,6 +727,8 @@ class RulesAdapter:
             return "pending_choice_unsupported" if payload.dc is None else None
         if type(payload) is CombatClosePayload:
             return None
+        if type(payload) is ExplorationItemUsePayload:
+            return None  # RE validates the selected bottle and narrow healing activity.
         if type(payload) is ItemUsePayload:
             if payload.target_id != actor_id or actor_id not in snapshot.combat_state.party_ids:
                 return "item_unauthorized"
@@ -784,7 +851,9 @@ class RulesAdapter:
         row = row if row is not None else self._pinned_row(command.session_id, package)
         return RuleEvaluationRequest(
             schema_version=(
-                "engine-evaluation/27"
+                "engine-evaluation/28"
+                if type(command.payload) is ExplorationItemUsePayload
+                else "engine-evaluation/27"
                 if snapshot.snapshot_schema_version == "engine-snapshot/20"
                 else "engine-evaluation/26"
                 if snapshot.snapshot_schema_version == "engine-snapshot/19"

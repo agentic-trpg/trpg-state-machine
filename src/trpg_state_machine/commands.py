@@ -9,6 +9,7 @@ from dnd5e_engine.evaluation_contracts import (
     CheckPayload,
     CombatClosePayload,
     CombatIntentPayload,
+    ExplorationItemUsePayload,
     ItemUsePayload,
 )
 from pydantic import ValidationError
@@ -94,6 +95,7 @@ OPERATIONS = {
     "combat.close": CombatClosePayload,
     "combat.intent": CombatIntentPayload,
     "combat.item": ItemUsePayload,
+    "world.use_item": ExplorationItemUsePayload,
     "combat.initialize": InitializeCombat,
     "rule_operation": RuleOperation,
     "enter_scene": EnterScene,
@@ -162,6 +164,7 @@ class TypedCommand:
         | InitializeCombat
         | CombatIntentPayload
         | ItemUsePayload
+        | ExplorationItemUsePayload
         | CombatClosePayload
         | CheckPayload
         | AdvanceGameTime
@@ -226,6 +229,7 @@ def validate_command(command: TypedCommand) -> None:
             AdvanceSessionTime,
             SetTimeRunning,
             RuleOperation,
+            ExplorationItemUsePayload,
         ):
             raise StateMachineError(
                 "invalid_time_wait", "This operation cannot be a domain wait reply"
@@ -326,6 +330,7 @@ def validate_command(command: TypedCommand) -> None:
         CombatClosePayload,
         CheckPayload,
         ItemUsePayload,
+        ExplorationItemUsePayload,
     ):
         try:
             type(command.payload).model_validate(deepcopy(command.payload))
@@ -337,7 +342,7 @@ def validate_command(command: TypedCommand) -> None:
         ):
             raise StateMachineError("invalid_actor", "Intent source differs from trusted actor")
         if (
-            isinstance(command.payload, ItemUsePayload)
+            isinstance(command.payload, (ItemUsePayload, ExplorationItemUsePayload))
             and command.payload.target_id != command.actor_id
         ):
             raise StateMachineError("invalid_target", "Drinking a potion requires self target")
@@ -424,6 +429,7 @@ class CommandRuntime:
         if type(command.payload) in (
             CombatIntentPayload,
             ItemUsePayload,
+            ExplorationItemUsePayload,
             CombatClosePayload,
             CheckPayload,
             *OPENABLE_CHECK_OPERATIONS,
@@ -578,6 +584,7 @@ def world_command_from_data(data):
         "world.lock_door",
         "world.pickup_item",
         "world.drop_item",
+        "world.use_item",
         "enter_scene",
         "move_actor",
         "set_object_state",

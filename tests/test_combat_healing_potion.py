@@ -1,6 +1,6 @@
 """Exact-instance potion use through the real pinned item evaluator and shared commit."""
 
-from dataclasses import replace
+from dataclasses import asdict, replace
 
 import pytest
 from dnd5e_engine.evaluation_contracts import ItemUsePayload
@@ -10,14 +10,29 @@ from dnd5e_srd_data import BundledAssetLoader, MemoryAssetLoader
 from dnd_support import initialize
 from item_support import A, create, item_data, item_loader, navigate, submit
 
-from trpg_state_machine import PickupItem, StateMachine, StateMachineError, TypedCommand
+from trpg_state_machine import (
+    PickupItem,
+    StateMachine,
+    StateMachineError,
+    TimeBinding,
+    TypedCommand,
+)
 from trpg_state_machine.package import _validate
 
 FIRST, SECOND = "object.potion_first", "object.potion_second"
 
 
-def potion_world(tmp_path, context, *, last_turn=False, version="engine-snapshot/19"):
-    """Create two authored normal healing potions, then pick one before combat."""
+def potion_world(
+    tmp_path,
+    context,
+    *,
+    last_turn=False,
+    version="engine-snapshot/19",
+    combat=True,
+    full_hp=False,
+    timed=False,
+):
+    """Pick up two authored normal healing potions and optionally enter combat."""
     base = item_loader()
     bundled = BundledAssetLoader()
     loader = MemoryAssetLoader(
@@ -27,7 +42,12 @@ def potion_world(tmp_path, context, *, last_turn=False, version="engine-snapshot
     data = item_data()
     data["manifest"]["ruleset_binding"] = ruleset_binding(loader).model_dump(mode="json")
     data["manifest"]["package_version"] = "item-01/1"
-    data["pc_templates"][0]["character"]["hp"]["current"] = 2
+    if timed:
+        data["time_binding"] = asdict(TimeBinding())
+        for actor in data["actors"]:
+            actor.pop("npc_state", None)
+    hp = data["pc_templates"][0]["character"]["hp"]
+    hp["current"] = hp["max"] if full_hp else 2
     for foundation in data["rule_bindings"].values():
         snapshot = foundation["snapshot"]
         snapshot["snapshot_schema_version"] = version
@@ -35,7 +55,7 @@ def potion_world(tmp_path, context, *, last_turn=False, version="engine-snapshot
             for actor in snapshot["character_states"]:
                 assert not actor.pop("spells_known")
         actor = snapshot["character_states"][0]
-        actor.update(hp_current=2, weapon_in_hands=None, weapon_grip="none")
+        actor.update(hp_current=hp["current"], weapon_in_hands=None, weapon_grip="none")
         if last_turn:
             actor.update(action_available=False, movement_remaining=0)
     for iid in (FIRST, SECOND):
@@ -68,7 +88,8 @@ def potion_world(tmp_path, context, *, last_turn=False, version="engine-snapshot
             submit(sm, sid, package, context, PickupItem(iid, A, "2,1"), "pick." + iid).status
             == "committed"
         )
-    assert initialize(sm, sid, package, context).status == "committed"
+    if combat:
+        assert initialize(sm, sid, package, context).status == "committed"
     return sm, sid, package, loader, db
 
 

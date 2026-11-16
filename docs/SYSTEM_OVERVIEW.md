@@ -39,6 +39,10 @@ RE 负责受支持机械规则，SM 负责输入准备、结果校验和采用�
 `combat.item` 已通过既有 RuleExecution 接入所选 PC 自饮普通治疗药水的受限路径；
 WorldFacts 按实例删除并记录消费，CharacterFacts 写入 HP，详见
 [ITEM-01 Batch B](ITEM_01_COMBAT_HEALING_POTION.md)。
+`world.use_item` 沿同一路径以 `engine-evaluation/28` 和探索快照 `/20` 支持
+按实例自饮普通治疗药水。满 HP 时保留药水。成功时药水、HP、RNG、事件和
+回执一起提交。探索喝药不消耗战斗动作，也不推进时间。已开始的时间推进
+须先结算，之后可以重试喝药命令。
 SPELL-01 沿同一 RuleExecution 接入战斗内一环 Cure Wounds，角色余额与本场
 支出分别归 CharacterFacts 和 CombatRecords，治疗及支付一起采用。
 完整 Agent Host、通用规则采用、完整活跃战斗恢复及未来多人负载不是已验收能力。

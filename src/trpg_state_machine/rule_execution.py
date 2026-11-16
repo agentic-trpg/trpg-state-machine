@@ -1,9 +1,14 @@
-"""Shared prepare/evaluate/commit path for checks, combat and object checks."""
+"""Shared prepare/evaluate/commit path for checks, combat and exploration item use."""
 
 import copy
 from dataclasses import asdict, replace
 
-from dnd5e_engine.evaluation_contracts import CheckPayload, CombatIntentPayload, ItemUsePayload
+from dnd5e_engine.evaluation_contracts import (
+    CheckPayload,
+    CombatIntentPayload,
+    ExplorationItemUsePayload,
+    ItemUsePayload,
+)
 from dnd5e_engine.evaluation_openable import OpenableCheckRequest, evaluate_openable
 from dnd5e_engine.evaluation_ruleset import EVALUATOR_VERSION, RulesetBindingError
 from pydantic import ValidationError
@@ -44,9 +49,11 @@ class RuleExecution:
         prerequisites. Allowed Delta, RNG, events and receipt share the existing write
         scope. Domain failure uses the effects savepoint; transaction/publication
         failures remain governed by the Store rather than being converted to an ordinary
-        rules rejection.
+        rules rejection. Exploration potion use runs at the committed exploration tick.
         """
-        command = self.runtime.prepare_timed_command(command, package, context, fingerprint)
+        exploration_item = type(command.payload) is ExplorationItemUsePayload
+        if not exploration_item:
+            command = self.runtime.prepare_timed_command(command, package, context, fingerprint)
         object_check = type(command.payload) in OPENABLE_CHECK_OPERATIONS
         mechanism_check = type(command.payload) is CheckMechanism
         domain_check = object_check or mechanism_check
@@ -56,6 +63,20 @@ class RuleExecution:
         plan, prepare_error, rule_command = None, None, command
         spell_prepared = True
 
+        def exploration_item_error(value):
+            """Check mode and protocol, deferring use while saved time work is unfinished."""
+            if self.world._active_combat(command.session_id):
+                return "unsupported_combat_world_operation"
+            if value["mechanical_schema_version"] != "engine-snapshot/20":
+                return "unsupported_mechanical_version"
+            if self.runtime.time is not None:
+                progress = self.runtime.time.progress(command.session_id)
+                if progress is not None and progress["status"] != "completed":
+                    raise StateMachineError(
+                        "time_advance_pending", "Finish the saved time work first"
+                    )
+            return None
+
         def build_snapshot(value):
             """Build the required mechanical snapshot for the command and current combat
             state.
@@ -64,7 +85,7 @@ class RuleExecution:
                 # Preserve a durable rejected receipt without pretending a combat
                 # snapshot is a noncombat check or relaxing any capability guard.
                 return self.rules._combat_snapshot(value)
-            if type(command.payload) is CheckPayload or domain_check:
+            if type(command.payload) is CheckPayload or domain_check or exploration_item:
                 return self.rules._noncombat_snapshot(value, package)
             return self.rules._combat_snapshot(value)
 
@@ -80,7 +101,9 @@ class RuleExecution:
                 raise StateMachineError(
                     "ruleset_binding_mismatch", "Pinned evaluator version is not installed"
                 )
-            snapshot = build_snapshot(row)
+            if exploration_item:
+                prepare_error = exploration_item_error(row)
+            snapshot = None if prepare_error else build_snapshot(row)
             if domain_check:
                 try:
                     plan = check_service.prepare_check(
@@ -112,7 +135,11 @@ class RuleExecution:
                 else True
             )
             rng = self.rules._rng_context(row)
-            if type(command.payload) is not CheckPayload and not domain_check:
+            if (
+                type(command.payload) is not CheckPayload
+                and not domain_check
+                and not exploration_item
+            ):
                 combat = self._conn.execute(
                     "SELECT process_id FROM combats WHERE session_id=?", (command.session_id,)
                 ).fetchone()
@@ -125,7 +152,7 @@ class RuleExecution:
         unlocked_pick = noop and type(command.payload) is PickLock
         if unlocked_pick:
             request, capability = None, None
-        elif domain_check and prepare_error is not None:
+        elif prepare_error is not None:
             request = None
             capability = prepare_error
         else:
@@ -150,7 +177,8 @@ class RuleExecution:
         if capability is None and not world_ready:
             capability = "world_precondition_failed"
         result, changes = None, ()
-        if snapshot.world_version == command.expected_world_version:
+        input_version = row["world_version"] if snapshot is None else snapshot.world_version
+        if input_version == command.expected_world_version:
             self.rules._verify_dnd_binding(package, row)
             if capability is None and not noop:
                 try:
@@ -184,9 +212,11 @@ class RuleExecution:
             self.sessions._npc_combat_location_guard(command)
             version = row["world_version"]
             status, error = "committed", None
+            current_exploration_error = exploration_item_error(row) if exploration_item else None
             if (
                 self.runtime.version_conflict(row, command)
-                or build_snapshot(row) != snapshot
+                or (exploration_item and current_exploration_error != prepare_error)
+                or (snapshot is not None and build_snapshot(row) != snapshot)
                 or self.rules._rng_context(row) != rng
             ):
                 status, error = "conflict", "version_conflict"
@@ -238,6 +268,8 @@ class RuleExecution:
                             package,
                             "rules.check_rolled"
                             if type(command.payload) is CheckPayload or domain_check
+                            else "world.item_used"
+                            if exploration_item
                             else "combat.engine_event",
                             {
                                 **(
@@ -271,6 +303,8 @@ class RuleExecution:
                                         }
                                     }
                                     if type(command.payload) is CheckPayload or domain_check
+                                    else {"item_instance_id": command.payload.instance_id}
+                                    if exploration_item
                                     else {
                                         "combat_id": snapshot.combat_state.combat_id,
                                         **(

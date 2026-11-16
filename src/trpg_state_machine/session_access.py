@@ -7,6 +7,7 @@ from dnd5e_engine.evaluation_contracts import (
     CheckPayload,
     CombatClosePayload,
     CombatIntentPayload,
+    ExplorationItemUsePayload,
     ItemUsePayload,
 )
 
@@ -109,7 +110,10 @@ class SessionAccess:
 
     def _authorize_command(self, row, actor_id, payload, context):
         """Authorize the command actor and operation for the trusted context."""
-        if type(payload) is ItemUsePayload and actor_id != row["pc_actor_id"]:
+        if (
+            type(payload) in (ItemUsePayload, ExplorationItemUsePayload)
+            and actor_id != row["pc_actor_id"]
+        ):
             raise StateMachineError("unauthorized", "Only the selected PC can drink a potion")
         if type(payload) in ENVIRONMENT_OPERATIONS and not context.can_manage_environment:
             raise StateMachineError("unauthorized", "Trusted environment management grant required")

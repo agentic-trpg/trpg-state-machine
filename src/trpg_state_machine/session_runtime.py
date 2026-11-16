@@ -11,6 +11,7 @@ from dnd5e_engine.evaluation_contracts import (
     CheckPayload,
     CombatClosePayload,
     CombatIntentPayload,
+    ExplorationItemUsePayload,
     ItemUsePayload,
 )
 from dnd5e_engine.evaluation_rng import RNGContext, RNGState
@@ -46,6 +47,7 @@ def _fingerprint(command, digest, binding, context):
         CombatClosePayload,
         CheckPayload,
         ItemUsePayload,
+        ExplorationItemUsePayload,
     ):
         data["payload"] = command.payload.model_dump(mode="json")
     return hashlib.sha256(

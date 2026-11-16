@@ -1,5 +1,14 @@
 # Session Management 重构进度
 
+## 2026-11-16 ITEM-01 探索喝药候选
+
+`world.use_item` 在探索中把所选玩家角色、确切药瓶和活动 ID 交给
+`engine-evaluation/28`，使用固定的 `engine-snapshot/20` 非战斗快照。规则拒绝
+满血、无权或无法使用的自饮。成功时沿用同一份 WorldFacts 物品消费记录和
+CharacterFacts 的 HP，RNG、事件和回执进入同一提交。当前 Schema 及战斗喝药
+协议沿用原版本。已有时间推进未结算时，喝药返回可重试的
+`time_advance_pending`，此时没有喝药回执。定向回归和独立审阅以本批固定候选报告为准。
+
 ## 2026-11-16 ITEM-01 / SPELL-01 隔离集成候选
 
 当前候选保留 ITEM-01 的 Schema52 装备表及精确物品实例绑定，独立的

@@ -6,6 +6,7 @@ from dnd5e_engine.evaluation_contracts import (
     CheckPayload,
     CombatClosePayload,
     CombatIntentPayload,
+    ExplorationItemUsePayload,
     ItemUsePayload,
 )
 
@@ -202,6 +203,7 @@ class CombatHandler:
         if type(command.payload) not in (
             CombatIntentPayload,
             ItemUsePayload,
+            ExplorationItemUsePayload,
             CombatClosePayload,
             CheckPayload,
             *OPENABLE_CHECK_OPERATIONS,
