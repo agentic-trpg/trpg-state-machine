@@ -174,3 +174,60 @@ def test_hold_forged_graph_slot_level_is_rejected(tmp_path, context):
         assert sm.read_rng_context(sid, package, context=context) == before_rng
         assert _effect_counts(sm, sid) == (0, 0)
         assert sm.get_command_receipt(sid, command.command_id, package, context=context) is None
+
+
+def test_hold_damage_and_concentration_drop_roll_back_together(tmp_path, context):
+    """A late fault restores HP and concentration before one successful retry."""
+    sm, sid, package, _, _ = hold_world(tmp_path, context, seed=9)
+    with sm:
+        cast = _cast(sm, sid, package, context)
+        assert candidate_submit(sm, cast, package, context).status == "committed"
+        before = sm.read_combat_snapshot(sid, package, context=context)
+        before_rng = sm.read_rng_context(sid, package, context=context)
+        caster = cast.actor_id
+        hp_before = next(a for a in before.character_states if a.entity_id == caster).hp_current
+        assert before.effect_states[0].target_id == caster
+        assert _effect_counts(sm, sid) == (1, 1)
+
+        attack = TypedCommand(
+            sid,
+            "hold.damage.atomic",
+            NPC,
+            "combat.intent",
+            CombatIntentPayload(
+                intent_type="attack",
+                source_id=NPC,
+                target_id=caster,
+                stat_block_action_id="scimitar",
+            ),
+            before.world_version,
+        )
+        # This fires only if the attack has already lowered HP and removed the
+        # caster's group, immediately before the command receipt is persisted.
+        sm._conn.execute(
+            "CREATE TEMP TRIGGER fail_hold_damage_receipt BEFORE INSERT ON command_receipts "
+            "WHEN NEW.command_id='hold.damage.atomic' AND "
+            "(SELECT current_hp FROM characters WHERE session_id=NEW.session_id "
+            f"AND actor_id='{caster}')<{hp_before} AND "
+            "NOT EXISTS(SELECT 1 FROM effect_concentrations WHERE session_id=NEW.session_id "
+            f"AND caster_id='{caster}') "
+            "BEGIN SELECT RAISE(ABORT,'injected damage receipt failure'); END"
+        )
+        with pytest.raises(StateMachineError):
+            candidate_submit(sm, attack, package, context)
+        assert sm.read_combat_snapshot(sid, package, context=context) == before
+        assert sm.read_rng_context(sid, package, context=context) == before_rng
+        assert _effect_counts(sm, sid) == (1, 1)
+        assert sm.get_command_receipt(sid, attack.command_id, package, context=context) is None
+
+        sm._conn.execute("DROP TRIGGER fail_hold_damage_receipt")
+        receipt = candidate_submit(sm, attack, package, context)
+        assert receipt.status == "committed"
+        after = sm.read_combat_snapshot(sid, package, context=context)
+        hp_after = next(a for a in after.character_states if a.entity_id == caster).hp_current
+        assert 0 < hp_after < hp_before
+        assert not after.effect_states
+        assert not after.combat_state.concentration_chain
+        assert _effect_counts(sm, sid) == (0, 0)
+        assert before.effect_states and before.combat_state.concentration_chain[caster]
+        assert candidate_submit(sm, attack, package, context) == receipt
