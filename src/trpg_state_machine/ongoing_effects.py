@@ -70,6 +70,7 @@ class OngoingEffects:
         chain_ordinal=None,
         conditions=None,
         lifecycle=None,
+        expires_tick=None,
     ):
         """Persist one identified target effect and its optional linked records."""
         self.store.require_write()
@@ -85,7 +86,10 @@ class OngoingEffects:
                 canonical_json({"identity": identity, "state": lifecycle})
             ).model_dump(mode="json")["state"]
         self._conn.execute(
-            "INSERT INTO ongoing_effects VALUES (?,?,?,?,?,?,?,?,?,?)",
+            "INSERT INTO ongoing_effects(session_id,target_id,effect_id,origin,ordinal,"
+            "payload_json,concentration_id,chain_ordinal,conditions_json,"
+            "lifecycle_json,expires_tick) "
+            "VALUES (?,?,?,?,?,?,?,?,?,?,?)",
             (
                 sid,
                 target,
@@ -97,9 +101,32 @@ class OngoingEffects:
                 chain_ordinal,
                 canonical_json(conditions) if conditions is not None else None,
                 canonical_json(lifecycle) if lifecycle is not None else None,
+                expires_tick,
             ),
         )
 
+    def add_world_effect(self, sid, proposal, *, expires_tick):
+        """Persist one RE-declared terminal effect and its clock deadline atomically."""
+        self.store.require_write()
+        ordinal = self._conn.execute(
+            "SELECT coalesce(max(ordinal)+1,0) FROM ongoing_effects WHERE session_id=?",
+            (sid,),
+        ).fetchone()[0]
+        self.add_effect(
+            sid, proposal.effect.model_dump(mode="json"), ordinal=ordinal, expires_tick=expires_tick
+        )
+
+    def expire_world_effect(self, sid, identity, expected_tick):
+        """Remove only the exact due effect whose stored deadline still agrees."""
+        self.store.require_write()
+        target, effect_id, origin = identity
+        deleted = self._conn.execute(
+            "DELETE FROM ongoing_effects WHERE session_id=? AND target_id=? "
+            "AND effect_id=? AND origin=? AND expires_tick=? AND concentration_id IS NULL",
+            (sid, target, effect_id, origin, expected_tick),
+        )
+        if deleted.rowcount != 1:
+            raise StateMachineError("invalid_effect", "Effect deadline or identity changed")
 
     def remove_effect(self, sid, target_id, effect_id, origin):
         """Remove exactly one target effect, retaining its concentration siblings."""

@@ -151,7 +151,9 @@ source、pending；用新的 command_id、相同 source／target 继续，旧 ke
 progress_status，不能将它解释成“已完成活动／已达到终点”。业务操作的前同步未完成时
 抛出 `time_advance_pending`，保留准入进度，同一命令重试继续，不执行业务操作。
 
-同领域内部使用该领域已有顺序，机关同 tick 重置沿用 object_id 顺序。不同领域同刻
+同领域内部使用该领域已有顺序，机关同 tick 重置沿用 object_id 顺序。受控
+Longstrider 效果期限按 expires_tick、target_id、effect_id、origin 排序，一次结算一个
+完整身份；其 RE 已声明的终结动作为移除，不在此重新计算规则。不同领域同刻
 存在依赖且没有已审阅策略时保存 waiting / simultaneous_time_choice，不用任意字典排序
 替代选择。内部 `resolve_simultaneous` 是宿主已确认依赖／选择的接线点，业务选择仍应
 由领域保存。测试仅验证该契约，不冒充完整玩家／DM 选择 UI。

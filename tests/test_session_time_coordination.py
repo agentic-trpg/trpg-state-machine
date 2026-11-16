@@ -212,6 +212,129 @@ def test_18_second_expiry_delayed_wake_and_successive_boundaries(session):
     assert session[5].active() == []
 
 
+def test_re_longstrider_deadline_settles_at_exact_world_tick(
+    tmp_path, package_data, context, monkeypatch
+):
+    """A real RE passive proposal expires on the shared Session clock."""
+    from dnd5e_srd_data import BundledAssetLoader, MemoryAssetLoader
+    from dnd_support import create
+    from modern_support import modern_data, modern_loader
+
+    from trpg_state_machine.package import _validate
+
+    base = modern_loader()
+    assets = MemoryAssetLoader(
+        items=list(base._items.values()),
+        monsters=list(base._monsters.values()),
+        spells=[BundledAssetLoader().get_spell("longstrider")],
+    )
+    data = modern_data(package_data, assets)
+    data["time_binding"] = asdict(TimeBinding())
+    package = _validate(data)
+    context = replace(context, can_advance_time=True)
+    with StateMachine(tmp_path / "longstrider.db", dnd_loader=assets) as sm:
+        sid = create(sm, package, context)
+        actor = sm.read_session(sid, package, context=context).pc_actor_id
+        effects = sm._session_runtime.time.consumers["effects"]
+        with sm._transaction(write=True):
+            with pytest.raises(RuntimeError, match="rolled back"), sm._store.savepoint():
+                effects.apply_longstrider(sid, package, "rolled-back", actor, actor)
+                raise RuntimeError("rolled back")
+            assert effects.next_boundary(sid, package) is None
+            proposed = effects.apply_longstrider(sid, package, "longstrider", actor, actor)
+        assert proposed.duration_seconds == 3600
+        assert effects.next_boundary(sid, package) == 3600
+        session = (sm, sid, package, context)
+        assert submit(session, AdvanceSessionTime(3599), "before-longstrider").status == "committed"
+        assert effects.next_boundary(sid, package) == 3600
+        fixed = tuple(sm._characters.effects.for_targets(sid, {actor}))
+        expire = effects.owner.expire_world_effect
+
+        def fail_expiry(*args):
+            raise StateMachineError("invalid_effect", "Injected expiry failure")
+
+        monkeypatch.setattr(effects.owner, "expire_world_effect", fail_expiry)
+        assert submit(session, AdvanceSessionTime(3600), "failed-longstrider").status == "rejected"
+        assert sm.read_time_sync(sid, package, context=context).committed_tick == 3599
+        assert effects.next_boundary(sid, package) == 3600
+        monkeypatch.setattr(effects.owner, "expire_world_effect", expire)
+        simultaneous = DeadlinePort(sm)
+        simultaneous.put(sid, "same-tick", 3600)
+        sm._session_runtime.time.consumers["fixture"] = simultaneous
+        assert (
+            submit(session, AdvanceSessionTime(3600), "simultaneous-longstrider").status
+            == "committed"
+        )
+        assert (
+            sm.read_time_sync(sid, package, context=context).progress_reason
+            == "simultaneous_time_choice"
+        )
+        assert effects.next_boundary(sid, package) == 3600
+        sm._session_runtime.time.resolve_simultaneous = lambda sid, names: "effects"
+        assert submit(session, AdvanceSessionTime(3600), "end-longstrider").status == "committed"
+        assert effects.next_boundary(sid, package) is None
+        assert sm._characters.effects.for_targets(sid, {actor}) == []
+        assert len(fixed) == 1
+    with StateMachine(tmp_path / "longstrider.db", dnd_loader=assets) as reopened:
+        assert reopened.read_time_sync(sid, package, context=context).committed_tick == 3600
+        assert reopened._characters.effects.for_targets(sid, {actor}) == []
+
+
+def test_re_longstrider_clock_survives_combat_round_and_close(tmp_path, package_data, context):
+    """Combat Round and later exploration advance consume the same deadline."""
+    import json
+
+    from dnd5e_engine.evaluation_state import CombatSnapshot
+    from dnd5e_srd_data import BundledAssetLoader, MemoryAssetLoader
+    from dnd_support import create, initialize
+    from modern_support import modern_data, modern_loader
+    from test_combat_closure import close_command, pc_attack
+
+    from trpg_state_machine.package import _validate
+
+    base = modern_loader()
+    assets = MemoryAssetLoader(
+        items=list(base._items.values()),
+        monsters=list(base._monsters.values()),
+        spells=[BundledAssetLoader().get_spell("longstrider")],
+    )
+    data = modern_data(package_data, assets, npc_hp=1)
+    data["time_binding"] = asdict(TimeBinding())
+    for actor in data["actors"]:
+        actor.pop("npc_state", None)
+    package = _validate(data)
+    context = replace(context, can_advance_time=True)
+    with StateMachine(tmp_path / "longstrider-combat.db", dnd_loader=assets) as sm:
+        sid = create(sm, package, context)
+        workshop = "npc.attendant"
+        foundation = CombatSnapshot.model_validate_json(
+            json.dumps(data["rule_bindings"]["combat_foundation"]["snapshot"])
+        )
+        template = foundation.character_states[1].model_copy(update={"entity_id": workshop})
+        with sm._transaction(write=True):
+            sm.scene_lifecycle.ensure_scene(sid, "scene.workshop", package)
+            row = sm._sessions._session(sid, package, context)
+            sm._characters.initialize_rule_actor(row, template)
+        effects = sm._session_runtime.time.consumers["effects"]
+        with sm._transaction(write=True):
+            effects.apply_longstrider(sid, package, "longstrider-combat", workshop, workshop)
+        session = (sm, sid, package, context)
+        assert submit(session, AdvanceSessionTime(3594), "before-combat").status == "committed"
+        assert initialize(sm, sid, package, context).status == "committed"
+        attack = pc_attack(sm, sid, package, context)
+        attack_receipt = sm.submit_command(attack, package, context=context)
+        assert attack_receipt.status == "committed", attack_receipt
+        assert sm.read_time_sync(sid, package, context=context).committed_tick == 3600
+        assert effects.next_boundary(sid, package) is None
+        assert (
+            sm.submit_command(
+                close_command(sm, sid, package, context), package, context=context
+            ).status
+            == "committed"
+        )
+        assert submit(session, AdvanceSessionTime(3601), "after-combat").status == "committed"
+
+
 def test_earlier_change_cancel_rearms_and_old_callback_is_inert(session):
     deadlines = port(session)
     deadlines.put(session[1], "later", 100)

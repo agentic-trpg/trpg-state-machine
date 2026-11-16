@@ -112,7 +112,12 @@ class SessionTime:
         """Bind unified time coordination, consumers, waits and driver registry."""
         self.runtime, self.world, self.effects = runtime, world, effects
         self.store = runtime.store
-        self.consumers = {"mechanisms": world.objects.mechanisms}
+        from .effect_time import EffectTimeConsumer
+
+        self.consumers = {
+            "mechanisms": world.objects.mechanisms,
+            "effects": EffectTimeConsumer(runtime, world),
+        }
         self.drivers = {}
         self.waits = TimeWaits(self)
         # Multiple domain owners at one instant require a reviewed dependency policy.

@@ -165,7 +165,8 @@ SQLite COMMIT 与 RAM 发布不是同一个 ACID 事务。COMMIT 后，Store 在
 
 `world_states.game_tick` 是唯一游戏时钟；`world_time.py::WorldTimeService` 做读取转换，
 SessionTime 协调模式、消费者和等待，`time_driver.py::TimeDriver` 只是宿主采样／唤醒。
-活动／Effects 等完整时间消费、秒制 NPC 兼容、活跃战斗精确恢复及多人负载仍有独立限制。
+`effect_time.py::EffectTimeConsumer` 将受控 RE Longstrider 效果期限接入同一有界消费者路径；
+其余 Effects 时间消费、活动、秒制 NPC 兼容、活跃战斗精确恢复及多人负载仍有独立限制。
 
 ## 6. 跨仓库接口与按任务找代码
 

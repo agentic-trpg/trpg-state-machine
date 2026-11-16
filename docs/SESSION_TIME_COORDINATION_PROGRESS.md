@@ -1,5 +1,16 @@
 # Session 时间协调实施记录
 
+## 2026-11-16 EFFECT-01 候选：同一 game_tick 的持续效果期限
+
+Schema54 为 `ongoing_effects` 增加按 Session、到期 tick 和完整效果身份排序的索引。
+受控 Longstrider 应用由已固定的 RE 产出效果与秒数；SM 使用
+`WorldTimeService.seconds_deadline` 在同一写事务内保存唯一世界时钟期限。
+`SessionTime` 将 Effects 作为有界消费者，按完整 `(target_id,id,origin)` 精确删除，
+到期事件与效果删除共同提交。Combat 完整 Round 的原有六 tick 接线和探索跳时共用该消费者；
+不同领域同刻且没有已审阅选择策略时继续停在 `simultaneous_time_choice`，不会跳过边界。
+该受控内部接线不提供普通角色施法或其余持续效果的生产准入；扩大施法与效果规则另行处理。
+候选验证结果以本批最终命令记录为准。
+
 ## 2026-10-22 统一 Session RAM 提交边界
 
 时间控制、准入／可靠进度、Driver attach、Activity 与已支持机关期限更新均经共同 Store；
