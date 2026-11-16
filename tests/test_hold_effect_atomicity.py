@@ -134,3 +134,43 @@ def test_hold_forged_graph_caster_association_is_rejected(tmp_path, context):
         assert sm.read_rng_context(sid, package, context=context) == before_rng
         assert _effect_counts(sm, sid) == (0, 0)
         assert sm.get_command_receipt(sid, command.command_id, package, context=context) is None
+
+
+def test_hold_forged_graph_slot_level_is_rejected(tmp_path, context):
+    """A typed third-level graph cannot accompany a second-level request and payment."""
+    sm, sid, package, _, _ = hold_world(tmp_path, context)
+    with sm:
+        command = _cast(sm, sid, package, context)
+        before = sm.read_combat_snapshot(sid, package, context=context)
+        before_rng = sm.read_rng_context(sid, package, context=context)
+        original = sm._rules._evaluate_dnd
+
+        async def forged(request):
+            """Round-trip the changed graph through the actual RE DTO schema."""
+            result = await original(request)
+            assert result.status == "accepted"
+            operations = []
+            for operation in result.state_delta.operations:
+                if type(operation) is delta.HoldPersonGraphCreate:
+                    assert operation.slot_level == 2
+                    changed = operation.model_copy(update={"slot_level": 3})
+                    operation = delta.HoldPersonGraphCreate.model_validate_json(
+                        changed.model_dump_json()
+                    )
+                operations.append(operation)
+            return result.model_copy(
+                update={
+                    "state_delta": result.state_delta.model_copy(
+                        update={"operations": tuple(operations)}
+                    )
+                }
+            )
+
+        sm._rules._evaluate_dnd = forged
+        with pytest.raises(StateMachineError) as error:
+            candidate_submit(sm, command, package, context)
+        assert error.value.code == "invalid_rule_result"
+        assert sm.read_combat_snapshot(sid, package, context=context) == before
+        assert sm.read_rng_context(sid, package, context=context) == before_rng
+        assert _effect_counts(sm, sid) == (0, 0)
+        assert sm.get_command_receipt(sid, command.command_id, package, context=context) is None

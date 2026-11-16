@@ -427,6 +427,7 @@ def hold_effect_changes(request, result):
             graph.combat_id != combat.combat_id
             or graph.source_id != request.actor_id
             or graph.spell_source_id != payload.spell_source_id
+            or graph.slot_level != payload.slot_level
             or graph.actor_ids != combat.initiative_ids
             or graph.selected_target_ids != (payload.target_id,)
             or graph.applied_turn_serial != combat.turn_serial
