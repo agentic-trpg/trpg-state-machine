@@ -1,6 +1,22 @@
 # Session Management
 
+## 当前会话保存与恢复
+
+适用源码基线为 SM `4d62c6e`。跨模块故障规则由 [MC §6.4](https://github.com/agentic-trpg/agentic-trpg/blob/main/docs/MODULE_CONTRACTS.md#64-原子性与故障-decided) 维护；
+产品边界见 [MVP Scope §6.3](https://github.com/agentic-trpg/agentic-trpg/blob/main/docs/MVP_SCOPE.md#63-state--memory--knowledge)。
+下方日期化记录保存各轮实现与原始证据。
+
+| 场景 | 当前公开行为 | 源码与回归 |
+| --- | --- | --- |
+| 预发布开发存档 | 当前 SQLite Schema 为 53。旧版已初始化开发库在可写打开前拒绝。 | [Store](../src/trpg_state_machine/storage.py)、[当前保存策略回归](../tests/test_pre_release_save_policy.py) |
+| 非战斗保存与重开 | `save_session` 校验并读取已提交存档；`resume_session` 在支持的边界恢复，遇已暂停的 Session 按持久事实对账。 | [公开入口](../src/trpg_state_machine/service.py)、[创建到重开回归](../tests/test_integration.py) |
+| 已提交但内存发布失败 | Store 以 `committed_publication_pending` 暂停该 Session 的当前态操作；受支持的恢复完成后同键重试返回原回执。 | [真实 RE 检定故障测试](../tests/test_session_memory_rng_failures.py)、[物品转移故障测试](../tests/test_session_memory_runtime.py) |
+| 活跃战斗跨进程 | 可按权限读取已持久化的审计事实及原回执；普通保存、恢复和新规则推进受 `combat_unrestorable` 限制。精确续玩属 Post-MVP。 | [独立进程回归](../tests/test_dnd_hardening.py)、[MC §8.2](https://github.com/agentic-trpg/agentic-trpg/blob/main/docs/MODULE_CONTRACTS.md#82-必须明确不支持的场景-open) |
+
 ## 2026-11-16 SPELL-01 战斗治疗术与角色法术记录（候选）
+
+本节标题保留当时的候选语境。该受限能力已进入 SM main `4d62c6e`，当前覆盖见
+[治疗术集成回归](../tests/test_cure_wounds.py)。
 
 设计决定为按来源持久化角色法术，内存角色保留已知和已准备两份只读列表，
 列表引用同一批法术记录。来源引用随记录保存，RE 快照 `/20` 按来源分组，

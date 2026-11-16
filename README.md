@@ -3,6 +3,17 @@
 Start with the [system and interface overview](docs/SYSTEM_OVERVIEW.md) for repository
 responsibilities, current public paths, state ownership and task-based source navigation.
 
+## 开始使用与开发
+
+| 任务 | 从哪里开始 |
+| --- | --- |
+| 安装依赖、运行验证或打开示例 | [安装与验证](#安装与验证) |
+| 找公开入口、规则采用或领域操作 | [系统总览按任务导航](docs/SYSTEM_OVERVIEW.md#6-跨仓库接口与按任务找代码) |
+| 核对提交后发布故障、保存版本和战斗恢复 | [Session Management 当前实现](docs/SESSION_MANAGEMENT.md#当前会话保存与恢复) |
+| 查 RE 依赖版本和跨仓协作 | [系统与接口总览](docs/SYSTEM_OVERVIEW.md)、[锁定文件](uv.lock) |
+
+下文按日期或批次保存验证记录与当时的支持范围。当前行为以任务入口、源码和对应测试为准。
+
 ## Source explanations and development workflows — 2026-10-27
 
 [Source documentation maintenance](docs/SOURCE_DOCUMENTATION.md) is mandatory for
@@ -20,7 +31,7 @@ separate explanation coverage from runtime acceptance.
 
 ## Session memory runtime target — 2026-10-21
 
-Architecture Decision Status **[DECIDED]**；完整 Session 内存运行层 Implementation Status **[NOT IMPLEMENTED]**；Acceptance Status **本次未执行运行验收**。 活跃已加载事实的查询、检查、RE 输入、角色视图、Snapshot 与环境／光照／重量输入统一读取同版本 Session RAM；候选与旧固定输入隔离。每次修改通过 SQLite 短事务增量持久化，COMMIT 后发布 RAM，版本就绪后正常返回成功及投影。统一协议与现有组件差距见 [Session Management](docs/SESSION_MANAGEMENT.md)。当前 main `d6be5a9` 为 Schema40，已有操作 memo／GridMaps／环境缓存与空间索引，完整内存运行层及跨命令重量／机关索引仍待实施。未来 5–6 玩家负载不扩大单人 MVP；活跃战斗精确恢复仍不支持。下述批次版本、数字和兼容边界保留原时点。
+2026-10-21 历史基线：架构决定 **[DECIDED]**；当时完整 Session 内存运行层 **[NOT IMPLEMENTED]**，未执行运行验收。 活跃已加载事实的查询、检查、RE 输入、角色视图、Snapshot 与环境／光照／重量输入统一读取同版本 Session RAM；候选与旧固定输入隔离。每次修改通过 SQLite 短事务增量持久化，COMMIT 后发布 RAM，版本就绪后正常返回成功及投影。统一协议与现有组件差距见 [Session Management](docs/SESSION_MANAGEMENT.md)。当时 main `d6be5a9` 为 Schema40，已有操作 memo／GridMaps／环境缓存与空间索引，完整内存运行层及跨命令重量／机关索引仍待实施。未来 5–6 玩家负载不扩大单人 MVP；活跃战斗精确恢复仍不支持。下述批次版本、数字和兼容边界保留原时点。
 
 MechanismService 的 `mechanism/3` 配置和独立 `mechanism-effect/1` 端口支持强类型
 规则效果定义、单体／区域目标筛选、原命令关联及有序事务采用验证。固定 RE /24
@@ -32,11 +43,11 @@ Batch 1 实现了一个可运行的本地闭环：**验证原创合成 Adventure
 
 StateMachine 是统一 API 与组件装配入口；各领域 Facts / Records 管理所属权威事实，通过共享事务共同提交。Package 是不可变模板；返回的 Snapshot 是独立副本，修改副本不会写入数据库。已接入固定候选 SHA 的真实 D&D 基础攻击及受限胜利/TPK 关闭，同时保留隔离的合成测试路径；没有第二份运行态权威。正常关闭后可以保存并在新进程恢复；活跃战斗跨进程精确续玩仍不支持。
 
-Session Management 已分离为 SessionCreation 创建协调、SessionAccess 授权和 SessionRuntime
-执行元数据／公共提交协调。公开 create_session 等当前签名保留；当前存储为 Schema41；运行时 RE 校验、
+历史实现记录（Schema41）：Session Management 当时已分离为 SessionCreation 创建协调、SessionAccess 授权和 SessionRuntime
+执行元数据／公共提交协调。该批保留公开 create_session 等签名；运行时 RE 校验、
 求值和查询以持久化 Session 的三项绑定为准。已授权 NPC 移动也可延迟创建目标场景，
 不制造 PC 进入事件。对象能力、Scene 配置、NPC senses 和辅助读取现已取持久实例数据；
-当前 Schema41 存档可直接恢复；早期开发数据库会在打开时被拒绝，恢复 getter 不补字段、不重置状态。
+该批的 Schema41 存档恢复结论仅适用于当时版本。现行存储和恢复范围见 [Session Management](docs/SESSION_MANAGEMENT.md#当前会话保存与恢复)。
 ContainerService 在一次读取／候选状态中共用邻接索引和子树重量，位置变更使旧重量失效。
 RE 冻结素材已按 a011eba 整合提交接入：Runtime 一次选定，初始化／求值／查询／校验共用。
 RE 不静默重绑；原实例配置批次的历史状态与计数证据见
@@ -130,7 +141,7 @@ Session Runtime 已支持显式倍率、按业务边界推进的 TimeDriver、�
 
 ## World W1–W8：可组合非战斗世界能力
 
-Package `/6` / SQLite Schema 31（当前存储版本 40）增加显式对象定义、内部耐久结果应用、独立卡住/门闩、
+W1–W8 历史记录：Package `/6` / SQLite Schema 31（后续当时演进至 Schema40）增加显式对象定义、内部耐久结果应用、独立卡住/门闩、
 多锁、嵌套容器、受权 GM 多格布置、普通场景光源与一次性手动联动机关。
 普通操作仍通过 `submit_command` / `submit_command_async` 的既有命令、版本与回执入口；
 对象、角色位置、库存投影与事件证据在共享事务中提交。

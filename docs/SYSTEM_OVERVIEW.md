@@ -1,6 +1,6 @@
 # 系统与接口总览：State Machine
 
-2026-10-27，按本批起始源码 `a7b0804` 核对。此页是面向 Codex 的实现导航，
+当前提交、发布及恢复路径按 SM `4d62c6e` 静态核对。此页是实现导航，
 不替代[跨模块契约](../../agentic-trpg/docs/MODULE_CONTRACTS.md)、
 [SM Architecture](../../agentic-trpg/docs/STATE_MACHINE_ARCHITECTURE.md) 和
 [World Design](../../agentic-trpg/docs/WORLD_SUBSYSTEM_DESIGN.md)。
@@ -30,7 +30,7 @@ World、Character、Combat、Time、NPC 等组件已有实际实现；SessionMem
 角色属性、AC、等级、机械感官与熟练项各由按角色定位的字段／有序项行持有，规则 Snapshot 与事件机械感官从同一事实投影。
 角色显式施法来源、已知／准备法术和材料对象绑定以带键记录归 CharacterFacts；
 战斗与探索共用施法投影，World 转移按实际对象 ID 的材料反向索引保护绑定。
-在 SPELL-01 候选中，材料绑定与法术同一行，角色已知与已准备列表引用同一记录，
+SM `4d62c6e` 已包含 SPELL-01 的受限实现：材料绑定与法术同一行，角色已知与已准备列表引用同一记录，
 `engine-snapshot/20` 以每个来源的一份法术列表表达这些事实。
 持续效果以目标效果 ID 行及单条专注组记录归 Effects；角色条件链接、
 生命周期时钟和战斗快照投影使用同一记录；独立角色条件归 CharacterFacts 的
@@ -39,7 +39,7 @@ RE 负责受支持机械规则，SM 负责输入准备、结果校验和采用�
 `combat.item` 已通过既有 RuleExecution 接入所选 PC 自饮普通治疗药水的受限路径；
 WorldFacts 按实例删除并记录消费，CharacterFacts 写入 HP，详见
 [ITEM-01 Batch B](ITEM_01_COMBAT_HEALING_POTION.md)。
-SPELL-01 候选沿同一 RuleExecution 接入战斗内一环 Cure Wounds，角色余额与本场
+SPELL-01 沿同一 RuleExecution 接入战斗内一环 Cure Wounds，角色余额与本场
 支出分别归 CharacterFacts 和 CombatRecords，治疗及支付一起采用。
 完整 Agent Host、通用规则采用、完整活跃战斗恢复及未来多人负载不是已验收能力。
 
@@ -158,11 +158,15 @@ SessionTime 协调模式、消费者和等待，`time_driver.py::TimeDriver` 只
 
 ## 6. 跨仓库接口与按任务找代码
 
+开发时请从逻辑工作区的 sibling checkout 阅读同名契约；表中的 GitHub 链接供远端浏览。
+
 | 任务／接口 | 从哪里读起 | 进一步核对 |
 | --- | --- | --- |
 | 宿主请求／授权 | `models.py::TrustedContext`、`models.py::CreateSessionRequest`、`commands.py::TypedCommand` | `service.py`、SessionAccess；认证由外部可信层完成 |
 | 修改容器重量 | `world_containers.py`→WorldFacts→运行字段和修改监听 | MC §2.3a、[World](../../agentic-trpg/docs/WORLD_SUBSYSTEM_DESIGN.md)、容器 Progress；runtime-change |
-| 检查事务／恢复 | `storage.py`→`session_memory.py`→SessionRuntime／resume | [Session Management](SESSION_MANAGEMENT.md)、原故障验收；atomicity-review |
+| RE 返回结果后谁采用、谁提交 | [RE 求值与采用](#re-求值与采用)、[MC §6.1](https://github.com/agentic-trpg/agentic-trpg/blob/main/docs/MODULE_CONTRACTS.md#61-执行时序-decided-partially-implemented) | [RuleExecution](../src/trpg_state_machine/rule_execution.py)、[真实检定回归](../tests/test_session_memory_rng_failures.py) |
+| SQLite 已提交但 RAM 发布失败 | [事务、发布和恢复边界](#5-事务发布和恢复边界)、[MC §6.4](https://github.com/agentic-trpg/agentic-trpg/blob/main/docs/MODULE_CONTRACTS.md#64-原子性与故障-decided) | [Store](../src/trpg_state_machine/storage.py)、[故障回归](../tests/test_session_memory_runtime.py) |
+| 活跃战斗进程退出后能否继续 | [Session Management 当前边界](SESSION_MANAGEMENT.md#当前会话保存与恢复)、[MC §8.2](https://github.com/agentic-trpg/agentic-trpg/blob/main/docs/MODULE_CONTRACTS.md#82-必须明确不支持的场景-open)、[MVP §6.3](https://github.com/agentic-trpg/agentic-trpg/blob/main/docs/MVP_SCOPE.md#63-state--memory--knowledge) | [恢复入口](../src/trpg_state_machine/service.py)、[独立进程回归](../tests/test_dnd_hardening.py) |
 | 新增规则采用 | `rule_execution.py`、`rules_adapter.py`、`combat_handler.py` | RE 对应 evaluator／DTO、SM pin、支持白名单和验证；不能只加一条调用 |
 | 事件与可靠消费 | EventCapture→PackageEffects→EventPersistence→队列／游标 | `events.py`、`perception_queue.py`、NPC 输入与输出 |
 | 空间／机关语义 | GridService／ObjectSpatialService／MechanismService 的真实公开调用链 | [实例归属证据](reviews/RUNTIME_INSTANCE_OWNERSHIP.md)、locality-review |
