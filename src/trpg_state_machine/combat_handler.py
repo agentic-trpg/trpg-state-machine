@@ -218,11 +218,13 @@ class CombatHandler:
             fingerprint = self.runtime.fingerprint(command, row, context)
         return await self._submit_dnd(command, package, context, fingerprint)
 
-    async def _submit_dnd(self, command, package, context, fingerprint):
+    async def _submit_dnd(self, command, package, context, fingerprint, *, hold_candidate=False):
         """Delegate command execution to the rule execution coordinator."""
         from .rule_execution import RuleExecution
 
-        return await RuleExecution(self).submit(command, package, context, fingerprint)
+        return await RuleExecution(self).submit(
+            command, package, context, fingerprint, hold_candidate=hold_candidate
+        )
 
     def query_action_availability(self, session_id, actor_id, payload, package, *, context):
         """Authorize and build the required snapshot for a read-only rules availability

@@ -40,7 +40,7 @@ class RuleExecution:
         """Return the shared rule-execution connection."""
         return self.store.connection
 
-    async def submit(self, command, package, context, fingerprint):
+    async def submit(self, command, package, context, fingerprint, *, hold_candidate=False):
         """Evaluate fixed rules inputs, then revalidate and adopt their guarded result.
 
         Preparation authorizes the actor, bindings, target and optional domain check in
@@ -143,7 +143,10 @@ class RuleExecution:
         else:
             request = self.rules.request(rule_command, package, snapshot, rng, row=row)
             capability = self.rules._dnd_capability(
-                rule_command.payload, command.actor_id, snapshot
+                rule_command.payload,
+                command.actor_id,
+                snapshot,
+                hold_candidate=hold_candidate,
             )
             payload = rule_command.payload
             if capability is None and getattr(payload, "intent_type", None) == "cast_spell":
@@ -216,7 +219,12 @@ class RuleExecution:
                         "Evaluator failed; original command may be retried",
                     ) from exc
                 try:
-                    result, changes = validate_dnd_result(request, result, loader=self.rules.loader)
+                    result, changes = validate_dnd_result(
+                        request,
+                        result,
+                        loader=self.rules.loader,
+                        hold_candidate=hold_candidate,
+                    )
                 except UnsupportedSpellConsequence:
                     capability = "spell.capability"
             self.rules._verify_dnd_binding(package, row)
@@ -257,7 +265,12 @@ class RuleExecution:
                 status, error = "rejected", result.error.code
             else:
                 self.sessions._npc_combat_target_guard(command, package, build_snapshot(row))
-                result, changes = validate_dnd_result(request, result, loader=self.rules.loader)
+                result, changes = validate_dnd_result(
+                    request,
+                    result,
+                    loader=self.rules.loader,
+                    hold_candidate=hold_candidate,
+                )
                 self._conn.execute("SAVEPOINT dnd_effects")
                 try:
                     if command.time_wait is not None:

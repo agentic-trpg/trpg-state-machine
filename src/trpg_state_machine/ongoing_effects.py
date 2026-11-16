@@ -41,6 +41,10 @@ class OngoingEffects:
         if not members:
             raise StateMachineError("invalid_effect", "Concentration needs a target effect")
         with self.store.savepoint():
+            next_ordinal = self._conn.execute(
+                "SELECT COALESCE(MAX(ordinal), -1) + 1 FROM ongoing_effects WHERE session_id=?",
+                (sid,),
+            ).fetchone()[0]
             self._conn.execute(
                 "INSERT INTO effect_concentrations VALUES (?,?,?,?,?)",
                 (sid, concentration_id, caster_id, effect_id, rounds_remaining),
@@ -49,7 +53,7 @@ class OngoingEffects:
                 self.add_effect(
                     sid,
                     member["effect"],
-                    ordinal=member["ordinal"],
+                    ordinal=member.get("ordinal", next_ordinal + chain_ordinal),
                     concentration_id=concentration_id,
                     chain_ordinal=chain_ordinal,
                     conditions=member.get("conditions"),
@@ -96,6 +100,7 @@ class OngoingEffects:
             ),
         )
 
+
     def remove_effect(self, sid, target_id, effect_id, origin):
         """Remove exactly one target effect, retaining its concentration siblings."""
         self.store.require_write()
@@ -140,6 +145,100 @@ class OngoingEffects:
         )
         if result.rowcount != 1:
             raise StateMachineError("invalid_effect", "Concentration is missing")
+
+    def apply_lifecycle(self, sid, operation):
+        """Apply one guarded RE effect and clock transition in the caller's write scope.
+
+        Group removal follows the complete set of member transitions in the same
+        UnitOfWork; a last-member deletion does not silently delete its group.
+        """
+        self.store.require_write()
+        target, effect_id, origin = operation.identity
+        row = self._conn.execute(
+            "SELECT * FROM ongoing_effects WHERE session_id=? AND target_id=? "
+            "AND effect_id=? AND origin=?",
+            (sid, target, effect_id, origin),
+        ).fetchone()
+        if row is None:
+            raise StateMachineError("invalid_effect", "Effect transition lost its source")
+        current = {
+            "id": row["effect_id"],
+            "origin": row["origin"],
+            "target_id": row["target_id"],
+            **self.store.memory.json(row["payload_json"]),
+        }
+        if (
+            current != operation.expected_effect.model_dump(mode="json")
+            or (self.store.memory.json(row["conditions_json"]) if row["conditions_json"] else [])
+            != list(operation.expected_lineage.statuses)
+            or (self.store.memory.json(row["lifecycle_json"]) if row["lifecycle_json"] else None)
+            != (
+                operation.expected_lifecycle.model_dump(mode="json")["state"]
+                if operation.expected_lifecycle
+                else None
+            )
+        ):
+            raise StateMachineError("invalid_effect", "Effect transition pre-value changed")
+        if operation.effect is None:
+            self._conn.execute(
+                "DELETE FROM ongoing_effects WHERE session_id=? AND target_id=? "
+                "AND effect_id=? AND origin=?",
+                (sid, target, effect_id, origin),
+            )
+        else:
+            self._conn.execute(
+                "UPDATE ongoing_effects SET lifecycle_json=? WHERE session_id=? "
+                "AND target_id=? AND effect_id=? AND origin=?",
+                (
+                    canonical_json(operation.lifecycle.model_dump(mode="json")["state"]),
+                    sid,
+                    target,
+                    effect_id,
+                    origin,
+                ),
+            )
+
+    def apply_concentration(self, sid, operation):
+        """Guard the caster's one group and adopt RE's retained duration or removal."""
+        self.store.require_write()
+        self.assert_concentration(sid, operation, after_members=True)
+        row = self._conn.execute(
+            "SELECT * FROM effect_concentrations WHERE session_id=? AND caster_id=?",
+            (sid, operation.source_id),
+        ).fetchone()
+        if operation.chain:
+            self._conn.execute(
+                "UPDATE effect_concentrations SET rounds_remaining=? WHERE session_id=? "
+                "AND concentration_id=?",
+                (operation.rounds, sid, row["concentration_id"]),
+            )
+        else:
+            self._conn.execute(
+                "DELETE FROM effect_concentrations WHERE session_id=? AND concentration_id=?",
+                (sid, row["concentration_id"]),
+            )
+
+    def assert_concentration(self, sid, operation, *, after_members=False):
+        """Compare one caster's persisted group and ordered member identities."""
+        row = self._conn.execute(
+            "SELECT * FROM effect_concentrations WHERE session_id=? AND caster_id=?",
+            (sid, operation.source_id),
+        ).fetchone()
+        if row is None or (
+            row["effect_id"] != operation.expected_effect_id
+            or row["rounds_remaining"] != operation.expected_rounds
+        ):
+            raise StateMachineError("invalid_effect", "Concentration pre-value changed")
+        current_chain = tuple(
+            (member["target_id"], member["effect_id"], member["origin"])
+            for member in self._conn.execute(
+                "SELECT target_id,effect_id,origin FROM ongoing_effects WHERE session_id=? "
+                "AND concentration_id=? ORDER BY chain_ordinal",
+                (sid, row["concentration_id"]),
+            )
+        )
+        if current_chain != (operation.chain if after_members else operation.expected_chain):
+            raise StateMachineError("invalid_effect", "Concentration members changed")
 
     @scoped_read
     def _target_rows(self, sid, target_id):

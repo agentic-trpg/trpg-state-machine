@@ -43,29 +43,17 @@ def validate_foundation(value):
         raise StateMachineError("invalid_combat_foundation", "Initial world version must be zero")
     if snapshot.combat_state.ended:
         raise StateMachineError("invalid_combat_foundation", "An initial encounter must be active")
-    if reason := snapshot_support_failure(snapshot):
-        # Instance equipment snapshots may carry a reviewed class profile. Keep the
-        # original broad admission for all other foundations and let the same
-        # frozen RE dependency check used by ordinary attacks decide this one.
-        reviewed_party = any(
-            actor.entity_id in snapshot.combat_state.party_ids
-            and actor.classes in ({"fighter": 1}, {"cleric": 1})
-            for actor in snapshot.character_states
-        )
-        if (
-            snapshot.snapshot_schema_version
-            not in (
-                "engine-snapshot/19",
-                "engine-snapshot/20",
-            )
-            or not reviewed_party
-        ):
-            raise StateMachineError("unsupported_combat_foundation", reason)
+    if snapshot.snapshot_schema_version in ("engine-snapshot/19", "engine-snapshot/20"):
+        # This RE admission includes the plain guards and checks complete
+        # authored class/equipment dependencies for current snapshots.
         from dnd5e_engine.evaluation_class_dependencies import operation_dependencies
         from dnd5e_engine.evaluation_ruleset import get_default_ruleset
 
-        if operation_dependencies(snapshot, get_default_ruleset(), equipped=True):
-            raise StateMachineError("unsupported_combat_foundation", reason)
+        reason = operation_dependencies(snapshot, get_default_ruleset(), equipped=True)
+    else:
+        reason = snapshot_support_failure(snapshot)
+    if reason:
+        raise StateMachineError("unsupported_combat_foundation", reason)
     return snapshot
 
 

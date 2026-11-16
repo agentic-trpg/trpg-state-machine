@@ -25,6 +25,15 @@ State which versions and dependencies change and which valid fields consumers re
 Distinguish supplied fixed input, isolated mutation candidates and published current
 state; a newly added cache with no production consumer is not completion.
 
+When a feature reaches an early hard-coded allowlist or limit, trace it to the
+owning contract and its current callers. If the bound RE already validates the
+same rule, remove the duplicate restriction at its source and test the newly
+supported path plus a real rejection. Use RE dependency admission for class
+profiles. Use the level in the verified spell-slot spend when updating its ledger.
+Keep independent SM checks for authorization, supported operation scope, identity,
+expected values, and atomic writes. Document a restriction that still protects a
+distinct invariant or a known dependency gap.
+
 Integrate maintenance with existing persistence/UoW, commit/publication, savepoints,
 rollback, recovery invalidation and lifecycle retention. Use existing owner replacements,
 not a second transaction or Session authority. Cache hits retain authorization/OCC,

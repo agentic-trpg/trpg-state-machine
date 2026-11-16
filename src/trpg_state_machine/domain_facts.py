@@ -3072,7 +3072,12 @@ class CombatRecords:
         row = self._conn.execute(
             "SELECT combat_id,state_json FROM combats WHERE session_id=?", (sid,)
         ).fetchone()
-        if row is None or row["combat_id"] != combat_id or slot_kind != "spell_slot" or level != 1:
+        if (
+            row is None
+            or row["combat_id"] != combat_id
+            or slot_kind != "spell_slot"
+            or not 1 <= level <= 9
+        ):
             raise StateMachineError("invalid_rule_result", "Unsupported spell slot ledger")
         state = self.store.memory.json(row["state_json"])
         ledger = state.get("expended_resources")

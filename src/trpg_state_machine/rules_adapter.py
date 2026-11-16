@@ -58,7 +58,7 @@ def _json(value):
     return value
 
 
-def delta_changes(request, result):
+def delta_changes(request, result, *, hold_mode=False):
     """Check pre-values and ownership for the attack or narrow potion Delta.
 
     A temporary candidate validates invariants; it is never persisted as a Snapshot.
@@ -86,6 +86,8 @@ def delta_changes(request, result):
         _invalid("Turn delta is outside the encounter")
     budget_owners = {request.actor_id, snapshot.combat_state.initiative_ids[turn]}
     affected_actors = budget_owners | {request.payload.target_id}
+    if hold_mode:
+        affected_actors.update(effect.target_id for effect in snapshot.effect_states)
     inventory = snapshot.inventory_state.model_dump(mode="json") if item_use else None
 
     def edit(component, identity, field, expected, value):
@@ -107,6 +109,34 @@ def delta_changes(request, result):
         changes.append((component, identity, field, _json(value)))
 
     for op in result.state_delta.operations:
+        if hold_mode and type(op) in (
+            delta.HoldPersonGraphCreate,
+            delta.EffectLifecycleUpdate,
+            delta.ConcentrationUpdate,
+        ):
+            continue
+        if hold_mode and type(op) is delta.ResourceUpdate:
+            if (
+                hold_mode != "cast"
+                or op.owner_id != request.actor_id
+                or op.amount != -1
+                or op.expected not in snapshot.resource_state.pools
+                or op.expected.kind != "spell_slot"
+                or op.expected.level != request.payload.slot_level
+            ):
+                _invalid("Hold Person payment differs from the bound caster")
+            changes.append(("resource", op.owner_id, op.pool_id, (op.expected.current, 1)))
+            continue
+        if hold_mode and type(op) is delta.SlotSpendLedgerUpdate:
+            if (
+                hold_mode != "cast"
+                or op.owner_id != request.actor_id
+                or op.combat_id != combat["combat_id"]
+                or combat["expended_resources"].get(op.owner_id) != op.expected
+            ):
+                _invalid("Hold Person slot ledger differs from fixed combat")
+            changes.append(("slot_ledger", op.owner_id, "expended_resources", op))
+            continue
         if item_use and type(op) not in (
             delta.InventoryConsume,
             delta.HPDelta,
@@ -140,7 +170,15 @@ def delta_changes(request, result):
             continue
         target = getattr(op, "target_id", None)
         actor_id = getattr(op, "actor_id", None)
-        if target is not None and (target not in actors or target != request.payload.target_id):
+        if target is not None and (
+            target not in actors
+            or (
+                target != request.payload.target_id
+                and not (
+                    hold_mode and type(op) is delta.ConditionsUpdate and target in affected_actors
+                )
+            )
+        ):
             _invalid("Damage/status delta must belong to the declared target")
         allowed_owners = budget_owners
         if type(op) is delta.ActionBudgetUpdate:
@@ -360,7 +398,186 @@ def exploration_potion_changes(request, result):
     )
 
 
-def validate_dnd_result(request, result, *, loader=None):
+def hold_effect_changes(request, result):
+    """Guard RE's typed Hold Person graph against the fixed encounter input."""
+    snapshot = request.state_snapshot
+    combat = snapshot.combat_state
+    payload = request.payload
+    operations = result.state_delta.operations
+    graphs = [op for op in operations if type(op) is delta.HoldPersonGraphCreate]
+    lifecycles = [op for op in operations if type(op) is delta.EffectLifecycleUpdate]
+    concentrations = [op for op in operations if type(op) is delta.ConcentrationUpdate]
+    cast = payload.intent_type == "cast_spell"
+    if cast:
+        if (
+            payload.spell_id != "hold-person"
+            or payload.slot_level != 2
+            or payload.target_ids
+            or len(graphs) != 1
+            or lifecycles
+            or concentrations
+            or snapshot.effect_states
+            or combat.concentration_chain
+            or combat.effect_lifecycles
+            or combat.conditions_by_effect
+        ):
+            _invalid("Hold Person requires one fresh level-two target graph")
+        graph = graphs[0]
+        if (
+            graph.combat_id != combat.combat_id
+            or graph.source_id != request.actor_id
+            or graph.spell_source_id != payload.spell_source_id
+            or graph.actor_ids != combat.initiative_ids
+            or graph.selected_target_ids != (payload.target_id,)
+            or graph.applied_turn_serial != combat.turn_serial
+            or graph.applied_round != combat.round_number
+            or len(graph.entries) != 1
+        ):
+            _invalid("Hold Person graph differs from bound request")
+        actors = {a.entity_id: a for a in snapshot.character_states}
+        if payload.target_id not in actors or actors[payload.target_id].creature_type != "humanoid":
+            _invalid("Hold Person target is not Humanoid")
+        if (
+            sum(type(op) is delta.ResourceUpdate for op in operations) != 1
+            or sum(type(op) is delta.SlotSpendLedgerUpdate for op in operations) != 1
+        ):
+            _invalid("Hold Person payment is incomplete")
+        mode = "cast"
+    else:
+        if graphs or not snapshot.effect_states or len(combat.concentration_chain) != 1:
+            _invalid("Hold Person lifecycle requires one existing graph")
+        mode = "existing"
+    source = request.actor_id if cast else next(iter(combat.concentration_chain))
+    old_effects = {(e.target_id, e.id, e.origin): e for e in snapshot.effect_states}
+    old_clocks = {e.identity: e for e in combat.effect_lifecycles}
+    old_links = {e.identity: e for e in combat.conditions_by_effect}
+    if len(old_effects) != len(snapshot.effect_states) or len(concentrations) > 1:
+        _invalid("Duplicate effect or concentration transition")
+    actors = {a.entity_id: a for a in snapshot.character_states}
+    for operation in operations:
+        if type(operation) is delta.ConditionsUpdate:
+            if operation.target_id not in actors:
+                _invalid("Hold Person condition target is outside encounter")
+            before = actors[operation.target_id].conditions
+            independent = [c for c in before if c.source_effect_id is None]
+            after_independent = [c for c in operation.value if c.source_effect_id is None]
+            if list(operation.expected) != list(before) or after_independent != independent:
+                _invalid("Hold Person changed independent conditions")
+    if cast:
+        payment = next(op for op in operations if type(op) is delta.ResourceUpdate)
+        ledger = next(op for op in operations if type(op) is delta.SlotSpendLedgerUpdate)
+        if (
+            ledger.slot_kind != payment.expected.kind
+            or ledger.level != payment.expected.level
+            or payment.value.kind != payment.expected.kind
+            or payment.value.level != payment.expected.level
+        ):
+            _invalid("Hold Person payment and ledger disagree")
+        submitted = [event for event in result.proposed_events if event.type == "intent_submitted"]
+        saves = [event for event in result.proposed_events if event.type == "save_rolled"]
+        applied = [event for event in result.proposed_events if event.type == "effect_applied"]
+        if (
+            len(submitted) != 1
+            or submitted[0].actor_id != request.actor_id
+            or submitted[0].intent_type != "cast_spell"
+            or submitted[0].spell_id != "hold-person"
+            or submitted[0].target_id != payload.target_id
+            or len(saves) != 1
+            or saves[0].target_id != payload.target_id
+            or saves[0].ability != "wis"
+            or saves[0].dc != graph.save_dc
+            or len(applied) != 1
+            or (
+                applied[0].effect.target_id,
+                applied[0].effect.id,
+                applied[0].effect.origin,
+            )
+            != graph.chain[0]
+        ):
+            _invalid("Hold Person cast evidence differs from its graph")
+    final_effects = dict(old_effects)
+    for op in lifecycles:
+        if (
+            op.combat_id != combat.combat_id
+            or op.identity not in old_effects
+            or op.expected_effect != old_effects[op.identity]
+            or op.expected_lifecycle != old_clocks.get(op.identity)
+            or op.expected_lineage != old_links.get(op.identity)
+        ):
+            _invalid("Effect lifecycle pre-value differs from fixed input")
+        if op.effect is None:
+            if not any(
+                event.type == "effect_expired"
+                and (event.target_id, event.effect_id, event.origin) == op.identity
+                for event in result.proposed_events
+            ):
+                _invalid("Effect removal lacks matching expiry evidence")
+            final_effects.pop(op.identity)
+        else:
+            if (
+                op.lifecycle.state.last_repeat_turn_serial != combat.turn_serial
+                or not any(
+                    event.type == "turn_phase"
+                    and event.phase == "turn_end"
+                    and event.actor_id == op.identity[0]
+                    for event in result.proposed_events
+                )
+                or not any(
+                    event.type == "save_rolled"
+                    and event.target_id == op.identity[0]
+                    and event.ability == "wis"
+                    and not event.succeeded
+                    for event in result.proposed_events
+                )
+            ):
+                _invalid("Repeat-save clock lacks its target TurnEnd evidence")
+            final_effects[op.identity] = op.effect
+    if len({op.identity for op in lifecycles}) != len(lifecycles):
+        _invalid("Duplicate effect lifecycle transition")
+    if cast:
+        final_effects = {
+            (e.effect.target_id, e.effect.id, e.effect.origin): e.effect for e in graph.entries
+        }
+    if concentrations:
+        op = concentrations[0]
+        caster = next(a for a in snapshot.character_states if a.entity_id == source)
+        if (
+            op.combat_id != combat.combat_id
+            or op.source_id != source
+            or op.expected_effect_id != caster.concentration_effect_id
+            or op.expected_chain != tuple(combat.concentration_chain[source])
+            or op.expected_rounds != combat.concentration_rounds_remaining[source]
+        ):
+            _invalid("Concentration pre-value differs from fixed input")
+        if op.rounds == op.expected_rounds - 1 and not any(
+            event.type == "turn_phase" and event.phase == "turn_end" and event.actor_id == source
+            for event in result.proposed_events
+        ):
+            _invalid("Concentration tick lacks caster TurnEnd")
+        if (
+            not op.chain
+            and not any(
+                event.type == "concentration_dropped" and event.target_id == source
+                for event in result.proposed_events
+            )
+            and not any(event.type == "effect_expired" for event in result.proposed_events)
+        ):
+            _invalid("Concentration removal lacks expiry or drop evidence")
+        chain = op.chain
+    else:
+        chain = graph.chain if cast else tuple(combat.concentration_chain[source])
+    if set(chain) != set(final_effects) or len(chain) != len(final_effects):
+        _invalid("Hold Person graph transition is incomplete")
+    base = delta_changes(request, result, hold_mode=mode)
+    effects = (
+        ([("hold_graph", source, "create", graph)] if cast else [])
+        + [("hold_lifecycle", op.identity, "update", op) for op in lifecycles]
+        + [("hold_concentration", source, "update", op) for op in concentrations]
+    )
+    return (*base, *effects)
+
+
+def validate_dnd_result(request, result, *, loader=None, hold_candidate=False):
     """Strictly restore an RE result and validate request, binding, read version and Delta."""
     try:
         result = RuleEvaluationResult.model_validate(copy.deepcopy(result))
@@ -424,11 +641,22 @@ def validate_dnd_result(request, result, *, loader=None):
     if getattr(request.payload, "intent_type", None) == "cast_spell":
         if loader is None:
             _invalid("Spell result requires its bound rules loader")
+        if hold_candidate and request.payload.spell_id == "hold-person":
+            return result, hold_effect_changes(request, result)
         mechanism = ordinary_spell_mechanism(loader, request.payload.spell_id)
         if mechanism is None:
             _invalid("Accepted spell is outside the bound ordinary mechanism")
         activity_id = loader.get_spell(request.payload.spell_id).activities[0].id
         return result, ordinary_spell_changes(request, result, mechanism, activity_id)
+    if (
+        hold_candidate
+        and request.state_snapshot.effect_states
+        and (
+            request.operation_kind == "combat.intent"
+            and request.payload.intent_type in {"pass", "attack"}
+        )
+    ):
+        return result, hold_effect_changes(request, result)
     return result, (
         closure_changes(request, result)
         if request.operation_kind == "combat.close"
@@ -733,7 +961,7 @@ class RulesAdapter:
         """Invoke stateless evaluation with the selected fixed rules loader."""
         return await evaluate(request, loader=self.loader)
 
-    def _dnd_capability(self, payload, actor_id, snapshot):
+    def _dnd_capability(self, payload, actor_id, snapshot, *, hold_candidate=False):
         """Determine command support from actual actor, monster and operation state."""
         if type(payload) is CheckPayload:
             return "pending_choice_unsupported" if payload.dc is None else None
@@ -762,6 +990,27 @@ class RulesAdapter:
                 return "intent.capability"
             canonical = get_default_ruleset()
             mechanism = ordinary_spell_mechanism(canonical, payload.spell_id)
+            if hold_candidate and payload.spell_id == "hold-person":
+                basic = type(payload)(
+                    intent_type="cast_spell",
+                    source_id=payload.source_id,
+                    spell_id="hold-person",
+                    target_id=payload.target_id,
+                    slot_level=payload.slot_level,
+                    spell_source_id=payload.spell_source_id,
+                )
+                if (
+                    payload != basic
+                    or payload.slot_level != 2
+                    or payload.source_id not in (None, actor_id)
+                    or payload.target_id is None
+                    or payload.spell_source_id is None
+                    or actor_id not in snapshot.combat_state.party_ids
+                    or snapshot.combat_state.pending_reactions
+                    or snapshot.effect_states
+                ):
+                    return "spell.capability"
+                return None
             if mechanism is None:
                 return "intent.capability"
             spell = canonical.get_spell(payload.spell_id)
@@ -789,6 +1038,15 @@ class RulesAdapter:
                 return "spell.capability"
             return None
         if payload.intent_type != "attack":
+            if hold_candidate and payload.intent_type == "pass":
+                basic = type(payload)(intent_type="pass", source_id=payload.source_id)
+                if (
+                    payload == basic
+                    and payload.source_id in (None, actor_id)
+                    and snapshot.effect_states
+                    and len(snapshot.combat_state.concentration_chain) == 1
+                ):
+                    return None
             return "intent.capability"
         selected = (
             payload.weapon_instance_id
@@ -813,12 +1071,20 @@ class RulesAdapter:
         """
         self.store.require_write()
         sid = row["session_id"]
+        effect_updates = any(component.startswith("hold_") for component, _, _, _ in changes)
+        for component, _, _, operation in changes:
+            if component == "hold_concentration":
+                self.characters.effects.assert_concentration(sid, operation)
         for component, identity, field, value in changes:
             if component == "actor" and field == "conditions":
                 independent = [
                     condition for condition in value if condition["source_effect_id"] is None
                 ]
-                if self.characters.effects.actor_conditions(sid, identity, independent) != value:
+                if (
+                    not effect_updates
+                    and self.characters.effects.actor_conditions(sid, identity, independent)
+                    != value
+                ):
                     _invalid("Delta changed effect-linked conditions")
         for component, identity, field, value in changes:
             if component == "item" and field == "consume":
@@ -843,6 +1109,28 @@ class RulesAdapter:
                     value.expected,
                     value.value,
                 )
+            elif component == "hold_graph":
+                self.characters.effects.create_concentration(
+                    sid,
+                    command_id,
+                    identity,
+                    value.concentration_id,
+                    value.rounds,
+                    (
+                        {
+                            "effect": entry.effect.model_dump(mode="json"),
+                            "conditions": list(entry.lineage.statuses),
+                            "lifecycle": entry.clock.model_dump(mode="json")["state"]
+                            if entry.clock
+                            else None,
+                        }
+                        for entry in value.entries
+                    ),
+                )
+            elif component == "hold_lifecycle":
+                self.characters.effects.apply_lifecycle(sid, value)
+            elif component == "hold_concentration":
+                self.characters.effects.apply_concentration(sid, value)
             elif component == "actor" and field == "hp_current":
                 self.characters.set_hp(sid, identity, value)
             elif component == "actor":
@@ -868,6 +1156,15 @@ class RulesAdapter:
                 self.records.update_ledger(sid, identity, value)
             else:
                 _invalid("Unknown internal component edit")
+        if effect_updates:
+            for component, identity, field, value in changes:
+                if component == "actor" and field == "conditions":
+                    independent = [c for c in value if c["source_effect_id"] is None]
+                    if (
+                        self.characters.effects.actor_conditions(sid, identity, independent)
+                        != value
+                    ):
+                        _invalid("Effect-linked conditions differ after adoption")
 
     def request(self, command, package, snapshot, rng, *, row=None):
         """Build a rules request with durable Session identity and isolated fixed inputs."""
