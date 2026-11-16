@@ -1,4 +1,4 @@
-"""Validate the narrow Cure Wounds combat Delta before SM adopts any facts."""
+"""Validate supported ordinary spell Deltas before SM adopts any facts."""
 
 from dnd5e_engine import evaluation_delta as delta
 from dnd5e_engine.evaluation_actor import combatant
@@ -12,13 +12,17 @@ from .errors import StateMachineError
 from .package import canonical_json
 
 
+class UnsupportedSpellConsequence(Exception):
+    """Signal a valid but not yet adopted spell consequence before any write."""
+
+
 def _invalid(message):
     """Reject a spell result that cannot be adopted as one complete payment."""
     raise StateMachineError("invalid_rule_result", message)
 
 
-def cure_wounds_changes(request, result):
-    """Validate the complete one-slot healing result against the fixed snapshot.
+def ordinary_spell_changes(request, result, mechanism, activity_id):
+    """Validate one immediate healing or save-damage result against fixed input.
 
     The returned edits are candidates for the caller's existing write transaction.
     Resource and combat expenditure guards must both be applied there; this
@@ -28,10 +32,40 @@ def cure_wounds_changes(request, result):
     payload = request.payload
     caster = request.actor_id
     target = payload.target_id
+    spell_id = payload.spell_id
+    healing = mechanism == "healing"
+    slot_paid = payload.slot_level not in (None, 0)
+    if mechanism not in {"healing", "save_damage"}:
+        _invalid("Unsupported ordinary spell mechanism")
+    if not healing and any(
+        type(op)
+        in {
+            delta.TempHPSet,
+            delta.DeathStateUpdate,
+            delta.ConditionsUpdate,
+            delta.ProcessedDamageUpdate,
+            delta.DeathLedgerUpdate,
+        }
+        for op in result.state_delta.operations
+    ):
+        raise UnsupportedSpellConsequence
     data = snapshot.model_dump(mode="json")
     actors = {actor["entity_id"]: actor for actor in data["character_states"]}
     combat = data["combat_state"]
     pools = data["resource_state"]["pools"]
+    if not healing:
+        lethal = [
+            op
+            for op in result.state_delta.operations
+            if type(op) is delta.HPDelta and op.resulting_hp == 0
+        ]
+        if lethal:
+            if any(
+                type(op) in {delta.DeathStateUpdate, delta.DeathLedgerUpdate}
+                for op in result.state_delta.operations
+            ):
+                raise UnsupportedSpellConsequence
+            _invalid("Zero-HP spell damage omitted its life-state consequences")
     if caster not in snapshot.combat_state.party_ids or target not in actors:
         _invalid("Spell actor or target is outside the admitted encounter")
     if snapshot.combat_state.pending_reactions or snapshot.effect_states:
@@ -39,25 +73,33 @@ def cure_wounds_changes(request, result):
     submitted = [event for event in result.proposed_events if event.type == "intent_submitted"]
     cast = [event for event in result.proposed_events if event.type == "spell_cast"]
     healed = [event for event in result.proposed_events if event.type == "healing_applied"]
+    saved = [event for event in result.proposed_events if event.type == "save_rolled"]
+    damaged = [event for event in result.proposed_events if event.type == "damage_applied"]
     if (
         len(submitted) != 1
         or submitted[0].actor_id != caster
         or submitted[0].intent_type != "cast_spell"
-        or submitted[0].spell_id != "cure-wounds"
+        or submitted[0].spell_id != spell_id
         or submitted[0].target_id != target
         or len(cast) != 1
         or cast[0].actor_id != caster
-        or cast[0].spell_id != "cure-wounds"
-        or cast[0].slot_level != 1
-        or len(healed) != 1
-        or healed[0].target_id != target
-        or healed[0].amount < 0
+        or cast[0].spell_id != spell_id
+        or cast[0].slot_level != (payload.slot_level if slot_paid else None)
+        or (len(healed) != 1 if healing else bool(healed))
+        or (healing and (healed[0].target_id != target or healed[0].amount < 0))
+        or (bool(saved or damaged) if healing else len(saved) != 1 or len(damaged) != 1)
+        or (
+            not healing
+            and (saved[0].target_id != target or any(e.target_id != target for e in damaged))
+        )
         or any(
             event.type
             not in {
                 "intent_submitted",
                 "spell_cast",
                 "healing_applied",
+                "save_rolled",
+                "damage_applied",
                 "turn_phase",
                 "turn_ended",
                 "turn_started",
@@ -66,7 +108,7 @@ def cure_wounds_changes(request, result):
             for event in result.proposed_events
         )
     ):
-        _invalid("Cure Wounds events differ from the submitted caster and target")
+        _invalid("Spell events differ from the submitted caster and target")
     changes = []
     seen = set()
 
@@ -84,6 +126,7 @@ def cure_wounds_changes(request, result):
 
     resource = ledger = None
     hp = None
+    attribution = sequence = None
     paid_action = False
     turn_advanced = any(type(op) is delta.TurnUpdate for op in result.state_delta.operations)
     turn = next(
@@ -168,10 +211,10 @@ def cure_wounds_changes(request, result):
         _invalid("Spell turn handoff events differ from the accepted transition")
     for op in result.state_delta.operations:
         if type(op) is delta.ResourceUpdate:
-            if resource is not None or op.owner_id != caster or op.amount != -1:
-                _invalid("Cure Wounds requires one owned slot payment")
-            if op.expected.kind != "spell_slot" or op.expected.level != 1:
-                _invalid("Cure Wounds requires an ordinary level-one slot")
+            if resource is not None or not slot_paid or op.owner_id != caster or op.amount != -1:
+                _invalid("Spell requires one owned slot payment")
+            if op.expected.kind != "spell_slot" or op.expected.level != payload.slot_level:
+                _invalid("Spell slot level differs from the request")
             old = op.expected.model_dump(mode="json")
             new = op.value.model_dump(mode="json")
             if old not in pools or new["current"] != old["current"] - 1:
@@ -186,7 +229,12 @@ def cure_wounds_changes(request, result):
             resource = op
             changes.append(("resource", caster, op.pool_id, (old["current"], 1)))
         elif type(op) is delta.SlotSpendLedgerUpdate:
-            if ledger is not None or op.owner_id != caster or op.combat_id != combat["combat_id"]:
+            if (
+                ledger is not None
+                or not slot_paid
+                or op.owner_id != caster
+                or op.combat_id != combat["combat_id"]
+            ):
                 _invalid("Slot spend ledger has a different owner or combat")
             if combat["expended_resources"].get(caster) != op.expected:
                 _invalid("Slot spend ledger pre-value differs")
@@ -194,12 +242,31 @@ def cure_wounds_changes(request, result):
             ledger = op
             changes.append(("slot_ledger", caster, "expended_resources", op))
         elif type(op) is delta.HPDelta:
-            if hp is not None or op.target_id != target or op.amount < 0:
-                _invalid("Cure Wounds changed an unrelated HP value")
-            if op.resulting_hp > actors[target]["hp_max"]:
-                _invalid("Cure Wounds exceeds target maximum HP")
+            if (
+                hp is not None
+                or op.target_id != target
+                or (op.amount < 0 if healing else op.amount > 0)
+            ):
+                _invalid("Spell changed an unrelated HP value")
+            if healing and op.resulting_hp > actors[target]["hp_max"]:
+                _invalid("Spell healing exceeds target maximum HP")
             edit("actor", target, "hp_current", op.expected_hp, op.resulting_hp)
             hp = op
+        elif type(op) is delta.DamageAttributionUpdate:
+            if healing or attribution is not None or op.target_id != target or op.value != caster:
+                _invalid("Spell damage attribution differs from the caster")
+            edit("actor", target, "last_damaged_by", op.expected, op.value)
+            attribution = op
+        elif type(op) is delta.DamageSequenceUpdate:
+            if (
+                healing
+                or sequence is not None
+                or op.combat_id != combat["combat_id"]
+                or op.value != op.expected + 1
+            ):
+                _invalid("Spell damage sequence differs from one resolved instance")
+            edit("combat", op.combat_id, "damage_instance_sequence", op.expected, op.value)
+            sequence = op
         elif type(op) is delta.ActionBudgetUpdate:
             if op.actor_id not in ({caster, next_actor} if turn_advanced else {caster}):
                 _invalid("Spell changed an unrelated action budget")
@@ -285,7 +352,7 @@ def cure_wounds_changes(request, result):
                 ("ledger", op.actor_id, "movement_ledgers", op.value.model_dump(mode="json"))
             )
         else:
-            _invalid("Unsupported Cure Wounds consequence")
+            _invalid("Unsupported ordinary spell consequence")
     if solo_wrap and not paid_action:
         paid_action = True
     if any(
@@ -311,18 +378,37 @@ def cure_wounds_changes(request, result):
             _invalid("Outgoing caster budget differs from its paid turn end")
     if combat["movement_ledgers"].get(next_actor) != fresh_ledger:
         _invalid("Next actor omitted or changed its ordinary movement ledger")
-    if (
-        resource is None
-        or ledger is None
-        or not paid_action
-        or ledger.slot_kind != resource.value.kind
-        or ledger.level != resource.value.level
+    if not paid_action or (resource is None) == slot_paid or (ledger is None) == slot_paid:
+        _invalid("Spell action and slot payment are incomplete")
+    if resource is not None and (
+        ledger.slot_kind != resource.value.kind or ledger.level != resource.value.level
     ):
-        _invalid("Cure Wounds payment and ledger are incomplete")
+        _invalid("Spell payment and ledger disagree")
     target_before = next(actor for actor in snapshot.character_states if actor.entity_id == target)
-    expected_healing = min(healed[0].amount, target_before.hp_max - target_before.hp_current)
-    if hp is None and expected_healing != 0 or hp is not None and hp.amount != expected_healing:
-        _invalid("Cure Wounds HP differs from the healing event")
+    if healing:
+        expected_healing = min(healed[0].amount, target_before.hp_max - target_before.hp_current)
+        if hp is None and expected_healing != 0 or hp is not None and hp.amount != expected_healing:
+            _invalid("Spell HP differs from the healing event")
+    else:
+        damage = sum(event.amount for event in damaged)
+        if any(event.source_actor_id != caster or event.amount < 0 for event in damaged):
+            _invalid("Spell damage event attribution differs from the caster")
+        if any(
+            event.source_id != f"spell:{spell_id}:{activity_id}"
+            or event.source_parent_id is not None
+            or event.is_crit
+            for event in damaged
+        ):
+            _invalid("Spell damage event provenance differs from the cast activity")
+        expected_damage = min(damage, target_before.hp_current)
+        if hp is None and expected_damage != 0 or hp is not None and hp.amount != -expected_damage:
+            _invalid("Spell HP differs from the damage event")
+        if bool(damaged) != (sequence is not None):
+            _invalid("Spell damage metadata is incomplete")
+        if damaged[0].damage_instance_id != (f"damage:{sequence.value}:{caster}:{target}"):
+            _invalid("Spell damage instance differs from the accepted sequence")
+        if damaged and actors[target]["last_damaged_by"] != caster:
+            _invalid("Spell damage attribution is incomplete")
     data.update(
         character_states=[actors[a.entity_id] for a in snapshot.character_states],
         combat_state=combat,

@@ -23,7 +23,13 @@ from dnd5e_engine.evaluation_contracts import (
 )
 from dnd5e_engine.evaluation_preflight import template_support_failure
 from dnd5e_engine.evaluation_rng import RNGState
-from dnd5e_engine.evaluation_ruleset import RulesetBinding, RulesetBindingError, verify_ruleset
+from dnd5e_engine.evaluation_ruleset import (
+    RulesetBinding,
+    RulesetBindingError,
+    get_default_ruleset,
+    verify_ruleset,
+)
+from dnd5e_engine.evaluation_spells import ordinary_spell_mechanism
 from dnd5e_engine.evaluation_state import CharacterStateV2, CombatSnapshot, NonCombatSnapshot
 from dnd5e_engine.events import HealingApplied, IntentSubmitted
 from pydantic import ValidationError
@@ -35,7 +41,7 @@ from .errors import StateMachineError
 from .package import canonical_json
 from .scoped_reads import scoped_read
 from .session_access import _binding
-from .spell_adoption import cure_wounds_changes
+from .spell_adoption import ordinary_spell_changes
 
 
 def _invalid(message):
@@ -354,7 +360,7 @@ def exploration_potion_changes(request, result):
     )
 
 
-def validate_dnd_result(request, result):
+def validate_dnd_result(request, result, *, loader=None):
     """Strictly restore an RE result and validate request, binding, read version and Delta."""
     try:
         result = RuleEvaluationResult.model_validate(copy.deepcopy(result))
@@ -416,7 +422,13 @@ def validate_dnd_result(request, result):
             _invalid("Potion healing differs from the rolled event")
         return result, changes
     if getattr(request.payload, "intent_type", None) == "cast_spell":
-        return result, cure_wounds_changes(request, result)
+        if loader is None:
+            _invalid("Spell result requires its bound rules loader")
+        mechanism = ordinary_spell_mechanism(loader, request.payload.spell_id)
+        if mechanism is None:
+            _invalid("Accepted spell is outside the bound ordinary mechanism")
+        activity_id = loader.get_spell(request.payload.spell_id).activities[0].id
+        return result, ordinary_spell_changes(request, result, mechanism, activity_id)
     return result, (
         closure_changes(request, result)
         if request.operation_kind == "combat.close"
@@ -745,17 +757,28 @@ class RulesAdapter:
             if entry.item_slug != "potion-of-healing":
                 return "item.capability"
             return None
-        if payload.intent_type == "cast_spell" and payload.spell_id == "cure-wounds":
+        if payload.intent_type == "cast_spell":
+            if payload.spell_id is None:
+                return "intent.capability"
+            canonical = get_default_ruleset()
+            mechanism = ordinary_spell_mechanism(canonical, payload.spell_id)
+            if mechanism is None:
+                return "intent.capability"
+            spell = canonical.get_spell(payload.spell_id)
+            if spell is None:
+                return "spell.capability"
+            level = spell.level
             basic = type(payload)(
                 intent_type="cast_spell",
                 source_id=payload.source_id,
-                spell_id="cure-wounds",
+                spell_id=payload.spell_id,
                 target_id=payload.target_id,
-                slot_level=1,
+                slot_level=payload.slot_level,
                 spell_source_id=payload.spell_source_id,
             )
             if (
                 payload != basic
+                or payload.slot_level not in ((None, 0) if level == 0 else (level,))
                 or payload.source_id not in (None, actor_id)
                 or payload.spell_source_id is None
                 or payload.target_id is None

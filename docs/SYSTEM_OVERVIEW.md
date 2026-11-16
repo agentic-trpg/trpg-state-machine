@@ -45,6 +45,8 @@ WorldFacts 按实例删除并记录消费，CharacterFacts 写入 HP，详见
 须先结算，之后可以重试喝药命令。
 SPELL-01 沿同一 RuleExecution 接入战斗内一环 Cure Wounds，角色余额与本场
 支出分别归 CharacterFacts 和 CombatRecords，治疗及支付一起采用。
+SPELL-02 候选把即时治疗与单目标豁免伤害接到同一普通法术采用路径，
+机制支持由冻结 RE 分类；已识别的生命／临时生命等未接线后果拒绝。
 完整 Agent Host、通用规则采用、完整活跃战斗恢复及未来多人负载不是已验收能力。
 
 ## 2. 公开入口和主要协作模块

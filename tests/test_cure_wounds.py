@@ -1,6 +1,7 @@
 """Public Cure Wounds acceptance with an authored class source and real RE assets."""
 
 from dataclasses import replace
+from random import Random
 
 import pytest
 from dnd5e_engine.evaluation_contracts import CombatIntentPayload
@@ -9,6 +10,7 @@ from dnd5e_engine.evaluation_delta import (
     AttackBudgetState,
     MovementLedgerUpdate,
 )
+from dnd5e_engine.evaluation_rng import RNGState
 from dnd5e_engine.evaluation_ruleset import ruleset_binding
 from dnd5e_srd_data import BundledAssetLoader, MemoryAssetLoader
 from dnd_support import create, initialize
@@ -22,7 +24,7 @@ SOURCE = "class:cleric"
 SPELL = "cure-wounds"
 
 
-def cure_loader(*, equipped=False):
+def cure_loader(*, equipped=False, extra_spells=()):
     """Bind the canonical first-level cleric and Cure Wounds to authored items."""
     base = item_loader()
     canonical = BundledAssetLoader()
@@ -36,7 +38,7 @@ def cure_loader(*, equipped=False):
                 *(("divine-order-protector",) if equipped else ()),
             )
         ],
-        spells=[canonical.get_spell(SPELL)],
+        spells=[canonical.get_spell(spell) for spell in (SPELL, *extra_spells)],
         items=list(base._items.values())
         + ([canonical.get_item(s) for s in ("mace", "chain-shirt")] if equipped else []),
         monsters=list(base._monsters.values()),
@@ -55,9 +57,13 @@ def cure_world(
     next_actor_spent=False,
     caster_spent_movement=False,
     equipped=False,
+    extra_spells=(),
+    rng_seed=0,
+    target_hp=None,
+    same_attribution=False,
 ):
     """Create and initialize one combat from a complete, original Package."""
-    loader = cure_loader(equipped=equipped)
+    loader = cure_loader(equipped=equipped, extra_spells=extra_spells)
     data = item_data()
     data["manifest"]["ruleset_binding"] = ruleset_binding(loader).model_dump(mode="json")
     data["manifest"]["package_version"] = "spell-01/1"
@@ -88,6 +94,7 @@ def cure_world(
             )
     next(actor for actor in data["actors"] if actor["actor_id"] == NPC)["initial_cell"] = "1,0"
     for foundation in data["rule_bindings"].values():
+        foundation["rng_state"] = RNGState.capture(Random(rng_seed)).model_dump(mode="json")
         snapshot = foundation["snapshot"]
         snapshot["snapshot_schema_version"] = "engine-snapshot/20"
         pc = snapshot["character_states"][0]
@@ -111,7 +118,14 @@ def cure_world(
                 ledger = snapshot["combat_state"]["movement_ledgers"][pc["entity_id"]]
                 ledger.update(spent_ft=10, distance_ft=10)
         npc = snapshot["character_states"][1]
-        npc.update(hp_current=0 if solo_dead else hp, hp_max=50, is_alive=not solo_dead)
+        npc.update(
+            hp_current=0 if solo_dead else (hp if target_hp is None else target_hp),
+            hp_max=50,
+            is_alive=not solo_dead,
+            **({"granted_features": []} if extra_spells else {}),
+        )
+        if same_attribution:
+            npc["last_damaged_by"] = pc["entity_id"]
         if next_actor_spent:
             npc.update(action_available=False, action_taken_this_turn=True, movement_remaining=0)
         npc.pop("spells_known", None)
@@ -189,10 +203,13 @@ def cure_world(
                             "ability": "wis",
                             "spells": [
                                 {
-                                    "spell_id": SPELL,
-                                    "prepared_order": 0 if prepared else None,
+                                    "spell_id": spell,
+                                    "prepared_order": index
+                                    if prepared and loader.get_spell(spell).level
+                                    else None,
                                     "material": None,
                                 }
+                                for index, spell in enumerate((SPELL, *extra_spells))
                             ],
                         }
                     ],

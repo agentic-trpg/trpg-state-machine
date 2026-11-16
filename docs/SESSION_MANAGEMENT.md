@@ -13,6 +13,17 @@
 | 已提交但内存发布失败 | Store 以 `committed_publication_pending` 暂停该 Session 的当前态操作；受支持的恢复完成后同键重试返回原回执。 | [真实 RE 检定故障测试](../tests/test_session_memory_rng_failures.py)、[物品转移故障测试](../tests/test_session_memory_runtime.py) |
 | 活跃战斗跨进程 | 可按权限读取已持久化的审计事实及原回执；普通保存、恢复和新规则推进受 `combat_unrestorable` 限制。精确续玩属 Post-MVP。 | [独立进程回归](../tests/test_dnd_hardening.py)、[MC §8.2](https://github.com/agentic-trpg/agentic-trpg/blob/main/docs/MODULE_CONTRACTS.md#82-必须明确不支持的场景-open) |
 
+## 2026-11-16 SPELL-02 普通即时法术候选
+
+本候选沿既有 `RuleExecution` 公开战斗命令，使用冻结 RE 的普通法术机制分类，
+对单目标即时治疗和豁免伤害采用同一套行动／回合与事务围栏。已知戏法不要求
+准备或法术位；一环法术继续要求实际来源、准备和法术位支付。已验证
+Cure Wounds、Sacred Flame 的成功／失败豁免及第二个同类豁免法术
+Inflict Wounds。HP、最近伤害归因、伤害序号、法术位、本场支出、RNG、
+事件和回执沿既有事实 owner 和一次提交发布。零 HP、临时 HP、持续效果与
+反应后果仍在本候选采用范围外；已识别的生命后果返回持久
+`spell.capability` 拒绝，不提交支付或 RNG。活跃战斗跨进程恢复限制不变。
+
 ## 2026-11-16 SPELL-01 战斗治疗术与角色法术记录（候选）
 
 本节标题保留当时的候选语境。该受限能力已进入 SM main `4d62c6e`，当前覆盖见

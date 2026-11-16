@@ -5,7 +5,6 @@ from dataclasses import asdict, replace
 
 from dnd5e_engine.evaluation_contracts import (
     CheckPayload,
-    CombatIntentPayload,
     ExplorationItemUsePayload,
     ItemUsePayload,
 )
@@ -18,6 +17,7 @@ from .combat import process_id
 from .dnd_checks import world_effects_ready
 from .errors import StateMachineError
 from .rules_adapter import validate_dnd_result
+from .spell_adoption import UnsupportedSpellConsequence
 from .world_commands import OPENABLE_CHECK_OPERATIONS, CheckMechanism, PickLock
 
 
@@ -61,7 +61,6 @@ class RuleExecution:
             self.world.objects.mechanisms if mechanism_check else self.world.objects.openable
         )
         plan, prepare_error, rule_command = None, None, command
-        spell_prepared = True
 
         def exploration_item_error(value):
             """Check mode and protocol, deferring use while saved time work is unfinished."""
@@ -115,20 +114,6 @@ class RuleExecution:
                     prepare_error = exc.code
 
             self.sessions._npc_combat_target_guard(command, package, snapshot)
-            payload = command.payload
-            if (
-                type(payload) is CombatIntentPayload
-                and payload.intent_type == "cast_spell"
-                and payload.spell_id == "cure-wounds"
-                and row["world_version"] == command.expected_world_version
-            ):
-                spell_prepared = any(
-                    spell.spell_id == payload.spell_id
-                    and spell.source.source_id == payload.spell_source_id
-                    for spell in self.rules.characters.prepared_spells(
-                        command.session_id, command.actor_id
-                    )
-                )
             world_ready = (
                 world_effects_ready(self.world, row, command)
                 if row["world_version"] == command.expected_world_version
@@ -160,8 +145,38 @@ class RuleExecution:
             capability = self.rules._dnd_capability(
                 rule_command.payload, command.actor_id, snapshot
             )
-            if capability is None and not spell_prepared:
-                capability = "spell.source"
+            payload = rule_command.payload
+            if capability is None and getattr(payload, "intent_type", None) == "cast_spell":
+                casting = snapshot.casting_state
+                caster = (
+                    next(
+                        (entry for entry in casting.actors if entry.actor_id == command.actor_id),
+                        None,
+                    )
+                    if casting is not None
+                    else None
+                )
+                source = (
+                    next(
+                        (
+                            source
+                            for source in caster.sources
+                            if source.source_id == payload.spell_source_id
+                        ),
+                        None,
+                    )
+                    if caster is not None
+                    else None
+                )
+                selected = (
+                    source.prepared_spells
+                    if source is not None and payload.slot_level not in (None, 0)
+                    else source.known_spells
+                    if source is not None
+                    else ()
+                )
+                if payload.spell_id not in selected:
+                    capability = "spell.source"
         spec = (
             OpenableCheckRequest(
                 schema_version="engine-openable/1",
@@ -200,7 +215,10 @@ class RuleExecution:
                         "rule_evaluation_failed",
                         "Evaluator failed; original command may be retried",
                     ) from exc
-                result, changes = validate_dnd_result(request, result)
+                try:
+                    result, changes = validate_dnd_result(request, result, loader=self.rules.loader)
+                except UnsupportedSpellConsequence:
+                    capability = "spell.capability"
             self.rules._verify_dnd_binding(package, row)
         with self.store.transaction(write=True):
             row = self.sessions._session(command.session_id, package, context)
@@ -239,7 +257,7 @@ class RuleExecution:
                 status, error = "rejected", result.error.code
             else:
                 self.sessions._npc_combat_target_guard(command, package, build_snapshot(row))
-                result, changes = validate_dnd_result(request, result)
+                result, changes = validate_dnd_result(request, result, loader=self.rules.loader)
                 self._conn.execute("SAVEPOINT dnd_effects")
                 try:
                     if command.time_wait is not None:
