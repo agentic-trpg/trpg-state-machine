@@ -22,7 +22,7 @@ from trpg_state_machine.package import _validate
 from trpg_state_machine.rules_migration import migrate_package_16
 
 ROOT = Path(__file__).resolve().parents[1]
-PIN = "4504cbe7052a500f8ead48e6c213f529feee03fb"
+PIN = "7a72a9456ace41d3d5ec6d371381fe4fa7bfa753"
 BASELINE = "5ff7a807d5b29cceb4311dcb2fe5b1182ead6bd1"
 
 

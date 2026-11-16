@@ -460,6 +460,7 @@ def _validate(data: dict, *, allow_legacy_audit=False) -> AdventurePackage:
                 "dnd5e-evaluation/38",
                 "dnd5e-evaluation/39",
                 "dnd5e-evaluation/40",
+                "dnd5e-evaluation/41",
             )
             and not legacy_audit
         )
