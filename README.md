@@ -409,6 +409,17 @@ uv run --locked python -m ruff format --check .
 git diff --check
 ```
 
+日常开发可以根据 Git 改动运行相关测试。加 `--plan` 只查看测试范围和选中原因。
+
+```powershell
+uv run --locked python tools/run_affected_tests.py --plan
+uv run --locked python tools/run_affected_tests.py
+```
+
+里程碑验收或工具提示需要全量测试时，运行上面的 `uv run --locked python -m pytest -q`。
+
+通常在现有项目目录切换到开发分支，保留原有文件。只有切换分支或修改会影响已有工作、并行任务需要继续使用原目录，或你明确要求隔离时，才另开一个工作目录（Git worktree）。无关的本地文件可以留在原处。详见 [开发流程](AGENTS.md#development-workflow)。
+
 如果受限 Windows 环境无法使用系统临时目录，可把测试临时目录放在仓库内：
 
 ```powershell
