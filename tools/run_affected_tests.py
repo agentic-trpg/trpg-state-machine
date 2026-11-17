@@ -15,6 +15,7 @@ from pathlib import Path, PurePosixPath
 ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_COMMAND = "uv run --locked python -m pytest -q"
 RUNNER = "tools/run_affected_tests.py"
+SOURCE_AUDIT = "tests/test_domain_runtime.py"
 TEST_ROOTS = ("tests/", "tools/tests/")
 INPUT_ROOTS = ("src/", "tests/", "examples/", "tools/")
 ASSET_SUFFIXES = {".json", ".yaml", ".yml"}
@@ -401,6 +402,15 @@ def build_plan(root: Path, changed: list[str]) -> Plan:
             selected.update(test for test in tests if test.startswith("tools/tests/"))
         if not selected:
             plan.full.append(f"{path}: no tests found through supported dependencies")
+        source = PurePosixPath(path)
+        # test_production_writers_and_dependency_direction reads every direct *.py
+        # in this package. Its source audit alone cannot establish behavioral coverage.
+        if (
+            SOURCE_AUDIT in tests
+            and source.parent.as_posix() == "src/trpg_state_machine"
+            and source.suffix == ".py"
+        ):
+            selected.add(SOURCE_AUDIT)
         for test in sorted(selected):
             plan.tests.setdefault(test, []).append(path)
     default_tests = {test for test in tests if test.startswith("tests/")}

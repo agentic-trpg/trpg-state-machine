@@ -208,6 +208,40 @@ def test_unresolved_dynamic_consumer_blocks_partial_source_selection(repo):
     assert "Full SM test scope required" in result.stdout
 
 
+def test_source_audit_supplements_behavioral_tests_without_narrowing_unknown_scope(repo):
+    package = "src/trpg_state_machine"
+    known = f"{package}/runtime.py"
+    unknown = f"{package}/new_runtime.py"
+    audit = "tests/test_domain_runtime.py"
+    write(repo, known, "VALUE = 1\n")
+    write(repo, "tests/test_selected.py", "from trpg_state_machine import runtime\n")
+    write(
+        repo,
+        audit,
+        "from pathlib import Path\n"
+        "def test_production_writers_and_dependency_direction():\n"
+        '    root = Path(__file__).parents[1] / "src/trpg_state_machine"\n'
+        '    for path in root.glob("*.py"):\n'
+        "        assert path.read_text()\n",
+    )
+    git(repo, "add", ".")
+    git(repo, "commit", "-qm", "add source audit and runtime consumer")
+    write(repo, known, "VALUE = 2\n")
+    planned = run(repo, "--plan")
+    assert planned.returncode == 0, planned.stderr
+    assert f"{audit} <- {known}" in planned.stdout
+    assert f"tests/test_selected.py <- {known}" in planned.stdout
+    assert "Full SM test scope required" not in planned.stdout
+
+    write(repo, known, "VALUE = 1\n")
+    write(repo, unknown, "VALUE = 3\n")
+    broad = run(repo)
+    assert broad.returncode == 2, broad.stdout + broad.stderr
+    assert f"{audit} <- {unknown}" in broad.stdout
+    assert f"{unknown}: no tests found through supported dependencies" in broad.stdout
+    assert "tests/test_selected.py" not in broad.stdout
+
+
 def test_documentation_only_and_explicit_empty_scope(repo):
     empty = run(repo, "--plan", "--base", "HEAD")
     assert empty.returncode == 0, empty.stderr
