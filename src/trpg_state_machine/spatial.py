@@ -30,7 +30,7 @@ from .grid import GridService, cell_in_bounds
 from .models import TrustedContext
 from .package import AdventurePackage
 from .scoped_reads import scoped_read
-from .world_commands import WORLD_CAPABILITY_OPERATIONS
+from .world_commands import WORLD_CAPABILITY_OPERATIONS, PutItem, TakeItem
 
 
 @dataclass(frozen=True, slots=True)
@@ -371,9 +371,10 @@ class WorldHandler:
         return position
 
     def _validate_item_transfer(self, row, actor_id, operation, package):
-        """Validate item transfer placement, visibility and binding prerequisites."""
+        """Validate ground transfer placement, visibility and binding after dispatch checks
+        world capability.
+        """
         sid = row["session_id"]
-        self._world_operation_capability(row, operation)
         self._world_actor_ready(sid, actor_id)
         position = self._public_scope(sid, actor_id, package)
         # Establish local visibility before reporting any target-specific reason.
@@ -1031,7 +1032,9 @@ class WorldHandler:
         automatic = effect_origin is not None
         if automatic and type(operation) not in (SetSceneFlag, SetObjectState):
             raise StateMachineError("unsupported_operation", "Unsupported automatic world effect")
-        self._world_operation_capability(row, operation)
+        # Container transfers check world capability in their shared validator.
+        if type(operation) not in (PutItem, TakeItem):
+            self._world_operation_capability(row, operation)
         if type(operation) in ENVIRONMENT_OPERATIONS:
             return self.environment.operate(row, operation, package)
         if type(operation) in WORLD_CAPABILITY_OPERATIONS:
