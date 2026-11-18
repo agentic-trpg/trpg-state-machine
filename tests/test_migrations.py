@@ -8,8 +8,6 @@ from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from threading import Barrier
 
-from test_mechanics import mechanical_package as mechanical_package
-
 from trpg_state_machine import (
     StateMachine,
 )

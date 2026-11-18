@@ -5,7 +5,6 @@ import sqlite3
 import subprocess
 import sys
 from dataclasses import asdict, replace
-from pathlib import Path
 
 import pytest
 import yaml
@@ -21,8 +20,6 @@ from trpg_state_machine import MoveActor, StateMachine, StateMachineError, load_
 from trpg_state_machine.npc_results import NPCEvaluationResult
 from trpg_state_machine.npc_state import SourceReference
 from trpg_state_machine.perception import NPCContext
-
-ROOT = Path(__file__).resolve().parents[1]
 
 
 @pytest.fixture

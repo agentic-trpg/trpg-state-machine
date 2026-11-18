@@ -12,9 +12,6 @@ from trpg_state_machine import (
 )
 from trpg_state_machine.storage import CURRENT_SCHEMA_VERSION
 
-ROOT = Path(__file__).resolve().parents[1]
-HISTORY = {"33": "9ce60cb", "main34": "afe6871", "env34": "06c7af8"}
-
 
 def snapshot(db):
     with sqlite3.connect(db) as connection:

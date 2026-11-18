@@ -1,14 +1,7 @@
 """SQLite pending scans, on-demand prefixes, transaction snapshots and Schema 20."""
 
-import io
-import json
-import os
-import subprocess
-import sys
-import zipfile
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
-from pathlib import Path
 from threading import Barrier
 
 import pytest
@@ -24,8 +17,6 @@ from trpg_state_machine.perception_queue import (
     _NPC_PERCEPTION_CURSOR_SQL,
     _PENDING_PERCEPTION_SQL,
 )
-
-ROOT = Path(__file__).resolve().parents[1]
 
 
 def unrelated(sm, sid, package, count):
@@ -189,43 +180,6 @@ def test_cursor_reads_share_snapshot_with_observations_during_concurrent_commit(
         assert sm.npc_perception_cursor(sid, package, context=one) == seq + 100
         assert sm.read_observations(sid, package, context=one)[-1].observer_id == N1
         assert sm.npc_completed_cursor(sid, package, context=one) == seq - 1
-
-
-def schema19_save(tmp_path, data):
-    source = tmp_path / "schema19"
-    archive = subprocess.run(
-        ["git", "archive", "--format=zip", "e23cde5", "src"],
-        cwd=ROOT,
-        check=True,
-        capture_output=True,
-    ).stdout
-    with zipfile.ZipFile(io.BytesIO(archive)) as files:
-        files.extractall(source)
-    fixture = tmp_path / "fixture.json"
-    fixture.write_text(json.dumps(data), encoding="utf-8")
-    db = tmp_path / "legacy.db"
-    script = """
-import json,sys
-sys.path.append(sys.argv[1])
-from test_npc_perception_queue import prepared,change
-from trpg_state_machine import ObjectState,TrustedContext
-from pathlib import Path
-context=TrustedContext('authenticated:alice','player.alice')
-sm,db,sid,package,contexts=prepared(Path(sys.argv[2]),json.loads(Path(sys.argv[3]).read_text()),context)
-change(sm,sid,package,context,ObjectState.OPEN,'pending')
-sm.close()
-print(sid)
-"""
-    result = subprocess.run(
-        [sys.executable, "-c", script, str(ROOT / "tests"), str(tmp_path), str(fixture)],
-        cwd=tmp_path,
-        env=dict(os.environ, PYTHONPATH=str(source / "src")),
-        check=True,
-        capture_output=True,
-        text=True,
-    )
-    (tmp_path / "queue.db").rename(db)
-    return db, result.stdout.strip()
 
 
 def test_event_submit_and_pending_read_concurrent(tmp_path, queue_data, context):

@@ -1,4 +1,4 @@
-"""Real Schema38 producer, explicit upgrade, commit failure and snapshot isolation."""
+"""Container weights reflect candidate transfers and return to their original values on rollback."""
 
 import pytest
 from lock_support import CRED

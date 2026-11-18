@@ -614,12 +614,13 @@ or ACK protocol. It cannot recover lost evidence or invent senses for an old pin
 Package. Ambiguous schema-5 provenance stays unresolved conservatively. Package
 digest mismatches still refuse resume; no silent Package rewrite is provided.
 
-191 tests pass (168 existing + 23 stabilization cases), including real historical
-runtime subprocesses, schema 1–4 upgrades, already-upgraded schema-5 mixed history,
-nonzero RNG/receipts, concurrent initialization/upgrades, migration process exit,
-new Observation delivery and new unresolved cursor gaps. Historical tests require
-Git and the five fixed commits in `tests/test_migrations.py` to be available to
-`git archive`; shallow clones/source archives need that repository history first.
+The 2026-10-10 stabilization run passed 191 tests (168 existing + 23 stabilization
+cases), including real historical runtime subprocesses, schema 1–4 upgrades,
+already-upgraded schema-5 mixed history, nonzero RNG/receipts, concurrent
+initialization/upgrades, migration process exit, new Observation delivery and new
+unresolved cursor gaps. That run used `git archive` with five fixed commits listed
+in `tests/test_migrations.py` at the time. The current suite verifies fresh schema
+setup, rollback and refusal of legacy development databases without those archives.
 The original old Loader/Fixture tests are separate from forward-authored senses
 fixtures passed through the old trusted typed-package service boundary; they do
 not claim old YAML loaders supported senses.

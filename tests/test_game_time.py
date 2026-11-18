@@ -1,10 +1,8 @@
 """Abstract clock and schedule: actual SQLite atomicity, authorization and recovery."""
 
-import io
 import json
 import subprocess
 import sys
-import zipfile
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import asdict, replace
 from pathlib import Path
@@ -15,7 +13,7 @@ from test_dnd_ledger_scope import stored_state
 from test_npc_evaluation_tasks import evaluation_package as evaluation_package
 from test_npc_evaluation_tasks import prepare
 from test_npc_results import full_result
-from test_npc_state import SOURCE, enter, grant, request
+from test_npc_state import enter, grant, request
 
 from trpg_state_machine import (
     AdvanceGameTime,
@@ -26,8 +24,6 @@ from trpg_state_machine import (
 )
 from trpg_state_machine.npc_results import NPCActionIntent, NPCEvaluationResult
 from trpg_state_machine.package import _validate
-
-ROOT = Path(__file__).resolve().parents[1]
 
 
 def tick_command(sm, sid, package, context, next_tick, key=None, expected_tick=None):
@@ -417,53 +413,6 @@ def test_fresh_process_clock_activity_receipt_recovery(tmp_path, evaluation_pack
     assert data["receipt"] == asdict(receipt) | {"event_seqs": list(receipt.event_seqs)}
     assert data["npc"] == json.loads(json.dumps(asdict(view)))
     assert stored_state(db) == before
-
-
-def old_schema14(tmp_path):
-    old = tmp_path / "old"
-    archive = subprocess.run(
-        ["git", "archive", "--format=zip", "ca79751", "src"],
-        cwd=ROOT,
-        check=True,
-        capture_output=True,
-    ).stdout
-    with zipfile.ZipFile(io.BytesIO(archive)) as contents:
-        contents.extractall(old)
-    db = tmp_path / "old.db"
-    code = """
-import sys,json
-sys.path.insert(0,sys.argv[1])
-from dataclasses import replace
-from trpg_state_machine import (
- StateMachine,TrustedContext,CreateSessionRequest,PlayerSelection,SetSceneFlag)
-from trpg_state_machine import load_adventure_package
-from trpg_state_machine.perception import NPCContext
-from trpg_state_machine.npc_results import NPCEvaluationResult
-p=load_adventure_package(sys.argv[3]).package
-c=TrustedContext('authenticated:alice','player.alice',('npc.caretaker',))
-with StateMachine(sys.argv[2]) as sm:
- r=CreateSessionRequest('old',p.adventure_id,p.package_version,p.package_digest,(PlayerSelection(c.player_id,'pc_template.observer'),))
- sid=sm.create_session(r,p,context=c).session_id
- sm._apply(sid,p,SetSceneFlag('scene.platform','flag.lamp_checked',True),expected_world_version=0,context=c)
- sm.grant_npc_access(sid,'npc.caretaker','agent:npc.caretaker',p,context=c)
- n=NPCContext('agent:npc.caretaker',sid,'npc.caretaker')
- t=sm.create_npc_evaluation_task(sid,p,context=n,request_id='old.task',mode='interactive',reason='test',expected_npc_state_version=1)
- memory=sm.get_npc_view(sid,n.observer_id,p,context=n).memories[0]
- result=NPCEvaluationResult(memory_updates=(replace(memory,version=2,
-  text='Old committed memory.'),))
- sm.submit_npc_evaluation_result(t.evaluation_id,result,p,context=n)
- assert sm._conn.execute('PRAGMA user_version').fetchone()[0]==14
- print(json.dumps(sid))
-"""
-    result = subprocess.run(
-        [sys.executable, "-c", code, str(old / "src"), str(db), str(SOURCE)],
-        cwd=tmp_path,
-        capture_output=True,
-        text=True,
-        encoding="utf-8",
-        check=True,
-    )
-    return db, json.loads(result.stdout)
 
 
 def test_overlapping_schedule_fails_closed_without_partial_clock(

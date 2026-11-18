@@ -1,16 +1,9 @@
 """Real SQLite queues, independent NPC ordering, routing and historical runtimes."""
 
-import io
-import json
-import os
 import sqlite3
-import subprocess
-import sys
-import zipfile
 from concurrent.futures import ThreadPoolExecutor
 from copy import deepcopy
 from dataclasses import replace
-from pathlib import Path
 from threading import Barrier
 
 import pytest
@@ -35,8 +28,6 @@ from trpg_state_machine.npc_modes import MemoryGateJudgment
 from trpg_state_machine.npc_results import NPCEvaluationResult
 from trpg_state_machine.package import _validate
 from trpg_state_machine.perception import JudgmentResult, NPCContext, SignalJudgment
-
-ROOT = Path(__file__).resolve().parents[1]
 
 
 def negative(request):
@@ -551,31 +542,6 @@ def test_ttl_and_cognition_remain_independent_while_other_npc_unresolved(
             ).fetchone()[0]
             == 1
         )
-
-
-def historical_save(tmp_path, data, reference):
-    old = tmp_path / "old"
-    archive = subprocess.run(
-        ["git", "archive", "--format=zip", reference, "src"],
-        cwd=ROOT,
-        check=True,
-        capture_output=True,
-    ).stdout
-    with zipfile.ZipFile(io.BytesIO(archive)) as files:
-        files.extractall(old)
-    fixture = tmp_path / "package.json"
-    fixture.write_text(json.dumps(data), encoding="utf-8")
-    db = tmp_path / "historical.db"
-    result = subprocess.run(
-        [sys.executable, str(ROOT / "tests/_per3_legacy_worker.py"), str(db), str(fixture)],
-        cwd=tmp_path,
-        env=dict(os.environ, PYTHONPATH=str(old / "src")),
-        check=True,
-        capture_output=True,
-        text=True,
-        encoding="utf-8",
-    )
-    return db, json.loads(result.stdout)
 
 
 def test_queue_identity_and_completion_constraints_are_real_sqlite(tmp_path, queue_data, context):

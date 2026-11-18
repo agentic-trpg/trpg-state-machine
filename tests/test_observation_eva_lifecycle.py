@@ -6,7 +6,6 @@ import subprocess
 import sys
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import asdict, replace
-from pathlib import Path
 from threading import Barrier
 
 import pytest
@@ -24,8 +23,6 @@ from test_observation_retention import ob_package as ob_package
 from trpg_state_machine import ObjectState, SetObjectState, StateMachine, StateMachineError
 from trpg_state_machine.npc_results import NPCEvaluationResult
 from trpg_state_machine.perception import NPCContext
-
-ROOT = Path(__file__).resolve().parents[1]
 
 
 def eligible(sm, sid, package, npc, key="eligible"):

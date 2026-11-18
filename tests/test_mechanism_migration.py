@@ -1,4 +1,4 @@
-"""Schema31 table contract in a Schema33 save: exact preservation and atomic upgrade."""
+"""Reject an incompatible development Schema34 database without changing its stored data."""
 
 import sqlite3
 
