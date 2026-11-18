@@ -89,7 +89,10 @@ class ActorState:
 
 @dataclass(frozen=True, slots=True)
 class CharacterState:
-    """Carry detached HP, resources, inventory, effects and experience facts."""
+    """Carry detached HP, resources, inventory, effects and experience facts.
+
+    Effects are full records in a trusted snapshot and display summaries in a player view.
+    """
 
     actor_id: str
     current_hp: int

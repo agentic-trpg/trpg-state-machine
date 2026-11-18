@@ -372,7 +372,7 @@ class StateMachine(
                 pc["max_hp"],
                 self._characters.resource_balances(sid, pc["actor_id"]),
                 tuple(self._characters.carried_slugs(sid, pc["actor_id"])),
-                tuple(json.loads(pc["effects_json"])),
+                tuple(self._characters.effects.for_targets(sid, {pc["actor_id"]})),
                 pc["xp"],
             ),
             RNGState(
@@ -393,7 +393,10 @@ class StateMachine(
     def read_session(
         self, session_id: str, package: AdventurePackage, *, context: TrustedContext
     ) -> SessionSnapshot:
-        """Read a consistent detached runtime snapshot, verifying owner and all pins."""
+        """Read a consistent detached snapshot, verifying owner and all pins.
+
+        The character projection includes the PC's current effect records.
+        """
         with self._transaction():
             return self._snapshot(self._session(session_id, package, context), package)
 

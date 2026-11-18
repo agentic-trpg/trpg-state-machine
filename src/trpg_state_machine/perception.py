@@ -732,8 +732,9 @@ class PerceptionRuntime:
         return True
 
     def _game_scene_view(self, sid, package, context):
-        """Build the authorized game view, preserving unknown unsupported environment
-        inputs.
+        """Build the authorized game view, preserving unresolved environment status.
+
+        The player sees the IDs and names of enabled effects on their own character.
         """
         if (
             context.session_id != sid
@@ -778,17 +779,22 @@ class PerceptionRuntime:
             )
             own = None
             if context.role == "player":
+                actor_id = row["pc_actor_id"]
                 character = self._conn.execute(
                     "SELECT * FROM characters WHERE session_id=? AND actor_id=?",
-                    (sid, row["pc_actor_id"]),
+                    (sid, actor_id),
                 ).fetchone()
                 own = CharacterState(
-                    row["pc_actor_id"],
+                    actor_id,
                     character["current_hp"],
                     character["max_hp"],
-                    self._characters.resource_balances(sid, row["pc_actor_id"]),
-                    tuple(self._characters.carried_slugs(sid, row["pc_actor_id"])),
-                    tuple(json.loads(character["effects_json"])),
+                    self._characters.resource_balances(sid, actor_id),
+                    tuple(self._characters.carried_slugs(sid, actor_id)),
+                    tuple(
+                        {"id": effect["id"], "name": effect["name"]}
+                        for effect in self._characters.effects.for_targets(sid, {actor_id})
+                        if not effect["disabled"]
+                    ),
                     character["xp"],
                 )
             facts = (

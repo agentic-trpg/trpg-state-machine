@@ -1,5 +1,11 @@
 # Session Management 重构进度
 
+## 2026-11-19 角色效果视图
+
+`read_session` 和玩家的 `get_scene_view` 从 Effects 读取当前角色的效果。
+可信快照返回角色的效果记录，玩家视图只展示自己角色已启用效果的标识和名称。
+真实施法、到期及主动解除专注的回归覆盖效果列表随提交更新。
+
 ## 2026-11-18 EFFECT-03 定时施法和主动结束专注
 
 探索 `world.cast_spell` 使用 RE `/43` 的 evaluation `/29` 和探索

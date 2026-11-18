@@ -10,6 +10,7 @@ from test_hold_effect_candidate import hold_cast_command, hold_world
 from test_storage_conditions import _condition
 
 from trpg_state_machine import StateMachine, StateMachineError
+from trpg_state_machine.perception import GameViewContext
 
 
 def _held_target(snapshot):
@@ -28,6 +29,31 @@ def _cast_then_prepare_drop(sm, sid, package, context):
         payload=CombatIntentPayload(intent_type="drop_concentration"),
         expected_world_version=version,
     )
+
+
+def test_drop_concentration_removes_caster_effect_from_character_views(tmp_path, context):
+    """Drop Hold Person after the target saves and the caster retains its anchor."""
+    sm, sid, package, _, _ = hold_world(tmp_path, context, seed=5)
+    viewer = GameViewContext(context.principal_id, sid, context.player_id, "player")
+    with sm:
+        command = _cast_then_prepare_drop(sm, sid, package, context)
+        (effect,) = sm.read_combat_snapshot(sid, package, context=context).effect_states
+        assert (effect.id, effect.name, effect.target_id) == (
+            "effect:hold-person",
+            "Hold Person",
+            command.actor_id,
+        )
+        assert not effect.disabled
+        trusted = sm.read_session(sid, package, context=context).character
+        player = sm.get_scene_view(sid, package, context=viewer).own_character
+        assert trusted.effects == (effect.model_dump(mode="json"),)
+        assert player.effects == ({"id": effect.id, "name": effect.name},)
+
+        receipt = sm.submit_command(command, package, context=context)
+        assert receipt.status == "committed", receipt
+        assert sm.read_combat_snapshot(sid, package, context=context).effect_states == ()
+        assert sm.read_session(sid, package, context=context).character.effects == ()
+        assert sm.get_scene_view(sid, package, context=viewer).own_character.effects == ()
 
 
 @pytest.mark.parametrize("independent_source", [False, True])

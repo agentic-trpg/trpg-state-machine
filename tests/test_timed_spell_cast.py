@@ -20,6 +20,7 @@ from trpg_state_machine import (
     TypedCommand,
 )
 from trpg_state_machine.package import _validate
+from trpg_state_machine.perception import GameViewContext
 
 
 @pytest.fixture
@@ -204,10 +205,12 @@ def first_level_balance(sm, command):
 def test_public_longstrider_cast_and_expiry(timed_spell_world, target_id):
     session = timed_spell_world()
     sm, sid, package, context = session
+    viewer = GameViewContext(context.principal_id, sid, context.player_id, "player")
     with sm:
         assert submit(session, AdvanceSessionTime(11), "start-tick").status == "committed"
         command = cast_command(session, target_id=target_id)
         target = command.payload.target_id
+        assert sm.get_scene_view(sid, package, context=viewer).own_character.effects == ()
         old_rng = sm.read_rng_context(sid, package, context=context)
         receipt = sm.submit_command(command, package, context=context)
         assert receipt.status == "committed", receipt
@@ -224,22 +227,36 @@ def test_public_longstrider_cast_and_expiry(timed_spell_world, target_id):
             "spell_cast",
             "effect_applied",
         )
-        (effect,) = sm._characters.effects.for_targets(sid, {target})
-        assert effect["id"] == "effect:longstrider"
-        assert effect["target_id"] == target
+        (effect,) = sm.read_noncombat_snapshot(sid, package, context=context).effect_states
+        assert (effect.id, effect.name, effect.target_id) == (
+            "effect:longstrider",
+            "Longstrider",
+            target,
+        )
+        own_effect = target == command.actor_id
+        trusted_effects = (effect.model_dump(mode="json"),) if own_effect else ()
+        player_effects = ({"id": effect.id, "name": effect.name},) if own_effect else ()
+        trusted = sm.read_session(sid, package, context=context).character
+        player = sm.get_scene_view(sid, package, context=viewer).own_character
+        assert trusted.effects == trusted_effects
+        assert player.effects == player_effects
         assert sm._session_runtime.time.consumers["effects"].next_boundary(sid, package) == 3611
 
         assert submit(session, AdvanceSessionTime(3610), "before-expiry").status == "committed"
-        assert sm._characters.effects.for_targets(sid, {target}) == [effect]
+        assert sm.read_noncombat_snapshot(sid, package, context=context).effect_states == (effect,)
         expiry = submit(session, AdvanceSessionTime(3611), "at-expiry")
         assert expiry.status == "committed"
-        assert sm._characters.effects.for_targets(sid, {target}) == []
+        assert sm.read_noncombat_snapshot(sid, package, context=context).effect_states == ()
+        assert sm.read_session(sid, package, context=context).character.effects == ()
+        assert sm.get_scene_view(sid, package, context=viewer).own_character.effects == ()
+        assert trusted.effects == trusted_effects
+        assert player.effects == player_effects
         assert any(
             event.event_type == "effect.expired"
             for event in sm.read_events(sid, package, context=context)
         )
         assert sm.submit_command(command, package, context=context) == receipt
-        assert sm._characters.effects.for_targets(sid, {target}) == []
+        assert sm.read_noncombat_snapshot(sid, package, context=context).effect_states == ()
         assert first_level_balance(sm, command) == 3
 
 
