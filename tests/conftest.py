@@ -1,3 +1,4 @@
+from copy import deepcopy
 from pathlib import Path
 
 import pytest
@@ -21,9 +22,16 @@ def package():
     return result.package
 
 
-@pytest.fixture
-def package_data():
+@pytest.fixture(scope="session")
+def _package_data_template():
+    """Parse the static YAML once for the pytest session."""
     return yaml.safe_load(FIXTURE.read_text("utf-8"))
+
+
+@pytest.fixture
+def package_data(_package_data_template):
+    """Give each test a mutable copy with isolated nested data."""
+    return deepcopy(_package_data_template)
 
 
 @pytest.fixture
