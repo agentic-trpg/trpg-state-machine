@@ -64,6 +64,10 @@ Effects 和 SessionTime 共同保存及消费到期时间。`drop_concentration`
 [Session Management 进度](SESSION_MANAGEMENT_PROGRESS.md#2026-11-18-effect-03-定时施法和主动结束专注)。
 探索移动接入固定环境来源的进出区域效果。World 提供格子覆盖，RE 按来源返回状态变化，
 Effects 和位置共同提交。详见 [固定区域环境来源](ENVIRONMENT_SERVICE.md#固定区域环境来源)。
+战斗 `combat.intent` 接入受支持的单目标 Haste 施法、自然到期和主动结束专注，使用
+RE `dnd5e-evaluation/44` 的 `engine-evaluation/30` 结果。Effects 在同一提交内依序
+解除旧效果并采用返回的 Lethargy。疲乏持续到目标下一自然回合结束。当前范围为单条
+Haste 或 Lethargy 效果图的回合推进与解除，Haste 额外行动、重叠和受伤中断另行接入。
 完整 Agent Host、通用规则采用、完整活跃战斗恢复及未来多人负载不是已验收能力。
 
 ## 2. 公开入口和主要协作模块

@@ -24,6 +24,7 @@ from dnd5e_engine.evaluation_contracts import (
     RuleEvaluationRequest,
     RuleEvaluationResult,
 )
+from dnd5e_engine.evaluation_haste import has_haste_effects, haste_speed
 from dnd5e_engine.evaluation_preflight import template_support_failure
 from dnd5e_engine.evaluation_rng import RNGState
 from dnd5e_engine.evaluation_ruleset import (
@@ -55,6 +56,7 @@ from .concentration_adoption import concentration_release_changes
 from .dnd_checks import check_changes
 from .dnd_closure import closure_changes
 from .errors import StateMachineError
+from .haste_adoption import haste_cast_admission, haste_pass_admission
 from .package import canonical_json
 from .scoped_reads import scoped_read
 from .session_access import _binding
@@ -124,7 +126,7 @@ def _has_combat_effects(snapshot):
     )
 
 
-def delta_changes(request, result, *, hold_mode=False):
+def delta_changes(request, result, *, effect_operations=(), effect_targets=()):
     """Check pre-values and ownership for an attack, turn advance or narrow potion Delta.
 
     A temporary candidate validates invariants; it is never persisted as a Snapshot.
@@ -152,8 +154,9 @@ def delta_changes(request, result, *, hold_mode=False):
         _invalid("Turn delta is outside the encounter")
     budget_owners = {request.actor_id, snapshot.combat_state.initiative_ids[turn]}
     affected_actors = budget_owners | {request.payload.target_id}
-    if hold_mode:
+    if effect_operations:
         affected_actors.update(effect.target_id for effect in snapshot.effect_states)
+        affected_actors.update(effect_targets)
     inventory = snapshot.inventory_state.model_dump(mode="json") if item_use else None
 
     def edit(component, identity, field, expected, value):
@@ -175,32 +178,28 @@ def delta_changes(request, result, *, hold_mode=False):
         changes.append((component, identity, field, _json(value)))
 
     for op in result.state_delta.operations:
-        if hold_mode and type(op) in (
-            delta.HoldPersonGraphCreate,
-            delta.EffectLifecycleUpdate,
-            delta.ConcentrationUpdate,
-        ):
+        if type(op) in effect_operations:
             continue
-        if hold_mode and type(op) is delta.ResourceUpdate:
+        if effect_operations and type(op) is delta.ResourceUpdate:
             if (
-                hold_mode != "cast"
+                request.payload.intent_type != "cast_spell"
                 or op.owner_id != request.actor_id
                 or op.amount != -1
                 or op.expected not in snapshot.resource_state.pools
                 or op.expected.kind != "spell_slot"
                 or op.expected.level != request.payload.slot_level
             ):
-                _invalid("Hold Person payment differs from the bound caster")
+                _invalid("Effect cast payment differs from the bound caster")
             changes.append(("resource", op.owner_id, op.pool_id, (op.expected.current, 1)))
             continue
-        if hold_mode and type(op) is delta.SlotSpendLedgerUpdate:
+        if effect_operations and type(op) is delta.SlotSpendLedgerUpdate:
             if (
-                hold_mode != "cast"
+                request.payload.intent_type != "cast_spell"
                 or op.owner_id != request.actor_id
                 or op.combat_id != combat["combat_id"]
                 or combat["expended_resources"].get(op.owner_id) != op.expected
             ):
-                _invalid("Hold Person slot ledger differs from fixed combat")
+                _invalid("Effect cast slot ledger differs from fixed combat")
             changes.append(("slot_ledger", op.owner_id, "expended_resources", op))
             continue
         if item_use and type(op) not in (
@@ -240,7 +239,9 @@ def delta_changes(request, result, *, hold_mode=False):
             or (
                 target != request.payload.target_id
                 and not (
-                    hold_mode and type(op) is delta.ConditionsUpdate and target in affected_actors
+                    effect_operations
+                    and type(op) is delta.ConditionsUpdate
+                    and target in affected_actors
                 )
             )
         ):
@@ -462,21 +463,18 @@ def exploration_potion_changes(request, result):
     )
 
 
-def _turn_intent_scope(request, result, *, hold_graph=False, condition_changes=None):
-    """Check the closed Cast or Pass write set and bind its turn and budgets."""
+def _turn_intent_scope(
+    request, result, *, effect_operations=(), condition_changes=None, effect_movement=None
+):
+    """Bind the ordinary turn handoff and validate its affected target's movement ledger."""
     snapshot = request.state_snapshot
     combat = snapshot.combat_state
     operations = result.state_delta.operations
     cast = request.payload.intent_type == "cast_spell"
     permitted = {delta.TurnUpdate, delta.ActionBudgetUpdate, delta.MovementLedgerUpdate}
+    permitted.update(effect_operations)
     if cast:
-        permitted.update(
-            {delta.HoldPersonGraphCreate, delta.ResourceUpdate, delta.SlotSpendLedgerUpdate}
-        )
-    elif hold_graph:
-        permitted.update(
-            {delta.EffectLifecycleUpdate, delta.ConcentrationUpdate, delta.ConditionsUpdate}
-        )
+        permitted.update({delta.ResourceUpdate, delta.SlotSpendLedgerUpdate})
     if any(type(op) not in permitted for op in operations):
         _invalid("Cast or Pass proposed a consequence outside its operation scope")
 
@@ -488,7 +486,7 @@ def _turn_intent_scope(request, result, *, hold_graph=False, condition_changes=N
     if cast:
         payment = ordinary_action_payment(outgoing)
         if not payment or outgoing.action_taken_this_turn:
-            _invalid("Hold Person lacks an available ordinary Action")
+            _invalid("Effect cast lacks an available ordinary Action")
         outgoing = outgoing.model_copy(update=payment)
 
     turns = [op for op in operations if type(op) is delta.TurnUpdate]
@@ -505,7 +503,9 @@ def _turn_intent_scope(request, result, *, hold_graph=False, condition_changes=N
         actors[target_id] = actors[target_id].model_copy(update={"conditions": value})
 
     def speed(actor, mode):
-        """Project the bounded turn's movement from the adopted conditions via RE."""
+        """Use the RE movement projection for the target's adopted effect or conditions."""
+        if effect_movement is not None and actor.entity_id == effect_movement[0]:
+            return haste_speed(actor, effect_movement[1], mode)
         return speed_for_mode(
             project_speeds(
                 actor.base_speed,
@@ -580,21 +580,28 @@ def _turn_intent_scope(request, result, *, hold_graph=False, condition_changes=N
                 )
             actors[identity] = actor.model_copy(update={"sneak_attack_spent_this_turn": False})
     elif turn_events or ledgers:
-        _invalid("Hold Person proposed turn consequences without a turn transition")
+        _invalid("Effect cast proposed turn consequences without a turn transition")
+    elif effect_movement is not None:
+        target = effect_movement[0]
+        actor = actors[target]
+        ledger = combat.movement_ledgers[target]
+        actors[target] = actor.model_copy(
+            update={"movement_remaining": ledger.remaining(speed(actor, ledger.active_mode))}
+        )
 
     fields = delta.AttackBudgetState.model_fields
-    expected_budgets = {}
-    for actor in snapshot.character_states:
-        identity = actor.entity_id
-        if any(getattr(actors[identity], field) != getattr(actor, field) for field in fields):
-            expected_budgets[identity] = {
-                field: getattr(actors[identity], field) for field in fields
-            }
-    if {
+    proposed_budgets = {
         op.actor_id: op.value.model_dump()
         for op in operations
         if type(op) is delta.ActionBudgetUpdate
-    } != expected_budgets:
+    }
+    expected_budgets = {}
+    for actor in snapshot.character_states:
+        identity = actor.entity_id
+        values = {field: getattr(actors[identity], field) for field in fields}
+        if any(values[field] != getattr(actor, field) for field in fields):
+            expected_budgets[identity] = values
+    if proposed_budgets != expected_budgets:
         _invalid("Cast or Pass changed budgets outside Action payment and turn reset")
 
 
@@ -643,11 +650,9 @@ def hold_effect_changes(request, result):
             or sum(type(op) is delta.SlotSpendLedgerUpdate for op in operations) != 1
         ):
             _invalid("Hold Person payment is incomplete")
-        mode = "cast"
     else:
         if graphs or not snapshot.effect_states or len(combat.concentration_chain) != 1:
             _invalid("Hold Person lifecycle requires one existing graph")
-        mode = "existing"
     source = request.actor_id if cast else next(iter(combat.concentration_chain))
     old_effects = {(e.target_id, e.id, e.origin): e for e in snapshot.effect_states}
     old_clocks = {e.identity: e for e in combat.effect_lifecycles}
@@ -820,10 +825,26 @@ def hold_effect_changes(request, result):
                     )
         if condition_changes != ({} if cast else expected_conditions):
             _invalid("Hold Person conditions do not match its graph transition")
-        _turn_intent_scope(
-            request, result, hold_graph=not cast, condition_changes=expected_conditions
+        effect_operations = (
+            (delta.HoldPersonGraphCreate,)
+            if cast
+            else (delta.EffectLifecycleUpdate, delta.ConcentrationUpdate, delta.ConditionsUpdate)
         )
-    base = delta_changes(request, result, hold_mode=mode)
+        _turn_intent_scope(
+            request,
+            result,
+            effect_operations=effect_operations,
+            condition_changes=expected_conditions,
+        )
+    base = delta_changes(
+        request,
+        result,
+        effect_operations=(
+            delta.HoldPersonGraphCreate,
+            delta.EffectLifecycleUpdate,
+            delta.ConcentrationUpdate,
+        ),
+    )
     if zero_hp:
         evidence = result.proposed_events
         dead = any(
@@ -861,6 +882,38 @@ def hold_effect_changes(request, result):
         + [("hold_concentration", source, "update", op) for op in concentrations]
     )
     return (*base, *effects)
+
+
+def haste_effect_changes(request, result):
+    """Admit the typed Haste cast or bounded turn effects and ordinary handoff."""
+    if request.payload.intent_type == "cast_spell":
+        graph = haste_cast_admission(request, result)
+        effect_operations = (delta.HasteGraphCreate,)
+        condition_changes = None
+        target = graph.target_id
+        final_effects = (graph.effect,)
+        adopted = [("haste_graph", graph.source_id, "create", graph)]
+    else:
+        adopted, condition_changes, target, final_effects = haste_pass_admission(request, result)
+        effect_operations = (
+            delta.EffectLifecycleUpdate,
+            delta.ConcentrationUpdate,
+            delta.EffectFollowUpCreate,
+        )
+    turn_operations = effect_operations
+    if condition_changes is not None:
+        turn_operations = (*turn_operations, delta.ConditionsUpdate)
+    _turn_intent_scope(
+        request,
+        result,
+        effect_operations=turn_operations,
+        condition_changes=condition_changes,
+        effect_movement=(target, final_effects),
+    )
+    base = delta_changes(
+        request, result, effect_operations=effect_operations, effect_targets=(target,)
+    )
+    return (*base, *adopted)
 
 
 def validate_dnd_result(request, result, *, loader=None):
@@ -932,6 +985,8 @@ def validate_dnd_result(request, result, *, loader=None):
             _invalid("Potion healing differs from the rolled event")
         return result, changes
     if getattr(request.payload, "intent_type", None) == "cast_spell":
+        if request.payload.spell_id == "haste":
+            return result, haste_effect_changes(request, result)
         if loader is None:
             _invalid("Spell result requires its bound rules loader")
         if request.payload.spell_id == "hold-person":
@@ -954,6 +1009,8 @@ def validate_dnd_result(request, result, *, loader=None):
     ):
         return result, hold_effect_changes(request, result)
     if request.operation_kind == "combat.intent" and request.payload.intent_type == "pass":
+        if has_haste_effects(request.state_snapshot):
+            return result, haste_effect_changes(request, result)
         _turn_intent_scope(request, result)
     return result, (
         closure_changes(request, result)
@@ -1290,6 +1347,34 @@ class RulesAdapter:
         if payload.intent_type == "cast_spell":
             if payload.spell_id is None:
                 return "intent.capability"
+            if payload.spell_id == "haste":
+                basic = type(payload)(
+                    intent_type="cast_spell",
+                    source_id=payload.source_id,
+                    spell_id="haste",
+                    target_id=payload.target_id,
+                    target_ids=payload.target_ids,
+                    slot_level=payload.slot_level,
+                    spell_source_id=payload.spell_source_id,
+                    willing_target_ids=payload.willing_target_ids,
+                )
+                if (
+                    payload != basic
+                    or snapshot.snapshot_schema_version != "engine-snapshot/20"
+                    or payload.source_id not in (None, actor_id)
+                    or payload.target_id not in combat.initiative_ids
+                    or payload.target_ids not in (None, (payload.target_id,))
+                    or payload.willing_target_ids != (payload.target_id,)
+                    or payload.spell_source_id is None
+                    or actor_id not in combat.party_ids
+                    or combat.pending_reactions
+                    or combat.active_reaction_responses
+                    or combat.reaction_effects_pending_expiry
+                    or combat.sap_marks
+                    or _has_combat_effects(snapshot)
+                ):
+                    return "spell.capability"
+                return None
             if payload.spell_id == "hold-person":
                 basic = type(payload)(
                     intent_type="cast_spell",
@@ -1360,7 +1445,11 @@ class RulesAdapter:
                         actor.is_alive and actor.hp_current > 0
                         for actor in snapshot.character_states
                     )
-                    and (not _has_combat_effects(snapshot) or _hold_source(snapshot) is not None)
+                    and (
+                        not _has_combat_effects(snapshot)
+                        or _hold_source(snapshot) is not None
+                        or has_haste_effects(snapshot)
+                    )
                 ):
                     return None
             return "intent.capability"
@@ -1387,7 +1476,17 @@ class RulesAdapter:
         """
         self.store.require_write()
         sid = row["session_id"]
-        effect_updates = any(component.startswith("hold_") for component, _, _, _ in changes)
+        effect_updates = any(
+            component
+            in {
+                "hold_graph",
+                "haste_graph",
+                "hold_lifecycle",
+                "hold_concentration",
+                "effect_follow_up",
+            }
+            for component, _, _, _ in changes
+        )
         for component, _, _, operation in changes:
             if component == "hold_concentration":
                 self.characters.effects.assert_concentration(sid, operation)
@@ -1445,8 +1544,25 @@ class RulesAdapter:
                         for entry in value.entries
                     ),
                 )
+            elif component == "haste_graph":
+                self.characters.effects.create_concentration(
+                    sid,
+                    command_id,
+                    identity,
+                    value.concentration_id,
+                    value.rounds,
+                    (
+                        {
+                            "effect": value.effect.model_dump(mode="json"),
+                            "conditions": value.lineage.statuses,
+                            "lifecycle": value.lifecycle.model_dump(mode="json")["state"],
+                        },
+                    ),
+                )
             elif component == "hold_lifecycle":
                 self.characters.effects.apply_lifecycle(sid, value)
+            elif component == "effect_follow_up":
+                self.characters.effects.apply_follow_up(sid, value)
             elif component == "hold_concentration":
                 self.characters.effects.apply_concentration(sid, value)
             elif component == "actor" and field == "hp_current":
@@ -1489,7 +1605,17 @@ class RulesAdapter:
         row = row if row is not None else self._pinned_row(command.session_id, package)
         return RuleEvaluationRequest(
             schema_version=(
-                "engine-evaluation/29"
+                "engine-evaluation/30"
+                if command.command_type == "combat.intent"
+                and snapshot.snapshot_schema_version == "engine-snapshot/20"
+                and (
+                    command.payload.spell_id == "haste"
+                    or (
+                        command.payload.intent_type in {"pass", "drop_concentration"}
+                        and has_haste_effects(snapshot)
+                    )
+                )
+                else "engine-evaluation/29"
                 if type(command.payload) is ExplorationSpellCastPayload
                 else "engine-evaluation/28"
                 if type(command.payload) is ExplorationItemUsePayload

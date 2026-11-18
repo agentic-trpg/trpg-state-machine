@@ -129,6 +129,26 @@ class OngoingEffects:
         """Persist one RE-declared terminal effect and its clock deadline atomically."""
         self.add_effect(sid, proposal.effect.model_dump(mode="json"), expires_tick=expires_tick)
 
+    def apply_follow_up(self, sid, operation):
+        """Create an independent target effect after its exact parent has been removed."""
+        self.store.require_write()
+        for identity in (operation.ended_identity, operation.lifecycle.identity):
+            if (
+                self._conn.execute(
+                    "SELECT 1 FROM ongoing_effects WHERE session_id=? AND target_id=? "
+                    "AND effect_id=? AND origin=?",
+                    (sid, *identity),
+                ).fetchone()
+                is not None
+            ):
+                raise StateMachineError("invalid_effect", "Follow-up effect pre-value changed")
+        self.add_effect(
+            sid,
+            operation.effect.model_dump(mode="json"),
+            conditions=operation.lineage.statuses,
+            lifecycle=operation.lifecycle.model_dump(mode="json")["state"],
+        )
+
     def transition_region_condition(
         self,
         sid,
