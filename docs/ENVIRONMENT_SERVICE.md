@@ -1,5 +1,24 @@
 # EnvironmentService
 
+## 固定区域环境来源
+
+`EnvironmentSource.region_condition="poisoned"` 为环境来源显式声明固定的 `Poisoned`
+区域。区域复用 `EnvironmentArea` 的非空格子集合，要求 `exposure="local"` 且不配置高度。
+普通雾、烟和天气来源的 `region_condition` 默认为空。
+
+有环境管理权限的调用方可通过 `InitializeEnvironment` 或 `AddEnvironmentSource` 声明区域。
+配置时不对已有占用者补发效果。`ReplaceEnvironmentSource` 可更新天气值、优先级和可见性，
+固定区域的条件和格子必须与原值一致。普通来源不能通过替换升级为固定区域，固定区域不能
+通过 `RemoveEnvironmentSource` 移除。这样离开的移动操作始终能按进入时的区域找到来源。
+
+探索移动通过 `region_condition_sources` 按权威位置读取覆盖该格的来源 ID，结果按来源 ID
+排序。无格子的位置没有区域归属。索引在对应的 `Scene.environment` 字段按需建立，沿环境
+事实的场景级依赖失效，复用 SessionMemory 的候选隔离与容量预算。查询不合成天气、防护或光照。
+
+探索移动沿用原有命令。对已有机械事实的角色，RE 根据进出边界、来源已有的效果和角色免疫
+决定增加或移除状态。SM 在同一事务提交位置与效果，玩家视图读取已提交结果。区域内移动
+保留原效果，重叠来源独立解除。这个切片覆盖探索移动与状态投影，检定和战斗中的状态结算仍待接入。
+
 ## 2026-10-22 防护批准备的共享输入
 
 OSS 防护输入改为同范围只读地图的固定尺寸；同一批按 Scene 懒准备一次，不再为每个

@@ -73,7 +73,7 @@ class ActivityHandler:
             raise StateMachineError(
                 "unsupported_combat_world_operation", "Navigation is noncombat only"
             )
-        self.world._world_actor_ready(row["session_id"], actor)
+        self.world._world_actor_ready(row["session_id"], actor, movement=True)
         self.world._public_scope(row["session_id"], actor, package)
 
     def operate(self, row, package, operation, *, actor_id, command_id):
@@ -133,7 +133,9 @@ class ActivityHandler:
                 if record["cursor"] == len(plan):
                     # Check current actor state even for a zero-distance completion.
                     scope = self.records.execution(record, None)
-                    self.world._world_actor_ready(sid, actor_id, navigation_scope=scope)
+                    self.world._world_actor_ready(
+                        sid, actor_id, navigation_scope=scope, movement=True
+                    )
                     if self.world._active_combat(sid):
                         raise StateMachineError(
                             "unsupported_combat_world_operation", "Navigation is noncombat only"

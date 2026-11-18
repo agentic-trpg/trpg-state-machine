@@ -197,9 +197,10 @@ class SpatialFields:
 
 @dataclass(frozen=True)
 class EnvironmentFields:
-    """Retain environment facts, prepared inputs and composed cell/range fields."""
+    """Retain environment facts, region associations, inputs and composed fields."""
 
     facts: tuple = ()
+    region_conditions: tuple = ()
     inputs: tuple = ()
     protection: tuple = ()
     cells: tuple = ()

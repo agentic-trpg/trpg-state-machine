@@ -457,6 +457,20 @@ class CharacterFacts:
         )
         return [self._condition_data(row) for row in rows]
 
+    @scoped_read
+    def condition_immunities(self, sid, actor_id):
+        """Read an actor's declared immunities without assembling rule inputs."""
+        row = self._conn.execute(
+            "SELECT state_json FROM mechanical_actors WHERE session_id=? AND actor_id=?",
+            (sid, actor_id),
+        ).fetchone()
+        if row is None:
+            return None
+        immunities = self.store.memory.json(row[0]).get("condition_immunities")
+        if type(immunities) is not list or any(type(item) is not str for item in immunities):
+            raise StateMachineError("invalid_mechanical_state", "Actor immunities are missing")
+        return tuple(immunities)
+
     @staticmethod
     def _condition_data(row):
         """Restore the unchanged RE wire fields from one owned condition row."""
@@ -1927,8 +1941,7 @@ class WorldFacts:
 
     def set_environment(self, sid, scene_id, facts):
         """Require typed environment facts and persist them for the scene."""
-        from dataclasses import asdict
-
+        from .environment_commands import environment_facts_to_data
         from .environment_models import EnvironmentSceneFacts
 
         self.store.require_write()
@@ -1937,7 +1950,7 @@ class WorldFacts:
         self._conn.execute(
             "INSERT INTO scene_environments VALUES (?,?,?) "
             "ON CONFLICT(session_id,scene_id) DO UPDATE SET facts_json=excluded.facts_json",
-            (sid, scene_id, canonical_json(asdict(facts))),
+            (sid, scene_id, canonical_json(environment_facts_to_data(facts))),
         )
 
     @instance_read("object", None, "facts")

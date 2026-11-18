@@ -1,6 +1,8 @@
 """Scene environment business and read-only derived queries over shared WorldFacts."""
 
+from collections.abc import Mapping
 from dataclasses import asdict, dataclass, replace
+from types import MappingProxyType
 
 from .environment_commands import (
     AddEnvironmentSource,
@@ -111,6 +113,17 @@ class UnitEnvironment:
 
     status: str
     segments: tuple[EnvironmentHeightSegment, ...] = ()
+
+
+@dataclass(frozen=True, slots=True)
+class _RegionConditionIndex:
+    """Retain immutable source ID buckets for the configured cells of one Scene."""
+
+    by_cell: Mapping[str, tuple[str, ...]]
+
+    def __deepcopy__(self, memo):
+        """Share the immutable buckets with candidate and fixed read scopes."""
+        return self
 
 
 def _value_status(value):
@@ -355,8 +368,15 @@ class EnvironmentService:
                 elif type(change) is ReplaceEnvironmentSource:
                     if before is None:
                         raise StateMachineError("environment_source_not_found", "Source is absent")
+                    if before.region_condition != change.source.region_condition or (
+                        before.region_condition is not None and before.area != change.source.area
+                    ):
+                        invalid("Replace cannot introduce or change a fixed environment region")
                     sources[source_id] = change.source
                 else:
+                    if before is not None and before.region_condition is not None:
+                        # Movement exits must be able to find the same region as entry.
+                        invalid("Remove cannot remove a fixed environment region")
                     sources.pop(source_id, None)
                 after = sources.get(source_id)
                 if before == after:
@@ -416,6 +436,40 @@ class EnvironmentService:
                 raise StateMachineError("unauthorized", "Environment management grant required")
             self._area(sid, scene_id, EnvironmentArea(), package)
             return self.h.facts.environment(sid, scene_id)
+
+    def _region_condition_index(self, sid, scene_id):
+        """Build cell associations from persisted Scene sources in source ID order."""
+        facts = self.h.facts.environment(sid, scene_id)
+        by_cell = {}
+        for source in facts.sources if facts is not None else ():
+            if source.region_condition is not None:
+                for cell in source.area.cells:
+                    by_cell.setdefault(cell, []).append(source.source_id)
+        return _RegionConditionIndex(
+            MappingProxyType({cell: tuple(source_ids) for cell, source_ids in by_cell.items()})
+        )
+
+    def region_condition_sources(
+        self, sid: str, scene_id: str, cell: str | None
+    ) -> tuple[str, ...]:
+        """Return the fixed condition source IDs for a trusted movement position.
+
+        A position without a Grid cell has no regional membership. The bounded Scene
+        field shares the authoritative facts' dependency in the candidate or read scope.
+        """
+        if cell is None:
+            return ()
+        index = resolve_field(
+            self.h.store,
+            "scene",
+            sid,
+            scene_id,
+            "environment",
+            "region_conditions",
+            (),
+            lambda: self._region_condition_index(sid, scene_id),
+        )
+        return index.by_cell.get(cell, ())
 
     def _inputs(self, sid, scene, package):
         """Combine persisted environment facts, Effects sources and provider status."""

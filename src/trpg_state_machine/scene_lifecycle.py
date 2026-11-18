@@ -7,9 +7,12 @@ Facts retain ownership of all persisted state. No scene is reset on departure.
 
 from dataclasses import asdict, replace
 
+from dnd5e_engine.evaluation_ruleset import RulesetBinding
+
 from ._execution import _execution_data
 from .errors import StateMachineError
 from .events import _ActorMotion
+from .session_access import _binding
 
 
 class SceneLifecycleService:
@@ -152,12 +155,12 @@ class SceneLifecycleService:
         self.runtime.move_pc_scene(sid, package.entry_scene_id)
         self.facts.visit(sid, package.entry_scene_id)
 
-    def move_admitted(self, row, package, actor_id, destination):
+    def move_admitted(self, row, package, actor_id, destination, *, environment, loader):
         """Apply a destination already validated by the movement owner.
 
         Same-scene steps retain their existing event semantics. Only a PC crossing
         a scene boundary records a visit. Exit evidence precedes initialization
-        and movement; arrival evidence sees the resulting authoritative facts.
+        and movement; arrival evidence sees the new position and region effects.
         """
         self.store.require_write()
         sid = row["session_id"]
@@ -187,6 +190,7 @@ class SceneLifecycleService:
             self.runtime.move_pc_scene(sid, destination.scene_id)
             if crossing:
                 self.facts.visit(sid, destination.scene_id)
+        self._move_region_conditions(row, actor_id, before, destination, environment, loader)
         if is_pc and crossing:
             events.append(
                 self.capture._capture_event(
@@ -224,6 +228,39 @@ class SceneLifecycleService:
             ),
         )
         return events
+
+    def _move_region_conditions(self, row, actor_id, before, after, environment, loader):
+        """Adopt only the fixed region sources crossed by this admitted move."""
+        sid = row["session_id"]
+        previous = {
+            (before.scene_id, source)
+            for source in environment.region_condition_sources(sid, before.scene_id, before.cell)
+        }
+        current = {
+            (after.scene_id, source)
+            for source in environment.region_condition_sources(sid, after.scene_id, after.cell)
+        }
+        entered, left = current - previous, previous - current
+        if not entered and not left:
+            return
+        immunities = self.characters.condition_immunities(sid, actor_id) if entered else ()
+        if immunities is None:
+            raise StateMachineError(
+                "unsupported_actor_state", "Region exposure requires a mechanical actor"
+            )
+        binding = RulesetBinding(**asdict(_binding(row)))
+        for entering, sources in ((False, left), (True, entered)):
+            for scene_id, source_id in sorted(sources):
+                self.characters.effects.transition_region_condition(
+                    sid,
+                    actor_id,
+                    scene_id,
+                    source_id,
+                    entering=entering,
+                    condition_immunities=immunities,
+                    ruleset_binding=binding,
+                    loader=loader,
+                )
 
     def set_flag(self, row, package, operation, *, actor_id, effect_origin=None):
         """Declared scene-local booleans only; no domain-state reinterpretation."""

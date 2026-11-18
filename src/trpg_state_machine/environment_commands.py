@@ -36,7 +36,7 @@ class SetEnvironmentBase:
 
 @dataclass(frozen=True, slots=True)
 class AddEnvironmentSource:
-    """Request insertion of a local environment contribution."""
+    """Request insertion of an environment contribution, optionally with a fixed region."""
 
     scene_id: str
     source: EnvironmentSource
@@ -44,7 +44,7 @@ class AddEnvironmentSource:
 
 @dataclass(frozen=True, slots=True)
 class ReplaceEnvironmentSource:
-    """Request replacement of an identified environment source."""
+    """Replace an identified source while preserving any fixed region and condition."""
 
     scene_id: str
     source: EnvironmentSource
@@ -52,7 +52,7 @@ class ReplaceEnvironmentSource:
 
 @dataclass(frozen=True, slots=True)
 class RemoveEnvironmentSource:
-    """Request removal of an identified environment source."""
+    """Request removal of an environment source that has no fixed region condition."""
 
     scene_id: str
     source_id: str
@@ -121,18 +121,31 @@ def validate_environment_operation(op):
         identity(op.source_id)
 
 
+def _environment_dict(items):
+    """Keep the established mapping shape when a source has no region condition."""
+    data = dict(items)
+    if data.get("region_condition") is None:
+        data.pop("region_condition", None)
+    return data
+
+
+def environment_facts_to_data(facts: EnvironmentSceneFacts) -> dict:
+    """Encode persisted scene facts while preserving ordinary source mappings."""
+    return asdict(facts, dict_factory=_environment_dict)
+
+
 def environment_operation_to_data(op):
     """Canonical tagged wire encoding; preserve mutation identity AND list order.
 
     The existing registry is the sole type/name authority. Single payloads keep
-    their historical asdict shape; only batches need recursive union tags.
+    their historical mapping shape for ordinary sources. Only batches need recursive union tags.
     """
     validate_environment_operation(op)
     kind = next(name for name, cls in ENVIRONMENT_COMMANDS.items() if type(op) is cls)
     payload = (
         {"changes": [environment_operation_to_data(change) for change in op.changes]}
         if type(op) is BatchEnvironment
-        else asdict(op)
+        else asdict(op, dict_factory=_environment_dict)
     )
 
     # Adding an optional shelter field must preserve historical command receipts.

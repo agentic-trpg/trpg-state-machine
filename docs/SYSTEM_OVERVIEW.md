@@ -62,6 +62,8 @@ EFFECT-02 在 RE `/42` 下将已验证的二环单目标 Hold Person 接到公�
 Effects 和 SessionTime 共同保存及消费到期时间。`drop_concentration`
 通过已有战斗命令入口解除受支持的专注图。详见
 [Session Management 进度](SESSION_MANAGEMENT_PROGRESS.md#2026-11-18-effect-03-定时施法和主动结束专注)。
+探索移动接入固定环境来源的进出区域效果。World 提供格子覆盖，RE 按来源返回状态变化，
+Effects 和位置共同提交。详见 [固定区域环境来源](ENVIRONMENT_SERVICE.md#固定区域环境来源)。
 完整 Agent Host、通用规则采用、完整活跃战斗恢复及未来多人负载不是已验收能力。
 
 ## 2. 公开入口和主要协作模块

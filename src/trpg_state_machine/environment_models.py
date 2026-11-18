@@ -169,7 +169,11 @@ CONDITION_TYPES = {
 
 @dataclass(frozen=True, slots=True)
 class EnvironmentSource:
-    """Define a prioritized, scoped and optionally observable condition source."""
+    """Define a scoped environmental source with an optional fixed region condition.
+
+    Region membership uses the same explicit cells as the environment contribution.
+    Fog, smoke and other environmental values carry no region condition by default.
+    """
 
     source_id: str
     conditions: EnvironmentConditions
@@ -177,9 +181,10 @@ class EnvironmentSource:
     priority: int = 0
     exposure: Literal["outdoor", "local"] = "local"
     observable: bool = False
+    region_condition: Literal["poisoned"] | None = None
 
     def __post_init__(self):
-        """Validate environment source identity, extent, priority and observability."""
+        """Validate source shape and require explicit horizontal coverage for poisoning."""
         identity(self.source_id)
         if self.source_id == "base":
             invalid("base is reserved")
@@ -192,6 +197,11 @@ class EnvironmentSource:
             invalid("Source priority must be an integer in [-1000,1000]")
         if self.exposure not in ("outdoor", "local") or type(self.observable) is not bool:
             invalid("Invalid source exposure/disclosure policy")
+        if self.region_condition is not None:
+            if type(self.region_condition) is not str or self.region_condition != "poisoned":
+                invalid("Unsupported environment region condition")
+            if not self.area.cells or self.area.heights is not None or self.exposure != "local":
+                invalid("A fixed environment region condition requires local cells without heights")
 
 
 @dataclass(frozen=True, slots=True)

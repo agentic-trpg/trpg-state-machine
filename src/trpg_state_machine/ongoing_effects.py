@@ -6,12 +6,27 @@ remain with the bound Rule Engine; every mutation uses the caller's UnitOfWork.
 
 from dnd5e_engine.effect_lifecycle import conditions_after_effect_application
 from dnd5e_engine.evaluation_effects import EffectState
+from dnd5e_engine.evaluation_region_effect import (
+    is_region_condition,
+    plan_region_condition_transition,
+    region_condition_identity,
+)
+from dnd5e_engine.evaluation_ruleset import RulesetBindingError
 from dnd5e_engine.evaluation_state import ConditionLink, LifecycleRecord
 from dnd5e_engine.types.conditions import ActiveCondition
 
 from .errors import StateMachineError
 from .package import canonical_json
 from .scoped_reads import scoped_read
+
+
+def _region_poison(row, statuses):
+    """Recognize an untimed region Poisoned link from its stored profile and RE identity."""
+    return (
+        statuses == ["poisoned"]
+        and all(row[key] is None for key in ("concentration_id", "lifecycle_json", "expires_tick"))
+        and is_region_condition(row["effect_id"], row["origin"])
+    )
 
 
 class OngoingEffects:
@@ -65,14 +80,14 @@ class OngoingEffects:
         sid,
         effect,
         *,
-        ordinal,
+        ordinal=None,
         concentration_id=None,
         chain_ordinal=None,
         conditions=None,
         lifecycle=None,
         expires_tick=None,
     ):
-        """Persist one identified target effect and its optional linked records."""
+        """Persist one target effect and its links, assigning an ordinal when omitted."""
         self.store.require_write()
         typed = EffectState.model_validate_json(canonical_json(effect)).model_dump(mode="json")
         target, effect_id, origin = (typed.pop(key) for key in ("target_id", "id", "origin"))
@@ -85,6 +100,11 @@ class OngoingEffects:
             lifecycle = LifecycleRecord.model_validate_json(
                 canonical_json({"identity": identity, "state": lifecycle})
             ).model_dump(mode="json")["state"]
+        if ordinal is None:
+            ordinal = self._conn.execute(
+                "SELECT coalesce(max(ordinal)+1,0) FROM ongoing_effects WHERE session_id=?",
+                (sid,),
+            ).fetchone()[0]
         self._conn.execute(
             "INSERT INTO ongoing_effects(session_id,target_id,effect_id,origin,ordinal,"
             "payload_json,concentration_id,chain_ordinal,conditions_json,"
@@ -107,14 +127,83 @@ class OngoingEffects:
 
     def add_world_effect(self, sid, proposal, *, expires_tick):
         """Persist one RE-declared terminal effect and its clock deadline atomically."""
+        self.add_effect(sid, proposal.effect.model_dump(mode="json"), expires_tick=expires_tick)
+
+    def transition_region_condition(
+        self,
+        sid,
+        actor_id,
+        scene_id,
+        source_id,
+        *,
+        entering,
+        condition_immunities,
+        ruleset_binding,
+        loader,
+    ):
+        """Plan and adopt one region transition against the full identity and current row."""
         self.store.require_write()
-        ordinal = self._conn.execute(
-            "SELECT coalesce(max(ordinal)+1,0) FROM ongoing_effects WHERE session_id=?",
-            (sid,),
-        ).fetchone()[0]
-        self.add_effect(
-            sid, proposal.effect.model_dump(mode="json"), ordinal=ordinal, expires_tick=expires_tick
-        )
+        identity = region_condition_identity(scene_id, source_id, actor_id)
+        stored = self._conn.execute(
+            "SELECT effect_id,origin,conditions_json,concentration_id,lifecycle_json,expires_tick "
+            "FROM ongoing_effects WHERE session_id=? AND target_id=? AND effect_id=? AND origin=?",
+            (sid, *identity),
+        ).fetchone()
+        present = stored is not None
+        if present and (
+            stored["conditions_json"] is None
+            or not _region_poison(stored, self.store.memory.json(stored["conditions_json"]))
+        ):
+            raise StateMachineError("invalid_mechanical_state", "Region effect has invalid links")
+        try:
+            transition = plan_region_condition_transition(
+                ruleset_binding=ruleset_binding,
+                scene_id=scene_id,
+                source_id=source_id,
+                target_id=actor_id,
+                entering=entering,
+                present=present,
+                condition_immunities=condition_immunities,
+                loader=loader,
+            )
+        except RulesetBindingError as exc:
+            raise StateMachineError("ruleset_binding_mismatch", str(exc)) from exc
+        valid_operations = {"none"}
+        if entering and not present:
+            valid_operations.add("add")
+        elif not entering and present:
+            valid_operations = {"remove"}
+        if transition.identity != identity or transition.operation not in valid_operations:
+            raise StateMachineError(
+                "invalid_rule_result", "Region transition conflicts with its source"
+            )
+        effect = transition.effect
+        if transition.operation == "add":
+            if (
+                not isinstance(effect, EffectState)
+                or (effect.target_id, effect.id, effect.origin) != identity
+            ):
+                raise StateMachineError("invalid_rule_result", "Region effect identity differs")
+            payload = effect.model_dump(mode="json")
+            if (
+                effect.disabled
+                or effect.transfer
+                or effect.statuses != {"poisoned"}
+                or effect.changes
+                or effect.action_policy is not None
+                or effect.flags
+                or effect.lifecycle is not None
+                or effect.end_effects
+                or any(value is not None for value in payload["duration"].values())
+            ):
+                raise StateMachineError("invalid_rule_result", "Unsupported region effect profile")
+            self.add_effect(sid, payload, conditions=payload["statuses"])
+        elif effect is not None:
+            raise StateMachineError(
+                "invalid_rule_result", "Region transition has unexpected effect"
+            )
+        elif transition.operation == "remove":
+            self.remove_effect(sid, *identity)
 
     def expire_world_effect(self, sid, identity, expected_tick):
         """Remove only the exact due effect whose stored deadline still agrees."""
@@ -349,8 +438,12 @@ class OngoingEffects:
         for row in sorted(self._target_rows(sid, target_id), key=lambda row: row["ordinal"]):
             if row["conditions_json"] is None:
                 continue
+            statuses = self.store.memory.json(row["conditions_json"])
             current, _ = conditions_after_effect_application(
-                current, row["effect_id"], self.store.memory.json(row["conditions_json"])
+                current,
+                row["effect_id"],
+                statuses,
+                scope="session" if _region_poison(row, statuses) else "combat",
             )
         return [condition.model_dump(mode="json") for condition in current]
 
@@ -372,16 +465,16 @@ class OngoingEffects:
                     seen.add(key)
         return names
 
-    def has_linked_conditions(self, sid, target_id):
-        """Check one target's linked statuses for conservative predicate callers."""
-        return any(
-            row["conditions_json"] is not None
-            and bool(self.store.memory.json(row["conditions_json"]))
-            for row in self._conn.execute(
-                "SELECT conditions_json FROM ongoing_effects WHERE session_id=? AND target_id=?",
-                (sid, target_id),
-            )
-        )
+    @scoped_read
+    def has_linked_conditions(self, sid, target_id, *, allow_region_poison=False):
+        """Check target statuses, optionally allowing the fixed region condition."""
+        for row in self._target_rows(sid, target_id):
+            if row["conditions_json"] is None:
+                continue
+            statuses = self.store.memory.json(row["conditions_json"])
+            if statuses and not (allow_region_poison and _region_poison(row, statuses)):
+                return True
+        return False
 
     def has_concentration(self, sid, caster_id):
         """Check the caster's keyed group without constructing its RE wire token."""

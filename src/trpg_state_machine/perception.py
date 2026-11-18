@@ -725,7 +725,9 @@ class PerceptionRuntime:
             ).fetchall()
             if any(
                 self._characters.has_conditions(sid, r["actor_id"])
-                or self._characters.effects.has_linked_conditions(sid, r["actor_id"])
+                or self._characters.effects.has_linked_conditions(
+                    sid, r["actor_id"], allow_region_poison=True
+                )
                 for r in states
             ):
                 return False

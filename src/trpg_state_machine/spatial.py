@@ -171,9 +171,9 @@ class WorldHandler:
         return self.scenes.ensure_scene(sid, scene_id, package)
 
     @scoped_read
-    def _world_actor_ready(self, sid, actor_id, *, navigation_scope=None):
+    def _world_actor_ready(self, sid, actor_id, *, navigation_scope=None, movement=False):
         """Check activity occupancy, actor state and authoritative position for action
-        readiness.
+        readiness. Fixed-region Poisoned does not prevent an admitted move.
         """
         qualified = self.activities.qualifies(navigation_scope, sid, actor_id)
         if self.activities.active(sid, actor_id) and not qualified:
@@ -193,7 +193,9 @@ class WorldHandler:
             and (
                 not life["is_alive"]
                 or self.characters.has_conditions(sid, actor_id)
-                or self.characters.effects.has_linked_conditions(sid, actor_id)
+                or self.characters.effects.has_linked_conditions(
+                    sid, actor_id, allow_region_poison=movement
+                )
                 or self.characters.effects.has_concentration(sid, actor_id)
             )
         ):
@@ -216,7 +218,10 @@ class WorldHandler:
 
     @scoped_read
     def _public_scope(self, sid, actor_id, package):
-        """Validate public spatial eligibility in the actor's scene."""
+        """Validate public spatial eligibility in the actor's scene.
+
+        Fixed-region Poisoned does not restrict target visibility.
+        """
         proof = self._conn.execute(
             "SELECT complete FROM scene_integrity WHERE session_id=? AND scene_id="
             "(SELECT current_scene_id FROM actors WHERE session_id=? AND actor_id=?)",
@@ -242,7 +247,9 @@ class WorldHandler:
         ).fetchone()
         if mechanical and (
             self.characters.has_conditions(sid, actor_id)
-            or self.characters.effects.has_linked_conditions(sid, actor_id)
+            or self.characters.effects.has_linked_conditions(
+                sid, actor_id, allow_region_poison=True
+            )
         ):
             raise StateMachineError(
                 "unsupported_target_visibility",
@@ -679,7 +686,8 @@ class WorldHandler:
         """Resolve the validated world destination for the operation kind."""
         sid = row["session_id"]
         self._world_operation_capability(row, operation)
-        self._world_actor_ready(sid, actor_id, navigation_scope=navigation_scope)
+        movement = type(operation) in (StepActor, TraversePassage, EnterScene, MoveActor)
+        self._world_actor_ready(sid, actor_id, navigation_scope=navigation_scope, movement=movement)
         position = self._actor_position(sid, actor_id)
         # Establish caller capability before looking up any target reference.
         if self.facts.instances.scene(row["session_id"], position.scene_id).has_grid:
@@ -868,7 +876,9 @@ class WorldHandler:
                     source_actor_id=operation.object_id,
                 )
             ]
-        return self.scenes.move_admitted(row, package, actor_id, destination)
+        return self.scenes.move_admitted(
+            row, package, actor_id, destination, environment=self.environment, loader=self.loader
+        )
 
     @scoped_read
     def _actor_position(self, sid, actor_id):

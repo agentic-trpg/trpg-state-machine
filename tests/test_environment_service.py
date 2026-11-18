@@ -48,7 +48,12 @@ from trpg_state_machine import (
 from trpg_state_machine import (
     SceneEnvironmentProtection as Protection,
 )
-from trpg_state_machine.environment_commands import environment_operation_from_data
+from trpg_state_machine.environment_commands import (
+    environment_facts_to_data,
+    environment_operation_from_data,
+    environment_operation_to_data,
+    facts_from_data,
+)
 from trpg_state_machine.errors import StateMachineError
 from trpg_state_machine.object_protection import (
     CurrentProtectionProperties,
@@ -242,6 +247,80 @@ def test_noops_conflicts_permissions_fingerprints_and_closed_wire(tmp_path, cont
         ):
             with pytest.raises(StateMachineError):
                 environment_operation_from_data("world.batch_environment", raw)
+
+
+def test_fixed_region_source_codec_preserves_ordinary_fingerprints_and_facts():
+    """Omit the optional field for ordinary sources and round-trip an explicit region."""
+    ordinary = Source("fog", WEATHER, EnvironmentArea(("2,1",)))
+    fixed = replace(ordinary, region_condition="poisoned")
+    legacy = {
+        "source_id": "fog",
+        "conditions": asdict(WEATHER),
+        "area": {"cells": ("2,1",), "heights": None},
+        "priority": 0,
+        "exposure": "local",
+        "observable": False,
+    }
+    kind = "world.add_environment_source"
+    for source, expected in (
+        (ordinary, legacy),
+        (fixed, {**legacy, "region_condition": "poisoned"}),
+    ):
+        mutation = AddEnvironmentSource(A, source)
+        wire = environment_operation_to_data(mutation)
+        assert wire == {"command_type": kind, "payload": {"scene_id": A, "source": expected}}
+        assert environment_operation_from_data(kind, wire["payload"]) == mutation
+        facts = Facts(sources=(source,))
+        persisted = environment_facts_to_data(facts)
+        assert persisted["sources"] == (expected,)
+        assert facts_from_data(persisted) == facts
+
+    for overrides in (
+        {"region_condition": "frightened"},
+        {"exposure": "outdoor"},
+        {"area": EnvironmentArea()},
+        {"area": EnvironmentArea(("2,1",), HeightInterval(0, 5))},
+    ):
+        with pytest.raises(StateMachineError) as rejected:
+            replace(fixed, **overrides)
+        assert rejected.value.code == "invalid_environment"
+
+
+def test_fixed_region_source_keeps_geometry_across_environment_mutations(tmp_path, context):
+    """Allow visual updates and refuse changes that can strand a movement condition."""
+    sm, sid, p, _ = setup(tmp_path, context, large_data())
+    ctx = gm(context)
+    with sm:
+        area = EnvironmentArea(("2,1",))
+        fixed = Source("fixed", WEATHER, area, region_condition="poisoned")
+        ordinary = Source("ordinary", WEATHER, area)
+        seed(sm, sid, p, ctx, Facts(sources=(fixed, ordinary)))
+        assert sm.environment.region_condition_sources(sid, A, "2,1") == ("fixed",)
+        assert sm.environment.region_condition_sources(sid, A, None) == ()
+
+        actions = (
+            ReplaceEnvironmentSource(A, replace(fixed, region_condition=None)),
+            ReplaceEnvironmentSource(A, replace(fixed, area=EnvironmentArea(("1,1",)))),
+            ReplaceEnvironmentSource(A, replace(ordinary, region_condition="poisoned")),
+            RemoveEnvironmentSource(A, fixed.source_id),
+        )
+        for i, op in enumerate(actions):
+            assert submit(sm, sid, p, ctx, op, f"reject{i}").error_code == "invalid_environment"
+        assert sm.environment.read_facts(sid, A, p, context=ctx).sources == (fixed, ordinary)
+
+        update = ReplaceEnvironmentSource(A, replace(fixed, conditions=Conditions()))
+        assert submit(sm, sid, p, ctx, update, "change_visuals").status == "committed"
+        assert sm.environment.region_condition_sources(sid, A, "2,1") == ("fixed",)
+        added = replace(fixed, source_id="alpha")
+        assert submit(sm, sid, p, ctx, AddEnvironmentSource(A, added), "add").status == "committed"
+        assert sm.environment.region_condition_sources(sid, A, "2,1") == ("alpha", "fixed")
+        assert sm.environment.region_condition_sources(sid, A, "1,1") == ()
+
+        other_scene = AddEnvironmentSource(B, replace(fixed, area=EnvironmentArea(("0,0",))))
+        assert submit(sm, sid, p, ctx, other_scene, "add_elsewhere").status == "committed"
+        builds = sm._store.memory.stats["instance_builds"]
+        assert sm.environment.region_condition_sources(sid, A, "2,1") == ("alpha", "fixed")
+        assert sm._store.memory.stats["instance_builds"] == builds
 
 
 def test_batch_prevalidation_rollback_and_net_noop(tmp_path, context, monkeypatch):
