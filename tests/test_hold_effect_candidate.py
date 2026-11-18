@@ -1,6 +1,6 @@
-"""Controlled Hold Person candidate through the shared SM rule submission."""
+"""Hold Person lifecycle through the public SM command entry point."""
 
-import asyncio
+from dataclasses import replace
 from random import Random
 
 import pytest
@@ -8,7 +8,6 @@ from dnd5e_engine.evaluation_class_dependencies import operation_dependencies
 from dnd5e_engine.evaluation_contracts import CombatIntentPayload
 from dnd5e_engine.evaluation_rng import RNGState
 from dnd5e_engine.evaluation_ruleset import ruleset_binding
-from dnd5e_engine.evaluation_spell_dependencies import invocation_dependencies
 from dnd5e_engine.rules.character import proficiency_grants
 from dnd5e_srd_data import BundledAssetLoader, MemoryAssetLoader
 from dnd_support import create, initialize
@@ -18,7 +17,7 @@ from trpg_state_machine import StateMachine, StateMachineError, TypedCommand
 from trpg_state_machine.package import _validate, canonical_json
 
 
-def hold_world(tmp_path, context, *, seed=0, invalid_ac=False):
+def hold_world(tmp_path, context, *, seed=0, invalid_ac=False, caster_hp=30):
     """Author a Wizard 5, one component pouch and one living Humanoid."""
     canonical = BundledAssetLoader()
     base = item_loader()
@@ -45,7 +44,7 @@ def hold_world(tmp_path, context, *, seed=0, invalid_ac=False):
     data["manifest"]["package_version"] = "effect-01/1"
     owner = data["pc_templates"][0]["pc_template_id"]
     data["pc_templates"][0]["character"]["inventory"] = ["component-pouch"]
-    data["pc_templates"][0]["character"]["hp"] = {"current": 30, "max": 30}
+    data["pc_templates"][0]["character"]["hp"] = {"current": caster_hp, "max": 30}
     data["scenes"][0]["objects"].append(
         {
             "object_id": "object.pouch",
@@ -88,7 +87,7 @@ def hold_world(tmp_path, context, *, seed=0, invalid_ac=False):
             weapon_in_hands=None,
             weapon_grip="none",
             other_hand_occupied=False,
-            hp_current=30,
+            hp_current=caster_hp,
             hp_max=30,
             ac=99 if invalid_ac else 10 + (pc["dexterity"] - 10) // 2,
             proficiency_bonus_override=None,
@@ -180,218 +179,171 @@ def test_foundation_rejects_unreviewed_wizard_ac(tmp_path, context):
     assert error.value.code == "unsupported_combat_foundation"
 
 
-def candidate_submit(sm, command, package, context):
-    """Use the internal opt-in after the same context and fingerprint preparation."""
-    with sm._store.transaction():
-        row = sm._sessions._session(command.session_id, package, context)
-        fingerprint = sm._session_runtime.fingerprint(command, row, context)
-    return asyncio.run(
-        sm._combat._submit_dnd(command, package, context, fingerprint, hold_candidate=True)
+def hold_cast_command(sm, sid, package, context, *, command_id="hold.cast"):
+    """Create a public cast command pinned to the current world version."""
+    state = sm.read_session(sid, package, context=context)
+    return TypedCommand(
+        sid,
+        command_id,
+        state.pc_actor_id,
+        "combat.intent",
+        CombatIntentPayload(
+            intent_type="cast_spell",
+            spell_id="hold-person",
+            target_id=NPC,
+            slot_level=2,
+            spell_source_id="class:wizard",
+        ),
+        state.world_version,
+    )
+
+
+def hold_attack_command(sid, caster, world_version, *, command_id="hold.attack"):
+    """Create the NPC's ordinary attack against the concentrating caster."""
+    return TypedCommand(
+        sid,
+        command_id,
+        NPC,
+        "combat.intent",
+        CombatIntentPayload(
+            intent_type="attack", source_id=NPC, target_id=caster, stat_block_action_id="scimitar"
+        ),
+        world_version,
+    )
+
+
+def pass_command(sid, snapshot, command_id):
+    """Use the actual current turn's actor and the fixed snapshot's version."""
+    turn = snapshot.combat_state
+    return TypedCommand(
+        sid,
+        command_id,
+        turn.initiative_ids[turn.current_turn_index],
+        "combat.intent",
+        CombatIntentPayload(intent_type="pass"),
+        snapshot.world_version,
     )
 
 
 @pytest.mark.parametrize("seed", [0, 5])
-def test_hold_candidate_cast_and_reopen(tmp_path, context, seed):
+def test_hold_public_cast_and_reopen(tmp_path, context, seed):
     """Adopt one real typed graph and its payment in the shared commit."""
     sm, sid, package, loader, db = hold_world(tmp_path, context, seed=seed)
     with sm:
-        state = sm.read_session(sid, package, context=context)
-        command = TypedCommand(
-            sid,
-            "hold.cast",
-            state.pc_actor_id,
-            "combat.intent",
-            CombatIntentPayload(
-                intent_type="cast_spell",
-                spell_id="hold-person",
-                target_id=NPC,
-                slot_level=2,
-                spell_source_id="class:wizard",
-            ),
-            state.world_version,
-        )
+        command = hold_cast_command(sm, sid, package, context)
         before = sm.read_combat_snapshot(sid, package, context=context)
-        assert invocation_dependencies(before, loader, NPC, damaging=True) is None
-        receipt = candidate_submit(sm, command, package, context)
+        receipt = sm.submit_command(command, package, context=context)
         assert receipt.status == "committed", receipt
         after = sm.read_combat_snapshot(sid, package, context=context)
-        assert len(after.effect_states) == 1
-        assert after.effect_states[0].target_id == (NPC if seed == 0 else state.pc_actor_id)
-        assert after.combat_state.concentration_chain[state.pc_actor_id]
+        (effect,) = after.effect_states
+        assert effect.target_id == (NPC if seed == 0 else command.actor_id)
+        assert tuple(after.combat_state.concentration_chain[command.actor_id]) == (
+            (effect.target_id, effect.id, effect.origin),
+        )
+        target = next(actor for actor in after.character_states if actor.entity_id == NPC)
+        assert [(cond.condition, cond.source_effect_id) for cond in target.conditions] == (
+            [("paralyzed", effect.id)] if seed == 0 else []
+        )
+        caster = next(
+            actor for actor in after.character_states if actor.entity_id == command.actor_id
+        )
+        assert caster.spell_slots == {1: 4, 2: 2, 3: 2}
+        assert after.combat_state.expended_resources[command.actor_id] == {"spell_slot:2": 1}
         assert before.effect_states == ()
-        assert candidate_submit(sm, command, package, context) == receipt
+        assert sm.submit_command(command, package, context=context) == receipt
     with StateMachine(db, dnd_loader=loader) as reopened:
         assert reopened.read_combat_snapshot(sid, package, context=context) == after
 
 
 @pytest.mark.parametrize("seed", [0, 1])
-def test_hold_candidate_target_turn(tmp_path, context, seed):
+def test_hold_public_target_turn(tmp_path, context, seed):
     """Use the same RE graph for a target repeat save or empty anchor turn."""
     sm, sid, package, _, _ = hold_world(tmp_path, context, seed=seed)
     with sm:
-        state = sm.read_session(sid, package, context=context)
-        cast = TypedCommand(
-            sid,
-            "hold.cast",
-            state.pc_actor_id,
-            "combat.intent",
-            CombatIntentPayload(
-                intent_type="cast_spell",
-                spell_id="hold-person",
-                target_id=NPC,
-                slot_level=2,
-                spell_source_id="class:wizard",
-            ),
-            state.world_version,
-        )
-        assert candidate_submit(sm, cast, package, context).status == "committed"
+        cast = hold_cast_command(sm, sid, package, context)
+        assert sm.submit_command(cast, package, context=context).status == "committed"
         before = sm.read_combat_snapshot(sid, package, context=context)
-        actor_id = before.combat_state.initiative_ids[before.combat_state.current_turn_index]
-        assert actor_id == NPC
-        turn = TypedCommand(
-            sid,
-            "hold.target.turn",
-            actor_id,
-            "combat.intent",
-            CombatIntentPayload(intent_type="pass"),
-            before.world_version,
-        )
-        receipt = candidate_submit(sm, turn, package, context)
+        turn = pass_command(sid, before, "hold.target.turn")
+        assert turn.actor_id == NPC
+        receipt = sm.submit_command(turn, package, context=context)
         assert receipt.status == "committed", receipt
         after = sm.read_combat_snapshot(sid, package, context=context)
         assert len(after.effect_states) == (1 if seed == 0 else 0)
+        target = next(actor for actor in after.character_states if actor.entity_id == NPC)
+        assert bool(target.conditions) == (seed == 0)
+        assert bool(after.combat_state.concentration_chain) == (seed == 0)
         assert after.world_version > before.world_version
         assert after.combat_state.current_turn_index != before.combat_state.current_turn_index
 
 
-def test_hold_candidate_caster_turn_decrements(tmp_path, context):
+def test_hold_public_caster_turn_decrements(tmp_path, context):
     """RE's caster TurnEnd decrements its own concentration counter once."""
     sm, sid, package, _, _ = hold_world(tmp_path, context, seed=0)
     with sm:
-        state = sm.read_session(sid, package, context=context)
-        cast = TypedCommand(
-            sid,
-            "hold.cast",
-            state.pc_actor_id,
-            "combat.intent",
-            CombatIntentPayload(
-                intent_type="cast_spell",
-                spell_id="hold-person",
-                target_id=NPC,
-                slot_level=2,
-                spell_source_id="class:wizard",
-            ),
-            state.world_version,
-        )
-        assert candidate_submit(sm, cast, package, context).status == "committed"
+        cast = hold_cast_command(sm, sid, package, context)
+        assert sm.submit_command(cast, package, context=context).status == "committed"
         first = sm.read_combat_snapshot(sid, package, context=context)
-        target_turn = TypedCommand(
-            sid,
-            "hold.target.turn",
-            NPC,
-            "combat.intent",
-            CombatIntentPayload(intent_type="pass"),
-            first.world_version,
-        )
-        assert candidate_submit(sm, target_turn, package, context).status == "committed"
+        target_turn = pass_command(sid, first, "hold.target.turn")
+        assert target_turn.actor_id == NPC
+        rng = sm.read_rng_context(sid, package, context=context)
+        wrong_context = replace(context, controlled_npc_ids=())
+        with pytest.raises(StateMachineError) as error:
+            sm.submit_command(target_turn, package, context=wrong_context)
+        assert error.value.code == "unauthorized"
+        assert sm.get_command_receipt(sid, target_turn.command_id, package, context=context) is None
+        assert sm.read_combat_snapshot(sid, package, context=context) == first
+        assert sm.read_rng_context(sid, package, context=context) == rng
+        assert sm.submit_command(target_turn, package, context=context).status == "committed"
         before = sm.read_combat_snapshot(sid, package, context=context)
-        assert before.combat_state.concentration_rounds_remaining[state.pc_actor_id] == 9
-        caster_turn = TypedCommand(
-            sid,
-            "hold.caster.turn",
-            state.pc_actor_id,
-            "combat.intent",
-            CombatIntentPayload(intent_type="pass"),
-            before.world_version,
-        )
-        assert candidate_submit(sm, caster_turn, package, context).status == "committed"
+        assert before.combat_state.concentration_rounds_remaining[cast.actor_id] == 9
+        caster_turn = pass_command(sid, before, "hold.caster.turn")
+        assert caster_turn.actor_id == cast.actor_id
+        assert sm.submit_command(caster_turn, package, context=context).status == "committed"
         after = sm.read_combat_snapshot(sid, package, context=context)
-        assert after.combat_state.concentration_rounds_remaining[state.pc_actor_id] == 8
+        assert after.combat_state.concentration_rounds_remaining[cast.actor_id] == 8
 
 
-def test_hold_candidate_caster_duration_expires(tmp_path, context):
-    """An anchor from a successful initial save expires on the ninth caster TurnEnd."""
+def test_hold_public_caster_duration_expires(tmp_path, context):
+    """A saved-against anchor expires on the ninth caster TurnEnd, then plain Pass works."""
     sm, sid, package, _, _ = hold_world(tmp_path, context, seed=5)
     with sm:
-        state = sm.read_session(sid, package, context=context)
-        cast = TypedCommand(
-            sid,
-            "hold.cast",
-            state.pc_actor_id,
-            "combat.intent",
-            CombatIntentPayload(
-                intent_type="cast_spell",
-                spell_id="hold-person",
-                target_id=NPC,
-                slot_level=2,
-                spell_source_id="class:wizard",
-            ),
-            state.world_version,
-        )
-        assert candidate_submit(sm, cast, package, context).status == "committed"
+        cast = hold_cast_command(sm, sid, package, context)
+        assert sm.submit_command(cast, package, context=context).status == "committed"
         for turn in range(18):
             before = sm.read_combat_snapshot(sid, package, context=context)
             assert before.effect_states
-            actor_id = before.combat_state.initiative_ids[before.combat_state.current_turn_index]
-            command = TypedCommand(
-                sid,
-                f"hold.duration.{turn}",
-                actor_id,
-                "combat.intent",
-                CombatIntentPayload(intent_type="pass"),
-                before.world_version,
-            )
-            assert candidate_submit(sm, command, package, context).status == "committed"
+            command = pass_command(sid, before, f"hold.duration.{turn}")
+            assert sm.submit_command(command, package, context=context).status == "committed"
         after = sm.read_combat_snapshot(sid, package, context=context)
         assert not after.effect_states
         assert not after.combat_state.concentration_chain
         assert not after.combat_state.concentration_rounds_remaining
+        command = pass_command(sid, after, "hold.duration.plain")
+        assert sm.submit_command(command, package, context=context).status == "committed"
+        plain = sm.read_combat_snapshot(sid, package, context=context)
+        assert plain.combat_state.current_turn_index != after.combat_state.current_turn_index
+        assert not plain.effect_states
 
 
 @pytest.mark.parametrize("seed", [9, 11])
-def test_hold_candidate_damage_concentration(tmp_path, context, seed):
+def test_hold_public_damage_concentration(tmp_path, context, seed):
     """A real positive-HP attack against the caster adopts RE concentration."""
     sm, sid, package, _, _ = hold_world(tmp_path, context, seed=seed)
     with sm:
-        state = sm.read_session(sid, package, context=context)
-        cast = TypedCommand(
-            sid,
-            "hold.cast",
-            state.pc_actor_id,
-            "combat.intent",
-            CombatIntentPayload(
-                intent_type="cast_spell",
-                spell_id="hold-person",
-                target_id=NPC,
-                slot_level=2,
-                spell_source_id="class:wizard",
-            ),
-            state.world_version,
-        )
-        assert candidate_submit(sm, cast, package, context).status == "committed"
+        cast = hold_cast_command(sm, sid, package, context)
+        assert sm.submit_command(cast, package, context=context).status == "committed"
         before = sm.read_combat_snapshot(sid, package, context=context)
-        assert before.effect_states[0].target_id == state.pc_actor_id
-        attack = TypedCommand(
-            sid,
-            "hold.attack",
-            NPC,
-            "combat.intent",
-            CombatIntentPayload(
-                intent_type="attack",
-                source_id=NPC,
-                target_id=state.pc_actor_id,
-                stat_block_action_id="scimitar",
-            ),
-            before.world_version,
-        )
-        receipt = candidate_submit(sm, attack, package, context)
+        assert before.effect_states[0].target_id == cast.actor_id
+        attack = hold_attack_command(sid, cast.actor_id, before.world_version)
+        receipt = sm.submit_command(attack, package, context=context)
         assert receipt.status == "committed", receipt
         after = sm.read_combat_snapshot(sid, package, context=context)
         hp_before = next(
-            a for a in before.character_states if a.entity_id == state.pc_actor_id
+            a for a in before.character_states if a.entity_id == cast.actor_id
         ).hp_current
         hp_after = next(
-            a for a in after.character_states if a.entity_id == state.pc_actor_id
+            a for a in after.character_states if a.entity_id == cast.actor_id
         ).hp_current
         assert 0 < hp_after < hp_before
         assert len(after.effect_states) == (0 if seed == 9 else 1)
+        assert bool(after.combat_state.concentration_chain) == (seed == 11)

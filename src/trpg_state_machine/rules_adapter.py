@@ -5,7 +5,9 @@ import json
 from dataclasses import asdict
 
 from dnd5e_engine import evaluation_delta as delta
+from dnd5e_engine.attack_rules import attack_action_is_spent
 from dnd5e_engine.evaluation import evaluate
+from dnd5e_engine.evaluation_actor import combatant
 from dnd5e_engine.evaluation_availability import (
     ActionAvailabilityRequest,
     ActionAvailabilityResult,
@@ -15,6 +17,7 @@ from dnd5e_engine.evaluation_contracts import (
     CheckPayload,
     CombatClosePayload,
     ExplorationItemUsePayload,
+    ExplorationSpellCastPayload,
     ItemUsePayload,
     ReadVersion,
     RuleError,
@@ -30,11 +33,25 @@ from dnd5e_engine.evaluation_ruleset import (
     verify_ruleset,
 )
 from dnd5e_engine.evaluation_spells import ordinary_spell_mechanism
-from dnd5e_engine.evaluation_state import CharacterStateV2, CombatSnapshot, NonCombatSnapshot
+from dnd5e_engine.evaluation_state import (
+    CharacterStateV2,
+    CombatSnapshot,
+    ConditionRecord,
+    MovementLedgerState,
+    NonCombatSnapshot,
+)
 from dnd5e_engine.events import HealingApplied, IntentSubmitted
+from dnd5e_engine.movement import project_speeds, speed_for_mode
+from dnd5e_engine.rules.conditions import active_condition_names, exhaustion_level_of
+from dnd5e_engine.turn_rules import (
+    next_turn_index,
+    ordinary_action_payment,
+    reset_turn_budget,
+)
 from pydantic import ValidationError
 
 from .combat import DND_RULESET, _remap, process_id, validate_foundation
+from .concentration_adoption import concentration_release_changes
 from .dnd_checks import check_changes
 from .dnd_closure import closure_changes
 from .errors import StateMachineError
@@ -42,6 +59,7 @@ from .package import canonical_json
 from .scoped_reads import scoped_read
 from .session_access import _binding
 from .spell_adoption import ordinary_spell_changes
+from .timed_spell_adoption import timed_spell_changes
 
 
 def _invalid(message):
@@ -58,8 +76,56 @@ def _json(value):
     return value
 
 
+class UnsupportedEffectConsequence(Exception):
+    """A verified Hold Person attack reaches the unsupported zero-HP lifecycle."""
+
+
+def _hold_source(snapshot):
+    """Select the caster of one Hold Person graph in the fixed encounter input."""
+    state = snapshot.combat_state
+    if (
+        snapshot.snapshot_schema_version != "engine-snapshot/20"
+        or len(snapshot.effect_states) != 1
+        or len(state.concentration_chain) != 1
+    ):
+        return None
+    effect = snapshot.effect_states[0]
+    source, chain = next(iter(state.concentration_chain.items()))
+    if chain != [(effect.target_id, effect.id, effect.origin)]:
+        return None
+    application = effect.lifecycle
+    if application is None:
+        if (
+            effect.target_id == source
+            and effect.id == "effect:hold-person"
+            and effect.origin == f"cast:hold-person:{source}"
+            and effect.flags.get("concentration_anchor") is True
+        ):
+            return source
+    elif (
+        effect.id == "effect:paralyzed"
+        and application.source_id == source
+        and application.source_kind == "spell"
+        and application.source_slug == "hold-person"
+    ):
+        return source
+    return None
+
+
+def _has_combat_effects(snapshot):
+    """Check for effect graph components even if the current effect list is empty."""
+    state = snapshot.combat_state
+    return bool(
+        snapshot.effect_states
+        or state.concentration_chain
+        or state.concentration_rounds_remaining
+        or state.effect_lifecycles
+        or state.conditions_by_effect
+    )
+
+
 def delta_changes(request, result, *, hold_mode=False):
-    """Check pre-values and ownership for the attack or narrow potion Delta.
+    """Check pre-values and ownership for an attack, turn advance or narrow potion Delta.
 
     A temporary candidate validates invariants; it is never persisted as a Snapshot.
     Whole-session OCC covers all Engine dependencies in this candidate API.
@@ -396,6 +462,142 @@ def exploration_potion_changes(request, result):
     )
 
 
+def _turn_intent_scope(request, result, *, hold_graph=False, condition_changes=None):
+    """Check the closed Cast or Pass write set and bind its turn and budgets."""
+    snapshot = request.state_snapshot
+    combat = snapshot.combat_state
+    operations = result.state_delta.operations
+    cast = request.payload.intent_type == "cast_spell"
+    permitted = {delta.TurnUpdate, delta.ActionBudgetUpdate, delta.MovementLedgerUpdate}
+    if cast:
+        permitted.update(
+            {delta.HoldPersonGraphCreate, delta.ResourceUpdate, delta.SlotSpendLedgerUpdate}
+        )
+    elif hold_graph:
+        permitted.update(
+            {delta.EffectLifecycleUpdate, delta.ConcentrationUpdate, delta.ConditionsUpdate}
+        )
+    if any(type(op) not in permitted for op in operations):
+        _invalid("Cast or Pass proposed a consequence outside its operation scope")
+
+    actor_id = request.actor_id
+    if combat.initiative_ids[combat.current_turn_index] != actor_id:
+        _invalid("Cast or Pass actor does not own the fixed turn")
+    actors = {actor.entity_id: combatant(actor) for actor in snapshot.character_states}
+    outgoing = actors[actor_id]
+    if cast:
+        payment = ordinary_action_payment(outgoing)
+        if not payment or outgoing.action_taken_this_turn:
+            _invalid("Hold Person lacks an available ordinary Action")
+        outgoing = outgoing.model_copy(update=payment)
+
+    turns = [op for op in operations if type(op) is delta.TurnUpdate]
+    advances = not cast or attack_action_is_spent(outgoing)
+    if len(turns) != int(advances):
+        _invalid("Cast or Pass omitted or duplicated its required turn transition")
+    turn_events = [
+        event
+        for event in result.proposed_events
+        if event.type in {"turn_phase", "turn_ended", "turn_started", "round_started"}
+    ]
+    actors[actor_id] = outgoing
+    for target_id, value in (condition_changes or {}).items():
+        actors[target_id] = actors[target_id].model_copy(update={"conditions": value})
+
+    def speed(actor, mode):
+        """Project the bounded turn's movement from the adopted conditions via RE."""
+        return speed_for_mode(
+            project_speeds(
+                actor.base_speed,
+                actor.movement_modes,
+                condition_names=active_condition_names(actor.conditions),
+                exhaustion_level=exhaustion_level_of(actor.conditions),
+            ),
+            mode,
+        )
+
+    ledgers = [op for op in operations if type(op) is delta.MovementLedgerUpdate]
+    if advances:
+        next_turn = next_turn_index(
+            combat.initiative_ids, combat.dead_ids, combat.current_turn_index + 1
+        )
+        if next_turn is None:
+            _invalid("Cast or Pass lacks a living next turn")
+        index, rollover = next_turn
+        next_actor = combat.initiative_ids[index]
+        new_round = combat.round_number + int(rollover)
+        turn = turns[0]
+        if (
+            turn.value.current_turn_index != index
+            or turn.value.round_number != new_round
+            or turn.value.turn_serial != combat.turn_serial + 1
+            or turn.value.last_ended_turn != (combat.round_number, actor_id)
+            or turn.value.ended != combat.ended
+            or turn.value.departed_actor_id != combat.departed_actor_id
+            or turn.value.monster_turn_start_done != combat.monster_turn_start_done
+        ):
+            _invalid("Cast or Pass turn does not match the fixed initiative handoff")
+        expected_events = [("turn_phase", actor_id, "turn_end", combat.round_number)]
+        expected_events.append(("turn_ended", actor_id, None, None))
+        if rollover:
+            expected_events.extend(
+                [
+                    ("round_started", None, None, new_round),
+                    ("turn_phase", None, "round_start", new_round),
+                ]
+            )
+        expected_events.extend(
+            [
+                ("turn_started", next_actor, None, None),
+                ("turn_phase", next_actor, "turn_start", new_round),
+            ]
+        )
+        if [
+            (
+                event.type,
+                getattr(event, "actor_id", None),
+                getattr(event, "phase", None),
+                getattr(event, "round_number", None),
+            )
+            for event in turn_events
+        ] != expected_events:
+            _invalid("Cast or Pass lacks matching turn handoff events")
+        fresh = MovementLedgerState(spent_ft=0, distance_ft=0, active_mode="walk", dash_count=0)
+        old_ledger = combat.movement_ledgers[next_actor]
+        if [(op.actor_id, op.value) for op in ledgers] != (
+            [(next_actor, fresh)] if old_ledger != fresh else []
+        ):
+            _invalid("Cast or Pass changed movement outside the next turn reset")
+        for identity, actor in actors.items():
+            ledger = combat.movement_ledgers[identity]
+            if identity == next_actor:
+                actor = reset_turn_budget(actor, effective_speed=speed(actor, "walk"), attacks=1)
+            else:
+                actor = actor.model_copy(
+                    update={
+                        "movement_remaining": ledger.remaining(speed(actor, ledger.active_mode))
+                    }
+                )
+            actors[identity] = actor.model_copy(update={"sneak_attack_spent_this_turn": False})
+    elif turn_events or ledgers:
+        _invalid("Hold Person proposed turn consequences without a turn transition")
+
+    fields = delta.AttackBudgetState.model_fields
+    expected_budgets = {}
+    for actor in snapshot.character_states:
+        identity = actor.entity_id
+        if any(getattr(actors[identity], field) != getattr(actor, field) for field in fields):
+            expected_budgets[identity] = {
+                field: getattr(actors[identity], field) for field in fields
+            }
+    if {
+        op.actor_id: op.value.model_dump()
+        for op in operations
+        if type(op) is delta.ActionBudgetUpdate
+    } != expected_budgets:
+        _invalid("Cast or Pass changed budgets outside Action payment and turn reset")
+
+
 def hold_effect_changes(request, result):
     """Guard RE's typed Hold Person graph against the fixed encounter input."""
     snapshot = request.state_snapshot
@@ -453,6 +655,22 @@ def hold_effect_changes(request, result):
     if len(old_effects) != len(snapshot.effect_states) or len(concentrations) > 1:
         _invalid("Duplicate effect or concentration transition")
     actors = {a.entity_id: a for a in snapshot.character_states}
+    zero_hp = (
+        payload.intent_type == "attack"
+        and payload.target_id == source
+        and any(
+            type(op) is delta.HPDelta
+            and op.target_id == source
+            and op.expected_hp > 0
+            and op.resulting_hp == 0
+            for op in operations
+        )
+    )
+    knocked_out = zero_hp and any(
+        event.type == "unconscious" and event.target_id == source
+        for event in result.proposed_events
+    )
+    unconscious_added = False
     for operation in operations:
         if type(operation) is delta.ConditionsUpdate:
             if operation.target_id not in actors:
@@ -460,6 +678,20 @@ def hold_effect_changes(request, result):
             before = actors[operation.target_id].conditions
             independent = [c for c in before if c.source_effect_id is None]
             after_independent = [c for c in operation.value if c.source_effect_id is None]
+            if knocked_out and operation.target_id == source:
+                independent.append(
+                    ConditionRecord(
+                        condition="unconscious",
+                        source_entity_id="implied:event",
+                        scope="combat",
+                        duration_rounds=None,
+                        save_dc=None,
+                        applied_round=combat.round_number,
+                        exhaustion_level=1,
+                        source_effect_id=None,
+                    )
+                )
+                unconscious_added = True
             if list(operation.expected) != list(before) or after_independent != independent:
                 _invalid("Hold Person changed independent conditions")
     if cast:
@@ -567,7 +799,62 @@ def hold_effect_changes(request, result):
         chain = graph.chain if cast else tuple(combat.concentration_chain[source])
     if set(chain) != set(final_effects) or len(chain) != len(final_effects):
         _invalid("Hold Person graph transition is incomplete")
+    if payload.intent_type in {"cast_spell", "pass"}:
+        condition_changes = {
+            op.target_id: op.value for op in operations if type(op) is delta.ConditionsUpdate
+        }
+        expected_conditions = {}
+        if cast:
+            (entry,) = graph.entries
+            if entry.condition is not None:
+                target = entry.effect.target_id
+                expected_conditions[target] = (*actors[target].conditions, entry.condition)
+        else:
+            for op in lifecycles:
+                if op.effect is None and op.expected_lineage.statuses:
+                    target, effect_id, _ = op.identity
+                    expected_conditions[target] = tuple(
+                        condition
+                        for condition in actors[target].conditions
+                        if condition.source_effect_id != effect_id
+                    )
+        if condition_changes != ({} if cast else expected_conditions):
+            _invalid("Hold Person conditions do not match its graph transition")
+        _turn_intent_scope(
+            request, result, hold_graph=not cast, condition_changes=expected_conditions
+        )
     base = delta_changes(request, result, hold_mode=mode)
+    if zero_hp:
+        evidence = result.proposed_events
+        dead = any(
+            type(op) is delta.DeathStateUpdate and op.target_id == source and not op.value.is_alive
+            for op in operations
+        ) and any(event.type == "death" and event.target_id == source for event in evidence)
+        confirmed_knockout = unconscious_added and any(
+            event.type == "condition_applied"
+            and event.target_id == source
+            and event.condition == "unconscious"
+            for event in evidence
+        )
+        if (
+            chain
+            or not (confirmed_knockout or dead)
+            or not any(
+                event.type == "damage_applied"
+                and event.target_id == source
+                and event.source_actor_id == request.actor_id
+                and event.amount > 0
+                for event in evidence
+            )
+            or not any(
+                event.type == "concentration_dropped" and event.target_id == source
+                for event in evidence
+            )
+        ):
+            _invalid(
+                "Zero-HP concentration outcome lacks matching damage, life-state or drop evidence"
+            )
+        raise UnsupportedEffectConsequence
     effects = (
         ([("hold_graph", source, "create", graph)] if cast else [])
         + [("hold_lifecycle", op.identity, "update", op) for op in lifecycles]
@@ -576,7 +863,7 @@ def hold_effect_changes(request, result):
     return (*base, *effects)
 
 
-def validate_dnd_result(request, result, *, loader=None, hold_candidate=False):
+def validate_dnd_result(request, result, *, loader=None):
     """Strictly restore an RE result and validate request, binding, read version and Delta."""
     try:
         result = RuleEvaluationResult.model_validate(copy.deepcopy(result))
@@ -609,6 +896,8 @@ def validate_dnd_result(request, result, *, loader=None, hold_candidate=False):
         return result, check_changes(request, result)
     if type(request.payload) is ExplorationItemUsePayload:
         return result, exploration_potion_changes(request, result)
+    if type(request.payload) is ExplorationSpellCastPayload:
+        return result, timed_spell_changes(request, result, loader)
     if type(request.payload) is ItemUsePayload:
         changes = delta_changes(request, result)
         bottle = next(
@@ -645,7 +934,7 @@ def validate_dnd_result(request, result, *, loader=None, hold_candidate=False):
     if getattr(request.payload, "intent_type", None) == "cast_spell":
         if loader is None:
             _invalid("Spell result requires its bound rules loader")
-        if hold_candidate and request.payload.spell_id == "hold-person":
+        if request.payload.spell_id == "hold-person":
             return result, hold_effect_changes(request, result)
         mechanism = ordinary_spell_mechanism(loader, request.payload.spell_id)
         if mechanism is None:
@@ -653,14 +942,19 @@ def validate_dnd_result(request, result, *, loader=None, hold_candidate=False):
         activity_id = loader.get_spell(request.payload.spell_id).activities[0].id
         return result, ordinary_spell_changes(request, result, mechanism, activity_id)
     if (
-        hold_candidate
-        and request.state_snapshot.effect_states
-        and (
-            request.operation_kind == "combat.intent"
-            and request.payload.intent_type in {"pass", "attack"}
-        )
+        request.operation_kind == "combat.intent"
+        and request.payload.intent_type == "drop_concentration"
+    ):
+        return result, concentration_release_changes(request, result)
+    if (
+        request.operation_kind == "combat.intent"
+        and request.payload.intent_type in {"pass", "attack"}
+        and (source := _hold_source(request.state_snapshot)) is not None
+        and (request.payload.intent_type == "pass" or request.payload.target_id == source)
     ):
         return result, hold_effect_changes(request, result)
+    if request.operation_kind == "combat.intent" and request.payload.intent_type == "pass":
+        _turn_intent_scope(request, result)
     return result, (
         closure_changes(request, result)
         if request.operation_kind == "combat.close"
@@ -721,9 +1015,11 @@ class RulesAdapter:
             ) from exc
 
     @scoped_read
-    def _noncombat_snapshot(self, row, package=None):
-        """Build a complete noncombat snapshot from consistent actors, components, map and
-        lighting.
+    def _noncombat_snapshot(self, row, package=None, *, actor_ids=None):
+        """Read the required mechanical actors and the current scene in one scope.
+
+        A named dependency set limits actor and component assembly to its members.
+        Callers supplying a Package request its effective lighting projection.
         """
         self.records.require_noncombat_save(row)
         sid = row["session_id"]
@@ -736,17 +1032,17 @@ class RulesAdapter:
             raise StateMachineError(
                 "unsupported_mechanical_version", "Complete noncombat state was not initialized"
             )
-        present = [
-            a[0]
-            for a in self._conn.execute(
-                (
+        if actor_ids is None:
+            actor_ids = tuple(
+                a[0]
+                for a in self._conn.execute(
                     "SELECT actor_id FROM actors WHERE session_id=? AND current_scene_id=? "
-                    "ORDER BY actor_id"
-                ),
-                (sid, row["current_scene_id"]),
+                    "ORDER BY actor_id",
+                    (sid, row["current_scene_id"]),
+                )
             )
-        ]
-        actors = self.characters.rule_actors(sid, set(present))
+        owners = set(actor_ids)
+        actors = self.characters.rule_actors(sid, owners)
         scene_data = self.facts.mechanical_scene(sid, row["current_scene_id"])
         if scene_data is not None and package is not None:
             projected, unknown, _ = self.world.objects.lights.current_project(
@@ -765,8 +1061,8 @@ class RulesAdapter:
                         "snapshot_schema_version": row["mechanical_schema_version"],
                         "session_id": sid,
                         "world_version": row["world_version"],
-                        "character_states": [actors[a] for a in present],
-                        **self.characters.rule_components(sid, set(present)),
+                        "character_states": [actors[a] for a in actor_ids],
+                        **self.characters.rule_components(sid, owners),
                         "combat_setup": None,
                         "scene_state": scene_data,
                     }
@@ -806,8 +1102,8 @@ class RulesAdapter:
         self.characters.rule_components(row["session_id"], set(actors), full_audit=True)
 
     @scoped_read
-    def _combat_snapshot(self, row):
-        """Build a complete fixed combat snapshot from current facts and combat records."""
+    def _combat_snapshot(self, row, *, for_pass=False):
+        """Build fixed combat facts, limiting Pass to effects with a turn dependency."""
         sid = row["session_id"]
         if row["mechanical_schema_version"] not in (
             "engine-snapshot/17",
@@ -834,6 +1130,13 @@ class RulesAdapter:
             )
         try:
             components = self.characters.rule_components(sid, roster)
+            if for_pass:
+                independent = self.characters.effects.world_passive_identities(sid, roster)
+                components["effect_states"] = [
+                    effect
+                    for effect in components["effect_states"]
+                    if (effect["target_id"], effect["id"], effect["origin"]) not in independent
+                ]
             actors = self.characters.combat_rule_actors(
                 sid, roster, components["inventory_state"]["entries"]
             )
@@ -965,14 +1268,14 @@ class RulesAdapter:
         """Invoke stateless evaluation with the selected fixed rules loader."""
         return await evaluate(request, loader=self.loader)
 
-    def _dnd_capability(self, payload, actor_id, snapshot, *, hold_candidate=False):
+    def _dnd_capability(self, payload, actor_id, snapshot):
         """Determine command support from actual actor, monster and operation state."""
         if type(payload) is CheckPayload:
             return "pending_choice_unsupported" if payload.dc is None else None
         if type(payload) is CombatClosePayload:
             return None
-        if type(payload) is ExplorationItemUsePayload:
-            return None  # RE validates the selected bottle and narrow healing activity.
+        if type(payload) in (ExplorationItemUsePayload, ExplorationSpellCastPayload):
+            return None  # RE validates the fixed exploration operation.
         if type(payload) is ItemUsePayload:
             if payload.target_id != actor_id or actor_id not in snapshot.combat_state.party_ids:
                 return "item_unauthorized"
@@ -981,12 +1284,13 @@ class RulesAdapter:
             ):
                 return "item_missing"
             return None
+        combat = snapshot.combat_state
+        if payload.intent_type == "drop_concentration":
+            return None  # RE validates the caster's current group and the exact intent.
         if payload.intent_type == "cast_spell":
             if payload.spell_id is None:
                 return "intent.capability"
-            canonical = get_default_ruleset()
-            mechanism = ordinary_spell_mechanism(canonical, payload.spell_id)
-            if hold_candidate and payload.spell_id == "hold-person":
+            if payload.spell_id == "hold-person":
                 basic = type(payload)(
                     intent_type="cast_spell",
                     source_id=payload.source_id,
@@ -997,16 +1301,22 @@ class RulesAdapter:
                 )
                 if (
                     payload != basic
+                    or snapshot.snapshot_schema_version != "engine-snapshot/20"
                     or payload.slot_level != 2
                     or payload.source_id not in (None, actor_id)
                     or payload.target_id is None
                     or payload.spell_source_id is None
-                    or actor_id not in snapshot.combat_state.party_ids
-                    or snapshot.combat_state.pending_reactions
-                    or snapshot.effect_states
+                    or actor_id not in combat.party_ids
+                    or combat.pending_reactions
+                    or combat.active_reaction_responses
+                    or combat.reaction_effects_pending_expiry
+                    or combat.sap_marks
+                    or _has_combat_effects(snapshot)
                 ):
                     return "spell.capability"
                 return None
+            canonical = get_default_ruleset()
+            mechanism = ordinary_spell_mechanism(canonical, payload.spell_id)
             if mechanism is None:
                 return "intent.capability"
             spell = canonical.get_spell(payload.spell_id)
@@ -1027,20 +1337,30 @@ class RulesAdapter:
                 or payload.source_id not in (None, actor_id)
                 or payload.spell_source_id is None
                 or payload.target_id is None
-                or actor_id not in snapshot.combat_state.party_ids
-                or snapshot.combat_state.pending_reactions
+                or actor_id not in combat.party_ids
+                or combat.pending_reactions
                 or snapshot.effect_states
             ):
                 return "spell.capability"
             return None
         if payload.intent_type != "attack":
-            if hold_candidate and payload.intent_type == "pass":
+            if payload.intent_type == "pass":
                 basic = type(payload)(intent_type="pass", source_id=payload.source_id)
                 if (
                     payload == basic
                     and payload.source_id in (None, actor_id)
-                    and snapshot.effect_states
-                    and len(snapshot.combat_state.concentration_chain) == 1
+                    and snapshot.snapshot_schema_version == "engine-snapshot/20"
+                    and not (
+                        combat.pending_reactions
+                        or combat.active_reaction_responses
+                        or combat.reaction_effects_pending_expiry
+                        or combat.sap_marks
+                    )
+                    and all(
+                        actor.is_alive and actor.hp_current > 0
+                        for actor in snapshot.character_states
+                    )
+                    and (not _has_combat_effects(snapshot) or _hold_source(snapshot) is not None)
                 ):
                     return None
             return "intent.capability"
@@ -1095,6 +1415,8 @@ class RulesAdapter:
                 self.characters.spend_resource(
                     sid, identity, field, amount, expected_current=expected_current
                 )
+            elif component == "world_effect" and field == "create":
+                self.world.runtime.time.consumers["effects"].apply_verified(sid, value)
             elif component == "slot_ledger":
                 self.records.spend_slot(
                     sid,
@@ -1162,12 +1484,14 @@ class RulesAdapter:
                     ):
                         _invalid("Effect-linked conditions differ after adoption")
 
-    def request(self, command, package, snapshot, rng, *, row=None):
+    def request(self, command, package, snapshot, rng, *, row=None, spell_positions=None):
         """Build a rules request with durable Session identity and isolated fixed inputs."""
         row = row if row is not None else self._pinned_row(command.session_id, package)
         return RuleEvaluationRequest(
             schema_version=(
-                "engine-evaluation/28"
+                "engine-evaluation/29"
+                if type(command.payload) is ExplorationSpellCastPayload
+                else "engine-evaluation/28"
                 if type(command.payload) is ExplorationItemUsePayload
                 else "engine-evaluation/27"
                 if snapshot.snapshot_schema_version == "engine-snapshot/20"
@@ -1185,14 +1509,13 @@ class RulesAdapter:
             state_snapshot=snapshot,
             ruleset_binding=self.session_binding(row),
             rng_context=rng,
+            spell_positions=spell_positions,
         )
 
     def query_availability(
         self, session_id, actor_id, payload, package, snapshot, owner, *, row=None
     ):
-        """Build/query availability and validate response association and support
-        boundaries.
-        """
+        """Query the pinned attack-only availability and validate its input association."""
         row = row if row is not None else self._pinned_row(session_id, package)
         self._verify_dnd_binding(package, row)
         try:
@@ -1213,7 +1536,11 @@ class RulesAdapter:
                 state_snapshot=snapshot,
                 ruleset_binding=self.session_binding(row),
             )
-            capability = self._dnd_capability(payload, actor_id, snapshot)
+            capability = (
+                self._dnd_capability(payload, actor_id, snapshot)
+                if payload.intent_type == "attack"
+                else "intent.capability"
+            )
             if owner != process_id() and not snapshot.combat_state.ended:
                 capability = "combat_unrestorable"
             if capability is not None:

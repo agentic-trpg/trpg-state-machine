@@ -300,6 +300,29 @@ class OngoingEffects:
         ]
 
     @scoped_read
+    def world_passive_identities(self, sid, target_ids):
+        """Find roster effects with only a world deadline and passive modifiers.
+
+        These rows have no turn trigger or linked condition. Pass can advance
+        the encounter with them still owned and scheduled by SessionTime.
+        """
+        identities = set()
+        for target_id in target_ids:
+            for row in self._target_rows(sid, target_id):
+                if row["expires_tick"] is None or any(
+                    row[name] is not None
+                    for name in ("concentration_id", "lifecycle_json", "conditions_json")
+                ):
+                    continue
+                effect = self.store.memory.json(row["payload_json"])
+                if not any(
+                    effect.get(name)
+                    for name in ("action_policy", "statuses", "flags", "lifecycle", "end_effects")
+                ):
+                    identities.add((target_id, row["effect_id"], row["origin"]))
+        return frozenset(identities)
+
+    @scoped_read
     def concentration_reference(self, sid, caster_id):
         """Return the stable caster wire token while its group exists."""
         row = self._conn.execute(

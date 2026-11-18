@@ -10,6 +10,7 @@ from dnd5e_engine.evaluation_contracts import (
     CombatClosePayload,
     CombatIntentPayload,
     ExplorationItemUsePayload,
+    ExplorationSpellCastPayload,
     ItemUsePayload,
 )
 from pydantic import ValidationError
@@ -96,6 +97,7 @@ OPERATIONS = {
     "combat.intent": CombatIntentPayload,
     "combat.item": ItemUsePayload,
     "world.use_item": ExplorationItemUsePayload,
+    "world.cast_spell": ExplorationSpellCastPayload,
     "combat.initialize": InitializeCombat,
     "rule_operation": RuleOperation,
     "enter_scene": EnterScene,
@@ -165,6 +167,7 @@ class TypedCommand:
         | CombatIntentPayload
         | ItemUsePayload
         | ExplorationItemUsePayload
+        | ExplorationSpellCastPayload
         | CombatClosePayload
         | CheckPayload
         | AdvanceGameTime
@@ -230,6 +233,7 @@ def validate_command(command: TypedCommand) -> None:
             SetTimeRunning,
             RuleOperation,
             ExplorationItemUsePayload,
+            ExplorationSpellCastPayload,
         ):
             raise StateMachineError(
                 "invalid_time_wait", "This operation cannot be a domain wait reply"
@@ -331,6 +335,7 @@ def validate_command(command: TypedCommand) -> None:
         CheckPayload,
         ItemUsePayload,
         ExplorationItemUsePayload,
+        ExplorationSpellCastPayload,
     ):
         try:
             type(command.payload).model_validate(deepcopy(command.payload))
@@ -430,6 +435,7 @@ class CommandRuntime:
             CombatIntentPayload,
             ItemUsePayload,
             ExplorationItemUsePayload,
+            ExplorationSpellCastPayload,
             CombatClosePayload,
             CheckPayload,
             *OPENABLE_CHECK_OPERATIONS,
@@ -585,6 +591,7 @@ def world_command_from_data(data):
         "world.pickup_item",
         "world.drop_item",
         "world.use_item",
+        "world.cast_spell",
         "enter_scene",
         "move_actor",
         "set_object_state",

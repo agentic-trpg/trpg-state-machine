@@ -1,4 +1,4 @@
-"""Shared prepare/evaluate/commit path for checks, combat and exploration item use."""
+"""Shared prepare/evaluate/commit path for combat and exploration rules."""
 
 import copy
 from dataclasses import asdict, replace
@@ -6,6 +6,8 @@ from dataclasses import asdict, replace
 from dnd5e_engine.evaluation_contracts import (
     CheckPayload,
     ExplorationItemUsePayload,
+    ExplorationSpellCastPayload,
+    ExplorationSpellPositions,
     ItemUsePayload,
 )
 from dnd5e_engine.evaluation_openable import OpenableCheckRequest, evaluate_openable
@@ -16,8 +18,9 @@ from ._execution import _WorldEffectKind, _WorldEffectOrigin
 from .combat import process_id
 from .dnd_checks import world_effects_ready
 from .errors import StateMachineError
-from .rules_adapter import validate_dnd_result
+from .rules_adapter import UnsupportedEffectConsequence, validate_dnd_result
 from .spell_adoption import UnsupportedSpellConsequence
+from .time_binding import TimeBinding
 from .world_commands import OPENABLE_CHECK_OPERATIONS, CheckMechanism, PickLock
 
 
@@ -40,7 +43,21 @@ class RuleExecution:
         """Return the shared rule-execution connection."""
         return self.store.connection
 
-    async def submit(self, command, package, context, fingerprint, *, hold_candidate=False):
+    def _spell_positions(self, row, command):
+        """Read only the named participants and require placement in the current scene."""
+        source_id, target_id = command.actor_id, command.payload.target_id
+        ids = tuple(dict.fromkeys((source_id, target_id)))
+        placements = [self.world.facts.carrier_position(row["session_id"], actor) for actor in ids]
+        if any(place is None or place[0] != row["current_scene_id"] for place in placements):
+            return "spell.target", ids, None
+        if source_id == target_id:
+            return None, ids, None
+        source, target = placements
+        if source[1] is None or target[1] is None:
+            return "spell.target", ids, None
+        return None, ids, ExplorationSpellPositions(source_cell=source[1], target_cell=target[1])
+
+    async def submit(self, command, package, context, fingerprint):
         """Evaluate fixed rules inputs, then revalidate and adopt their guarded result.
 
         Preparation authorizes the actor, bindings, target and optional domain check in
@@ -49,10 +66,12 @@ class RuleExecution:
         prerequisites. Allowed Delta, RNG, events and receipt share the existing write
         scope. Domain failure uses the effects savepoint; transaction/publication
         failures remain governed by the Store rather than being converted to an ordinary
-        rules rejection. Exploration potion use runs at the committed exploration tick.
+        rules rejection. Exploration items and spells use the committed exploration tick.
         """
         exploration_item = type(command.payload) is ExplorationItemUsePayload
-        if not exploration_item:
+        exploration_spell = type(command.payload) is ExplorationSpellCastPayload
+        exploration_rule = exploration_item or exploration_spell
+        if not exploration_rule:
             command = self.runtime.prepare_timed_command(command, package, context, fingerprint)
         object_check = type(command.payload) in OPENABLE_CHECK_OPERATIONS
         mechanism_check = type(command.payload) is CheckMechanism
@@ -61,13 +80,19 @@ class RuleExecution:
             self.world.objects.mechanisms if mechanism_check else self.world.objects.openable
         )
         plan, prepare_error, rule_command = None, None, command
+        initial_exploration_error = None
+        spell_actor_ids, spell_positions = None, None
 
-        def exploration_item_error(value):
+        def exploration_error(value):
             """Check mode and protocol, deferring use while saved time work is unfinished."""
             if self.world._active_combat(command.session_id):
                 return "unsupported_combat_world_operation"
             if value["mechanical_schema_version"] != "engine-snapshot/20":
                 return "unsupported_mechanical_version"
+            if exploration_spell and not isinstance(
+                self.world.facts.time_state(command.session_id)[0], TimeBinding
+            ):
+                return "unsupported_time_protocol"
             if self.runtime.time is not None:
                 progress = self.runtime.time.progress(command.session_id)
                 if progress is not None and progress["status"] != "completed":
@@ -84,9 +109,14 @@ class RuleExecution:
                 # Preserve a durable rejected receipt without pretending a combat
                 # snapshot is a noncombat check or relaxing any capability guard.
                 return self.rules._combat_snapshot(value)
+            if exploration_spell:
+                # Touch delivery depends on explicit placement and the mechanical grid.
+                return self.rules._noncombat_snapshot(value, actor_ids=spell_actor_ids)
             if type(command.payload) is CheckPayload or domain_check or exploration_item:
                 return self.rules._noncombat_snapshot(value, package)
-            return self.rules._combat_snapshot(value)
+            return self.rules._combat_snapshot(
+                value, for_pass=getattr(command.payload, "intent_type", None) == "pass"
+            )
 
         with self.store.transaction():
             row = self.sessions._session(command.session_id, package, context)
@@ -100,8 +130,13 @@ class RuleExecution:
                 raise StateMachineError(
                     "ruleset_binding_mismatch", "Pinned evaluator version is not installed"
                 )
-            if exploration_item:
-                prepare_error = exploration_item_error(row)
+            if exploration_rule:
+                initial_exploration_error = exploration_error(row)
+                prepare_error = initial_exploration_error
+            if exploration_spell and prepare_error is None:
+                prepare_error, spell_actor_ids, spell_positions = self._spell_positions(
+                    row, command
+                )
             snapshot = None if prepare_error else build_snapshot(row)
             if domain_check:
                 try:
@@ -123,7 +158,7 @@ class RuleExecution:
             if (
                 type(command.payload) is not CheckPayload
                 and not domain_check
-                and not exploration_item
+                and not exploration_rule
             ):
                 combat = self._conn.execute(
                     "SELECT process_id FROM combats WHERE session_id=?", (command.session_id,)
@@ -141,12 +176,11 @@ class RuleExecution:
             request = None
             capability = prepare_error
         else:
-            request = self.rules.request(rule_command, package, snapshot, rng, row=row)
+            request = self.rules.request(
+                rule_command, package, snapshot, rng, row=row, spell_positions=spell_positions
+            )
             capability = self.rules._dnd_capability(
-                rule_command.payload,
-                command.actor_id,
-                snapshot,
-                hold_candidate=hold_candidate,
+                rule_command.payload, command.actor_id, snapshot
             )
             payload = rule_command.payload
             if capability is None and getattr(payload, "intent_type", None) == "cast_spell":
@@ -223,10 +257,11 @@ class RuleExecution:
                         request,
                         result,
                         loader=self.rules.loader,
-                        hold_candidate=hold_candidate,
                     )
                 except UnsupportedSpellConsequence:
                     capability = "spell.capability"
+                except UnsupportedEffectConsequence:
+                    capability = "effect.capability"
             self.rules._verify_dnd_binding(package, row)
         with self.store.transaction(write=True):
             row = self.sessions._session(command.session_id, package, context)
@@ -238,10 +273,10 @@ class RuleExecution:
             self.sessions._npc_combat_location_guard(command)
             version = row["world_version"]
             status, error = "committed", None
-            current_exploration_error = exploration_item_error(row) if exploration_item else None
+            current_exploration_error = exploration_error(row) if exploration_rule else None
             if (
                 self.runtime.version_conflict(row, command)
-                or (exploration_item and current_exploration_error != prepare_error)
+                or (exploration_rule and current_exploration_error != initial_exploration_error)
                 or (snapshot is not None and build_snapshot(row) != snapshot)
                 or self.rules._rng_context(row) != rng
             ):
@@ -264,12 +299,12 @@ class RuleExecution:
             elif result.status != "accepted":
                 status, error = "rejected", result.error.code
             else:
-                self.sessions._npc_combat_target_guard(command, package, build_snapshot(row))
+                if not exploration_spell:
+                    self.sessions._npc_combat_target_guard(command, package, build_snapshot(row))
                 result, changes = validate_dnd_result(
                     request,
                     result,
                     loader=self.rules.loader,
-                    hold_candidate=hold_candidate,
                 )
                 self._conn.execute("SAVEPOINT dnd_effects")
                 try:
@@ -301,6 +336,8 @@ class RuleExecution:
                             if type(command.payload) is CheckPayload or domain_check
                             else "world.item_used"
                             if exploration_item
+                            else "world.spell_cast"
+                            if exploration_spell
                             else "combat.engine_event",
                             {
                                 **(
@@ -336,6 +373,8 @@ class RuleExecution:
                                     if type(command.payload) is CheckPayload or domain_check
                                     else {"item_instance_id": command.payload.instance_id}
                                     if exploration_item
+                                    else {"spell_id": command.payload.spell_id}
+                                    if exploration_spell
                                     else {
                                         "combat_id": snapshot.combat_state.combat_id,
                                         **(

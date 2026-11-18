@@ -50,11 +50,20 @@ class EffectTimeConsumer:
             result.verify_request(request)
         except ValueError as exc:
             raise StateMachineError("invalid_rule_result", "World effect proposal differs") from exc
-        if result.expiry.action != "remove":
-            raise StateMachineError("invalid_rule_result", "World effect proposal differs")
-        deadline = self.world.time.seconds_deadline(sid, result.duration_seconds)
-        self.owner.add_world_effect(sid, result, expires_tick=deadline)
+        self.apply_verified(sid, result)
         return result
+
+    def apply_verified(self, sid, proposal):
+        """Persist an admitted terminal effect at the current Session tick.
+
+        The caller owns the write transaction. The effect table's primary key
+        enforces absence of the full proposed identity at insertion.
+        """
+        self.store.require_write()
+        if proposal.session_id != sid or proposal.expiry.action != "remove":
+            raise StateMachineError("invalid_rule_result", "World effect proposal differs")
+        deadline = self.world.time.seconds_deadline(sid, proposal.duration_seconds)
+        self.owner.add_world_effect(sid, proposal, expires_tick=deadline)
 
     def next_boundary(self, session_id, package):
         """Find the next world-time effect deadline by the Session deadline index."""

@@ -6,7 +6,8 @@ The SM adapter matches the inventory change and the `IntentSubmitted` item
 identity to the selected instance on the fixed Snapshot. The bound RE decides
 whether its healing activity is supported. The locked RE `/42` evaluator admits the
 canonical Greater, Superior and Supreme potions through the same self-healing
-profile in exploration and combat. SM pins Engine and SRD to RE `ca49928`.
+profile in exploration and combat. The original compatibility cleanup was
+verified with Engine and SRD at RE `ca49928`.
 
 ## 2026-11-15 original scope
 

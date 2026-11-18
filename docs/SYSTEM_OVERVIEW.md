@@ -52,6 +52,16 @@ Hold Person 效果图、目标 TurnEnd 重复豁免、施法者 TurnEnd 专注�
 正 HP 受伤后的专注维持／移除。效果、链接条件、时钟、施法位、生命值和回执
 沿既有共享提交与发布边界持久化；公开施法、Pass 与带效果攻击准入尚未开放。
 RE 世界时间期限接口与 SM 的期限消费不属于此批已验收能力。
+EFFECT-02 在 RE `/42` 下将已验证的二环单目标 Hold Person 接到公开
+`combat.intent`。正 HP 的受支持遭遇可用普通 Pass 推进回合，有效 Hold 图
+结束后继续使用同一入口。对专注施法者的受支持攻击将伤害与专注变化共同采用。
+公开可用性查询仍由 RE 提供攻击预检。当前范围及边界见
+[Session Management 进度](SESSION_MANAGEMENT_PROGRESS.md#2026-11-18-effect-02-公开-hold-person-命令)。
+
+探索施法可通过 `world.cast_spell` 采用 RE 的法术位扣减和定时效果。
+Effects 和 SessionTime 共同保存及消费到期时间。`drop_concentration`
+通过已有战斗命令入口解除受支持的专注图。详见
+[Session Management 进度](SESSION_MANAGEMENT_PROGRESS.md#2026-11-18-effect-03-定时施法和主动结束专注)。
 完整 Agent Host、通用规则采用、完整活跃战斗恢复及未来多人负载不是已验收能力。
 
 ## 2. 公开入口和主要协作模块

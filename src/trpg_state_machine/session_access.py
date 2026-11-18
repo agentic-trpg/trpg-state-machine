@@ -8,6 +8,7 @@ from dnd5e_engine.evaluation_contracts import (
     CombatClosePayload,
     CombatIntentPayload,
     ExplorationItemUsePayload,
+    ExplorationSpellCastPayload,
     ItemUsePayload,
 )
 
@@ -115,6 +116,8 @@ class SessionAccess:
             and actor_id != row["pc_actor_id"]
         ):
             raise StateMachineError("unauthorized", "Only the selected PC can drink a potion")
+        if type(payload) is ExplorationSpellCastPayload and actor_id != row["pc_actor_id"]:
+            raise StateMachineError("unauthorized", "Only the selected PC can cast in exploration")
         if type(payload) in ENVIRONMENT_OPERATIONS and not context.can_manage_environment:
             raise StateMachineError("unauthorized", "Trusted environment management grant required")
         if type(payload) is RepositionObject and not context.can_place_world_objects:
