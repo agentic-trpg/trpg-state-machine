@@ -14,8 +14,9 @@ from trpg_state_machine import (
 FIXTURE = Path(__file__).parent / "fixtures" / "lantern_station.yaml"
 
 
-@pytest.fixture
+@pytest.fixture(scope="session")
 def package():
+    """Load the fixed, immutable Lantern Station package once per pytest session."""
     result = load_adventure_package(FIXTURE)
     assert result.status == "valid", result.errors
     assert result.package is not None

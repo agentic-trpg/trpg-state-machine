@@ -5,6 +5,7 @@ import sqlite3
 import subprocess
 import sys
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import closing
 from pathlib import Path
 from threading import Barrier
 
@@ -17,7 +18,8 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 def stored_rows(database):
-    with sqlite3.connect(database) as conn:
+    """Read table columns and rows, then close the snapshot connection."""
+    with closing(sqlite3.connect(database)) as conn:
         tables = conn.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()
         return {
             name: (

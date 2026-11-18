@@ -17,20 +17,33 @@ from test_migrations import stored_rows
 from test_npc_state import SOURCE, enter, grant, request
 
 from trpg_state_machine import SetSceneFlag, StateMachine, StateMachineError, load_adventure_package
+from trpg_state_machine.package import AdventurePackage
 from trpg_state_machine.perception import NPCContext
 
 ROOT = Path(__file__).resolve().parents[1]
+_EVALUATION_PACKAGE = pytest.StashKey[tuple[str, AdventurePackage]]()
 
 
 @pytest.fixture
-def evaluation_package(tmp_path):
+def evaluation_package(tmp_path, request):
+    """Reuse the validated package and write an independent YAML file for each test."""
+    path = tmp_path / "evaluation.yaml"
+    stash = request.config.stash
+    cached = stash.get(_EVALUATION_PACKAGE, None)
+    if cached is not None:
+        yaml_text, package = cached
+        path.write_text(yaml_text, "utf-8")
+        return package
+
     data = yaml.safe_load(SOURCE.read_text("utf-8"))
     data["events"] = [event_data()]
     data["scenes"][0]["event_definition_ids"] = ["event.open_gate"]
-    path = tmp_path / "evaluation.yaml"
-    path.write_text(yaml.safe_dump(data), "utf-8")
+    yaml_text = yaml.safe_dump(data)
+    path.write_text(yaml_text, "utf-8")
     loaded = load_adventure_package(path)
     assert loaded.status == "valid", loaded.errors
+    assert loaded.package is not None
+    stash[_EVALUATION_PACKAGE] = (yaml_text, loaded.package)
     return loaded.package
 
 
@@ -92,8 +105,9 @@ def test_task_full_input_repeat_restart_and_internal_provenance(
         assert "buried blue key" not in raw and "source_event_id" not in raw
         assert "attendant private" not in raw
         assert sm.list_npc_evaluation_tasks(sid, evaluation_package, context=npc) == (task,)
+        after = stored_rows(db)
         for table in ("npc_states", "npc_private_records", "rng_states", "projection_cursors"):
-            assert stored_rows(db)[table] == before[table]
+            assert after[table] == before[table]
         assert (
             sm._conn.execute("SELECT DISTINCT status FROM npc_observation_work").fetchall()[0][0]
             == "pending"

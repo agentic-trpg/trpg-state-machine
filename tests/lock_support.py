@@ -2,8 +2,8 @@
 
 from copy import deepcopy
 
-from dnd5e_engine.evaluation_ruleset import ruleset_binding
-from dnd5e_srd_data import BundledAssetLoader, MemoryAssetLoader
+from dnd5e_engine.evaluation_ruleset import get_default_ruleset, ruleset_binding
+from dnd5e_srd_data import MemoryAssetLoader
 from item_support import NPC, A, B, item_data, item_loader
 from spatial_support import command, create, submit
 
@@ -17,7 +17,7 @@ PASSAGE = "passage.mechanical"
 
 
 def lock_loader():
-    bundled = BundledAssetLoader()
+    bundled = get_default_ruleset()
     return MemoryAssetLoader(
         items=[
             bundled.get_item(s)

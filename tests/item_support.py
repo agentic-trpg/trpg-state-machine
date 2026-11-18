@@ -3,7 +3,8 @@
 from pathlib import Path
 
 import yaml
-from dnd5e_srd_data import BundledAssetLoader, MemoryAssetLoader
+from dnd5e_engine.evaluation_ruleset import get_default_ruleset
+from dnd5e_srd_data import MemoryAssetLoader
 from modern_support import modern_data
 from spatial_support import command, create, submit
 
@@ -14,7 +15,7 @@ DAGGER, SECOND, ROPE = "object.dagger_a", "object.dagger_b", "object.rope"
 
 
 def item_loader():
-    bundled = BundledAssetLoader()
+    bundled = get_default_ruleset()
     return MemoryAssetLoader(
         items=[
             bundled.get_item(slug)

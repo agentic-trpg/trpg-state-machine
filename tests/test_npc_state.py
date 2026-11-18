@@ -39,8 +39,9 @@ NPC_TABLES = (
 )
 
 
-@pytest.fixture
+@pytest.fixture(scope="session")
 def npc_package():
+    """Load the fixed, immutable NPC package once per pytest session."""
     loaded = load_adventure_package(SOURCE)
     assert loaded.status == "valid", loaded.errors
     return loaded.package

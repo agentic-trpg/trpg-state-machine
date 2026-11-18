@@ -97,7 +97,10 @@ def test_item_facts_supply_inventory_without_legacy_columns(tmp_path, context):
 def test_public_navigation_transfer_two_types_same_type_instances_and_new_process(
     tmp_path, context
 ):
-    sm, sid, package, db = setup(tmp_path, context)
+    data = item_data()
+    document = tmp_path / "package.json"
+    document.write_text(json.dumps(data), encoding="utf-8")
+    sm, sid, package, db = setup(tmp_path, context, data)
     with sm:
         pc = sm.read_session(sid, package, context=context).pc_actor_id
         initial = sm.read_noncombat_snapshot(sid, package, context=context)
@@ -133,8 +136,6 @@ def test_public_navigation_transfer_two_types_same_type_instances_and_new_proces
         assert sm._world_facts.object_position(sid, DAGGER)["cell"] == "1,1"
         assert sm.read_rng_context(sid, package, context=context) == rng
         before_restart = stored_rows(db)
-    document = tmp_path / "package.json"
-    document.write_text(json.dumps(item_data()), "utf-8")
     worker = subprocess.run(
         [
             sys.executable,

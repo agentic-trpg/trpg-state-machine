@@ -4,14 +4,15 @@ import random
 from copy import deepcopy
 
 from dnd5e_engine.evaluation_rng import RNGState
-from dnd5e_srd_data import BundledAssetLoader, MemoryAssetLoader
+from dnd5e_engine.evaluation_ruleset import get_default_ruleset
+from dnd5e_srd_data import MemoryAssetLoader
 from dnd_support import package_data as legacy_data
 
 from trpg_state_machine.package import _validate
 
 
 def modern_loader():
-    bundled = BundledAssetLoader()
+    bundled = get_default_ruleset()
     return MemoryAssetLoader(
         items=[
             bundled.get_weapon(slug) for slug in ("rapier", "longsword", "dagger", "greatsword")

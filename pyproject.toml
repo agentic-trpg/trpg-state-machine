@@ -23,6 +23,8 @@ packages = ["src/trpg_state_machine"]
 testpaths = ["tests"]
 pythonpath = ["src"]
 addopts = "-ra"
+tmp_path_retention_policy = "failed"
+tmp_path_retention_count = 2
 
 [tool.ruff]
 target-version = "py312"
