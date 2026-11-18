@@ -1,12 +1,12 @@
 # ITEM-01 Batch B: combat healing potion
 
-## 2026-11-18 evaluator candidate
+## 2026-11-18 evaluator binding
 
 The SM adapter matches the inventory change and the `IntentSubmitted` item
 identity to the selected instance on the fixed Snapshot. The bound RE decides
-whether its healing activity is supported. The RE `/42` candidate admits the
+whether its healing activity is supported. The locked RE `/42` evaluator admits the
 canonical Greater, Superior and Supreme potions through the same self-healing
-profile in exploration and combat. The SM lock continues to resolve RE `/41`.
+profile in exploration and combat. SM pins Engine and SRD to RE `ca49928`.
 
 ## 2026-11-15 original scope
 
