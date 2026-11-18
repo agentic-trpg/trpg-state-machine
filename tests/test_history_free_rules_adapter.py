@@ -3,6 +3,7 @@
 import json
 import re
 import sqlite3
+import tomllib
 from copy import deepcopy
 from dataclasses import replace
 from importlib.metadata import distribution
@@ -22,7 +23,6 @@ from trpg_state_machine.package import _validate
 from trpg_state_machine.rules_migration import migrate_package_16
 
 ROOT = Path(__file__).resolve().parents[1]
-PIN = "7a72a9456ace41d3d5ec6d371381fe4fa7bfa753"
 BASELINE = "5ff7a807d5b29cceb4311dcb2fe5b1182ead6bd1"
 
 
@@ -44,10 +44,26 @@ def setup(tmp_path, base, context, *, active=True):
 
 
 def test_installed_remote_engine_and_srd_match_fixed_full_sha():
+    with (ROOT / "pyproject.toml").open("rb") as config:
+        sources = tomllib.load(config)["tool"]["uv"]["sources"]
     for name in ("dnd5e-engine", "dnd5e-srd-data"):
-        source = json.loads(distribution(name).read_text("direct_url.json"))
-        assert source["vcs_info"]["commit_id"] == PIN
-        assert source["url"] == "https://github.com/agentic-trpg/trpg-rules-engine.git"
+        expected_url = sources[name]["git"]
+        expected_commit = sources[name]["rev"]
+        assert re.fullmatch(r"[0-9a-fA-F]{40}", expected_commit), (
+            f"{name} must declare a full Git commit SHA in pyproject.toml: {expected_commit!r}"
+        )
+
+        metadata = distribution(name).read_text("direct_url.json")
+        assert metadata is not None, f"{name} installation is missing direct_url.json"
+        source = json.loads(metadata)
+        actual_url = source.get("url")
+        actual_commit = source.get("vcs_info", {}).get("commit_id")
+        assert actual_url == expected_url, (
+            f"{name} installed Git origin was {actual_url!r}, expected {expected_url!r}"
+        )
+        assert actual_commit == expected_commit, (
+            f"{name} installed Git commit was {actual_commit!r}, expected {expected_commit!r}"
+        )
 
 
 def test_submit_occ_and_availability_do_not_select_audit_history(tmp_path, package_data, context):

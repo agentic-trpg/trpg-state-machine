@@ -10,6 +10,7 @@ from trpg_state_machine import (
     StateMachine,
     StateMachineError,
 )
+from trpg_state_machine.storage import CURRENT_SCHEMA_VERSION
 
 ROOT = Path(__file__).resolve().parents[1]
 HISTORY = {"33": "9ce60cb", "main34": "afe6871", "env34": "06c7af8"}
@@ -27,7 +28,7 @@ def snapshot(db):
 
 
 def assert_current(sm):
-    assert sm._conn.execute("PRAGMA user_version").fetchone()[0] == 53
+    assert sm._conn.execute("PRAGMA user_version").fetchone()[0] == CURRENT_SCHEMA_VERSION
     assert sm._conn.execute("PRAGMA foreign_key_check").fetchall() == []
     assert sm._conn.execute("PRAGMA integrity_check").fetchone()[0] == "ok"
     assert sm._conn.execute("PRAGMA foreign_keys").fetchone()[0] == 1

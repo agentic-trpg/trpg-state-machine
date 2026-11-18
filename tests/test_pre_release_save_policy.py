@@ -11,6 +11,7 @@ import pytest
 from trpg_state_machine import StateMachine, StateMachineError
 from trpg_state_machine.environment_versions import protection_key, source_key, wind_key
 from trpg_state_machine.runtime_integrity import spatial_cells
+from trpg_state_machine.storage import CURRENT_SCHEMA_VERSION
 
 
 def test_pre41_database_is_refused_before_ddl_and_preserves_source_bytes(tmp_path):
@@ -210,7 +211,7 @@ def test_current_save_reopens_without_inventory_aggregate_columns(
     with StateMachine(path) as sm:
         created = sm.create_session(request_for(), package, context=context)
         saved = sm.save_session(created.session_id, package, context=context)
-        assert sm._conn.execute("PRAGMA user_version").fetchone()[0] == 53
+        assert sm._conn.execute("PRAGMA user_version").fetchone()[0] == CURRENT_SCHEMA_VERSION
         for table in ("characters", "mechanical_components"):
             columns = {row[1] for row in sm._conn.execute(f"PRAGMA table_info({table})")}
             assert "inventory_json" not in columns

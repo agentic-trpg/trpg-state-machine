@@ -21,6 +21,7 @@ from test_npc_state import grant
 from trpg_state_machine import MoveActor, StateMachine, StateMachineError, TypedCommand
 from trpg_state_machine.npc_results import NPCActionIntent, NPCDialogue, NPCEvaluationResult
 from trpg_state_machine.npc_state import SourceReference
+from trpg_state_machine.storage import CURRENT_SCHEMA_VERSION
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -120,7 +121,7 @@ def test_complete_manual_result_vertical_slice_and_fresh_process_resume(
     assert resumed.returncode == 0, resumed.stderr
     assert json.loads(resumed.stdout) == executed
     with sqlite3.connect(db) as conn:
-        assert conn.execute("PRAGMA user_version").fetchone()[0] == 53
+        assert conn.execute("PRAGMA user_version").fetchone()[0] == CURRENT_SCHEMA_VERSION
         assert conn.execute("PRAGMA foreign_key_check").fetchall() == []
         assert conn.execute("SELECT COUNT(*) FROM npc_evaluation_receipts").fetchone()[0] == 1
         assert (

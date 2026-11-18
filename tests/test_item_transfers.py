@@ -6,6 +6,7 @@ import sys
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import asdict, replace
 from pathlib import Path
+from runpy import run_path
 from threading import Barrier
 
 import pytest
@@ -39,7 +40,7 @@ from trpg_state_machine import (
     world_command_from_data,
 )
 from trpg_state_machine.npc_results import NPCDropIntent, NPCEvaluationResult, NPCPickupIntent
-from trpg_state_machine.package import _validate, load_adventure_package
+from trpg_state_machine.package import _validate
 from trpg_state_machine.perception import NPCContext
 
 
@@ -607,9 +608,12 @@ def test_package_admission_and_unknown_assets_fail_closed(tmp_path, context, mut
             _validate(data)
 
 
-def test_example_package_is_valid():
-    loaded = load_adventure_package(Path(__file__).parents[1] / "examples/gc3_items.json")
-    assert loaded.status == "valid", loaded.errors
+def test_public_item_transfer_example_uses_bound_ruleset(tmp_path, capsys):
+    example = run_path(str(Path(__file__).parents[1] / "examples/item_transfers.py"))
+    example["run"](tmp_path / "items.db")
+    report = json.loads(capsys.readouterr().out)
+    assert "object.rope" in report["pc_instances"]
+    assert "object.dagger_a" in report["npc_instances"]
 
 
 def test_combat_initialization_and_real_availability_keep_current_inventory(tmp_path, context):

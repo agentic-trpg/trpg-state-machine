@@ -13,6 +13,7 @@ from test_mechanics import mechanical_package as mechanical_package
 from trpg_state_machine import (
     StateMachine,
 )
+from trpg_state_machine.storage import CURRENT_SCHEMA_VERSION
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -34,7 +35,7 @@ def assert_preserved(database, original):
         for table, (columns, rows) in original.items():
             after = set(conn.execute(f"SELECT {','.join(columns)} FROM {table}").fetchall())
             assert rows <= after, table
-        assert conn.execute("PRAGMA user_version").fetchone()[0] == 53
+        assert conn.execute("PRAGMA user_version").fetchone()[0] == CURRENT_SCHEMA_VERSION
         assert conn.execute("PRAGMA integrity_check").fetchone()[0] == "ok"
         assert conn.execute("PRAGMA foreign_key_check").fetchall() == []
 
@@ -83,7 +84,7 @@ def test_concurrent_fresh_initialization(tmp_path, monkeypatch):
             )
 
     with ThreadPoolExecutor(max_workers=4) as workers:
-        assert list(workers.map(open_runtime, range(4))) == [(53, 1, "wal")] * 4
+        assert list(workers.map(open_runtime, range(4))) == [(CURRENT_SCHEMA_VERSION, 1, "wal")] * 4
     assert len(version_reads) >= 4 and all(version_reads)
     monkeypatch.undo()
     assert_preserved(database, original)

@@ -27,6 +27,7 @@ from trpg_state_machine import (
     TypedCommand,
 )
 from trpg_state_machine.package import canonical_json
+from trpg_state_machine.storage import CURRENT_SCHEMA_VERSION
 
 
 class CountCursor:
@@ -708,7 +709,10 @@ def test_schema40_object_lookup_addendum_preserves_facts_and_old_read_scope(tmp_
         old.execute("BEGIN")
         fixed = old.execute("SELECT * FROM objects ORDER BY object_id").fetchall()
         with StateMachine(database, dnd_loader=sm._rules.loader) as reopened:
-            assert reopened._conn.execute("PRAGMA user_version").fetchone()[0] == 53
+            assert (
+                reopened._conn.execute("PRAGMA user_version").fetchone()[0]
+                == CURRENT_SCHEMA_VERSION
+            )
             assert reopened._conn.execute(
                 "SELECT sql FROM sqlite_master WHERE name='spatial_object_lookup'"
             ).fetchone()[0] == (

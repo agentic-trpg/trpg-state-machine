@@ -13,6 +13,7 @@ from world_support import setup, submit
 
 from trpg_state_machine import PutItem, StateMachine, StateMachineError, TakeItem
 from trpg_state_machine.package import AdventurePackage
+from trpg_state_machine.storage import CURRENT_SCHEMA_VERSION
 
 
 def prohibit_templates(monkeypatch, package):
@@ -361,7 +362,7 @@ def test_sqlite_direct_contents_uses_existing_index(tmp_path, context):
             (sid, BOX),
         ).fetchall()
         assert "objects_container" in " ".join(r[3] for r in plan)
-        assert sm._conn.execute("PRAGMA user_version").fetchone()[0] == 53
+        assert sm._conn.execute("PRAGMA user_version").fetchone()[0] == CURRENT_SCHEMA_VERSION
         configs = sm._conn.execute(
             "SELECT config_json FROM instance_configs WHERE domain='object'"
         ).fetchall()

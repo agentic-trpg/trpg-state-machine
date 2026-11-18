@@ -1,4 +1,4 @@
-"""Actual Schema24 history and transfer receipt preservation; atomic Schema25 upgrade."""
+"""Verify the public lockable passages example and its restore in a new process."""
 
 import json
 import subprocess
