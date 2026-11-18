@@ -227,7 +227,16 @@ def test_potion_can_advance_a_fully_spent_turn(tmp_path, context):
 
 
 @pytest.mark.parametrize(
-    "fault", ["wrong_bottle", "free_budget", "missing_heal", "extra_action", "wrong_event_target"]
+    "fault",
+    [
+        "wrong_bottle",
+        "wrong_delta_slug",
+        "free_budget",
+        "missing_heal",
+        "extra_action",
+        "wrong_event_target",
+        "wrong_event_slug",
+    ],
 )
 def test_malformed_item_result_never_consumes_or_commits(tmp_path, context, fault):
     """An accepted envelope cannot substitute another bottle or skip payment."""
@@ -236,25 +245,35 @@ def test_malformed_item_result_never_consumes_or_commits(tmp_path, context, faul
         command = potion_command(sm, sid, package, context)
         before = sm.read_combat_snapshot(sid, package, context=context)
         rng = sm.read_rng_context(sid, package, context=context)
+        before_writes = sm._conn.total_changes
         original = sm._rules._evaluate_dnd
 
         async def malformed(request):
             result = await original(request)
-            if fault == "wrong_event_target":
+            event_changes = {
+                "wrong_event_target": {"target_id": "npc.caretaker"},
+                "wrong_event_slug": {"item_id": "greater-potion-of-healing"},
+            }
+            if fault in event_changes:
                 events = list(result.proposed_events)
                 index = next(
                     i for i, event in enumerate(events) if event.type == "intent_submitted"
                 )
-                events[index] = events[index].model_copy(update={"target_id": "npc.caretaker"})
+                events[index] = events[index].model_copy(update=event_changes[fault])
                 return result.model_copy(update={"proposed_events": tuple(events)})
             operations = list(result.state_delta.operations)
-            if fault == "wrong_bottle":
-                other = next(
-                    entry
-                    for entry in request.state_snapshot.inventory_state.entries
-                    if entry.instance_id == SECOND
-                )
+            if fault in ("wrong_bottle", "wrong_delta_slug"):
                 index = next(i for i, op in enumerate(operations) if type(op) is InventoryConsume)
+                if fault == "wrong_bottle":
+                    other = next(
+                        entry
+                        for entry in request.state_snapshot.inventory_state.entries
+                        if entry.instance_id == SECOND
+                    )
+                else:
+                    other = operations[index].expected.model_copy(
+                        update={"item_slug": "greater-potion-of-healing"}
+                    )
                 operations[index] = operations[index].model_copy(
                     update={
                         "expected": other,
@@ -283,6 +302,7 @@ def test_malformed_item_result_never_consumes_or_commits(tmp_path, context, faul
         with pytest.raises(StateMachineError) as error:
             sm.submit_command(command, package, context=context)
         assert error.value.code == "invalid_rule_result"
+        assert sm._conn.total_changes == before_writes
         assert sm.read_combat_snapshot(sid, package, context=context) == before
         assert sm.read_rng_context(sid, package, context=context) == rng
         assert sm.get_command_receipt(sid, command.command_id, package, context=context) is None

@@ -209,36 +209,57 @@ def test_unfinished_time_boundary_blocks_potion_until_settled(tmp_path, context)
         assert sm.read_time_sync(sid, package, context=context).committed_tick == 60
 
 
-def test_wrong_bottle_in_evaluator_result_is_rejected_before_commit(tmp_path, context, monkeypatch):
+@pytest.mark.parametrize("fault", ["wrong_bottle", "wrong_delta_slug", "wrong_event_slug"])
+def test_wrong_item_identity_is_rejected_before_commit(tmp_path, context, monkeypatch, fault):
     sm, sid, package, _, _, command = exploration_potion_world(tmp_path, context)
     with sm:
         before = sm.read_noncombat_snapshot(sid, package, context=context)
         rng = sm.read_rng_context(sid, package, context=context)
+        before_writes = sm._conn.total_changes
         evaluate = sm._rules._evaluate_dnd
 
-        async def substitute_bottle(request):
+        async def malformed(request):
+            """Substitute the event's slug or the consumed entry in a valid result."""
             result = await evaluate(request)
-            wrong = next(
-                e for e in request.state_snapshot.inventory_state.entries if e.instance_id == FIRST
-            )
-            operations = tuple(
-                op.model_copy(
-                    update={"expected": wrong, "value": wrong.model_copy(update={"quantity": 0})}
+            if fault == "wrong_event_slug":
+                intent, healing = result.proposed_events
+                return result.model_copy(
+                    update={
+                        "proposed_events": (
+                            intent.model_copy(update={"item_id": "greater-potion-of-healing"}),
+                            healing,
+                        )
+                    }
                 )
-                if type(op) is InventoryConsume
-                else op
-                for op in result.state_delta.operations
+            operations = list(result.state_delta.operations)
+            index = next(i for i, op in enumerate(operations) if type(op) is InventoryConsume)
+            consume = operations[index]
+            if fault == "wrong_bottle":
+                wrong = next(
+                    e
+                    for e in request.state_snapshot.inventory_state.entries
+                    if e.instance_id == FIRST
+                )
+            else:
+                wrong = consume.expected.model_copy(
+                    update={"item_slug": "greater-potion-of-healing"}
+                )
+            operations[index] = consume.model_copy(
+                update={"expected": wrong, "value": wrong.model_copy(update={"quantity": 0})}
             )
             return result.model_copy(
                 update={
-                    "state_delta": result.state_delta.model_copy(update={"operations": operations})
+                    "state_delta": result.state_delta.model_copy(
+                        update={"operations": tuple(operations)}
+                    )
                 }
             )
 
-        monkeypatch.setattr(sm._rules, "_evaluate_dnd", substitute_bottle)
+        monkeypatch.setattr(sm._rules, "_evaluate_dnd", malformed)
         with pytest.raises(StateMachineError) as exc:
             sm.submit_command(command, package, context=context)
         assert exc.value.code == "invalid_rule_result"
+        assert sm._conn.total_changes == before_writes
         assert sm.read_noncombat_snapshot(sid, package, context=context) == before
         assert sm.read_rng_context(sid, package, context=context) == rng
         assert sm.get_command_receipt(sid, command.command_id, package, context=context) is None

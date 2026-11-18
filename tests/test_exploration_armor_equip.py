@@ -13,22 +13,23 @@ from trpg_state_machine import (
     EquipShield,
     StateMachine,
     StateMachineError,
+    UnequipArmor,
     UnequipShield,
 )
 from trpg_state_machine.package import _validate
 from trpg_state_machine.session_memory import ActiveItem
 
 
-def armor_package(*, unrelated=0):
-    """Give a Fighter 1 direct leather and chain-shirt instances with known AC."""
+def armor_package(*, unrelated=0, spare_armor="chain-shirt"):
+    """Give a Fighter 1 equipped leather and a directly carried spare armor instance."""
     data = combat_equipment_data()
     del data["rule_bindings"]["combat_foundation"]
     data["manifest"]["ruleset_binding"] = ruleset_binding().model_dump(mode="json")
     owner = data["pc_templates"][0]["pc_template_id"]
-    data["pc_templates"][0]["character"]["inventory"].append("chain-shirt")
+    data["pc_templates"][0]["character"]["inventory"].append(spare_armor)
     next(t for t in data["item_transfers"] if t["instance_id"] == "object.armor_spare")[
         "item_slug"
-    ] = "chain-shirt"
+    ] = spare_armor
     snapshot = data["rule_bindings"]["noncombat_foundation"]["snapshot"]
     actor = snapshot["character_states"][0]
     actor.update(
@@ -39,12 +40,12 @@ def armor_package(*, unrelated=0):
         fighting_styles=["defense"],
         ac=16,
     )
-    actor["carried_item_slugs"].append("chain-shirt")
+    actor["carried_item_slugs"].append(spare_armor)
     next(
         e
         for e in snapshot["inventory_state"]["entries"]
         if e["instance_id"] == "object.armor_spare"
-    )["item_slug"] = "chain-shirt"
+    )["item_slug"] = spare_armor
     for index in range(unrelated):
         identity = f"object.unrelated_equipment_{index}"
         data["scenes"][0]["objects"].append(
@@ -205,6 +206,52 @@ def test_armor_shield_replace_reopen_and_old_snapshot(tmp_path, context):
             assert sm._characters.equipment(sid, actor_id).shield is sm._store.memory.active_item(
                 sm._world_facts.object(sid, "object.shield_spare")
             )
+
+
+def test_ring_mail_equips_and_unequips_in_exploration(tmp_path, context):
+    """Ring Mail uses the shared heavy armor AC formula and records its stealth drawback."""
+    package = armor_package(spare_armor="ring-mail")
+    with StateMachine(tmp_path / "ring-mail.db") as sm:
+        sid = create(sm, package, context)
+        actor_id, before = pc(sm, sid, package, context)
+        instance_id = "object.armor_spare"
+        equip = EquipArmor(instance_id)
+        preview = sm.query_world_action(sid, actor_id, equip, package, context=context)
+        assert preview.status == "available", preview
+        assert pc(sm, sid, package, context)[1] == before
+
+        receipt = submit(sm, sid, package, context, equip, "equip-ring-mail")
+        assert receipt.status == "committed", receipt
+        _, equipped = pc(sm, sid, package, context)
+        assert equipped.worn_armor_instance_id == instance_id
+        assert equipped.equipped_shield_instance_id == "object.shield_equipped"
+        assert equipped.ac == 17
+        assert equipped.stealth_disadvantage is True
+
+        unequip = UnequipArmor(instance_id)
+        preview = sm.query_world_action(sid, actor_id, unequip, package, context=context)
+        assert preview.status == "available", preview
+        receipt = submit(sm, sid, package, context, unequip, "unequip-ring-mail")
+        assert receipt.status == "committed", receipt
+        _, unequipped = pc(sm, sid, package, context)
+        assert unequipped.worn_armor_instance_id is None
+        assert unequipped.equipped_shield_instance_id == "object.shield_equipped"
+        assert unequipped.ac == 14
+        assert unequipped.stealth_disadvantage is False
+
+
+def test_armor_with_strength_speed_requirement_is_still_rejected(tmp_path, context):
+    """Chain Mail still requires support for its Strength-based speed rule."""
+    package = armor_package(spare_armor="chain-mail")
+    with StateMachine(tmp_path / "chain-mail.db") as sm:
+        sid = create(sm, package, context)
+        actor_id, before = pc(sm, sid, package, context)
+        equip = EquipArmor("object.armor_spare")
+        preview = sm.query_world_action(sid, actor_id, equip, package, context=context)
+        assert (preview.status, preview.reason) == ("unavailable", "unsupported_item_binding")
+        receipt = submit(sm, sid, package, context, equip, "equip-chain-mail")
+        assert (receipt.status, receipt.error_code) == ("rejected", "unsupported_item_binding")
+        assert pc(sm, sid, package, context)[1] == before
 
 
 def test_armor_receipt_fault_rolls_back_ac_binding_event(tmp_path, context):

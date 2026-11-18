@@ -154,7 +154,6 @@ def delta_changes(request, result, *, hold_mode=False):
             if (
                 expected["instance_id"] != request.payload.instance_id
                 or expected["owner_id"] != request.actor_id
-                or expected["item_slug"] != "potion-of-healing"
                 or expected["quantity"] != 1
                 or expected["charges_remaining_per_unit"] != 1
                 or not expected["accessible"]
@@ -338,24 +337,10 @@ def delta_changes(request, result, *, hold_mode=False):
 
 
 def exploration_potion_changes(request, result):
-    """Adopt only one selected bottle and the matching bounded self-heal."""
+    """Bind consumption and self-healing evidence to the exact selected bottle."""
     snapshot = request.state_snapshot
     actor_id = request.actor_id
     actor = next(a for a in snapshot.character_states if a.entity_id == actor_id)
-    expected_intent = IntentSubmitted(
-        actor_id=actor_id, intent_type="use_item", target_id=actor_id, item_id="potion-of-healing"
-    )
-    events = result.proposed_events
-    if (
-        len(events) != 2
-        or events[0] != expected_intent
-        or type(events[1]) is not HealingApplied
-        or events[1].target_id != actor_id
-        or events[1].amount <= 0
-        or not result.rng_transition.state_changed
-    ):
-        _invalid("Exploration potion events or RNG differ from the expected profile")
-
     operations = result.state_delta.operations
     if len(operations) != 2 or {type(op) for op in operations} != {
         delta.InventoryConsume,
@@ -375,7 +360,6 @@ def exploration_potion_changes(request, result):
     if (
         entry is None
         or entry.owner_id != actor_id
-        or entry.item_slug != "potion-of-healing"
         or entry.quantity != 1
         or entry.charges_remaining_per_unit != 1
         or not entry.accessible
@@ -384,6 +368,20 @@ def exploration_potion_changes(request, result):
         or consume.value != entry.model_copy(update={"quantity": 0})
     ):
         _invalid("Item consumption differs from the selected potion")
+
+    expected_intent = IntentSubmitted(
+        actor_id=actor_id, intent_type="use_item", target_id=actor_id, item_id=entry.item_slug
+    )
+    events = result.proposed_events
+    if (
+        len(events) != 2
+        or events[0] != expected_intent
+        or type(events[1]) is not HealingApplied
+        or events[1].target_id != actor_id
+        or events[1].amount <= 0
+        or not result.rng_transition.state_changed
+    ):
+        _invalid("Exploration potion events or RNG differ from the expected profile")
     if (
         request.payload.target_id != actor_id
         or healing.target_id != actor_id
@@ -612,6 +610,12 @@ def validate_dnd_result(request, result, *, loader=None, hold_candidate=False):
     if type(request.payload) is ExplorationItemUsePayload:
         return result, exploration_potion_changes(request, result)
     if type(request.payload) is ItemUsePayload:
+        changes = delta_changes(request, result)
+        bottle = next(
+            value
+            for component, _, field, value in changes
+            if component == "item" and field == "consume"
+        )
         submitted = [event for event in result.proposed_events if event.type == "intent_submitted"]
         healed = [event for event in result.proposed_events if event.type == "healing_applied"]
         if (
@@ -619,12 +623,11 @@ def validate_dnd_result(request, result, *, loader=None, hold_candidate=False):
             or submitted[0].actor_id != request.actor_id
             or submitted[0].target_id != request.actor_id
             or submitted[0].intent_type != "use_item"
-            or submitted[0].item_id != "potion-of-healing"
+            or submitted[0].item_id != bottle["item_slug"]
             or len(healed) != 1
             or healed[0].target_id != request.actor_id
         ):
-            _invalid("Potion events do not match the authorized drinker")
-        changes = delta_changes(request, result)
+            _invalid("Potion events do not match the selected bottle and authorized drinker")
         actor = next(
             actor
             for actor in request.state_snapshot.character_states
@@ -973,18 +976,10 @@ class RulesAdapter:
         if type(payload) is ItemUsePayload:
             if payload.target_id != actor_id or actor_id not in snapshot.combat_state.party_ids:
                 return "item_unauthorized"
-            entry = next(
-                (
-                    e
-                    for e in snapshot.inventory_state.entries
-                    if e.instance_id == payload.instance_id
-                ),
-                None,
-            )
-            if entry is None:
+            if not any(
+                e.instance_id == payload.instance_id for e in snapshot.inventory_state.entries
+            ):
                 return "item_missing"
-            if entry.item_slug != "potion-of-healing":
-                return "item.capability"
             return None
         if payload.intent_type == "cast_spell":
             if payload.spell_id is None:

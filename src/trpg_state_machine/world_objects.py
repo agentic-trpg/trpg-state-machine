@@ -353,7 +353,7 @@ class WorldObjectService:
         return trained
 
     def _armor_ac(self, sid, actor_id, state, equipment, next_armor_id, next_shield_id):
-        """Return verifiable default-mode AC and the next body armor asset."""
+        """Return default-mode AC and the next ordinary body armor asset, including heavy armor."""
         assets = {}
 
         def piece(iid, category):
@@ -363,9 +363,10 @@ class WorldObjectService:
                 assets[key] = self._plain_armor(sid, actor_id, iid, category, equipment)
             return assets[key]
 
-        next_armor = piece(next_armor_id, ("light", "medium"))
+        body_categories = ("light", "medium", "heavy")
+        next_armor = piece(next_armor_id, body_categories)
         next_shield = piece(next_shield_id, ("shield",))
-        old_armor = piece(state.get("worn_armor_instance_id"), ("light", "medium"))
+        old_armor = piece(state.get("worn_armor_instance_id"), body_categories)
         old_shield = piece(state.get("equipped_shield_instance_id"), ("shield",))
         trained = self._armor_training(state)
         for armor_piece in (old_armor, old_shield, next_armor, next_shield):
