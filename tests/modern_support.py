@@ -4,7 +4,6 @@ import random
 from copy import deepcopy
 
 from dnd5e_engine.evaluation_rng import RNGState
-from dnd5e_engine.evaluation_ruleset import ruleset_binding
 from dnd5e_srd_data import BundledAssetLoader, MemoryAssetLoader
 from dnd_support import package_data as legacy_data
 
@@ -22,7 +21,7 @@ def modern_loader():
 
 
 def modern_data(base, assets, *, npc_hp=1, weapon="rapier", grip="one_handed", spatial=False):
-    data = legacy_data(deepcopy(base), assets)
+    data = legacy_data(base, assets)
     foundation = data["rule_bindings"]["combat_foundation"]
     snapshot = foundation["snapshot"]
     snapshot["snapshot_schema_version"] = "engine-snapshot/17"
@@ -90,7 +89,6 @@ def modern_data(base, assets, *, npc_hp=1, weapon="rapier", grip="one_handed", s
         "xp": {pc["entity_id"]: 10, npc["entity_id"]: 0},
         "additional_scenes": [extra],
     }
-    data["manifest"]["ruleset_binding"] = ruleset_binding(assets).model_dump(mode="json")
     return data
 
 

@@ -2,7 +2,6 @@
 
 import pytest
 from dnd5e_engine.evaluation_ruleset import ruleset_binding
-from dnd5e_srd_data import BundledAssetLoader
 from item_support import item_loader
 from spatial_support import command, create, submit
 from test_equipment_instance_bindings import combat_equipment_data
@@ -24,9 +23,7 @@ def armor_package(*, unrelated=0):
     """Give a Fighter 1 direct leather and chain-shirt instances with known AC."""
     data = combat_equipment_data()
     del data["rule_bindings"]["combat_foundation"]
-    data["manifest"]["ruleset_binding"] = ruleset_binding(BundledAssetLoader()).model_dump(
-        mode="json"
-    )
+    data["manifest"]["ruleset_binding"] = ruleset_binding().model_dump(mode="json")
     owner = data["pc_templates"][0]["pc_template_id"]
     data["pc_templates"][0]["character"]["inventory"].append("chain-shirt")
     next(t for t in data["item_transfers"] if t["instance_id"] == "object.armor_spare")[
@@ -90,7 +87,7 @@ def test_hot_equipment_resolves_shared_items_without_reads(
 ):
     """Preview and RE snapshots reuse one loaded equipment field with zero lookup work."""
     package = armor_package(unrelated=unrelated)
-    with StateMachine(tmp_path / "equipment.db", dnd_loader=BundledAssetLoader()) as sm:
+    with StateMachine(tmp_path / "equipment.db") as sm:
         sid = create(sm, package, context)
         actor_id = sm.read_session(sid, package, context=context).pc_actor_id
         memory = sm._store.memory
@@ -173,7 +170,7 @@ def test_armor_shield_replace_reopen_and_old_snapshot(tmp_path, context):
     """One exact armor instance changes stored AC; shield swaps stow the old ID."""
     package = armor_package()
     path = tmp_path / "armor.db"
-    with StateMachine(path, dnd_loader=BundledAssetLoader()) as sm:
+    with StateMachine(path) as sm:
         sid = create(sm, package, context)
         actor_id, old = pc(sm, sid, package, context)
         assert (old.ac, old.worn_armor_instance_id) == (16, "object.armor_equipped")
@@ -199,7 +196,7 @@ def test_armor_shield_replace_reopen_and_old_snapshot(tmp_path, context):
         _, equipped = pc(sm, sid, package, context)
         assert (equipped.ac, equipped.equipped_shield_instance_id) == (18, "object.shield_spare")
         saved = sm.save_session(sid, package, context=context)
-    with StateMachine(path, dnd_loader=BundledAssetLoader()) as sm:
+    with StateMachine(path) as sm:
         assert sm.resume_session(sid, package, context=context) == saved
         _, reopened = pc(sm, sid, package, context)
         assert (reopened.ac, reopened.worn_armor_instance_id) == (18, "object.armor_spare")
@@ -213,7 +210,7 @@ def test_armor_shield_replace_reopen_and_old_snapshot(tmp_path, context):
 def test_armor_receipt_fault_rolls_back_ac_binding_event(tmp_path, context):
     """A late receipt failure rolls back the selected armor, AC and event."""
     package = armor_package()
-    with StateMachine(tmp_path / "fault.db", dnd_loader=BundledAssetLoader()) as sm:
+    with StateMachine(tmp_path / "fault.db") as sm:
         sid = create(sm, package, context)
         actor_id, before = pc(sm, sid, package, context)
         events = sm.read_events(sid, package, context=context)
@@ -248,7 +245,7 @@ def test_armor_receipt_fault_rolls_back_ac_binding_event(tmp_path, context):
 def test_wrong_kind_and_stale_binding_are_rejected(tmp_path, context):
     """A shield cannot enter the body slot and stale shield identity cannot be removed."""
     package = armor_package()
-    with StateMachine(tmp_path / "reject.db", dnd_loader=BundledAssetLoader()) as sm:
+    with StateMachine(tmp_path / "reject.db") as sm:
         sid = create(sm, package, context)
         before = pc(sm, sid, package, context)[1]
         wrong = submit(sm, sid, package, context, EquipArmor("object.shield_spare"), "wrong")
@@ -261,7 +258,7 @@ def test_wrong_kind_and_stale_binding_are_rejected(tmp_path, context):
 def test_character_ac_reads_active_effect_once_without_persisting_it(tmp_path, context):
     """The trusted AC view includes only active scalar effects; base AC stays fixed."""
     package = armor_package()
-    with StateMachine(tmp_path / "effect.db", dnd_loader=BundledAssetLoader()) as sm:
+    with StateMachine(tmp_path / "effect.db") as sm:
         sid = create(sm, package, context)
         actor_id = sm.read_session(sid, package, context=context).pc_actor_id
         active = _effect(actor_id, "active")
@@ -287,7 +284,7 @@ def test_equipment_rejects_a_different_frozen_rules_loader(tmp_path, context):
     """An opened Session cannot reprice armor using unrelated local asset data."""
     package = armor_package()
     path = tmp_path / "wrong-loader.db"
-    with StateMachine(path, dnd_loader=BundledAssetLoader()) as sm:
+    with StateMachine(path) as sm:
         sid = create(sm, package, context)
     with StateMachine(path, dnd_loader=item_loader()) as sm:
         typed = command(sm, sid, package, context, EquipArmor("object.armor_spare"), "mismatch")
