@@ -57,7 +57,7 @@ EFFECT-02 在 RE `/42` 下将已验证的二环单目标 Hold Person 接到公�
 结束后继续使用同一入口。对专注施法者的受支持攻击将伤害与专注变化共同采用。
 公开可用性查询仍由 RE 提供攻击预检。当前范围及边界见
 [Session Management 进度](SESSION_MANAGEMENT_PROGRESS.md#2026-11-18-effect-02-公开-hold-person-命令)。
-当前固定 RE `/47` 也支持三环 Hold Person 在同一专注组内选择两个目标。
+RE `/47` 已接通三环 Hold Person 在同一专注组内选择两个目标。
 各目标单独豁免，成功时只移除自己的效果。法术位和专注沿原有共享提交路径采用。
 参见 [Hold Person 双目标](SESSION_MANAGEMENT_PROGRESS.md#2026-11-19-战斗-hold-person-双目标)。
 
@@ -65,6 +65,9 @@ EFFECT-02 在 RE `/42` 下将已验证的二环单目标 Hold Person 接到公�
 Effects 和 SessionTime 共同保存及消费到期时间。`drop_concentration`
 通过已有战斗命令入口解除受支持的专注图。详见
 [Session Management 进度](SESSION_MANAGEMENT_PROGRESS.md#2026-11-18-effect-03-定时施法和主动结束专注)。
+固定 RE `/48` 将单个定时步行或技能加值纳入普通攻击的依赖判断。
+攻击跨越到期轮界时仍由 SessionTime 在同一提交内清理效果。详见
+[普通攻击读取定时效果](SESSION_MANAGEMENT_PROGRESS.md#2026-11-19-普通攻击读取定时效果)。
 探索移动接入固定环境来源的进出区域效果。World 提供格子覆盖，RE 从来源的效果定义
 算出要添加或解除的效果，Effects 和位置共同提交。普通探索属性或技能检定把角色已有的
 效果交给 RE，由现有检定规则计算适用的数值加成和优势或劣势。详见

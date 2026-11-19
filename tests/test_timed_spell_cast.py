@@ -1,9 +1,11 @@
 """Public exploration spell adoption, expiration, and rollback."""
 
+import random
 from dataclasses import asdict, replace
 
 import pytest
-from dnd5e_engine.evaluation_contracts import ExplorationSpellCastPayload
+from dnd5e_engine.evaluation_contracts import CombatIntentPayload, ExplorationSpellCastPayload
+from dnd5e_engine.evaluation_rng import RNGState
 from dnd5e_engine.evaluation_ruleset import ruleset_binding
 from dnd5e_engine.rules.character import proficiency_grants
 from dnd5e_srd_data import BundledAssetLoader, MemoryAssetLoader
@@ -33,7 +35,14 @@ PERCEPTION_BONUS = "check.skill.perception.bonus"
 def timed_spell_world(tmp_path, context):
     """Create a second-scale exploration Session with authored wizard facts."""
 
-    def open_world(*, material=True, first_level_slots=4, spell_id="longstrider"):
+    def open_world(
+        *,
+        material=True,
+        first_level_slots=4,
+        spell_id="longstrider",
+        database="timed-spell.sqlite",
+        seed=0,
+    ):
         canonical = BundledAssetLoader()
         base = item_loader()
         wizard = canonical.get_class("wizard")
@@ -105,6 +114,7 @@ def timed_spell_world(tmp_path, context):
             )
         proficiency = proficiency_grants([(wizard, 5, "primary")])
         for foundation in data["rule_bindings"].values():
+            foundation["rng_state"] = RNGState.capture(random.Random(seed)).model_dump(mode="json")
             fixed = foundation["snapshot"]
             fixed["snapshot_schema_version"] = "engine-snapshot/20"
             pc, npc = fixed["character_states"]
@@ -192,7 +202,7 @@ def timed_spell_world(tmp_path, context):
             }
         package = _validate(data)
         authorized = replace(context, can_advance_time=True)
-        sm = StateMachine(tmp_path / "timed-spell.sqlite", dnd_loader=loader)
+        sm = StateMachine(tmp_path / database, dnd_loader=loader)
         sid = create(sm, package, authorized)
         return sm, sid, package, authorized
 
@@ -362,6 +372,143 @@ def test_public_timed_spell_modifies_only_perception_until_expiry(timed_spell_wo
         assert tuple(expired.payload["identity"]) == identity
         assert check_modifier("perception", "expired") == perception
         assert first_level_balance(sm, command) == 3
+
+
+@pytest.mark.parametrize(
+    ("spell_id", "effect_slug", "deadline", "seconds_before"),
+    [
+        ("longstrider", "longstrider", 3600, 12),
+        ("longstrider", "longstrider", 3600, 6),
+        (PERCEPTION_SPELL, "fixture_keen_perception", 60, 6),
+    ],
+    ids=["longstrider-retained", "longstrider-expires", "perception-expires"],
+)
+def test_public_ordinary_attack_with_active_timed_spell(
+    timed_spell_world, spell_id, effect_slug, deadline, seconds_before
+):
+    """Compare a seeded attack with and without a timed speed or skill effect."""
+
+    def attack(*, with_effect):
+        """Run the same public combat commands with one independently seeded save."""
+        session = timed_spell_world(
+            spell_id=spell_id, database=f"attack-{with_effect}.sqlite", seed=9
+        )
+        sm, sid, package, context = session
+        with sm:
+            cast = cast_command(session, spell_id=spell_id)
+            if with_effect:
+                receipt = sm.submit_command(cast, package, context=context)
+                assert receipt.status == "committed", receipt
+                (effect,) = sm.read_noncombat_snapshot(sid, package, context=context).effect_states
+                assert (effect.target_id, effect.id, effect.origin, effect.duration.seconds) == (
+                    cast.actor_id,
+                    f"effect:{effect_slug}",
+                    f"cast:{effect_slug}:{cast.actor_id}",
+                    deadline,
+                )
+                expected_effects = (effect,)
+            else:
+                expected_effects = ()
+            before_tick = deadline - seconds_before
+            advance = submit(session, AdvanceSessionTime(before_tick), "before-combat")
+            assert advance.status == "committed", advance
+            initialized = initialize(sm, sid, package, context)
+            assert initialized.status == "committed", initialized
+            before = sm.read_combat_snapshot(sid, package, context=context)
+            assert before.effect_states == expected_effects
+            turn = pass_command(sid, before, "open-npc-turn")
+            assert turn.actor_id == cast.actor_id
+            assert sm.submit_command(turn, package, context=context).status == "committed"
+            before = sm.read_combat_snapshot(sid, package, context=context)
+            assert before.effect_states == expected_effects
+            intent = CombatIntentPayload(
+                intent_type="attack",
+                source_id=NPC,
+                target_id=cast.actor_id,
+                stat_block_action_id="scimitar",
+            )
+            command = TypedCommand(
+                sid, "npc.attack", NPC, "combat.intent", intent, before.world_version
+            )
+            rng = sm.read_rng_context(sid, package, context=context)
+            available = sm.query_action_availability(sid, NPC, intent, package, context=context)
+            assert sm.read_rng_context(sid, package, context=context) == rng
+            receipt = sm.submit_command(command, package, context=context)
+            assert (receipt.status, receipt.error_code) == ("committed", None), available
+            assert available.status == "available", available
+            events = [
+                event.payload["engine_event"]
+                for event in sm.read_events(sid, package, context=context)
+                if event.event_seq in receipt.event_seqs
+                and event.event_type == "combat.engine_event"
+            ]
+            (roll,) = [event for event in events if event["type"] == "attack_rolled"]
+            (damage,) = [event for event in events if event["type"] == "damage_applied"]
+            assert (roll["attacker_id"], roll["target_id"], damage["target_id"]) == (
+                NPC,
+                cast.actor_id,
+                cast.actor_id,
+            )
+            assert (roll["natural"], roll["roll_total"], roll["advantage"], roll["is_hit"]) == (
+                15,
+                15,
+                "normal",
+                True,
+            )
+            assert roll["modifier"] == 0
+            after = sm.read_combat_snapshot(sid, package, context=context)
+            hp_before = {actor.entity_id: actor.hp_current for actor in before.character_states}
+            hp_after = {actor.entity_id: actor.hp_current for actor in after.character_states}
+            assert (hp_before[cast.actor_id], damage["amount"], hp_after[cast.actor_id]) == (
+                8,
+                5,
+                3,
+            )
+            assert hp_after[NPC] == hp_before[NPC]
+            after_rng = sm.read_rng_context(sid, package, context=context)
+            assert after_rng.version == rng.version + 1
+            after_tick = before_tick + 6
+            assert after.effect_states == (expected_effects if after_tick < deadline else ())
+            assert sm.read_time_sync(sid, package, context=context).committed_tick == after_tick
+            movement = {
+                actor.entity_id: actor.movement_remaining for actor in after.character_states
+            }
+            budgets = (movement[cast.actor_id], movement[NPC])
+
+            if with_effect:
+                expiry_receipt, expiry_command = receipt, command
+                if after_tick < deadline:
+                    turn = pass_command(sid, after, "last-active-turn")
+                    assert sm.submit_command(turn, package, context=context).status == "committed"
+                    after = sm.read_combat_snapshot(sid, package, context=context)
+                    assert after.effect_states == expected_effects
+                    assert (
+                        sm.read_time_sync(sid, package, context=context).committed_tick
+                        == after_tick
+                    )
+                    expiry_command = pass_command(sid, after, "expire-effect")
+                    expiry_receipt = sm.submit_command(expiry_command, package, context=context)
+                    assert expiry_receipt.status == "committed", expiry_receipt
+                assert sm.read_time_sync(sid, package, context=context).committed_tick == deadline
+                assert sm.read_combat_snapshot(sid, package, context=context).effect_states == ()
+                (expired,) = [
+                    event
+                    for event in sm.read_events(sid, package, context=context)
+                    if event.event_type == "effect.expired"
+                ]
+                assert expired.event_seq in expiry_receipt.event_seqs
+                assert expired.source_command_id == expiry_command.command_id
+                assert expired.payload["boundary_tick"] == deadline
+                assert tuple(expired.payload["identity"]) == (
+                    effect.target_id,
+                    effect.id,
+                    effect.origin,
+                )
+
+            return (rng.version, rng.state), (after_rng.version, after_rng.state), budgets
+
+    baseline = attack(with_effect=False)
+    assert attack(with_effect=True) == baseline
 
 
 def test_public_longstrider_expires_on_combat_round_boundary(timed_spell_world):
