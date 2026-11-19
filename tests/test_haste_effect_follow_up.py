@@ -176,14 +176,9 @@ def _active_actor(snapshot):
     return combat.initiative_ids[combat.current_turn_index]
 
 
-def _cast(sm, sid, package, context, *, target_id=None):
-    """Cast Haste on the selected willing target and return the committed snapshot."""
-    before = sm.read_combat_snapshot(sid, package, context=context)
-    caster = sm.read_session(sid, package, context=context).pc_actor_id
-    target_id = target_id or caster
-    assert _active_actor(before) == caster
-    assert _actor(before, caster).spell_slots[3] == 2
-    command = TypedCommand(
+def _cast_command(sid, before, caster, target_id):
+    """Pin a combat Haste command to the current world version."""
+    return TypedCommand(
         sid,
         "haste.cast",
         caster,
@@ -198,6 +193,16 @@ def _cast(sm, sid, package, context, *, target_id=None):
         ),
         before.world_version,
     )
+
+
+def _cast(sm, sid, package, context, *, target_id=None):
+    """Cast Haste on the selected willing target and return the committed snapshot."""
+    before = sm.read_combat_snapshot(sid, package, context=context)
+    caster = sm.read_session(sid, package, context=context).pc_actor_id
+    target_id = target_id or caster
+    assert _active_actor(before) == caster
+    assert _actor(before, caster).spell_slots[3] == 2
+    command = _cast_command(sid, before, caster, target_id)
     receipt = sm.submit_command(command, package, context=context)
     assert receipt.status == "committed", receipt
     after = sm.read_combat_snapshot(sid, package, context=context)
@@ -211,6 +216,58 @@ def _cast(sm, sid, package, context, *, target_id=None):
     assert sm.submit_command(command, package, context=context) == receipt
     assert sm.read_combat_snapshot(sid, package, context=context) == after
     return command, after
+
+
+@pytest.mark.parametrize(
+    ("operation_type", "keep_count"),
+    [
+        pytest.param(delta.HasteGraphCreate, 0, id="missing-graph"),
+        pytest.param(delta.HasteGraphCreate, 2, id="duplicate-graph"),
+        pytest.param(delta.ResourceUpdate, 0, id="missing-payment"),
+        pytest.param(delta.SlotSpendLedgerUpdate, 0, id="missing-ledger"),
+    ],
+)
+def test_haste_cast_rejects_incomplete_or_duplicate_creation(
+    haste_combat, context, monkeypatch, operation_type, keep_count
+):
+    """Reject a typed cast with missing or repeated guarded operations before any writes."""
+    sm, sid, package, assets, db = haste_combat
+    before = sm.read_combat_snapshot(sid, package, context=context)
+    caster = sm.read_session(sid, package, context=context).pc_actor_id
+    command = _cast_command(sid, before, caster, caster)
+    rng = sm.read_rng_context(sid, package, context=context)
+    events = sm.read_events(sid, package, context=context)
+    evaluate = sm._rules._evaluate_dnd
+
+    async def forge(request):
+        """Change one guarded operation's count in the real evaluator's result."""
+        result = await evaluate(request)
+        assert result.status == "accepted"
+        operations = result.state_delta.operations
+        (operation,) = (op for op in operations if type(op) is operation_type)
+        index = operations.index(operation)
+        changed = (*operations[:index], *((operation,) * keep_count), *operations[index + 1 :])
+        forged = result.model_copy(
+            update={"state_delta": result.state_delta.model_copy(update={"operations": changed})}
+        )
+        forged = type(result).model_validate_json(forged.model_dump_json())
+        forged.verify_request(request)
+        return forged
+
+    with monkeypatch.context() as patch:
+        patch.setattr(sm._rules, "_evaluate_dnd", forge)
+        with pytest.raises(StateMachineError) as failure:
+            sm.submit_command(command, package, context=context)
+    assert failure.value.code == "invalid_rule_result"
+    assert sm.read_combat_snapshot(sid, package, context=context) == before
+    assert sm.read_rng_context(sid, package, context=context) == rng
+    assert sm.read_events(sid, package, context=context) == events
+    assert _effect_counts(sm, sid) == (0, 0)
+    assert sm.get_command_receipt(sid, command.command_id, package, context=context) is None
+    with StateMachine(db, dnd_loader=assets) as reopened:
+        assert reopened.read_combat_snapshot(sid, package, context=context) == before
+
+    assert _cast(sm, sid, package, context)[0] == command
 
 
 def _pass(sm, sid, package, context, before, command_id, actor_id):

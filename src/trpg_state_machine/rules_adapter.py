@@ -605,55 +605,116 @@ def _turn_intent_scope(
         _invalid("Cast or Pass changed budgets outside Action payment and turn reset")
 
 
-def hold_effect_changes(request, result):
-    """Guard RE's typed Hold Person graph against the fixed encounter input."""
+def _concentration_cast_graph(request, result):
+    """Select a single supported creation and bind its scope and paired slot operations."""
     snapshot = request.state_snapshot
     combat = snapshot.combat_state
     payload = request.payload
     operations = result.state_delta.operations
-    graphs = [op for op in operations if type(op) is delta.HoldPersonGraphCreate]
+    graphs = [
+        op for op in operations if type(op) in (delta.HoldPersonGraphCreate, delta.HasteGraphCreate)
+    ]
+    if not graphs:
+        return None
+    payments = [op for op in operations if type(op) is delta.ResourceUpdate]
+    ledgers = [op for op in operations if type(op) is delta.SlotSpendLedgerUpdate]
+    if len(graphs) != 1 or len(payments) != 1 or len(ledgers) != 1 or _has_combat_effects(snapshot):
+        _invalid("Concentration cast requires one new graph and one paired slot spend")
+    graph, payment, ledger = graphs[0], payments[0], ledgers[0]
+    if (
+        graph.combat_id != combat.combat_id
+        or graph.source_id != request.actor_id
+        or graph.spell_source_id != payload.spell_source_id
+        or graph.slot_level != payload.slot_level
+        or graph.actor_ids != combat.initiative_ids
+        or graph.applied_turn_serial != combat.turn_serial
+        or graph.applied_round != combat.round_number
+        or (ledger.slot_kind, ledger.level) != (payment.expected.kind, payment.expected.level)
+    ):
+        _invalid("Concentration creation or payment differs from the bound cast")
+    return graph
+
+
+def _hold_cast_conditions(request, result, graph):
+    """Validate the single Humanoid target and save evidence, then project linked conditions."""
+    payload = request.payload
+    if (
+        payload.spell_id != graph.spell_slug
+        or payload.slot_level != 2
+        or payload.target_ids
+        or graph.selected_target_ids != (payload.target_id,)
+        or len(graph.entries) != 1
+    ):
+        _invalid("Hold Person requires one bound level-two target graph")
+    target = next(
+        (
+            actor
+            for actor in request.state_snapshot.character_states
+            if actor.entity_id == payload.target_id
+        ),
+        None,
+    )
+    if target is None or target.creature_type != "humanoid":
+        _invalid("Hold Person target is not Humanoid")
+    submitted = [event for event in result.proposed_events if event.type == "intent_submitted"]
+    saves = [event for event in result.proposed_events if event.type == "save_rolled"]
+    applied = [event for event in result.proposed_events if event.type == "effect_applied"]
+    if (
+        len(submitted) != 1
+        or submitted[0].actor_id != request.actor_id
+        or submitted[0].intent_type != "cast_spell"
+        or submitted[0].spell_id != graph.spell_slug
+        or submitted[0].target_id != payload.target_id
+        or len(saves) != 1
+        or saves[0].target_id != payload.target_id
+        or saves[0].ability != "wis"
+        or saves[0].dc != graph.save_dc
+        or len(applied) != 1
+        or (
+            applied[0].effect.target_id,
+            applied[0].effect.id,
+            applied[0].effect.origin,
+        )
+        != graph.chain[0]
+    ):
+        _invalid("Hold Person cast evidence differs from its graph")
+    (entry,) = graph.entries
+    return {target.entity_id: (*target.conditions, entry.condition)} if entry.condition else {}
+
+
+def _concentration_cast_changes(request, result, graph):
+    """Validate the typed cast and use the shared turn and component adoption checks."""
+    if type(graph) is delta.HoldPersonGraphCreate:
+        component = "hold_graph"
+        condition_changes = _hold_cast_conditions(request, result, graph)
+        effect_movement = None
+    else:
+        component = "haste_graph"
+        haste_cast_admission(request, result, graph)
+        condition_changes = None
+        effect_movement = (graph.target_id, (graph.effect,))
+    _turn_intent_scope(
+        request,
+        result,
+        effect_operations=(type(graph),),
+        condition_changes=condition_changes,
+        effect_movement=effect_movement,
+    )
+    base = delta_changes(request, result, effect_operations=(type(graph),))
+    return (*base, (component, graph.source_id, "create", graph))
+
+
+def hold_effect_changes(request, result):
+    """Guard Hold Person lifecycle updates against the fixed encounter input."""
+    snapshot = request.state_snapshot
+    combat = snapshot.combat_state
+    payload = request.payload
+    operations = result.state_delta.operations
     lifecycles = [op for op in operations if type(op) is delta.EffectLifecycleUpdate]
     concentrations = [op for op in operations if type(op) is delta.ConcentrationUpdate]
-    cast = payload.intent_type == "cast_spell"
-    if cast:
-        if (
-            payload.spell_id != "hold-person"
-            or payload.slot_level != 2
-            or payload.target_ids
-            or len(graphs) != 1
-            or lifecycles
-            or concentrations
-            or snapshot.effect_states
-            or combat.concentration_chain
-            or combat.effect_lifecycles
-            or combat.conditions_by_effect
-        ):
-            _invalid("Hold Person requires one fresh level-two target graph")
-        graph = graphs[0]
-        if (
-            graph.combat_id != combat.combat_id
-            or graph.source_id != request.actor_id
-            or graph.spell_source_id != payload.spell_source_id
-            or graph.slot_level != payload.slot_level
-            or graph.actor_ids != combat.initiative_ids
-            or graph.selected_target_ids != (payload.target_id,)
-            or graph.applied_turn_serial != combat.turn_serial
-            or graph.applied_round != combat.round_number
-            or len(graph.entries) != 1
-        ):
-            _invalid("Hold Person graph differs from bound request")
-        actors = {a.entity_id: a for a in snapshot.character_states}
-        if payload.target_id not in actors or actors[payload.target_id].creature_type != "humanoid":
-            _invalid("Hold Person target is not Humanoid")
-        if (
-            sum(type(op) is delta.ResourceUpdate for op in operations) != 1
-            or sum(type(op) is delta.SlotSpendLedgerUpdate for op in operations) != 1
-        ):
-            _invalid("Hold Person payment is incomplete")
-    else:
-        if graphs or not snapshot.effect_states or len(combat.concentration_chain) != 1:
-            _invalid("Hold Person lifecycle requires one existing graph")
-    source = request.actor_id if cast else next(iter(combat.concentration_chain))
+    if not snapshot.effect_states or len(combat.concentration_chain) != 1:
+        _invalid("Hold Person lifecycle requires one existing graph")
+    source = next(iter(combat.concentration_chain))
     old_effects = {(e.target_id, e.id, e.origin): e for e in snapshot.effect_states}
     old_clocks = {e.identity: e for e in combat.effect_lifecycles}
     old_links = {e.identity: e for e in combat.conditions_by_effect}
@@ -699,38 +760,6 @@ def hold_effect_changes(request, result):
                 unconscious_added = True
             if list(operation.expected) != list(before) or after_independent != independent:
                 _invalid("Hold Person changed independent conditions")
-    if cast:
-        payment = next(op for op in operations if type(op) is delta.ResourceUpdate)
-        ledger = next(op for op in operations if type(op) is delta.SlotSpendLedgerUpdate)
-        if (
-            ledger.slot_kind != payment.expected.kind
-            or ledger.level != payment.expected.level
-            or payment.value.kind != payment.expected.kind
-            or payment.value.level != payment.expected.level
-        ):
-            _invalid("Hold Person payment and ledger disagree")
-        submitted = [event for event in result.proposed_events if event.type == "intent_submitted"]
-        saves = [event for event in result.proposed_events if event.type == "save_rolled"]
-        applied = [event for event in result.proposed_events if event.type == "effect_applied"]
-        if (
-            len(submitted) != 1
-            or submitted[0].actor_id != request.actor_id
-            or submitted[0].intent_type != "cast_spell"
-            or submitted[0].spell_id != "hold-person"
-            or submitted[0].target_id != payload.target_id
-            or len(saves) != 1
-            or saves[0].target_id != payload.target_id
-            or saves[0].ability != "wis"
-            or saves[0].dc != graph.save_dc
-            or len(applied) != 1
-            or (
-                applied[0].effect.target_id,
-                applied[0].effect.id,
-                applied[0].effect.origin,
-            )
-            != graph.chain[0]
-        ):
-            _invalid("Hold Person cast evidence differs from its graph")
     final_effects = dict(old_effects)
     for op in lifecycles:
         if (
@@ -770,10 +799,6 @@ def hold_effect_changes(request, result):
             final_effects[op.identity] = op.effect
     if len({op.identity for op in lifecycles}) != len(lifecycles):
         _invalid("Duplicate effect lifecycle transition")
-    if cast:
-        final_effects = {
-            (e.effect.target_id, e.effect.id, e.effect.origin): e.effect for e in graph.entries
-        }
     if concentrations:
         op = concentrations[0]
         caster = next(a for a in snapshot.character_states if a.entity_id == source)
@@ -801,49 +826,38 @@ def hold_effect_changes(request, result):
             _invalid("Concentration removal lacks expiry or drop evidence")
         chain = op.chain
     else:
-        chain = graph.chain if cast else tuple(combat.concentration_chain[source])
+        chain = tuple(combat.concentration_chain[source])
     if set(chain) != set(final_effects) or len(chain) != len(final_effects):
         _invalid("Hold Person graph transition is incomplete")
-    if payload.intent_type in {"cast_spell", "pass"}:
+    if payload.intent_type == "pass":
         condition_changes = {
             op.target_id: op.value for op in operations if type(op) is delta.ConditionsUpdate
         }
         expected_conditions = {}
-        if cast:
-            (entry,) = graph.entries
-            if entry.condition is not None:
-                target = entry.effect.target_id
-                expected_conditions[target] = (*actors[target].conditions, entry.condition)
-        else:
-            for op in lifecycles:
-                if op.effect is None and op.expected_lineage.statuses:
-                    target, effect_id, _ = op.identity
-                    expected_conditions[target] = tuple(
-                        condition
-                        for condition in actors[target].conditions
-                        if condition.source_effect_id != effect_id
-                    )
-        if condition_changes != ({} if cast else expected_conditions):
+        for op in lifecycles:
+            if op.effect is None and op.expected_lineage.statuses:
+                target, effect_id, _ = op.identity
+                expected_conditions[target] = tuple(
+                    condition
+                    for condition in actors[target].conditions
+                    if condition.source_effect_id != effect_id
+                )
+        if condition_changes != expected_conditions:
             _invalid("Hold Person conditions do not match its graph transition")
-        effect_operations = (
-            (delta.HoldPersonGraphCreate,)
-            if cast
-            else (delta.EffectLifecycleUpdate, delta.ConcentrationUpdate, delta.ConditionsUpdate)
-        )
         _turn_intent_scope(
             request,
             result,
-            effect_operations=effect_operations,
+            effect_operations=(
+                delta.EffectLifecycleUpdate,
+                delta.ConcentrationUpdate,
+                delta.ConditionsUpdate,
+            ),
             condition_changes=expected_conditions,
         )
     base = delta_changes(
         request,
         result,
-        effect_operations=(
-            delta.HoldPersonGraphCreate,
-            delta.EffectLifecycleUpdate,
-            delta.ConcentrationUpdate,
-        ),
+        effect_operations=(delta.EffectLifecycleUpdate, delta.ConcentrationUpdate),
     )
     if zero_hp:
         evidence = result.proposed_events
@@ -876,37 +890,25 @@ def hold_effect_changes(request, result):
                 "Zero-HP concentration outcome lacks matching damage, life-state or drop evidence"
             )
         raise UnsupportedEffectConsequence
-    effects = (
-        ([("hold_graph", source, "create", graph)] if cast else [])
-        + [("hold_lifecycle", op.identity, "update", op) for op in lifecycles]
-        + [("hold_concentration", source, "update", op) for op in concentrations]
+    return (
+        *base,
+        *(("hold_lifecycle", op.identity, "update", op) for op in lifecycles),
+        *(("hold_concentration", source, "update", op) for op in concentrations),
     )
-    return (*base, *effects)
 
 
 def haste_effect_changes(request, result):
-    """Admit the typed Haste cast or bounded turn effects and ordinary handoff."""
-    if request.payload.intent_type == "cast_spell":
-        graph = haste_cast_admission(request, result)
-        effect_operations = (delta.HasteGraphCreate,)
-        condition_changes = None
-        target = graph.target_id
-        final_effects = (graph.effect,)
-        adopted = [("haste_graph", graph.source_id, "create", graph)]
-    else:
-        adopted, condition_changes, target, final_effects = haste_pass_admission(request, result)
-        effect_operations = (
-            delta.EffectLifecycleUpdate,
-            delta.ConcentrationUpdate,
-            delta.EffectFollowUpCreate,
-        )
-    turn_operations = effect_operations
-    if condition_changes is not None:
-        turn_operations = (*turn_operations, delta.ConditionsUpdate)
+    """Admit bounded Haste turn effects and the ordinary handoff."""
+    adopted, condition_changes, target, final_effects = haste_pass_admission(request, result)
+    effect_operations = (
+        delta.EffectLifecycleUpdate,
+        delta.ConcentrationUpdate,
+        delta.EffectFollowUpCreate,
+    )
     _turn_intent_scope(
         request,
         result,
-        effect_operations=turn_operations,
+        effect_operations=(*effect_operations, delta.ConditionsUpdate),
         condition_changes=condition_changes,
         effect_movement=(target, final_effects),
     )
@@ -985,12 +987,10 @@ def validate_dnd_result(request, result, *, loader=None):
             _invalid("Potion healing differs from the rolled event")
         return result, changes
     if getattr(request.payload, "intent_type", None) == "cast_spell":
-        if request.payload.spell_id == "haste":
-            return result, haste_effect_changes(request, result)
+        if (graph := _concentration_cast_graph(request, result)) is not None:
+            return result, _concentration_cast_changes(request, result, graph)
         if loader is None:
             _invalid("Spell result requires its bound rules loader")
-        if request.payload.spell_id == "hold-person":
-            return result, hold_effect_changes(request, result)
         mechanism = ordinary_spell_mechanism(loader, request.payload.spell_id)
         if mechanism is None:
             _invalid("Accepted spell is outside the bound ordinary mechanism")

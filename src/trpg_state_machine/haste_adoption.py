@@ -23,44 +23,16 @@ def _invalid(message):
     raise StateMachineError("invalid_rule_result", message)
 
 
-def haste_cast_admission(request, result):
-    """Bind one typed creation, slot spend and application event to the cast."""
-    snapshot = request.state_snapshot
-    combat = snapshot.combat_state
+def haste_cast_admission(request, result, graph):
+    """Bind the typed Haste graph to the willing target and ordered cast evidence."""
     payload = request.payload
-    operations = result.state_delta.operations
-    graphs = [op for op in operations if type(op) is delta.HasteGraphCreate]
-    payments = [op for op in operations if type(op) is delta.ResourceUpdate]
-    ledgers = [op for op in operations if type(op) is delta.SlotSpendLedgerUpdate]
     if (
-        len(graphs) != 1
-        or len(payments) != 1
-        or len(ledgers) != 1
-        or snapshot.effect_states
-        or combat.concentration_chain
-        or combat.concentration_rounds_remaining
-        or combat.effect_lifecycles
-        or combat.conditions_by_effect
-        or result.rng_transition.state_changed
-    ):
-        _invalid("Haste requires one new graph, one slot spend and no existing effect graph")
-    graph, payment, ledger = graphs[0], payments[0], ledgers[0]
-    if (
-        graph.combat_id != combat.combat_id
-        or graph.source_id != request.actor_id
-        or graph.spell_source_id != payload.spell_source_id
-        or graph.slot_level != payload.slot_level
+        payload.spell_id != "haste"
         or graph.target_id != payload.target_id
         or payload.willing_target_ids != (graph.target_id,)
-        or graph.actor_ids != combat.initiative_ids
-        or graph.applied_turn_serial != combat.turn_serial
-        or graph.applied_round != combat.round_number
-        or ledger.slot_kind != payment.expected.kind
-        or ledger.level != payment.expected.level
-        or payment.value.kind != payment.expected.kind
-        or payment.value.level != payment.expected.level
+        or result.rng_transition.state_changed
     ):
-        _invalid("Haste creation or payment differs from the bound request")
+        _invalid("Haste creation differs from the bound spell, willing target or RNG")
     events = result.proposed_events
     if (
         len(events) < 3
@@ -82,7 +54,6 @@ def haste_cast_admission(request, result):
     ):
         _invalid("Haste cast events differ from the submitted spell or turn handoff")
     require_effect_applied(events[2], graph.effect)
-    return graph
 
 
 def haste_pass_admission(request, result):
