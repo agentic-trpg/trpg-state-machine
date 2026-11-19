@@ -1044,8 +1044,8 @@ def validate_dnd_result(request, result, *, loader=None):
         mechanism = ordinary_spell_mechanism(loader, request.payload.spell_id)
         if mechanism is None:
             _invalid("Accepted spell is outside the bound ordinary mechanism")
-        activity_id = loader.get_spell(request.payload.spell_id).activities[0].id
-        return result, ordinary_spell_changes(request, result, mechanism, activity_id)
+        activity = loader.get_spell(request.payload.spell_id).activities[0]
+        return result, ordinary_spell_changes(request, result, mechanism, activity)
     if (
         request.operation_kind == "combat.intent"
         and request.payload.intent_type == "drop_concentration"

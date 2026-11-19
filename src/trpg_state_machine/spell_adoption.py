@@ -28,9 +28,11 @@ def _invalid(message):
     raise StateMachineError("invalid_rule_result", message)
 
 
-def ordinary_spell_changes(request, result, mechanism, activity_id):
-    """Validate one immediate healing or save-damage result against fixed input.
+def ordinary_spell_changes(request, result, mechanism, activity):
+    """Validate one immediate healing, save or attack spell against fixed input.
 
+    The bound activity identifies the spell's damage source and declared type.
+    Attack evidence is linked to the damage instance and to the caster's budget.
     The returned edits are candidates for the caller's existing write transaction.
     Resource and combat expenditure guards must both be applied there; this
     function does not change persistent state.
@@ -41,8 +43,9 @@ def ordinary_spell_changes(request, result, mechanism, activity_id):
     target = payload.target_id
     spell_id = payload.spell_id
     healing = mechanism == "healing"
+    attack = mechanism == "attack_damage"
     slot_paid = payload.slot_level not in (None, 0)
-    if mechanism not in {"healing", "save_damage"}:
+    if mechanism not in {"healing", "save_damage", "attack_damage"} or (attack and slot_paid):
         _invalid("Unsupported ordinary spell mechanism")
     data = snapshot.model_dump(mode="json")
     actors = {actor["entity_id"]: actor for actor in data["character_states"]}
@@ -77,7 +80,9 @@ def ordinary_spell_changes(request, result, mechanism, activity_id):
     cast = [event for event in result.proposed_events if event.type == "spell_cast"]
     healed = [event for event in result.proposed_events if event.type == "healing_applied"]
     saved = [event for event in result.proposed_events if event.type == "save_rolled"]
+    rolled = [event for event in result.proposed_events if event.type == "attack_rolled"]
     damaged = [event for event in result.proposed_events if event.type == "damage_applied"]
+    deaths = [event for event in result.proposed_events if event.type == "death"]
     if (
         len(submitted) != 1
         or submitted[0].actor_id != caster
@@ -90,12 +95,10 @@ def ordinary_spell_changes(request, result, mechanism, activity_id):
         or cast[0].slot_level != (payload.slot_level if slot_paid else None)
         or (len(healed) != 1 if healing else bool(healed))
         or (healing and (healed[0].target_id != target or healed[0].amount < 0))
-        or (
-            bool(saved or damaged or any(e.type == "death" for e in result.proposed_events))
-            if healing
-            else len(saved) != 1 or len(damaged) != 1
-        )
-        or (not healing and saved[0].target_id != target)
+        or (healing and bool(damaged or deaths))
+        or len(saved) != int(mechanism == "save_damage")
+        or (saved and (saved[0].target_id != target or len(damaged) != 1))
+        or len(rolled) != int(attack)
         or any(
             event.type
             not in {
@@ -103,6 +106,7 @@ def ordinary_spell_changes(request, result, mechanism, activity_id):
                 "spell_cast",
                 "healing_applied",
                 "save_rolled",
+                "attack_rolled",
                 "damage_applied",
                 "death",
                 "turn_phase",
@@ -114,6 +118,24 @@ def ordinary_spell_changes(request, result, mechanism, activity_id):
         )
     ):
         _invalid("Spell events differ from the submitted caster and target")
+    if attack:
+        roll = rolled[0]
+        if (
+            roll.natural is None
+            or not 1 <= roll.natural <= 20
+            or roll.modifier is None
+            or not result.rng_transition.state_changed
+        ):
+            _invalid("Spell attack lacks complete d20 or RNG evidence")
+        if (
+            roll.attacker_id != caster
+            or roll.target_id != target
+            or roll.is_opportunity_attack
+            or (roll.is_crit and not roll.is_hit)
+            or len(damaged) != int(roll.is_hit)
+            or (damaged and damaged[0].damage_type != activity.damage.parts[0].types[0])
+        ):
+            _invalid("Damage differs from the authorized spell attack")
     changes = []
     seen = set()
 
@@ -143,8 +165,8 @@ def ordinary_spell_changes(request, result, mechanism, activity_id):
             request,
             result,
             target_before,
-            source_id=f"spell:{spell_id}:{activity_id}",
-            is_crit=False,
+            source_id=f"spell:{spell_id}:{activity.id}",
+            is_crit=attack and rolled[0].is_crit,
         )
     )
     dead_ids = combat_before.dead_ids | newly_dead
@@ -232,6 +254,29 @@ def ordinary_spell_changes(request, result, mechanism, activity_id):
         )
     ):
         _invalid("Spell turn handoff events differ from the accepted transition")
+    if attack:
+        event_order: list[str | tuple[str, str | None, int]] = [
+            "intent_submitted",
+            "spell_cast",
+            "attack_rolled",
+        ]
+        if damaged:
+            event_order.append("damage_applied")
+        if deaths:
+            event_order.append("death")
+        next_round = turn_update.value.round_number
+        event_order.extend((("turn_end", caster, combat_before.round_number), "turn_ended"))
+        if rollover:
+            event_order.extend(("round_started", ("round_start", None, next_round)))
+        event_order.extend(("turn_started", ("turn_start", next_actor, next_round)))
+        actual_order = [
+            (event.phase, event.actor_id, event.round_number)
+            if event.type == "turn_phase"
+            else event.type
+            for event in result.proposed_events
+        ]
+        if actual_order != event_order:
+            _invalid("Spell attack events differ from the accepted turn order")
     for op in result.state_delta.operations:
         if type(op) is delta.ResourceUpdate:
             if resource is not None or not slot_paid or op.owner_id != caster or op.amount != -1:
@@ -285,6 +330,8 @@ def ordinary_spell_changes(request, result, mechanism, activity_id):
                 paid_action = True
             elif op.actor_id == caster:
                 permitted = {"action_available", "action_taken_this_turn"}
+                if attack:
+                    permitted.add("attack_rolls_made_this_turn")
                 if turn_advanced:
                     permitted |= {"movement_remaining", "sneak_attack_spent_this_turn"}
                 if (
@@ -363,6 +410,8 @@ def ordinary_spell_changes(request, result, mechanism, activity_id):
             _invalid("Caster lacked the ordinary action before the spell")
         outgoing = caster_before.model_dump(mode="json")
         outgoing.update(payment)
+        if attack:
+            outgoing["attack_rolls_made_this_turn"] += 1
         caster_ledger = snapshot.combat_state.movement_ledgers[caster]
         outgoing["movement_remaining"] = caster_ledger.remaining(
             effective_speed(caster_before, caster_ledger.active_mode)
