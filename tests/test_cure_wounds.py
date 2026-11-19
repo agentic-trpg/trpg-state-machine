@@ -23,6 +23,7 @@ from trpg_state_machine.package import _validate
 SLOT = "spell:1"
 SOURCE = "class:cleric"
 SPELL = "cure-wounds"
+HEALING_WORD = "healing-word"
 BYSTANDER = "npc.attendant"
 
 
@@ -262,7 +263,9 @@ def cure_world(
     return sm, sid, package, loader, db
 
 
-def cast_command(sm, sid, package, context, *, key="cast", target=None, source_actor=False):
+def cast_command(
+    sm, sid, package, context, *, key="cast", target=None, source_actor=False, spell=SPELL
+):
     """Build a typed public spell intent at the current world version."""
     state = sm.read_session(sid, package, context=context)
     return TypedCommand(
@@ -273,7 +276,7 @@ def cast_command(sm, sid, package, context, *, key="cast", target=None, source_a
         CombatIntentPayload(
             intent_type="cast_spell",
             source_id=state.pc_actor_id if source_actor else None,
-            spell_id=SPELL,
+            spell_id=spell,
             target_id=target or state.pc_actor_id,
             slot_level=1,
             spell_source_id=SOURCE,
@@ -290,6 +293,74 @@ def pool(snapshot):
 def actor(snapshot, actor_id):
     """Select the exact actor from the mechanical snapshot."""
     return next(a for a in snapshot.character_states if a.entity_id == actor_id)
+
+
+def test_healing_word_retains_turn_and_blocks_second_paid_spell(tmp_path, context):
+    """The public cast pays one bonus action and one owned level-one slot."""
+    sm, sid, package, loader, db = cure_world(tmp_path, context, extra_spells=(HEALING_WORD,))
+    with sm:
+        command = cast_command(sm, sid, package, context, spell=HEALING_WORD, target=NPC)
+        before = sm.read_combat_snapshot(sid, package, context=context)
+        rng = sm.read_rng_context(sid, package, context=context)
+        receipt = sm.submit_command(command, package, context=context)
+        assert receipt.status == "committed", receipt
+        after = sm.read_combat_snapshot(sid, package, context=context)
+        caster = actor(after, command.actor_id)
+        assert caster.action_available and not caster.action_taken_this_turn
+        assert not caster.bonus_action_available and caster.bonus_action_taken_this_turn
+        assert caster.spell_slots == {1: 1}
+        assert pool(after).current == 1
+        assert after.combat_state.expended_resources[caster.entity_id] == {"spell_slot:1": 1}
+        assert after.combat_state.turn_serial == before.combat_state.turn_serial
+        assert after.combat_state.current_turn_index == before.combat_state.current_turn_index
+        assert after.combat_state.round_number == before.combat_state.round_number
+        assert after.combat_state.movement_ledgers == before.combat_state.movement_ledgers
+        assert actor(after, NPC).hp_current == actor(before, NPC).hp_current + 11
+        next_rng = sm.read_rng_context(sid, package, context=context)
+        assert next_rng != rng
+        assert sm.submit_command(command, package, context=context) == receipt
+        for spell, code in ((HEALING_WORD, "no_action_economy"), (SPELL, "spell.turn_history")):
+            repeat = cast_command(sm, sid, package, context, key=f"repeat.{spell}", spell=spell)
+            refused = sm.submit_command(repeat, package, context=context)
+            assert refused.error_code == code
+            assert not refused.event_seqs
+            assert sm.read_combat_snapshot(sid, package, context=context) == after
+            assert sm.read_rng_context(sid, package, context=context) == next_rng
+    with StateMachine(db, dnd_loader=loader) as reopened:
+        assert reopened.read_combat_snapshot(sid, package, context=context) == after
+        assert reopened.read_rng_context(sid, package, context=context) == next_rng
+
+
+def test_healing_word_budget_resets_on_real_turn_wrap(tmp_path, context):
+    """Explicit end turn refreshes both budgets and permits a new paid cast."""
+    sm, sid, package, _, _ = cure_world(tmp_path, context, extra_spells=(HEALING_WORD,))
+    with sm:
+        command = cast_command(sm, sid, package, context, spell=HEALING_WORD)
+        assert sm.submit_command(command, package, context=context).status == "committed"
+        before = sm.read_combat_snapshot(sid, package, context=context)
+        for actor_id in (command.actor_id, NPC):
+            state = sm.read_combat_snapshot(sid, package, context=context)
+            end_turn = replace(
+                command,
+                command_id=f"pass.{actor_id}",
+                actor_id=actor_id,
+                payload=CombatIntentPayload(intent_type="pass"),
+                expected_world_version=state.world_version,
+            )
+            receipt = sm.submit_command(end_turn, package, context=context)
+            assert receipt.status == "committed", receipt
+        reset = sm.read_combat_snapshot(sid, package, context=context)
+        caster = actor(reset, command.actor_id)
+        assert reset.combat_state.turn_serial == before.combat_state.turn_serial + 2
+        assert reset.combat_state.round_number == before.combat_state.round_number + 1
+        assert caster.action_available and not caster.action_taken_this_turn
+        assert caster.bonus_action_available and not caster.bonus_action_taken_this_turn
+        assert pool(reset).current == 1
+        next_cast = cast_command(sm, sid, package, context, key="next.cast", spell=HEALING_WORD)
+        assert sm.submit_command(next_cast, package, context=context).status == "committed"
+        after = sm.read_combat_snapshot(sid, package, context=context)
+        assert pool(after).current == 0
+        assert after.combat_state.expended_resources[command.actor_id] == {"spell_slot:1": 2}
 
 
 @pytest.mark.parametrize("distinct_target", [False, True])
@@ -485,10 +556,12 @@ def test_ineligible_cast_preserves_all_facts(tmp_path, context, change, code):
         )
 
 
-def test_cure_wounds_occ_and_late_failure_rollback(tmp_path, context):
-    sm, sid, package, _, _ = cure_world(tmp_path, context)
+@pytest.mark.parametrize("spell", [SPELL, HEALING_WORD])
+def test_healing_spell_occ_and_late_failure_rollback(tmp_path, context, spell):
+    extra_spells = (HEALING_WORD,) if spell == HEALING_WORD else ()
+    sm, sid, package, _, _ = cure_world(tmp_path, context, extra_spells=extra_spells)
     with sm:
-        command = cast_command(sm, sid, package, context)
+        command = cast_command(sm, sid, package, context, spell=spell)
         before = sm.read_combat_snapshot(sid, package, context=context)
         rng = sm.read_rng_context(sid, package, context=context)
         before_events = sm._conn.execute(

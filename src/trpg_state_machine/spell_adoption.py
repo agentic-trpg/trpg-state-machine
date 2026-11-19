@@ -1,11 +1,18 @@
 """Validate supported ordinary spell Deltas before SM adopts any facts."""
 
 from dnd5e_engine import evaluation_delta as delta
+from dnd5e_engine.attack_rules import can_retain_turn
 from dnd5e_engine.evaluation_actor import combatant
 from dnd5e_engine.evaluation_state import CombatSnapshot, MovementLedgerState
 from dnd5e_engine.movement import project_speeds, speed_for_mode
 from dnd5e_engine.rules.conditions import active_condition_names, exhaustion_level_of
-from dnd5e_engine.turn_rules import next_turn_index, ordinary_action_payment, reset_turn_budget
+from dnd5e_engine.turn_rules import (
+    bonus_action_payment,
+    next_turn_index,
+    ordinary_action_payment,
+    reset_turn_budget,
+)
+from dnd5e_srd_data.schema.spell import CastingTimeUnit
 from pydantic import ValidationError
 
 from .damage_adoption import (
@@ -28,10 +35,10 @@ def _invalid(message):
     raise StateMachineError("invalid_rule_result", message)
 
 
-def ordinary_spell_changes(request, result, mechanism, activity):
+def ordinary_spell_changes(request, result, mechanism, spell):
     """Validate one immediate healing, save or attack spell against fixed input.
 
-    The bound activity identifies the spell's damage source and declared type.
+    The bound spell supplies casting timing, damage source and declared type.
     Attack evidence is linked to the damage instance and to the caster's budget.
     The returned edits are candidates for the caller's existing write transaction.
     Resource and combat expenditure guards must both be applied there; this
@@ -44,6 +51,8 @@ def ordinary_spell_changes(request, result, mechanism, activity):
     spell_id = payload.spell_id
     healing = mechanism == "healing"
     attack = mechanism == "attack_damage"
+    activity = spell.activities[0]
+    bonus = spell.casting_time.unit == CastingTimeUnit.BONUS
     slot_paid = payload.slot_level not in (None, 0)
     if mechanism not in {"healing", "save_damage", "attack_damage"} or (attack and slot_paid):
         _invalid("Unsupported ordinary spell mechanism")
@@ -157,7 +166,7 @@ def ordinary_spell_changes(request, result, mechanism, activity):
 
     resource = ledger = None
     hp = None
-    paid_action = False
+    budget_paid = False
     newly_dead = (
         set()
         if healing
@@ -170,24 +179,21 @@ def ordinary_spell_changes(request, result, mechanism, activity):
         )
     )
     dead_ids = combat_before.dead_ids | newly_dead
-    eligible = next_turn_index(
-        combat_before.initiative_ids, dead_ids, combat_before.current_turn_index + 1
+    turn_update = next(
+        (op for op in result.state_delta.operations if type(op) is delta.TurnUpdate), None
     )
-    turn_advanced = any(type(op) is delta.TurnUpdate for op in result.state_delta.operations)
-    turn = next(
-        (
-            op.value.current_turn_index
-            for op in result.state_delta.operations
-            if type(op) is delta.TurnUpdate
-        ),
-        snapshot.combat_state.current_turn_index,
+    turn_advanced = turn_update is not None
+    turn = turn_update.value.current_turn_index if turn_update else combat_before.current_turn_index
+    eligible = (
+        next_turn_index(
+            combat_before.initiative_ids, dead_ids, combat_before.current_turn_index + 1
+        )
+        if turn_advanced
+        else None
     )
     if not 0 <= turn < len(snapshot.combat_state.initiative_ids):
         _invalid("Spell turn is outside encounter")
     next_actor = snapshot.combat_state.initiative_ids[turn]
-    turn_update = next(
-        (op for op in result.state_delta.operations if type(op) is delta.TurnUpdate), None
-    )
     solo_wrap = (
         turn_update is not None
         and next_actor == caster
@@ -198,8 +204,15 @@ def ordinary_spell_changes(request, result, mechanism, activity):
         )
     )
     caster_before = next(actor for actor in snapshot.character_states if actor.entity_id == caster)
-    if solo_wrap and (not caster_before.action_available or caster_before.action_taken_this_turn):
-        _invalid("Solo caster lacked the ordinary action before its round wrap")
+    actor_before = combatant(caster_before)
+    if bonus:
+        if not actor_before.bonus_action_available or actor_before.bonus_action_taken_this_turn:
+            _invalid("Caster lacked the bonus action before the spell")
+        payment = bonus_action_payment()
+    else:
+        payment = ordinary_action_payment(actor_before)
+        if not payment or actor_before.action_taken_this_turn:
+            _invalid("Caster lacked the ordinary action before the spell")
 
     def effective_speed(before, mode):
         """Use RE's fixed-actor speed projection for a turn ledger mode."""
@@ -221,7 +234,13 @@ def ordinary_spell_changes(request, result, mechanism, activity):
         reset["sneak_attack_spent_this_turn"] = False
         return reset
 
-    next_reset = ordinary_reset(next_actor)
+    if bonus and turn_advanced == can_retain_turn(
+        actor_before.model_copy(update=payment),
+        movement_speed=lambda _: effective_speed(caster_before, "walk"),
+    ):
+        _invalid("Bonus action spell turn differs from its remaining budget")
+
+    next_reset = ordinary_reset(next_actor) if turn_advanced else None
     fresh_ledger = MovementLedgerState(
         spent_ft=0, distance_ft=0, active_mode="walk", dash_count=0
     ).model_dump(mode="json")
@@ -233,20 +252,22 @@ def ordinary_spell_changes(request, result, mechanism, activity):
             _invalid("Turn start event belongs to another actor")
         if event.type == "turn_phase" and event.actor_id not in (None, caster, next_actor):
             _invalid("Turn phase event belongs to another actor")
-    if turn_update is None:
+    if turn_update is None and not bonus:
         _invalid("Living caster requires a next-turn transition")
-    rollover = turn_update.value.round_number != snapshot.combat_state.round_number
+    rollover = (
+        turn_update is not None and turn_update.value.round_number != combat_before.round_number
+    )
     if (
         sum(
             event.type == "turn_ended" and event.actor_id == caster
             for event in result.proposed_events
         )
-        != 1
+        != int(turn_advanced)
         or sum(
             event.type == "turn_started" and event.actor_id == next_actor
             for event in result.proposed_events
         )
-        != 1
+        != int(turn_advanced)
         or sum(event.type == "round_started" for event in result.proposed_events) != int(rollover)
         or any(
             event.type == "round_started" and event.round_number != turn_update.value.round_number
@@ -254,6 +275,12 @@ def ordinary_spell_changes(request, result, mechanism, activity):
         )
     ):
         _invalid("Spell turn handoff events differ from the accepted transition")
+    if not turn_advanced and [event.type for event in result.proposed_events] != [
+        "intent_submitted",
+        "spell_cast",
+        "healing_applied",
+    ]:
+        _invalid("Retained spell turn has unrelated events")
     if attack:
         event_order: list[str | tuple[str, str | None, int]] = [
             "intent_submitted",
@@ -327,24 +354,16 @@ def ordinary_spell_changes(request, result, mechanism, activity):
                 field for field in value_budget if expected_budget[field] != value_budget[field]
             }
             if op.actor_id == caster and solo_wrap:
-                paid_action = True
+                budget_paid = True
             elif op.actor_id == caster:
-                permitted = {"action_available", "action_taken_this_turn"}
+                permitted = set(payment)
                 if attack:
                     permitted.add("attack_rolls_made_this_turn")
                 if turn_advanced:
                     permitted |= {"movement_remaining", "sneak_attack_spent_this_turn"}
-                if (
-                    not changed <= permitted
-                    or not {"action_available", "action_taken_this_turn"} <= changed
-                ):
+                if not changed <= permitted or not payment.keys() <= changed:
                     _invalid("Spell changed an unrelated caster budget")
-                paid_action = (
-                    op.expected.action_available
-                    and not op.expected.action_taken_this_turn
-                    and not op.value.action_available
-                    and op.value.action_taken_this_turn
-                )
+                budget_paid = all(value_budget[field] == value for field, value in payment.items())
             elif not turn_advanced:
                 _invalid("Spell changed next actor without a turn transition")
             for field in value_budget:
@@ -397,34 +416,34 @@ def ordinary_spell_changes(request, result, mechanism, activity):
             )
         else:
             _invalid("Unsupported ordinary spell consequence")
-    if solo_wrap and not paid_action:
-        paid_action = True
-    if any(
+    if next_reset is not None and any(
         actors[next_actor][field] != next_reset[field]
         for field in delta.AttackBudgetState.model_fields
     ):
         _invalid("Next actor omitted or changed its ordinary turn budget")
     if not solo_wrap:
-        payment = ordinary_action_payment(combatant(caster_before))
-        if payment != {"action_available": False, "action_taken_this_turn": True}:
-            _invalid("Caster lacked the ordinary action before the spell")
         outgoing = caster_before.model_dump(mode="json")
         outgoing.update(payment)
         if attack:
             outgoing["attack_rolls_made_this_turn"] += 1
-        caster_ledger = snapshot.combat_state.movement_ledgers[caster]
-        outgoing["movement_remaining"] = caster_ledger.remaining(
-            effective_speed(caster_before, caster_ledger.active_mode)
-        )
-        outgoing["sneak_attack_spent_this_turn"] = False
+        if turn_advanced:
+            caster_ledger = snapshot.combat_state.movement_ledgers[caster]
+            outgoing["movement_remaining"] = caster_ledger.remaining(
+                effective_speed(caster_before, caster_ledger.active_mode)
+            )
+            outgoing["sneak_attack_spent_this_turn"] = False
         if any(
             actors[caster][field] != outgoing[field]
             for field in delta.AttackBudgetState.model_fields
         ):
             _invalid("Outgoing caster budget differs from its paid turn end")
-    if combat["movement_ledgers"].get(next_actor) != fresh_ledger:
+    if turn_advanced and combat["movement_ledgers"].get(next_actor) != fresh_ledger:
         _invalid("Next actor omitted or changed its ordinary movement ledger")
-    if not paid_action or (resource is None) == slot_paid or (ledger is None) == slot_paid:
+    if (
+        not (budget_paid or solo_wrap)
+        or (resource is None) == slot_paid
+        or (ledger is None) == slot_paid
+    ):
         _invalid("Spell action and slot payment are incomplete")
     if resource is not None and (
         ledger.slot_kind != resource.value.kind or ledger.level != resource.value.level
