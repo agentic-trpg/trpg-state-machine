@@ -640,12 +640,11 @@ def _hold_cast_conditions(request, result, graph):
     payload = request.payload
     if (
         payload.spell_id != graph.spell_slug
-        or payload.slot_level != 2
         or payload.target_ids
         or graph.selected_target_ids != (payload.target_id,)
         or len(graph.entries) != 1
     ):
-        _invalid("Hold Person requires one bound level-two target graph")
+        _invalid("Hold Person requires a bound single-target graph")
     target = next(
         (
             actor
@@ -1376,6 +1375,7 @@ class RulesAdapter:
                     return "spell.capability"
                 return None
             if payload.spell_id == "hold-person":
+                # The bound rules engine admits the requested slot level.
                 basic = type(payload)(
                     intent_type="cast_spell",
                     source_id=payload.source_id,
@@ -1387,7 +1387,6 @@ class RulesAdapter:
                 if (
                     payload != basic
                     or snapshot.snapshot_schema_version != "engine-snapshot/20"
-                    or payload.slot_level != 2
                     or payload.source_id not in (None, actor_id)
                     or payload.target_id is None
                     or payload.spell_source_id is None

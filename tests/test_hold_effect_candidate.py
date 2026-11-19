@@ -179,7 +179,7 @@ def test_foundation_rejects_unreviewed_wizard_ac(tmp_path, context):
     assert error.value.code == "unsupported_combat_foundation"
 
 
-def hold_cast_command(sm, sid, package, context, *, command_id="hold.cast"):
+def hold_cast_command(sm, sid, package, context, *, command_id="hold.cast", slot_level=2):
     """Create a public cast command pinned to the current world version."""
     state = sm.read_session(sid, package, context=context)
     return TypedCommand(
@@ -191,7 +191,7 @@ def hold_cast_command(sm, sid, package, context, *, command_id="hold.cast"):
             intent_type="cast_spell",
             spell_id="hold-person",
             target_id=NPC,
-            slot_level=2,
+            slot_level=slot_level,
             spell_source_id="class:wizard",
         ),
         state.world_version,
@@ -226,11 +226,12 @@ def pass_command(sid, snapshot, command_id):
 
 
 @pytest.mark.parametrize("seed", [0, 5])
-def test_hold_public_cast_and_reopen(tmp_path, context, seed):
+@pytest.mark.parametrize("slot_level", [2, 3])
+def test_hold_public_cast_and_reopen(tmp_path, context, seed, slot_level):
     """Adopt one real typed graph and its payment in the shared commit."""
     sm, sid, package, loader, db = hold_world(tmp_path, context, seed=seed)
     with sm:
-        command = hold_cast_command(sm, sid, package, context)
+        command = hold_cast_command(sm, sid, package, context, slot_level=slot_level)
         before = sm.read_combat_snapshot(sid, package, context=context)
         receipt = sm.submit_command(command, package, context=context)
         assert receipt.status == "committed", receipt
@@ -247,12 +248,58 @@ def test_hold_public_cast_and_reopen(tmp_path, context, seed):
         caster = next(
             actor for actor in after.character_states if actor.entity_id == command.actor_id
         )
-        assert caster.spell_slots == {1: 4, 2: 2, 3: 2}
-        assert after.combat_state.expended_resources[command.actor_id] == {"spell_slot:2": 1}
+        expected_slots = {1: 4, 2: 3, 3: 2}
+        expected_slots[slot_level] -= 1
+        assert caster.spell_slots == expected_slots
+        assert {
+            pool.level: pool.current
+            for pool in after.resource_state.pools
+            if pool.kind == "spell_slot" and pool.owner_id == command.actor_id
+        } == expected_slots
+        assert after.combat_state.expended_resources[command.actor_id] == {
+            f"spell_slot:{slot_level}": 1
+        }
         assert before.effect_states == ()
         assert sm.submit_command(command, package, context=context) == receipt
     with StateMachine(db, dnd_loader=loader) as reopened:
         assert reopened.read_combat_snapshot(sid, package, context=context) == after
+        assert reopened.get_command_receipt(sid, command.command_id, package, context=context) == (
+            receipt
+        )
+
+
+def test_hold_level_below_spell_is_rejected_by_rules_engine(tmp_path, context, monkeypatch):
+    """Keep every mechanical fact when real evaluation rejects an available level-one slot."""
+    sm, sid, package, _, _ = hold_world(tmp_path, context)
+    with sm:
+        command = hold_cast_command(sm, sid, package, context, slot_level=1)
+        before = sm.read_combat_snapshot(sid, package, context=context)
+        before_rng = sm.read_rng_context(sid, package, context=context)
+        before_events = sm.read_events(sid, package, context=context)
+        caster = next(
+            actor for actor in before.character_states if actor.entity_id == command.actor_id
+        )
+        assert caster.spell_slots[1] == 4
+        evaluate = sm._rules._evaluate_dnd
+        evaluations = []
+
+        async def record_evaluation(request):
+            """Observe the actual rules-engine refusal without substituting a result."""
+            result = await evaluate(request)
+            evaluations.append((request.payload.slot_level, result.status, result.error.code))
+            return result
+
+        monkeypatch.setattr(sm._rules, "_evaluate_dnd", record_evaluation)
+        receipt = sm.submit_command(command, package, context=context)
+        assert (receipt.status, receipt.error_code) == ("rejected", "no_slot")
+        assert receipt.world_version == before.world_version
+        assert receipt.event_seqs == ()
+        assert sm.get_command_receipt(sid, command.command_id, package, context=context) == receipt
+        assert sm.submit_command(command, package, context=context) == receipt
+        assert evaluations == [(1, "rejected", "no_slot")]
+        assert sm.read_combat_snapshot(sid, package, context=context) == before
+        assert sm.read_rng_context(sid, package, context=context) == before_rng
+        assert sm.read_events(sid, package, context=context) == before_events
 
 
 @pytest.mark.parametrize("seed", [0, 1])

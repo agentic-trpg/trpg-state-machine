@@ -23,11 +23,16 @@ def _effect_counts(sm, sid):
     )
 
 
-def test_hold_late_receipt_failure_rolls_back_then_replay_and_stale_conflict(tmp_path, context):
+@pytest.mark.parametrize("slot_level", [2, 3])
+def test_hold_late_receipt_failure_rolls_back_then_replay_and_stale_conflict(
+    tmp_path, context, slot_level
+):
     """A failed final receipt leaves no graph, payment or RNG; retry commits once."""
     sm, sid, package, _, _ = hold_world(tmp_path, context)
     with sm:
-        command = hold_cast_command(sm, sid, package, context, command_id="hold.atomic")
+        command = hold_cast_command(
+            sm, sid, package, context, command_id="hold.atomic", slot_level=slot_level
+        )
         old_snapshot = sm.read_combat_snapshot(sid, package, context=context)
         old_rng = sm.read_rng_context(sid, package, context=context)
         old_effect_rows = _effect_counts(sm, sid)
@@ -45,8 +50,10 @@ def test_hold_late_receipt_failure_rolls_back_then_replay_and_stale_conflict(tmp
             "AND (SELECT count(*) FROM ongoing_effects WHERE session_id=NEW.session_id)=1 "
             "BEGIN SELECT RAISE(ABORT,'injected hold receipt failure'); END"
         )
-        with pytest.raises(StateMachineError):
+        with pytest.raises(StateMachineError) as error:
             sm.submit_command(command, package, context=context)
+        assert error.value.code == "storage_error"
+        assert str(error.value.__cause__) == "injected hold receipt failure"
         assert _effect_counts(sm, sid) == old_effect_rows
         assert sm.read_combat_snapshot(sid, package, context=context) == old_snapshot
         assert sm.read_rng_context(sid, package, context=context) == old_rng
