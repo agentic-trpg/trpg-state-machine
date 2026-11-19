@@ -7,9 +7,10 @@ remain with the bound Rule Engine; every mutation uses the caller's UnitOfWork.
 from dnd5e_engine.effect_lifecycle import conditions_after_effect_application
 from dnd5e_engine.evaluation_effects import EffectState
 from dnd5e_engine.evaluation_region_effect import (
-    is_region_condition,
+    is_fixed_region_condition_effect,
     plan_region_condition_transition,
     region_condition_identity,
+    region_condition_status,
 )
 from dnd5e_engine.evaluation_ruleset import RulesetBindingError
 from dnd5e_engine.evaluation_state import ConditionLink, LifecycleRecord
@@ -20,12 +21,13 @@ from .package import canonical_json
 from .scoped_reads import scoped_read
 
 
-def _region_poison(row, statuses):
-    """Recognize an untimed region Poisoned link from its stored profile and RE identity."""
+def _fixed_region_condition(row, statuses):
+    """Recognize a source-scoped fixed-area link from its stored metadata and RE identity."""
+    status = region_condition_status(row["effect_id"], row["origin"])
     return (
-        statuses == ["poisoned"]
+        status is not None
+        and statuses == [status]
         and all(row[key] is None for key in ("concentration_id", "lifecycle_json", "expires_tick"))
-        and is_region_condition(row["effect_id"], row["origin"])
     )
 
 
@@ -156,14 +158,18 @@ class OngoingEffects:
         scene_id,
         source_id,
         *,
+        rule_ref,
         entering,
         condition_immunities,
         ruleset_binding,
         loader,
     ):
-        """Plan and adopt one region transition against the full identity and current row."""
+        """Adopt a bound fixed-area transition against the full identity and current row."""
         self.store.require_write()
-        identity = region_condition_identity(scene_id, source_id, actor_id)
+        try:
+            identity = region_condition_identity(scene_id, source_id, actor_id, rule_ref=rule_ref)
+        except ValueError as exc:
+            raise StateMachineError("invalid_environment", str(exc)) from exc
         stored = self._conn.execute(
             "SELECT effect_id,origin,conditions_json,concentration_id,lifecycle_json,expires_tick "
             "FROM ongoing_effects WHERE session_id=? AND target_id=? AND effect_id=? AND origin=?",
@@ -172,7 +178,9 @@ class OngoingEffects:
         present = stored is not None
         if present and (
             stored["conditions_json"] is None
-            or not _region_poison(stored, self.store.memory.json(stored["conditions_json"]))
+            or not _fixed_region_condition(
+                stored, self.store.memory.json(stored["conditions_json"])
+            )
         ):
             raise StateMachineError("invalid_mechanical_state", "Region effect has invalid links")
         try:
@@ -185,9 +193,12 @@ class OngoingEffects:
                 present=present,
                 condition_immunities=condition_immunities,
                 loader=loader,
+                rule_ref=rule_ref,
             )
         except RulesetBindingError as exc:
             raise StateMachineError("ruleset_binding_mismatch", str(exc)) from exc
+        except ValueError as exc:
+            raise StateMachineError("invalid_environment", str(exc)) from exc
         valid_operations = {"none"}
         if entering and not present:
             valid_operations.add("add")
@@ -204,19 +215,9 @@ class OngoingEffects:
                 or (effect.target_id, effect.id, effect.origin) != identity
             ):
                 raise StateMachineError("invalid_rule_result", "Region effect identity differs")
-            payload = effect.model_dump(mode="json")
-            if (
-                effect.disabled
-                or effect.transfer
-                or effect.statuses != {"poisoned"}
-                or effect.changes
-                or effect.action_policy is not None
-                or effect.flags
-                or effect.lifecycle is not None
-                or effect.end_effects
-                or any(value is not None for value in payload["duration"].values())
-            ):
+            if not is_fixed_region_condition_effect(effect):
                 raise StateMachineError("invalid_rule_result", "Unsupported region effect profile")
+            payload = effect.model_dump(mode="json")
             self.add_effect(sid, payload, conditions=payload["statuses"])
         elif effect is not None:
             raise StateMachineError(
@@ -463,7 +464,7 @@ class OngoingEffects:
                 current,
                 row["effect_id"],
                 statuses,
-                scope="session" if _region_poison(row, statuses) else "combat",
+                scope="session" if _fixed_region_condition(row, statuses) else "combat",
             )
         return [condition.model_dump(mode="json") for condition in current]
 
@@ -486,13 +487,13 @@ class OngoingEffects:
         return names
 
     @scoped_read
-    def has_linked_conditions(self, sid, target_id, *, allow_region_poison=False):
-        """Check target statuses, optionally allowing the fixed region condition."""
+    def has_linked_conditions(self, sid, target_id, *, allow_fixed_region=False):
+        """Check target statuses, optionally allowing the movement- and vision-safe area rules."""
         for row in self._target_rows(sid, target_id):
             if row["conditions_json"] is None:
                 continue
             statuses = self.store.memory.json(row["conditions_json"])
-            if statuses and not (allow_region_poison and _region_poison(row, statuses)):
+            if statuses and not (allow_fixed_region and _fixed_region_condition(row, statuses)):
                 return True
         return False
 

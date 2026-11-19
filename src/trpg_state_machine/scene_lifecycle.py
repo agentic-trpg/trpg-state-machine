@@ -233,12 +233,16 @@ class SceneLifecycleService:
         """Adopt only the fixed region sources crossed by this admitted move."""
         sid = row["session_id"]
         previous = {
-            (before.scene_id, source)
-            for source in environment.region_condition_sources(sid, before.scene_id, before.cell)
+            (before.scene_id, source_id, rule_ref)
+            for source_id, rule_ref in environment.region_condition_sources(
+                sid, before.scene_id, before.cell
+            )
         }
         current = {
-            (after.scene_id, source)
-            for source in environment.region_condition_sources(sid, after.scene_id, after.cell)
+            (after.scene_id, source_id, rule_ref)
+            for source_id, rule_ref in environment.region_condition_sources(
+                sid, after.scene_id, after.cell
+            )
         }
         entered, left = current - previous, previous - current
         if not entered and not left:
@@ -250,12 +254,13 @@ class SceneLifecycleService:
             )
         binding = RulesetBinding(**asdict(_binding(row)))
         for entering, sources in ((False, left), (True, entered)):
-            for scene_id, source_id in sorted(sources):
+            for scene_id, source_id, rule_ref in sorted(sources):
                 self.characters.effects.transition_region_condition(
                     sid,
                     actor_id,
                     scene_id,
                     source_id,
+                    rule_ref=rule_ref,
                     entering=entering,
                     condition_immunities=immunities,
                     ruleset_binding=binding,

@@ -253,6 +253,7 @@ def test_fixed_region_source_codec_preserves_ordinary_fingerprints_and_facts():
     """Omit the optional field for ordinary sources and round-trip an explicit region."""
     ordinary = Source("fog", WEATHER, EnvironmentArea(("2,1",)))
     fixed = replace(ordinary, region_condition="poisoned")
+    explicit = replace(ordinary, region_effect_rule="condition:deafened")
     legacy = {
         "source_id": "fog",
         "conditions": asdict(WEATHER),
@@ -265,6 +266,7 @@ def test_fixed_region_source_codec_preserves_ordinary_fingerprints_and_facts():
     for source, expected in (
         (ordinary, legacy),
         (fixed, {**legacy, "region_condition": "poisoned"}),
+        (explicit, {**legacy, "region_effect_rule": "condition:deafened"}),
     ):
         mutation = AddEnvironmentSource(A, source)
         wire = environment_operation_to_data(mutation)
@@ -280,6 +282,7 @@ def test_fixed_region_source_codec_preserves_ordinary_fingerprints_and_facts():
         {"exposure": "outdoor"},
         {"area": EnvironmentArea()},
         {"area": EnvironmentArea(("2,1",), HeightInterval(0, 5))},
+        {"region_effect_rule": "condition:deafened"},
     ):
         with pytest.raises(StateMachineError) as rejected:
             replace(fixed, **overrides)
@@ -295,11 +298,15 @@ def test_fixed_region_source_keeps_geometry_across_environment_mutations(tmp_pat
         fixed = Source("fixed", WEATHER, area, region_condition="poisoned")
         ordinary = Source("ordinary", WEATHER, area)
         seed(sm, sid, p, ctx, Facts(sources=(fixed, ordinary)))
-        assert sm.environment.region_condition_sources(sid, A, "2,1") == ("fixed",)
+        fixed_ref = ("fixed", "condition:poisoned")
+        assert sm.environment.region_condition_sources(sid, A, "2,1") == (fixed_ref,)
         assert sm.environment.region_condition_sources(sid, A, None) == ()
 
         actions = (
             ReplaceEnvironmentSource(A, replace(fixed, region_condition=None)),
+            ReplaceEnvironmentSource(
+                A, replace(fixed, region_condition=None, region_effect_rule="condition:deafened")
+            ),
             ReplaceEnvironmentSource(A, replace(fixed, area=EnvironmentArea(("1,1",)))),
             ReplaceEnvironmentSource(A, replace(ordinary, region_condition="poisoned")),
             RemoveEnvironmentSource(A, fixed.source_id),
@@ -310,16 +317,17 @@ def test_fixed_region_source_keeps_geometry_across_environment_mutations(tmp_pat
 
         update = ReplaceEnvironmentSource(A, replace(fixed, conditions=Conditions()))
         assert submit(sm, sid, p, ctx, update, "change_visuals").status == "committed"
-        assert sm.environment.region_condition_sources(sid, A, "2,1") == ("fixed",)
+        assert sm.environment.region_condition_sources(sid, A, "2,1") == (fixed_ref,)
         added = replace(fixed, source_id="alpha")
         assert submit(sm, sid, p, ctx, AddEnvironmentSource(A, added), "add").status == "committed"
-        assert sm.environment.region_condition_sources(sid, A, "2,1") == ("alpha", "fixed")
+        alpha_ref = ("alpha", "condition:poisoned")
+        assert sm.environment.region_condition_sources(sid, A, "2,1") == (alpha_ref, fixed_ref)
         assert sm.environment.region_condition_sources(sid, A, "1,1") == ()
 
         other_scene = AddEnvironmentSource(B, replace(fixed, area=EnvironmentArea(("0,0",))))
         assert submit(sm, sid, p, ctx, other_scene, "add_elsewhere").status == "committed"
         builds = sm._store.memory.stats["instance_builds"]
-        assert sm.environment.region_condition_sources(sid, A, "2,1") == ("alpha", "fixed")
+        assert sm.environment.region_condition_sources(sid, A, "2,1") == (alpha_ref, fixed_ref)
         assert sm._store.memory.stats["instance_builds"] == builds
 
 

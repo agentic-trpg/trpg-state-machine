@@ -4,6 +4,7 @@ from dataclasses import dataclass
 from math import isfinite
 from typing import Literal, Protocol
 
+from dnd5e_engine.evaluation_region_effect import LEGACY_REGION_CONDITION_RULE
 from dnd5e_engine.spatial import canonical_cell_id
 
 from .errors import StateMachineError
@@ -169,10 +170,10 @@ CONDITION_TYPES = {
 
 @dataclass(frozen=True, slots=True)
 class EnvironmentSource:
-    """Define a scoped environmental source with an optional fixed region condition.
+    """Define a scoped environmental source with an optional fixed-area rule reference.
 
     Region membership uses the same explicit cells as the environment contribution.
-    Fog, smoke and other environmental values carry no region condition by default.
+    Fog, smoke and other environmental values carry no region rule by default.
     """
 
     source_id: str
@@ -182,9 +183,10 @@ class EnvironmentSource:
     exposure: Literal["outdoor", "local"] = "local"
     observable: bool = False
     region_condition: Literal["poisoned"] | None = None
+    region_effect_rule: str | None = None
 
     def __post_init__(self):
-        """Validate source shape and require explicit horizontal coverage for poisoning."""
+        """Validate the source shape and require explicit horizontal coverage for a rule."""
         identity(self.source_id)
         if self.source_id == "base":
             invalid("base is reserved")
@@ -197,11 +199,25 @@ class EnvironmentSource:
             invalid("Source priority must be an integer in [-1000,1000]")
         if self.exposure not in ("outdoor", "local") or type(self.observable) is not bool:
             invalid("Invalid source exposure/disclosure policy")
+        if self.region_condition is not None and (
+            type(self.region_condition) is not str or self.region_condition != "poisoned"
+        ):
+            invalid("Unsupported legacy environment region condition")
+        if self.region_effect_rule is not None:
+            identity(self.region_effect_rule)
+            if self.region_condition is not None:
+                invalid("Specify one fixed-area rule reference")
+        if self.region_rule_ref is not None and (
+            not self.area.cells or self.area.heights is not None or self.exposure != "local"
+        ):
+            invalid("A fixed-area rule requires local cells without heights")
+
+    @property
+    def region_rule_ref(self) -> str | None:
+        """Return the explicit rule reference or its legacy encoded equivalent."""
         if self.region_condition is not None:
-            if type(self.region_condition) is not str or self.region_condition != "poisoned":
-                invalid("Unsupported environment region condition")
-            if not self.area.cells or self.area.heights is not None or self.exposure != "local":
-                invalid("A fixed environment region condition requires local cells without heights")
+            return LEGACY_REGION_CONDITION_RULE
+        return self.region_effect_rule
 
 
 @dataclass(frozen=True, slots=True)

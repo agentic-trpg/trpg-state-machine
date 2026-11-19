@@ -44,7 +44,7 @@ class AddEnvironmentSource:
 
 @dataclass(frozen=True, slots=True)
 class ReplaceEnvironmentSource:
-    """Replace an identified source while preserving any fixed region and condition."""
+    """Replace an identified source while preserving any fixed-area rule and coverage."""
 
     scene_id: str
     source: EnvironmentSource
@@ -52,7 +52,7 @@ class ReplaceEnvironmentSource:
 
 @dataclass(frozen=True, slots=True)
 class RemoveEnvironmentSource:
-    """Request removal of an environment source that has no fixed region condition."""
+    """Request removal of an environment source without a fixed-area rule."""
 
     scene_id: str
     source_id: str
@@ -122,10 +122,11 @@ def validate_environment_operation(op):
 
 
 def _environment_dict(items):
-    """Keep the established mapping shape when a source has no region condition."""
+    """Omit absent rule fields to preserve established facts and command fingerprints."""
     data = dict(items)
-    if data.get("region_condition") is None:
-        data.pop("region_condition", None)
+    for key in ("region_condition", "region_effect_rule"):
+        if data.get(key) is None:
+            data.pop(key, None)
     return data
 
 

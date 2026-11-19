@@ -4,6 +4,9 @@ from collections.abc import Mapping
 from dataclasses import asdict, dataclass, replace
 from types import MappingProxyType
 
+from dnd5e_engine.evaluation_region_effect import resolve_region_condition_rule
+from dnd5e_engine.evaluation_ruleset import RulesetBinding, RulesetBindingError
+
 from .environment_commands import (
     AddEnvironmentSource,
     BatchEnvironment,
@@ -35,6 +38,7 @@ from .errors import StateMachineError
 from .grid import cell_in_bounds
 from .object_protection import PRECIPITATION_KINDS
 from .runtime_instances import SceneFieldCache, resolve_field
+from .session_access import _binding
 
 
 @dataclass(frozen=True, slots=True)
@@ -117,9 +121,9 @@ class UnitEnvironment:
 
 @dataclass(frozen=True, slots=True)
 class _RegionConditionIndex:
-    """Retain immutable source ID buckets for the configured cells of one Scene."""
+    """Retain immutable source and rule pairs for configured cells of one Scene."""
 
-    by_cell: Mapping[str, tuple[str, ...]]
+    by_cell: Mapping[str, tuple[tuple[str, str], ...]]
 
     def __deepcopy__(self, memo):
         """Share the immutable buckets with candidate and fixed read scopes."""
@@ -316,6 +320,21 @@ class EnvironmentService:
         for wind in facts.protection.wind or ():
             self._area(sid, scene, EnvironmentArea((wind.cell,)), package)
 
+    def _admit_region_rule(self, row, rule_ref):
+        """Validate an authored rule reference against this Session's frozen content."""
+        if rule_ref is None:
+            return
+        try:
+            resolve_region_condition_rule(
+                rule_ref,
+                ruleset_binding=RulesetBinding(**asdict(_binding(row))),
+                loader=self.h.loader,
+            )
+        except RulesetBindingError as exc:
+            raise StateMachineError("ruleset_binding_mismatch", str(exc)) from exc
+        except ValueError as exc:
+            invalid(str(exc))
+
     def operate(self, row, op, package):
         """Trusted WorldHandler participant. Plan the entire batch BEFORE touching facts."""
         self.h.store.require_write()
@@ -334,6 +353,10 @@ class EnvironmentService:
             source_id, areas, changed_fields = None, [], []
             if type(change) is InitializeEnvironment:
                 self._validate_facts(sid, scene, change.facts, package)
+                for rule_ref in dict.fromkeys(
+                    source.region_rule_ref for source in change.facts.sources
+                ):
+                    self._admit_region_rule(row, rule_ref)
                 new = old if old is not None else change.facts
                 areas = [EnvironmentArea()]
                 changed_fields = ["initialization", *CONDITION_TYPES, "protection"]
@@ -364,17 +387,20 @@ class EnvironmentService:
                         raise StateMachineError(
                             "environment_source_exists", "Source already exists"
                         )
+                    self._admit_region_rule(row, change.source.region_rule_ref)
                     sources[source_id] = change.source
                 elif type(change) is ReplaceEnvironmentSource:
                     if before is None:
                         raise StateMachineError("environment_source_not_found", "Source is absent")
-                    if before.region_condition != change.source.region_condition or (
-                        before.region_condition is not None and before.area != change.source.area
+                    rule_ref = change.source.region_rule_ref
+                    if before.region_rule_ref != rule_ref or (
+                        rule_ref is not None and before.area != change.source.area
                     ):
                         invalid("Replace cannot introduce or change a fixed environment region")
+                    self._admit_region_rule(row, rule_ref)
                     sources[source_id] = change.source
                 else:
-                    if before is not None and before.region_condition is not None:
+                    if before is not None and before.region_rule_ref is not None:
                         # Movement exits must be able to find the same region as entry.
                         invalid("Remove cannot remove a fixed environment region")
                     sources.pop(source_id, None)
@@ -438,21 +464,22 @@ class EnvironmentService:
             return self.h.facts.environment(sid, scene_id)
 
     def _region_condition_index(self, sid, scene_id):
-        """Build cell associations from persisted Scene sources in source ID order."""
+        """Build cell associations from persisted source/rule pairs in source ID order."""
         facts = self.h.facts.environment(sid, scene_id)
         by_cell = {}
         for source in facts.sources if facts is not None else ():
-            if source.region_condition is not None:
+            if (rule_ref := source.region_rule_ref) is not None:
+                reference = (source.source_id, rule_ref)
                 for cell in source.area.cells:
-                    by_cell.setdefault(cell, []).append(source.source_id)
+                    by_cell.setdefault(cell, []).append(reference)
         return _RegionConditionIndex(
-            MappingProxyType({cell: tuple(source_ids) for cell, source_ids in by_cell.items()})
+            MappingProxyType({cell: tuple(references) for cell, references in by_cell.items()})
         )
 
     def region_condition_sources(
         self, sid: str, scene_id: str, cell: str | None
-    ) -> tuple[str, ...]:
-        """Return the fixed condition source IDs for a trusted movement position.
+    ) -> tuple[tuple[str, str], ...]:
+        """Return (source ID, rule reference) pairs for a trusted movement position.
 
         A position without a Grid cell has no regional membership. The bounded Scene
         field shares the authoritative facts' dependency in the candidate or read scope.
