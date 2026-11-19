@@ -1,5 +1,6 @@
 """Production-path costs: dependency probes, copies and association discovery."""
 
+from ast import literal_eval
 from collections import Counter
 from contextlib import contextmanager, nullcontext
 from copy import deepcopy
@@ -83,10 +84,16 @@ def work(sm, monkeypatch):
                     else:
                         counts["unscoped_sense_queries"] += 1
                 if _label == "dependency_checks":
-                    if args[0][0] == "character_conditions":
+                    key, _ = args[0]
+                    if key == "character_conditions":
                         counts["condition_checks"] += 1
+                    table, _, projection = key.partition("@")
+                    if projection and table in ("scene_environments", "ongoing_effects"):
+                        predicates, _ = literal_eval(projection)
+                        counts[f"{table}_checks"] += 1
+                        counts[(table, predicates)] += 1
                     for domain in ("weight", "mechanism_index", "light_candidates"):
-                        if args[0][0].startswith(domain + ":"):
+                        if key.startswith(domain + ":"):
                             counts[domain + "_checks"] += 1
                 return result
 
@@ -232,7 +239,27 @@ def test_nonmatching_mechanism_records(tmp_path, context, monkeypatch, n, family
         # Four point condition probes now guard mechanical actors at admission
         # and evidence capture. They are fixed target dependencies, not scene scans.
         assert counts["condition_checks"] == 4
-        assert counts["dependency_checks"] - counts["condition_checks"] <= 114
+        # Region membership resolves the source and destination from this Scene.
+        scene_environment_checks = counts["scene_environments_checks"]
+        assert (
+            scene_environment_checks
+            == counts[("scene_environments", (("scene_id", A), ("session_id", sid)))]
+            == 3
+        )
+        # Movement and visibility have distinct predicates over the mover's linked effects.
+        actor_effect_checks = counts["ongoing_effects_checks"]
+        assert (
+            actor_effect_checks
+            == counts[("ongoing_effects", (("session_id", sid), ("target_id", motion.actor_id)))]
+            == 5
+        )
+        assert (
+            counts["dependency_checks"]
+            - counts["condition_checks"]
+            - scene_environment_checks
+            - actor_effect_checks
+            <= 114
+        )
         # Admission reads the PC once; event evidence reads the PC and one NPC.
         # Keep their new narrow-row cost separate from the preexisting scope.
         assert counts["life_point_queries"] == counts["life_ram_rows"] == 3

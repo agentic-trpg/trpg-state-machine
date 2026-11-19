@@ -46,11 +46,29 @@ from trpg_state_machine.errors import StateMachineError
 from trpg_state_machine.package import canonical_json
 
 
+def legacy_add_source_payload(op):
+    """Use the original public fields from before fixed region effects."""
+    source = op.source
+    return {
+        "scene_id": op.scene_id,
+        "source": {
+            "source_id": source.source_id,
+            "conditions": asdict(source.conditions),
+            "area": asdict(source.area),
+            "priority": source.priority,
+            "exposure": source.exposure,
+            "observable": source.observable,
+        },
+    }
+
+
 def legacy_fingerprint(cmd, package, context):
     """Frozen pre-fix algorithm for DTOs without legacy Reposition optional fields."""
     data = asdict(cmd)
     data.pop("check_world_effects")
     data.pop("time_wait")  # This frozen algorithm predates the optional field.
+    if type(cmd.payload) is AddEnvironmentSource:
+        data["payload"] = legacy_add_source_payload(cmd.payload)
     return hashlib.sha256(
         canonical_json(
             {
@@ -195,7 +213,7 @@ def test_tagged_wire_batch_and_typed_batch_have_same_fingerprint(tmp_path, conte
             "changes": [
                 {
                     "command_type": "world.add_environment_source",
-                    "payload": asdict(cmd.payload.changes[0]),
+                    "payload": legacy_add_source_payload(cmd.payload.changes[0]),
                 },
                 {
                     "command_type": "world.set_environment_base",
