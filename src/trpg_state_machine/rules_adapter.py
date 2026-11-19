@@ -52,7 +52,11 @@ from dnd5e_engine.turn_rules import (
 from pydantic import ValidationError
 
 from .combat import DND_RULESET, _remap, process_id, validate_foundation
-from .concentration_adoption import concentration_release_changes
+from .concentration_adoption import (
+    concentration_release_changes,
+    effect_identity,
+    require_effect_applied,
+)
 from .dnd_checks import check_changes
 from .dnd_closure import closure_changes
 from .errors import StateMachineError
@@ -83,32 +87,32 @@ class UnsupportedEffectConsequence(Exception):
 
 
 def _hold_source(snapshot):
-    """Select the caster of one Hold Person graph in the fixed encounter input."""
+    """Select the caster of a complete Hold Person group in the fixed encounter input."""
     state = snapshot.combat_state
     if (
         snapshot.snapshot_schema_version != "engine-snapshot/20"
-        or len(snapshot.effect_states) != 1
+        or not snapshot.effect_states
         or len(state.concentration_chain) != 1
     ):
         return None
-    effect = snapshot.effect_states[0]
     source, chain = next(iter(state.concentration_chain.items()))
-    if chain != [(effect.target_id, effect.id, effect.origin)]:
+    identities = {effect_identity(effect) for effect in snapshot.effect_states}
+    if not (
+        len(chain) == len(identities) == len(snapshot.effect_states) and set(chain) == identities
+    ):
         return None
-    application = effect.lifecycle
-    if application is None:
-        if (
-            effect.target_id == source
-            and effect.id == "effect:hold-person"
-            and effect.origin == f"cast:hold-person:{source}"
-            and effect.flags.get("concentration_anchor") is True
-        ):
+    if chain == [(source, "effect:hold-person", f"cast:hold-person:{source}")]:
+        anchor = snapshot.effect_states[0]
+        if anchor.lifecycle is None and anchor.flags.get("concentration_anchor") is True:
             return source
-    elif (
-        effect.id == "effect:paralyzed"
-        and application.source_id == source
-        and application.source_kind == "spell"
-        and application.source_slug == "hold-person"
+    if all(
+        effect.target_id != source
+        and effect.id == "effect:paralyzed"
+        and effect.lifecycle is not None
+        and effect.lifecycle.source_id == source
+        and effect.lifecycle.source_kind == "spell"
+        and effect.lifecycle.source_slug == "hold-person"
+        for effect in snapshot.effect_states
     ):
         return source
     return None
@@ -636,49 +640,63 @@ def _concentration_cast_graph(request, result):
 
 
 def _hold_cast_conditions(request, result, graph):
-    """Validate the single Humanoid target and save evidence, then project linked conditions."""
+    """Bind cast evidence and every graph member to the selected living Humanoids."""
     payload = request.payload
+    targets = payload.target_ids or (payload.target_id,)
     if (
         payload.spell_id != graph.spell_slug
-        or payload.target_ids
-        or graph.selected_target_ids != (payload.target_id,)
-        or len(graph.entries) != 1
+        or targets[0] != payload.target_id
+        or graph.selected_target_ids != targets
     ):
-        _invalid("Hold Person requires a bound single-target graph")
-    target = next(
-        (
-            actor
-            for actor in request.state_snapshot.character_states
-            if actor.entity_id == payload.target_id
-        ),
-        None,
-    )
-    if target is None or target.creature_type != "humanoid":
-        _invalid("Hold Person target is not Humanoid")
+        _invalid("Hold Person graph differs from the selected targets")
+    actors = {actor.entity_id: actor for actor in request.state_snapshot.character_states}
+    for target in targets:
+        actor = actors.get(target)
+        if (
+            actor is None
+            or actor.creature_type != "humanoid"
+            or not actor.is_alive
+            or actor.hp_current <= 0
+        ):
+            _invalid("Hold Person target is not a living Humanoid")
     submitted = [event for event in result.proposed_events if event.type == "intent_submitted"]
+    casts = [event for event in result.proposed_events if event.type == "spell_cast"]
     saves = [event for event in result.proposed_events if event.type == "save_rolled"]
     applied = [event for event in result.proposed_events if event.type == "effect_applied"]
+    conditions = [
+        (event.target_id, event.condition)
+        for event in result.proposed_events
+        if event.type == "condition_applied"
+    ]
+    failed = tuple(save.target_id for save in saves if not save.succeeded)
     if (
         len(submitted) != 1
         or submitted[0].actor_id != request.actor_id
         or submitted[0].intent_type != "cast_spell"
         or submitted[0].spell_id != graph.spell_slug
         or submitted[0].target_id != payload.target_id
-        or len(saves) != 1
-        or saves[0].target_id != payload.target_id
-        or saves[0].ability != "wis"
-        or saves[0].dc != graph.save_dc
-        or len(applied) != 1
-        or (
-            applied[0].effect.target_id,
-            applied[0].effect.id,
-            applied[0].effect.origin,
-        )
-        != graph.chain[0]
+        or [(cast.actor_id, cast.spell_id, cast.slot_level) for cast in casts]
+        != [(request.actor_id, graph.spell_slug, graph.slot_level)]
+        or tuple(save.target_id for save in saves) != targets
+        or any(save.ability != "wis" or save.dc != graph.save_dc for save in saves)
+        or tuple(entry.effect.target_id for entry in graph.entries)
+        != (failed or (request.actor_id,))
+        or len(applied) != len(graph.entries)
+        or conditions
+        != [
+            (entry.effect.target_id, entry.condition.condition)
+            for entry in graph.entries
+            if entry.condition is not None
+        ]
     ):
         _invalid("Hold Person cast evidence differs from its graph")
-    (entry,) = graph.entries
-    return {target.entity_id: (*target.conditions, entry.condition)} if entry.condition else {}
+    for event, entry in zip(applied, graph.entries, strict=True):
+        require_effect_applied(event, entry.effect)
+    return {
+        entry.effect.target_id: (*actors[entry.effect.target_id].conditions, entry.condition)
+        for entry in graph.entries
+        if entry.condition is not None
+    }
 
 
 def _concentration_cast_changes(request, result, graph):
@@ -699,11 +717,56 @@ def _concentration_cast_changes(request, result, graph):
         condition_changes=condition_changes,
         effect_movement=effect_movement,
     )
-    base = delta_changes(request, result, effect_operations=(type(graph),))
+    base = delta_changes(
+        request, result, effect_operations=(type(graph),), effect_targets=condition_changes or ()
+    )
     return (*base, (component, graph.source_id, "create", graph))
 
 
-def hold_effect_changes(request, result):
+def _hold_pass_boundaries(request, result, source, lifecycles):
+    """Bind each member transition to the already-verified Pass TurnEnd and its evidence."""
+    combat = request.state_snapshot.combat_state
+    actor_id = request.actor_id
+    expired = [event for event in result.proposed_events if event.type == "effect_expired"]
+    reasons = {(event.target_id, event.effect_id, event.origin): event.reason for event in expired}
+    if len(reasons) != len(expired) or reasons.keys() != {
+        op.identity for op in lifecycles if op.effect is None
+    }:
+        _invalid("Hold Person expiry evidence differs from the removed members")
+    saves = [event for event in result.proposed_events if event.type == "save_rolled"]
+    caster_duration_ended = (
+        actor_id == source and combat.concentration_rounds_remaining[source] == 1
+    )
+    if caster_duration_ended and reasons != dict.fromkeys(
+        combat.concentration_chain[source], "duration"
+    ):
+        _invalid("Hold Person caster duration must expire every member at its final TurnEnd")
+    for op in lifecycles:
+        clock = op.expected_lifecycle.state if op.expected_lifecycle is not None else None
+        reason = reasons.get(op.identity)
+        if reason == "duration":
+            if not caster_duration_ended and (
+                clock is None
+                or not clock.expires_at(actor_id, "end", combat.turn_serial, combat.round_number)
+            ):
+                _invalid("Hold Person member duration is outside its TurnEnd boundary")
+            continue
+        if (
+            reason not in (None, "save_succeeded")
+            or clock is None
+            or not clock.repeats_at(actor_id, combat.turn_serial)
+            or clock.application.save_ability != "wis"
+            or [
+                (save.ability, save.dc, save.succeeded)
+                for save in saves
+                if save.target_id == actor_id
+            ]
+            != [("wis", clock.application.save_dc, reason == "save_succeeded")]
+        ):
+            _invalid("Hold Person member transition lacks its due TurnEnd save evidence")
+
+
+def hold_effect_changes(request, result, source):
     """Guard Hold Person lifecycle updates against the fixed encounter input."""
     snapshot = request.state_snapshot
     combat = snapshot.combat_state
@@ -711,9 +774,6 @@ def hold_effect_changes(request, result):
     operations = result.state_delta.operations
     lifecycles = [op for op in operations if type(op) is delta.EffectLifecycleUpdate]
     concentrations = [op for op in operations if type(op) is delta.ConcentrationUpdate]
-    if not snapshot.effect_states or len(combat.concentration_chain) != 1:
-        _invalid("Hold Person lifecycle requires one existing graph")
-    source = next(iter(combat.concentration_chain))
     old_effects = {(e.target_id, e.id, e.origin): e for e in snapshot.effect_states}
     old_clocks = {e.identity: e for e in combat.effect_lifecycles}
     old_links = {e.identity: e for e in combat.conditions_by_effect}
@@ -853,6 +913,7 @@ def hold_effect_changes(request, result):
             ),
             condition_changes=expected_conditions,
         )
+        _hold_pass_boundaries(request, result, source, lifecycles)
     base = delta_changes(
         request,
         result,
@@ -1006,7 +1067,7 @@ def validate_dnd_result(request, result, *, loader=None):
         and (source := _hold_source(request.state_snapshot)) is not None
         and (request.payload.intent_type == "pass" or request.payload.target_id == source)
     ):
-        return result, hold_effect_changes(request, result)
+        return result, hold_effect_changes(request, result, source)
     if request.operation_kind == "combat.intent" and request.payload.intent_type == "pass":
         if has_haste_effects(request.state_snapshot):
             return result, haste_effect_changes(request, result)
@@ -1375,12 +1436,13 @@ class RulesAdapter:
                     return "spell.capability"
                 return None
             if payload.spell_id == "hold-person":
-                # The bound rules engine admits the requested slot level.
+                # The bound rules engine admits the requested slot level and target count.
                 basic = type(payload)(
                     intent_type="cast_spell",
                     source_id=payload.source_id,
                     spell_id="hold-person",
                     target_id=payload.target_id,
+                    target_ids=payload.target_ids,
                     slot_level=payload.slot_level,
                     spell_source_id=payload.spell_source_id,
                 )

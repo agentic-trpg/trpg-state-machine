@@ -1,5 +1,6 @@
 """Hold Person lifecycle through the public SM command entry point."""
 
+from copy import deepcopy
 from dataclasses import replace
 from random import Random
 
@@ -16,9 +17,11 @@ from item_support import NPC, item_data, item_loader
 from trpg_state_machine import StateMachine, StateMachineError, TypedCommand
 from trpg_state_machine.package import _validate, canonical_json
 
+SECOND_TARGET = "npc.attendant"
 
-def hold_world(tmp_path, context, *, seed=0, invalid_ac=False, caster_hp=30):
-    """Author a Wizard 5, one component pouch and one living Humanoid."""
+
+def hold_world(tmp_path, context, *, seed=0, invalid_ac=False, caster_hp=30, two_targets=False):
+    """Author a Wizard 5, one pouch and one or two living Humanoids in the encounter."""
     canonical = BundledAssetLoader()
     base = item_loader()
     wizard = canonical.get_class("wizard")
@@ -64,7 +67,19 @@ def hold_world(tmp_path, context, *, seed=0, invalid_ac=False, caster_hp=30):
             "policy": "ordinary_public",
         }
     )
-    next(actor for actor in data["actors"] if actor["actor_id"] == NPC)["initial_cell"] = "1,0"
+    first = next(actor for actor in data["actors"] if actor["actor_id"] == NPC)
+    first["initial_cell"] = "1,0"
+    if two_targets:
+        second = deepcopy(first)
+        second.update(actor_id=SECOND_TARGET, name="Attendant", initial_cell="2,0")
+        second["npc_state"].update(
+            initial_knowledge_ids=[], memories=[], beliefs=[], relationships=[], goals=[], plans=[]
+        )
+        data["actors"].append(second)
+        data["scenes"][0]["actor_ids"].append(SECOND_TARGET)
+        data["navigation"]["actor_grants"].append(
+            {"actor_id": SECOND_TARGET, "region_ids": ["region.public"]}
+        )
     weapon_grants = proficiency_grants([(wizard, 5, "primary")])
     for foundation in data["rule_bindings"].values():
         foundation["rng_state"] = RNGState.capture(Random(seed)).model_dump(mode="json")
@@ -97,6 +112,19 @@ def hold_world(tmp_path, context, *, seed=0, invalid_ac=False, caster_hp=30):
         pc.pop("spells_known", None)
         npc.update(hp_current=40, hp_max=40, creature_type="humanoid", granted_features=[])
         npc.pop("spells_known", None)
+        if two_targets:
+            snapshot["character_states"].append(
+                {**deepcopy(npc), "entity_id": SECOND_TARGET, "name": "Attendant", "initiative": 0}
+            )
+            if "combat_state" in snapshot:
+                combat = snapshot["combat_state"]
+                for key in ("initiative_ids", "encounter_ids"):
+                    combat[key].append(SECOND_TARGET)
+                combat["actor_zone"][SECOND_TARGET] = "2,0"
+                for key in ("movement_ledgers", "monster_slug_by_entity", "xp_value_by_entity"):
+                    combat[key][SECOND_TARGET] = deepcopy(combat[key][NPC])
+            else:
+                foundation["xp"][SECOND_TARGET] = 0
         snapshot["inventory_state"]["entries"] = [
             {
                 "instance_id": "object.pouch",
@@ -179,7 +207,9 @@ def test_foundation_rejects_unreviewed_wizard_ac(tmp_path, context):
     assert error.value.code == "unsupported_combat_foundation"
 
 
-def hold_cast_command(sm, sid, package, context, *, command_id="hold.cast", slot_level=2):
+def hold_cast_command(
+    sm, sid, package, context, *, command_id="hold.cast", slot_level=2, target_ids=None
+):
     """Create a public cast command pinned to the current world version."""
     state = sm.read_session(sid, package, context=context)
     return TypedCommand(
@@ -190,7 +220,8 @@ def hold_cast_command(sm, sid, package, context, *, command_id="hold.cast", slot
         CombatIntentPayload(
             intent_type="cast_spell",
             spell_id="hold-person",
-            target_id=NPC,
+            target_id=target_ids[0] if target_ids else NPC,
+            target_ids=target_ids,
             slot_level=slot_level,
             spell_source_id="class:wizard",
         ),

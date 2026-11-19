@@ -57,6 +57,9 @@ EFFECT-02 在 RE `/42` 下将已验证的二环单目标 Hold Person 接到公�
 结束后继续使用同一入口。对专注施法者的受支持攻击将伤害与专注变化共同采用。
 公开可用性查询仍由 RE 提供攻击预检。当前范围及边界见
 [Session Management 进度](SESSION_MANAGEMENT_PROGRESS.md#2026-11-18-effect-02-公开-hold-person-命令)。
+当前固定 RE `/47` 也支持三环 Hold Person 在同一专注组内选择两个目标。
+各目标单独豁免，成功时只移除自己的效果。法术位和专注沿原有共享提交路径采用。
+参见 [Hold Person 双目标](SESSION_MANAGEMENT_PROGRESS.md#2026-11-19-战斗-hold-person-双目标)。
 
 探索施法可通过 `world.cast_spell` 采用 RE 的法术位扣减和定时效果。
 Effects 和 SessionTime 共同保存及消费到期时间。`drop_concentration`
