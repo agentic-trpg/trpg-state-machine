@@ -4,7 +4,7 @@ import json
 from contextlib import contextmanager
 from dataclasses import asdict, replace
 
-from trpg_state_machine.environment_commands import source_from_data
+from trpg_state_machine.environment_commands import source_from_data, source_to_data
 from trpg_state_machine.environment_versions import (
     EnvironmentInputWatch,
     VersionedEnvironmentEffectsProvider,
@@ -94,7 +94,7 @@ class EffectsOwner(Owner):
 
     @current.setter
     def current(self, value):
-        self.put([asdict(s) for s in value] if value is not None else None)
+        self.put([source_to_data(source) for source in value] if value is not None else None)
 
     def environment_sources(self, sid, scene_id, package):
         self.reads += 1

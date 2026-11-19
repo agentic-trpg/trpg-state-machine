@@ -53,6 +53,8 @@ from trpg_state_machine.environment_commands import (
     environment_operation_from_data,
     environment_operation_to_data,
     facts_from_data,
+    source_from_data,
+    source_to_data,
 )
 from trpg_state_machine.errors import StateMachineError
 from trpg_state_machine.object_protection import (
@@ -254,6 +256,29 @@ def test_fixed_region_source_codec_preserves_ordinary_fingerprints_and_facts():
     ordinary = Source("fog", WEATHER, EnvironmentArea(("2,1",)))
     fixed = replace(ordinary, region_condition="poisoned")
     explicit = replace(ordinary, region_effect_rule="condition:deafened")
+    raw_template = {
+        "name": "Check penalty",
+        "transfer": False,
+        "changes": [{"key": "check.bonus", "mode": 2, "value": "-3"}],
+    }
+    configured = replace(ordinary, region_effect=raw_template)
+    configured_mapping = {
+        "id": "",
+        "name": "Check penalty",
+        "description": "",
+        "disabled": False,
+        "transfer": False,
+        "duration": None,
+        "statuses": [],
+        "changes": [{"key": "check.bonus", "mode": 2, "value": "-3", "priority": None}],
+    }
+    raw_template["changes"][0]["value"] = "4"
+    detached = configured.region_effect
+    assert detached.changes[0].value == "-3"
+    detached.changes.clear()
+    assert configured.region_effect.changes[0].value == "-3"
+    assert replace(configured, observable=True).region_effect == configured.region_effect
+    assert replace(configured, region_effect=None).region_effect is None
     legacy = {
         "source_id": "fog",
         "conditions": asdict(WEATHER),
@@ -267,7 +292,10 @@ def test_fixed_region_source_codec_preserves_ordinary_fingerprints_and_facts():
         (ordinary, legacy),
         (fixed, {**legacy, "region_condition": "poisoned"}),
         (explicit, {**legacy, "region_effect_rule": "condition:deafened"}),
+        (configured, {**legacy, "region_effect": configured_mapping}),
     ):
+        assert source_to_data(source) == expected
+        assert source_from_data(source_to_data(source)) == source
         mutation = AddEnvironmentSource(A, source)
         wire = environment_operation_to_data(mutation)
         assert wire == {"command_type": kind, "payload": {"scene_id": A, "source": expected}}
@@ -276,6 +304,10 @@ def test_fixed_region_source_codec_preserves_ordinary_fingerprints_and_facts():
         persisted = environment_facts_to_data(facts)
         assert persisted["sources"] == (expected,)
         assert facts_from_data(persisted) == facts
+
+    with pytest.raises(StateMachineError) as rejected:
+        source_from_data({**legacy, "_region_effect_json": None})
+    assert rejected.value.code == "invalid_environment"
 
     for overrides in (
         {"region_condition": "frightened"},

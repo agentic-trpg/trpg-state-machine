@@ -146,15 +146,26 @@ def test_public_fixed_area_rule_applies_and_clears_deafened(tmp_path, context, i
             assert entered.effect_states[0].statuses == {"deafened"}
 
 
-@pytest.mark.parametrize("rule_ref", ["condition:unknown", "condition:deafened"])
-def test_unavailable_fixed_area_rule_is_rejected_before_movement(tmp_path, context, rule_ref):
+@pytest.mark.parametrize(
+    "configuration",
+    [
+        {"region_effect_rule": "condition:unknown"},
+        {"region_effect_rule": "condition:deafened"},
+        {
+            "region_effect": {
+                "name": "Malformed Fog",
+                "transfer": False,
+                "changes": [{"key": "check.bonus", "mode": 2, "value": "bad formula"}],
+            }
+        },
+    ],
+)
+def test_unavailable_fixed_area_rule_is_rejected_before_movement(tmp_path, context, configuration):
     """Both authoring routes refuse unknown or absent bound condition content."""
     sm, sid, package, _ = setup(tmp_path, context, large_data())
     with sm:
         gm = replace(context, can_manage_environment=True)
-        source = EnvironmentSource(
-            "bad.area", FOG, EnvironmentArea(("1,0",)), region_effect_rule=rule_ref
-        )
+        source = EnvironmentSource("bad.area", FOG, EnvironmentArea(("1,0",)), **configuration)
         initial = submit(
             sm,
             sid,
@@ -171,11 +182,82 @@ def test_unavailable_fixed_area_rule_is_rejected_before_movement(tmp_path, conte
         assert step.status == "committed", step
 
 
+@pytest.mark.parametrize("status", ["blinded", "restrained"])
+def test_bound_condition_region_requires_a_legal_exit(tmp_path, context, status):
+    """Refuse a canonical condition whose movement or visibility would prevent exit."""
+    data = large_data()
+    loader = get_default_ruleset()
+    data["manifest"]["ruleset_binding"] = loader.binding.model_dump(mode="json")
+    package = _validate(data)
+    with StateMachine(tmp_path / "world.db", dnd_loader=loader) as sm:
+        sid = create(sm, package, context)
+        source = EnvironmentSource(
+            "canonical.area",
+            EnvironmentConditions(),
+            EnvironmentArea(("1,0",)),
+            region_effect_rule=f"condition:{status}",
+        )
+        rejected = submit(
+            sm,
+            sid,
+            package,
+            replace(context, can_manage_environment=True),
+            AddEnvironmentSource(A, source),
+            "bad.region",
+        )
+        assert rejected.error_code == "invalid_environment", rejected
+        assert submit(sm, sid, package, context, StepActor(A, "0,0", "1,0"), "step").status == (
+            "committed"
+        )
+        snapshot = sm.read_noncombat_snapshot(sid, package, context=context)
+        assert not snapshot.effect_states
+
+
+def test_passive_region_retains_noncheck_modifier_and_filters_immune_status(tmp_path, context):
+    """Use native mixed mechanics through public source adoption and a coverage exit."""
+    loader = get_default_ruleset()
+    data = large_data()
+    data["manifest"]["ruleset_binding"] = loader.binding.model_dump(mode="json")
+    for foundation in data["rule_bindings"].values():
+        foundation["snapshot"]["character_states"][0]["condition_immunities"] = ["poisoned"]
+    package = _validate(data)
+    with StateMachine(tmp_path / "world.db", dnd_loader=loader) as sm:
+        sid = create(sm, package, context)
+        pc = sm.read_session(sid, package, context=context).pc_actor_id
+        source = EnvironmentSource(
+            "mixed.area",
+            FOG,
+            EnvironmentArea(("1,0",)),
+            region_effect={
+                "name": "Mixed Fog",
+                "transfer": False,
+                "statuses": ["deafened", "poisoned"],
+                "changes": [{"key": "attack.roll.bonus", "mode": 2, "value": "-2"}],
+            },
+        )
+        _seed(sm, sid, package, context, (A, (source,)))
+        assert submit(sm, sid, package, context, StepActor(A, "0,0", "1,0"), "enter").status == (
+            "committed"
+        )
+        entered = sm.read_noncombat_snapshot(sid, package, context=context)
+        (effect,) = entered.effect_states
+        assert effect.statuses == {"deafened"}
+        assert [change.key for change in effect.changes] == ["attack.roll.bonus"]
+        actor = next(actor for actor in entered.character_states if actor.entity_id == pc)
+        (condition,) = actor.conditions
+        assert (condition.scope, condition.source_effect_id) == ("session", effect.id)
+        assert submit(sm, sid, package, context, StepActor(A, "1,0", "2,0"), "exit").status == (
+            "committed"
+        )
+        assert not sm.read_noncombat_snapshot(sid, package, context=context).effect_states
+
+
+@pytest.mark.parametrize("native", [False, True])
 def test_public_fixed_area_motion_uses_same_hot_lookup_with_unrelated_growth(
-    tmp_path, context, monkeypatch
+    tmp_path, context, monkeypatch, native
 ):
     """Compare actual moves after admitting 32 extra sources on an unrelated cell."""
-    from trpg_state_machine import ongoing_effects
+    from trpg_state_machine import ongoing_effects, scene_lifecycle
 
     measured = []
     for unrelated_count in (0, 32):
@@ -183,14 +265,24 @@ def test_public_fixed_area_motion_uses_same_hot_lookup_with_unrelated_growth(
         directory.mkdir()
         sm, sid, package, _ = setup(directory, context, large_data())
         with sm, monkeypatch.context() as patch:
-            sources = [_toxic_fog("local", "2,0")]
+            target = _toxic_fog("local", "2,0")
+            if native:
+                target = replace(
+                    target,
+                    region_condition=None,
+                    region_effect={
+                        "name": "Local modifier",
+                        "transfer": False,
+                        "changes": [{"key": "check.bonus", "mode": 2, "value": "2"}],
+                    },
+                )
+            sources = [target]
             sources.extend(_toxic_fog(f"remote.{i}", "8,8") for i in range(unrelated_count))
             _seed(sm, sid, package, context, (A, tuple(sources)))
             counts = Counter()
             observe(patch, sm.environment, "_region_condition_index", counts, "index_builds")
-            observe(
-                patch, ongoing_effects, "plan_region_condition_transition", counts, "rule_calls"
-            )
+            observe(patch, ongoing_effects, "plan_region_effect_transition", counts, "rule_calls")
+            observe(patch, scene_lifecycle, "region_rule_input", counts, "effect_inputs")
             warm = submit(sm, sid, package, context, StepActor(A, "0,0", "1,0"), "warm.cell.index")
             assert warm.status == "committed", warm
             assert counts == {"index_builds": 1}
@@ -199,7 +291,7 @@ def test_public_fixed_area_motion_uses_same_hot_lookup_with_unrelated_growth(
                 enter = submit(sm, sid, package, context, StepActor(A, "1,0", "2,0"), "enter")
                 leave = submit(sm, sid, package, context, StepActor(A, "2,0", "3,0"), "leave")
             assert enter.status == leave.status == "committed"
-            assert counts == {"rule_calls": 2}
+            assert counts == {"effect_inputs": 2, "rule_calls": 2}
             keyed = [
                 sql
                 for sql in statements

@@ -1,11 +1,12 @@
 """Bounded immutable Scene environment contracts; no rule or lifecycle authority."""
 
-from dataclasses import dataclass
+from dataclasses import InitVar, dataclass, field
 from math import isfinite
 from typing import Literal, Protocol
 
 from dnd5e_engine.evaluation_region_effect import LEGACY_REGION_CONDITION_RULE
 from dnd5e_engine.spatial import canonical_cell_id
+from dnd5e_srd_data.schema.common import PassiveEffect
 
 from .errors import StateMachineError
 from .object_protection import ORIENTATIONS, Direction, validate_precipitation_kinds
@@ -155,8 +156,8 @@ class EnvironmentConditions:
 
     def __post_init__(self):
         """Require each environment condition to use its corresponding value type."""
-        for field, cls in CONDITION_TYPES.items():
-            if getattr(self, field) is not None and type(getattr(self, field)) is not cls:
+        for name, cls in CONDITION_TYPES.items():
+            if getattr(self, name) is not None and type(getattr(self, name)) is not cls:
                 invalid("Expected typed environment condition")
 
 
@@ -168,12 +169,47 @@ CONDITION_TYPES = {
 }
 
 
+class _PackedPassiveEffect(str):
+    """Keep the native passive template immutable inside an EnvironmentSource."""
+
+
+def _pack_passive_effect(value) -> _PackedPassiveEffect:
+    """Validate native passive effect fields and retain their canonical model encoding."""
+    if isinstance(value, _PackedPassiveEffect):
+        return value
+    if isinstance(value, PassiveEffect):
+        value = value.model_dump(mode="python")
+    try:
+        effect = PassiveEffect.model_validate(value, strict=True, extra="forbid")
+    except ValueError as exc:
+        invalid(f"Invalid fixed-area passive effect: {exc}")
+    return _PackedPassiveEffect(effect.model_dump_json())
+
+
+def region_rule_input(reference: str) -> str | PassiveEffect:
+    """Restore the native RE template when a region association carries passive data."""
+    if isinstance(reference, _PackedPassiveEffect):
+        return PassiveEffect.model_validate_json(reference)
+    return reference
+
+
+class _PassiveEffectInput:
+    """Expose a detached template while the source retains its immutable encoding."""
+
+    def __get__(self, instance, owner=None) -> PassiveEffect | None:
+        """Read native model data without exposing the stored representation."""
+        if instance is not None and instance._region_effect_json is not None:
+            return PassiveEffect.model_validate_json(instance._region_effect_json)
+        return None
+
+
 @dataclass(frozen=True, slots=True)
 class EnvironmentSource:
-    """Define a scoped environmental source with an optional fixed-area rule reference.
+    """Define a scoped environmental source with an optional fixed-area effect.
 
     Region membership uses the same explicit cells as the environment contribution.
-    Fog, smoke and other environmental values carry no region rule by default.
+    Passive templates are stored as immutable canonical model JSON so callers
+    cannot mutate a previously admitted source or cached coverage association.
     """
 
     source_id: str
@@ -184,8 +220,10 @@ class EnvironmentSource:
     observable: bool = False
     region_condition: Literal["poisoned"] | None = None
     region_effect_rule: str | None = None
+    region_effect: InitVar[PassiveEffect | dict | None] = _PassiveEffectInput()
+    _region_effect_json: _PackedPassiveEffect | None = field(default=None, init=False, repr=False)
 
-    def __post_init__(self):
+    def __post_init__(self, region_effect):
         """Validate the source shape and require explicit horizontal coverage for a rule."""
         identity(self.source_id)
         if self.source_id == "base":
@@ -205,8 +243,16 @@ class EnvironmentSource:
             invalid("Unsupported legacy environment region condition")
         if self.region_effect_rule is not None:
             identity(self.region_effect_rule)
-            if self.region_condition is not None:
-                invalid("Specify one fixed-area rule reference")
+        if region_effect is not None:
+            object.__setattr__(self, "_region_effect_json", _pack_passive_effect(region_effect))
+        if (
+            sum(
+                effect is not None
+                for effect in (self.region_condition, self.region_effect_rule, region_effect)
+            )
+            > 1
+        ):
+            invalid("Specify one fixed-area effect")
         if self.region_rule_ref is not None and (
             not self.area.cells or self.area.heights is not None or self.exposure != "local"
         ):
@@ -214,10 +260,10 @@ class EnvironmentSource:
 
     @property
     def region_rule_ref(self) -> str | None:
-        """Return the explicit rule reference or its legacy encoded equivalent."""
+        """Return the immutable rule reference or packed passive template."""
         if self.region_condition is not None:
             return LEGACY_REGION_CONDITION_RULE
-        return self.region_effect_rule
+        return self.region_effect_rule or self._region_effect_json
 
 
 @dataclass(frozen=True, slots=True)

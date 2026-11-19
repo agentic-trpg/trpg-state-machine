@@ -10,6 +10,7 @@ from dataclasses import asdict, replace
 from dnd5e_engine.evaluation_ruleset import RulesetBinding
 
 from ._execution import _execution_data
+from .environment_models import region_rule_input
 from .errors import StateMachineError
 from .events import _ActorMotion
 from .session_access import _binding
@@ -190,7 +191,7 @@ class SceneLifecycleService:
             self.runtime.move_pc_scene(sid, destination.scene_id)
             if crossing:
                 self.facts.visit(sid, destination.scene_id)
-        self._move_region_conditions(row, actor_id, before, destination, environment, loader)
+        self._move_region_effects(row, actor_id, before, destination, environment, loader)
         if is_pc and crossing:
             events.append(
                 self.capture._capture_event(
@@ -229,7 +230,7 @@ class SceneLifecycleService:
         )
         return events
 
-    def _move_region_conditions(self, row, actor_id, before, after, environment, loader):
+    def _move_region_effects(self, row, actor_id, before, after, environment, loader):
         """Adopt only the fixed region sources crossed by this admitted move."""
         sid = row["session_id"]
         previous = {
@@ -255,12 +256,12 @@ class SceneLifecycleService:
         binding = RulesetBinding(**asdict(_binding(row)))
         for entering, sources in ((False, left), (True, entered)):
             for scene_id, source_id, rule_ref in sorted(sources):
-                self.characters.effects.transition_region_condition(
+                self.characters.effects.transition_region_effect(
                     sid,
                     actor_id,
                     scene_id,
                     source_id,
-                    rule_ref=rule_ref,
+                    rule=region_rule_input(rule_ref),
                     entering=entering,
                     condition_immunities=immunities,
                     ruleset_binding=binding,

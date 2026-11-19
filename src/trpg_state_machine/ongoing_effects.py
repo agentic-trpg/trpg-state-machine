@@ -7,10 +7,12 @@ remain with the bound Rule Engine; every mutation uses the caller's UnitOfWork.
 from dnd5e_engine.effect_lifecycle import conditions_after_effect_application
 from dnd5e_engine.evaluation_effects import EffectState
 from dnd5e_engine.evaluation_region_effect import (
-    is_fixed_region_condition_effect,
-    plan_region_condition_transition,
-    region_condition_identity,
-    region_condition_status,
+    is_fixed_region_effect,
+    matches_region_effect_statuses,
+    plan_region_effect_transition,
+    region_conditions_preserve_movement,
+    region_conditions_preserve_visibility,
+    region_effect_identity,
 )
 from dnd5e_engine.evaluation_ruleset import RulesetBindingError
 from dnd5e_engine.evaluation_state import ConditionLink, LifecycleRecord
@@ -21,13 +23,10 @@ from .package import canonical_json
 from .scoped_reads import scoped_read
 
 
-def _fixed_region_condition(row, statuses):
-    """Recognize a source-scoped fixed-area link from its stored metadata and RE identity."""
-    status = region_condition_status(row["effect_id"], row["origin"])
-    return (
-        status is not None
-        and statuses == [status]
-        and all(row[key] is None for key in ("concentration_id", "lifecycle_json", "expires_tick"))
+def _fixed_region_effect(row, statuses):
+    """Check source-scoped lineage against the stored metadata and RE identity."""
+    return matches_region_effect_statuses(row["effect_id"], row["origin"], statuses) and all(
+        row[key] is None for key in ("concentration_id", "lifecycle_json", "expires_tick")
     )
 
 
@@ -151,14 +150,14 @@ class OngoingEffects:
             lifecycle=operation.lifecycle.model_dump(mode="json")["state"],
         )
 
-    def transition_region_condition(
+    def transition_region_effect(
         self,
         sid,
         actor_id,
         scene_id,
         source_id,
         *,
-        rule_ref,
+        rule,
         entering,
         condition_immunities,
         ruleset_binding,
@@ -167,7 +166,7 @@ class OngoingEffects:
         """Adopt a bound fixed-area transition against the full identity and current row."""
         self.store.require_write()
         try:
-            identity = region_condition_identity(scene_id, source_id, actor_id, rule_ref=rule_ref)
+            identity = region_effect_identity(scene_id, source_id, actor_id, rule)
         except ValueError as exc:
             raise StateMachineError("invalid_environment", str(exc)) from exc
         stored = self._conn.execute(
@@ -176,15 +175,13 @@ class OngoingEffects:
             (sid, *identity),
         ).fetchone()
         present = stored is not None
-        if present and (
-            stored["conditions_json"] is None
-            or not _fixed_region_condition(
-                stored, self.store.memory.json(stored["conditions_json"])
-            )
+        if present and not _fixed_region_effect(
+            stored,
+            self.store.memory.json(stored["conditions_json"]) if stored["conditions_json"] else (),
         ):
             raise StateMachineError("invalid_mechanical_state", "Region effect has invalid links")
         try:
-            transition = plan_region_condition_transition(
+            transition = plan_region_effect_transition(
                 ruleset_binding=ruleset_binding,
                 scene_id=scene_id,
                 source_id=source_id,
@@ -193,7 +190,7 @@ class OngoingEffects:
                 present=present,
                 condition_immunities=condition_immunities,
                 loader=loader,
-                rule_ref=rule_ref,
+                rule=rule,
             )
         except RulesetBindingError as exc:
             raise StateMachineError("ruleset_binding_mismatch", str(exc)) from exc
@@ -215,10 +212,10 @@ class OngoingEffects:
                 or (effect.target_id, effect.id, effect.origin) != identity
             ):
                 raise StateMachineError("invalid_rule_result", "Region effect identity differs")
-            if not is_fixed_region_condition_effect(effect):
+            if not is_fixed_region_effect(effect):
                 raise StateMachineError("invalid_rule_result", "Unsupported region effect profile")
             payload = effect.model_dump(mode="json")
-            self.add_effect(sid, payload, conditions=payload["statuses"])
+            self.add_effect(sid, payload, conditions=payload["statuses"] or None)
         elif effect is not None:
             raise StateMachineError(
                 "invalid_rule_result", "Region transition has unexpected effect"
@@ -464,7 +461,7 @@ class OngoingEffects:
                 current,
                 row["effect_id"],
                 statuses,
-                scope="session" if _fixed_region_condition(row, statuses) else "combat",
+                scope="session" if _fixed_region_effect(row, statuses) else "combat",
             )
         return [condition.model_dump(mode="json") for condition in current]
 
@@ -487,13 +484,21 @@ class OngoingEffects:
         return names
 
     @scoped_read
-    def has_linked_conditions(self, sid, target_id, *, allow_fixed_region=False):
-        """Check target statuses, optionally allowing the movement- and vision-safe area rules."""
+    def has_linked_conditions(self, sid, target_id, *, capability=None):
+        """Find linked statuses that require more rules for the requested capability."""
+        preserves = {
+            "movement": region_conditions_preserve_movement,
+            "visibility": region_conditions_preserve_visibility,
+        }.get(capability)
         for row in self._target_rows(sid, target_id):
             if row["conditions_json"] is None:
                 continue
             statuses = self.store.memory.json(row["conditions_json"])
-            if statuses and not (allow_fixed_region and _fixed_region_condition(row, statuses)):
+            if statuses and (
+                preserves is None
+                or not _fixed_region_effect(row, statuses)
+                or not preserves(statuses)
+            ):
                 return True
         return False
 

@@ -4,7 +4,7 @@ from collections.abc import Mapping
 from dataclasses import asdict, dataclass, replace
 from types import MappingProxyType
 
-from dnd5e_engine.evaluation_region_effect import resolve_region_condition_rule
+from dnd5e_engine.evaluation_region_effect import validate_region_effect_rule
 from dnd5e_engine.evaluation_ruleset import RulesetBinding, RulesetBindingError
 
 from .environment_commands import (
@@ -31,6 +31,7 @@ from .environment_models import (
     Wind,
     finite,
     invalid,
+    region_rule_input,
     validate_sources,
 )
 from .environment_versions import EnvironmentVersions
@@ -321,12 +322,12 @@ class EnvironmentService:
             self._area(sid, scene, EnvironmentArea((wind.cell,)), package)
 
     def _admit_region_rule(self, row, rule_ref):
-        """Validate an authored rule reference against this Session's frozen content."""
+        """Validate an authored region effect against this Session's frozen content."""
         if rule_ref is None:
             return
         try:
-            resolve_region_condition_rule(
-                rule_ref,
+            validate_region_effect_rule(
+                region_rule_input(rule_ref),
                 ruleset_binding=RulesetBinding(**asdict(_binding(row))),
                 loader=self.h.loader,
             )
@@ -464,7 +465,7 @@ class EnvironmentService:
             return self.h.facts.environment(sid, scene_id)
 
     def _region_condition_index(self, sid, scene_id):
-        """Build cell associations from persisted source/rule pairs in source ID order."""
+        """Build cell associations from persisted fixed effects in source ID order."""
         facts = self.h.facts.environment(sid, scene_id)
         by_cell = {}
         for source in facts.sources if facts is not None else ():

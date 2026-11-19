@@ -1,5 +1,12 @@
 # EnvironmentService 实施记录
 
+## 固定区域模板接入通用效果
+
+环境来源可声明既有 RE `PassiveEffect`，受控配置校验模板后按原有格子索引定位进出。
+由 RE 转换为当前角色效果并过滤免疫状态，位置、效果及状态链接在同一事务采用。
+旧 Poisoned 与 Deafened 来源格式保留。具有额外来源、生命周期或离开路径依赖的状态
+在配置时拒绝。见 [固定区域环境来源](ENVIRONMENT_SERVICE.md#固定区域环境来源)。
+
 ## 2026-10-22 防护批准备消除逐物体整图传递
 
 本批 `fix/runtime-local-query-reuse` 从 `a2a2fe0` 出发。ObjectProtectionInput 改为固定

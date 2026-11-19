@@ -173,7 +173,7 @@ class WorldHandler:
     @scoped_read
     def _world_actor_ready(self, sid, actor_id, *, navigation_scope=None, movement=False):
         """Check activity occupancy, actor state and authoritative position for action
-        readiness. The admitted fixed-area rules preserve exploration movement.
+        readiness. Region statuses still need to preserve the movement capability.
         """
         qualified = self.activities.qualifies(navigation_scope, sid, actor_id)
         if self.activities.active(sid, actor_id) and not qualified:
@@ -194,7 +194,7 @@ class WorldHandler:
                 not life["is_alive"]
                 or self.characters.has_conditions(sid, actor_id)
                 or self.characters.effects.has_linked_conditions(
-                    sid, actor_id, allow_fixed_region=movement
+                    sid, actor_id, capability="movement" if movement else None
                 )
                 or self.characters.effects.has_concentration(sid, actor_id)
             )
@@ -220,7 +220,7 @@ class WorldHandler:
     def _public_scope(self, sid, actor_id, package):
         """Validate public spatial eligibility in the actor's scene.
 
-        The admitted fixed-area rules preserve visual target authorization.
+        Region statuses still need to preserve visual target authorization.
         """
         proof = self._conn.execute(
             "SELECT complete FROM scene_integrity WHERE session_id=? AND scene_id="
@@ -247,7 +247,7 @@ class WorldHandler:
         ).fetchone()
         if mechanical and (
             self.characters.has_conditions(sid, actor_id)
-            or self.characters.effects.has_linked_conditions(sid, actor_id, allow_fixed_region=True)
+            or self.characters.effects.has_linked_conditions(sid, actor_id, capability="visibility")
         ):
             raise StateMachineError(
                 "unsupported_target_visibility",

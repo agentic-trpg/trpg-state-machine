@@ -1,6 +1,7 @@
 """Closed typed environment mutations and strict data adapter."""
 
 from dataclasses import asdict, dataclass, fields
+from json import loads
 
 from .environment_models import (
     CONDITION_TYPES,
@@ -127,6 +128,9 @@ def _environment_dict(items):
     for key in ("region_condition", "region_effect_rule"):
         if data.get(key) is None:
             data.pop(key, None)
+    packed_effect = data.pop("_region_effect_json", None)
+    if packed_effect is not None:
+        data["region_effect"] = loads(packed_effect)
     return data
 
 
@@ -165,9 +169,10 @@ def environment_operation_to_data(op):
     return {"command_type": kind, "payload": payload}
 
 
-def _decode(cls, raw, converters=None):
+def _decode(cls, raw, converters=None, *, init_only=()):
     """Decode exact dataclass fields with controlled field conversions."""
-    if type(raw) is not dict or set(raw) - {f.name for f in fields(cls)}:
+    allowed = {f.name for f in fields(cls) if f.init}.union(init_only)
+    if type(raw) is not dict or set(raw) - allowed:
         invalid("Unknown environment mapping fields")
     values = dict(raw)
     for name, convert in (converters or {}).items():
@@ -207,6 +212,11 @@ def area_from_data(raw):
     )
 
 
+def source_to_data(source: EnvironmentSource) -> dict:
+    """Encode a source using the same public shape as environment facts and commands."""
+    return asdict(source, dict_factory=_environment_dict)
+
+
 def source_from_data(raw):
     """Restore an environment source definition."""
     return _decode(
@@ -216,6 +226,7 @@ def source_from_data(raw):
             "conditions": conditions_from_data,
             "area": area_from_data,
         },
+        init_only=("region_effect",),
     )
 
 

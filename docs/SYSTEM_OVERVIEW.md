@@ -62,9 +62,10 @@ EFFECT-02 在 RE `/42` 下将已验证的二环单目标 Hold Person 接到公�
 Effects 和 SessionTime 共同保存及消费到期时间。`drop_concentration`
 通过已有战斗命令入口解除受支持的专注图。详见
 [Session Management 进度](SESSION_MANAGEMENT_PROGRESS.md#2026-11-18-effect-03-定时施法和主动结束专注)。
-探索移动接入固定环境来源的进出区域效果。World 提供格子覆盖，RE 按来源配置的规则
-返回状态变化，Effects 和位置共同提交。普通探索属性或技能检定会读取角色已有的中毒，
-由 RE 结算劣势。详见 [固定区域环境来源](ENVIRONMENT_SERVICE.md#固定区域环境来源)。
+探索移动接入固定环境来源的进出区域效果。World 提供格子覆盖，RE 从来源的效果定义
+算出要添加或解除的效果，Effects 和位置共同提交。普通探索属性或技能检定把角色已有的
+效果交给 RE，由现有检定规则计算适用的数值加成和优势或劣势。详见
+[固定区域环境来源](ENVIRONMENT_SERVICE.md#固定区域环境来源)。
 战斗 `combat.intent` 接入受支持的单目标 Haste 施法、自然到期和主动结束专注，使用
 RE `dnd5e-evaluation/44` 的 `engine-evaluation/30` 结果。Effects 在同一提交内依序
 解除旧效果并采用返回的 Lethargy。疲乏持续到目标下一自然回合结束。当前范围为单条
