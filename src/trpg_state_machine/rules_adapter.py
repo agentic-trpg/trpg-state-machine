@@ -57,6 +57,13 @@ from .concentration_adoption import (
     effect_identity,
     require_effect_applied,
 )
+from .damage_adoption import (
+    DAMAGE_OPERATIONS,
+    adopt_damage_operation,
+    json_value,
+    ordinary_damage_target,
+    validate_damage_result,
+)
 from .dnd_checks import check_changes
 from .dnd_closure import closure_changes
 from .errors import StateMachineError
@@ -71,15 +78,6 @@ from .timed_spell_adoption import timed_spell_changes
 def _invalid(message):
     """Raise a rules adapter validation error."""
     raise StateMachineError("invalid_rule_result", message)
-
-
-def _json(value):
-    """Convert models and nested data into JSON-compatible values."""
-    if hasattr(value, "model_dump"):
-        return value.model_dump(mode="json")
-    if isinstance(value, (tuple, list, set, frozenset)):
-        return [_json(v) for v in value]
-    return value
 
 
 class UnsupportedEffectConsequence(Exception):
@@ -138,7 +136,10 @@ def delta_changes(request, result, *, effect_operations=(), effect_targets=()):
     """
     snapshot = request.state_snapshot
     item_use = type(request.payload) is ItemUsePayload
-    turn_advanced = any(type(op) is delta.TurnUpdate for op in result.state_delta.operations)
+    turn_update = next(
+        (op for op in result.state_delta.operations if type(op) is delta.TurnUpdate), None
+    )
+    turn_advanced = turn_update is not None
     data = snapshot.model_dump(mode="json")
     actors = {a["entity_id"]: a for a in data["character_states"]}
     combat = data["combat_state"]
@@ -146,13 +147,10 @@ def delta_changes(request, result, *, effect_operations=(), effect_targets=()):
     seen = set()
     consumed = False
     paid = False
-    turn = next(
-        (
-            op.value.current_turn_index
-            for op in result.state_delta.operations
-            if type(op) is delta.TurnUpdate
-        ),
-        snapshot.combat_state.current_turn_index,
+    turn = (
+        turn_update.value.current_turn_index
+        if turn_advanced
+        else snapshot.combat_state.current_turn_index
     )
     if not 0 <= turn < len(snapshot.combat_state.initiative_ids):
         _invalid("Turn delta is outside the encounter")
@@ -163,6 +161,48 @@ def delta_changes(request, result, *, effect_operations=(), effect_targets=()):
         affected_actors.update(effect_targets)
     inventory = snapshot.inventory_state.model_dump(mode="json") if item_use else None
 
+    if (
+        getattr(request.payload, "intent_type", None) == "attack"
+        and request.actor_id in snapshot.combat_state.party_ids
+        and request.payload.stat_block_action_id is None
+        and not _has_combat_effects(snapshot)
+    ):
+        target = next(
+            (
+                actor
+                for actor in snapshot.character_states
+                if actor.entity_id == request.payload.target_id
+            ),
+            None,
+        )
+        if target is not None and ordinary_damage_target(snapshot.combat_state, target):
+            source_id = request.payload.weapon_id or actors[request.actor_id]["weapon_in_hands"]
+            rolls = [event for event in result.proposed_events if event.type == "attack_rolled"]
+            if (
+                source_id is None
+                or len(rolls) != 1
+                or rolls[0].attacker_id != request.actor_id
+                or rolls[0].target_id != target.entity_id
+                or rolls[0].is_opportunity_attack
+                or rolls[0].is_hit
+                != any(event.type == "damage_applied" for event in result.proposed_events)
+            ):
+                _invalid("Damage differs from the authorized weapon attack")
+            newly_dead = validate_damage_result(
+                request, result, target, source_id=source_id, is_crit=rolls[0].is_crit
+            )
+            if newly_dead and turn_advanced:
+                state = snapshot.combat_state
+                expected_turn = next_turn_index(
+                    state.initiative_ids, state.dead_ids | newly_dead, state.current_turn_index + 1
+                )
+                if (
+                    expected_turn is None
+                    or turn != expected_turn[0]
+                    or turn_update.value.round_number != state.round_number + int(expected_turn[1])
+                ):
+                    _invalid("Attack turn did not advance to the next living actor")
+
     def edit(component, identity, field, expected, value):
         """Validate one edit and update the isolated candidate and change list."""
         key = (component, identity, field)
@@ -172,14 +212,14 @@ def delta_changes(request, result, *, effect_operations=(), effect_targets=()):
         current = actors[identity] if component == "actor" else combat
         # Set-valued schema fields have no serialization-order semantics.
         old = current[field]
-        expected = _json(expected)
+        expected = json_value(expected)
         if field in ("dead_ids", "processed_zero_hp_damage_instances"):
             old = sorted(old)
             expected = sorted(expected)
         if old != expected:
             _invalid("Delta pre-value differs from authoritative input")
-        current[field] = _json(value)
-        changes.append((component, identity, field, _json(value)))
+        current[field] = json_value(value)
+        changes.append((component, identity, field, json_value(value)))
 
     for op in result.state_delta.operations:
         if type(op) in effect_operations:
@@ -259,17 +299,14 @@ def delta_changes(request, result, *, effect_operations=(), effect_targets=()):
             _invalid("Action/movement delta actor is outside the authorized command")
         if hasattr(op, "combat_id") and op.combat_id != combat["combat_id"]:
             _invalid("Delta belongs to another combat")
-        if type(op) is delta.HPDelta:
-            if (item_use and op.amount <= 0) or (not item_use and op.amount > 0):
-                _invalid("HP direction differs from the authorized command")
-            if item_use and op.resulting_hp > actors[target]["hp_max"]:
-                _invalid("Potion healing exceeds maximum hit points")
+        if item_use and type(op) is delta.HPDelta:
+            if op.amount <= 0 or op.resulting_hp > actors[target]["hp_max"]:
+                _invalid("Potion healing must increase HP within the actor maximum")
             edit("actor", target, "hp_current", op.expected_hp, op.resulting_hp)
-        elif type(op) is delta.TempHPSet:
-            if op.temp_hp > op.expected_temp_hp:
-                _invalid("A basic attack cannot grant temporary HP")
-            edit("actor", target, "temp_hp", op.expected_temp_hp, op.temp_hp)
-        elif type(op) in (delta.DeathStateUpdate, delta.ActionBudgetUpdate, delta.TurnUpdate):
+        elif type(op) in DAMAGE_OPERATIONS:
+            target_kind = actors.get(request.payload.target_id, {}).get("entity_type", "").lower()
+            adopt_damage_operation(request, target_kind, op, edit)
+        elif type(op) in (delta.ActionBudgetUpdate, delta.TurnUpdate):
             if item_use and type(op) is delta.ActionBudgetUpdate:
                 changed_budget = {
                     field
@@ -329,64 +366,17 @@ def delta_changes(request, result, *, effect_operations=(), effect_targets=()):
                 )
         elif type(op) is delta.ConditionsUpdate:
             edit("actor", target, "conditions", op.expected, op.value)
-        elif type(op) is delta.DamageAttributionUpdate:
-            if op.value not in (None, request.actor_id):
-                _invalid("Damage attribution belongs to another actor")
-            edit("actor", target, "last_damaged_by", op.expected, op.value)
         elif type(op) is delta.MovementLedgerUpdate:
             if item_use and not turn_advanced:
                 _invalid("Potion changed movement outside turn start")
             field = "movement_ledgers"
-            if combat[field][actor_id] != _json(op.expected):
+            if combat[field][actor_id] != json_value(op.expected):
                 _invalid("Movement ledger pre-value differs")
             if (field, actor_id) in seen:
                 _invalid("Duplicate movement ledger")
             seen.add((field, actor_id))
-            combat[field][actor_id] = _json(op.value)
-            changes.append(("ledger", actor_id, field, _json(op.value)))
-        elif type(op) is delta.DamageSequenceUpdate:
-            if op.value < op.expected:
-                _invalid("Damage sequence cannot move backwards")
-            edit("combat", op.combat_id, "damage_instance_sequence", op.expected, op.value)
-        elif type(op) is delta.ProcessedDamageUpdate:
-            if not op.expected <= op.value:
-                _invalid("An attack cannot erase processed damage history")
-            new_entries = op.value - op.expected
-            if any(
-                target_id != request.payload.target_id or target_id not in actors
-                for target_id, _ in new_entries
-            ):
-                _invalid("New processed damage must belong to the declared target")
-            edit(
-                "combat", op.combat_id, "processed_zero_hp_damage_instances", op.expected, op.value
-            )
-        elif type(op) is delta.DeathLedgerUpdate:
-            if (
-                not op.expected_dead_ids <= op.dead_ids
-                or op.records[: len(op.expected_records)] != op.expected_records
-            ):
-                _invalid("An attack cannot erase or rewrite death history")
-            new_dead_ids = op.dead_ids - op.expected_dead_ids
-            new_records = op.records[len(op.expected_records) :]
-            if any(
-                target_id != request.payload.target_id or target_id not in actors
-                for target_id in new_dead_ids
-            ):
-                _invalid("New deaths must belong to the declared target")
-            for record in new_records:
-                if record.target_id != request.payload.target_id or record.target_id not in actors:
-                    _invalid("New death records must belong to the declared target")
-                if (
-                    record.killer_id != request.actor_id
-                    or record.location_id != snapshot.scene_state.scene_id
-                    or record.target_kind != actors[record.target_id]["entity_type"].lower()
-                ):
-                    _invalid("Death record attribution differs from the authorized attack")
-            record_targets = [record.target_id for record in new_records]
-            if set(record_targets) != new_dead_ids or len(record_targets) != len(new_dead_ids):
-                _invalid("New death identities and records must correspond exactly once")
-            edit("combat", op.combat_id, "dead_ids", op.expected_dead_ids, op.dead_ids)
-            edit("combat", op.combat_id, "deaths_recorded", op.expected_records, op.records)
+            combat[field][actor_id] = json_value(op.value)
+            changes.append(("ledger", actor_id, field, json_value(op.value)))
         else:
             _invalid("Unrecognized delta operation")
     data.update(

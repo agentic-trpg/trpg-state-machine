@@ -1,5 +1,6 @@
 """Public Cure Wounds acceptance with an authored class source and real RE assets."""
 
+from copy import deepcopy
 from dataclasses import replace
 from random import Random
 
@@ -22,6 +23,7 @@ from trpg_state_machine.package import _validate
 SLOT = "spell:1"
 SOURCE = "class:cleric"
 SPELL = "cure-wounds"
+BYSTANDER = "npc.attendant"
 
 
 def cure_loader(*, equipped=False, extra_spells=()):
@@ -60,6 +62,8 @@ def cure_world(
     extra_spells=(),
     rng_seed=0,
     target_hp=None,
+    target_temp_hp=0,
+    second_enemy=False,
     same_attribution=False,
 ):
     """Create and initialize one combat from a complete, original Package."""
@@ -92,7 +96,19 @@ def cure_world(
                     "policy": "ordinary_public",
                 }
             )
-    next(actor for actor in data["actors"] if actor["actor_id"] == NPC)["initial_cell"] = "1,0"
+    target = next(actor for actor in data["actors"] if actor["actor_id"] == NPC)
+    target["initial_cell"] = "1,0"
+    if second_enemy:
+        second = deepcopy(target)
+        second.update(actor_id=BYSTANDER, name="Attendant", initial_cell="2,0")
+        second["npc_state"].update(
+            initial_knowledge_ids=[], memories=[], beliefs=[], relationships=[], goals=[], plans=[]
+        )
+        data["actors"].append(second)
+        data["scenes"][0]["actor_ids"].append(BYSTANDER)
+        data["navigation"]["actor_grants"].append(
+            {"actor_id": BYSTANDER, "region_ids": ["region.public"]}
+        )
     for foundation in data["rule_bindings"].values():
         foundation["rng_state"] = RNGState.capture(Random(rng_seed)).model_dump(mode="json")
         snapshot = foundation["snapshot"]
@@ -121,6 +137,7 @@ def cure_world(
         npc.update(
             hp_current=0 if solo_dead else (hp if target_hp is None else target_hp),
             hp_max=50,
+            temp_hp=target_temp_hp,
             is_alive=not solo_dead,
             **({"granted_features": []} if extra_spells else {}),
         )
@@ -129,6 +146,27 @@ def cure_world(
         if next_actor_spent:
             npc.update(action_available=False, action_taken_this_turn=True, movement_remaining=0)
         npc.pop("spells_known", None)
+        if second_enemy:
+            snapshot["character_states"].append(
+                {
+                    **deepcopy(npc),
+                    "entity_id": BYSTANDER,
+                    "name": "Attendant",
+                    "initiative": 0,
+                    "hp_current": 40,
+                    "temp_hp": 0,
+                    "is_alive": True,
+                }
+            )
+            if "combat_state" in snapshot:
+                combat = snapshot["combat_state"]
+                for key in ("initiative_ids", "encounter_ids"):
+                    combat[key].append(BYSTANDER)
+                combat["actor_zone"][BYSTANDER] = "2,0"
+                for key in ("movement_ledgers", "monster_slug_by_entity", "xp_value_by_entity"):
+                    combat[key][BYSTANDER] = deepcopy(combat[key][NPC])
+            else:
+                foundation["xp"][BYSTANDER] = 0
         if solo_dead and "combat_state" in snapshot:
             snapshot["combat_state"]["dead_ids"] = [npc["entity_id"]]
             snapshot["combat_state"]["deaths_recorded"] = [

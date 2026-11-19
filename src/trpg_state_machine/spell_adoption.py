@@ -5,9 +5,16 @@ from dnd5e_engine.evaluation_actor import combatant
 from dnd5e_engine.evaluation_state import CombatSnapshot, MovementLedgerState
 from dnd5e_engine.movement import project_speeds, speed_for_mode
 from dnd5e_engine.rules.conditions import active_condition_names, exhaustion_level_of
-from dnd5e_engine.turn_rules import ordinary_action_payment, reset_turn_budget
+from dnd5e_engine.turn_rules import next_turn_index, ordinary_action_payment, reset_turn_budget
 from pydantic import ValidationError
 
+from .damage_adoption import (
+    DAMAGE_OPERATIONS,
+    adopt_damage_operation,
+    json_value,
+    ordinary_damage_target,
+    validate_damage_result,
+)
 from .errors import StateMachineError
 from .package import canonical_json
 
@@ -37,39 +44,35 @@ def ordinary_spell_changes(request, result, mechanism, activity_id):
     slot_paid = payload.slot_level not in (None, 0)
     if mechanism not in {"healing", "save_damage"}:
         _invalid("Unsupported ordinary spell mechanism")
-    if not healing and any(
-        type(op)
-        in {
-            delta.TempHPSet,
-            delta.DeathStateUpdate,
-            delta.ConditionsUpdate,
-            delta.ProcessedDamageUpdate,
-            delta.DeathLedgerUpdate,
-        }
-        for op in result.state_delta.operations
-    ):
-        raise UnsupportedSpellConsequence
     data = snapshot.model_dump(mode="json")
     actors = {actor["entity_id"]: actor for actor in data["character_states"]}
     combat = data["combat_state"]
     pools = data["resource_state"]["pools"]
-    if not healing:
-        lethal = [
-            op
-            for op in result.state_delta.operations
-            if type(op) is delta.HPDelta and op.resulting_hp == 0
-        ]
-        if lethal:
-            if any(
-                type(op) in {delta.DeathStateUpdate, delta.DeathLedgerUpdate}
-                for op in result.state_delta.operations
-            ):
-                raise UnsupportedSpellConsequence
-            _invalid("Zero-HP spell damage omitted its life-state consequences")
     if caster not in snapshot.combat_state.party_ids or target not in actors:
         _invalid("Spell actor or target is outside the admitted encounter")
     if snapshot.combat_state.pending_reactions or snapshot.effect_states:
         _invalid("Spell result needs unsupported reaction or effect adoption")
+    target_before = next(actor for actor in snapshot.character_states if actor.entity_id == target)
+    combat_before = snapshot.combat_state
+    if not healing and caster == target and target_before.last_damaged_by != caster:
+        _invalid("Spell damage attribution is incomplete")
+    if (
+        not healing
+        and not ordinary_damage_target(combat_before, target_before)
+        and any(
+            type(op)
+            in {
+                delta.TempHPSet,
+                delta.DeathStateUpdate,
+                delta.ConditionsUpdate,
+                delta.ProcessedDamageUpdate,
+                delta.DeathLedgerUpdate,
+            }
+            for op in result.state_delta.operations
+        )
+    ):
+        raise UnsupportedSpellConsequence
+
     submitted = [event for event in result.proposed_events if event.type == "intent_submitted"]
     cast = [event for event in result.proposed_events if event.type == "spell_cast"]
     healed = [event for event in result.proposed_events if event.type == "healing_applied"]
@@ -87,11 +90,12 @@ def ordinary_spell_changes(request, result, mechanism, activity_id):
         or cast[0].slot_level != (payload.slot_level if slot_paid else None)
         or (len(healed) != 1 if healing else bool(healed))
         or (healing and (healed[0].target_id != target or healed[0].amount < 0))
-        or (bool(saved or damaged) if healing else len(saved) != 1 or len(damaged) != 1)
         or (
-            not healing
-            and (saved[0].target_id != target or any(e.target_id != target for e in damaged))
+            bool(saved or damaged or any(e.type == "death" for e in result.proposed_events))
+            if healing
+            else len(saved) != 1 or len(damaged) != 1
         )
+        or (not healing and saved[0].target_id != target)
         or any(
             event.type
             not in {
@@ -100,6 +104,7 @@ def ordinary_spell_changes(request, result, mechanism, activity_id):
                 "healing_applied",
                 "save_rolled",
                 "damage_applied",
+                "death",
                 "turn_phase",
                 "turn_ended",
                 "turn_started",
@@ -119,15 +124,33 @@ def ordinary_spell_changes(request, result, mechanism, activity_id):
             _invalid("Duplicate spell Delta field")
         seen.add(key)
         owner = actors[identity] if component == "actor" else combat
-        if owner[field] != expected:
+        original = owner[field]
+        expected, value = json_value(expected), json_value(value)
+        if field in {"dead_ids", "processed_zero_hp_damage_instances"}:
+            original, expected = sorted(original), sorted(expected)
+        if original != expected:
             _invalid("Spell Delta pre-value differs from fixed input")
         owner[field] = value
         changes.append((component, identity, field, value))
 
     resource = ledger = None
     hp = None
-    attribution = sequence = None
     paid_action = False
+    newly_dead = (
+        set()
+        if healing
+        else validate_damage_result(
+            request,
+            result,
+            target_before,
+            source_id=f"spell:{spell_id}:{activity_id}",
+            is_crit=False,
+        )
+    )
+    dead_ids = combat_before.dead_ids | newly_dead
+    eligible = next_turn_index(
+        combat_before.initiative_ids, dead_ids, combat_before.current_turn_index + 1
+    )
     turn_advanced = any(type(op) is delta.TurnUpdate for op in result.state_delta.operations)
     turn = next(
         (
@@ -148,7 +171,7 @@ def ordinary_spell_changes(request, result, mechanism, activity_id):
         and next_actor == caster
         and turn_update.value.round_number == snapshot.combat_state.round_number + 1
         and all(
-            actor_id == caster or actor_id in snapshot.combat_state.dead_ids
+            actor_id == caster or actor_id in dead_ids
             for actor_id in snapshot.combat_state.initiative_ids
         )
     )
@@ -241,32 +264,15 @@ def ordinary_spell_changes(request, result, mechanism, activity_id):
             combat["expended_resources"][caster] = op.value
             ledger = op
             changes.append(("slot_ledger", caster, "expended_resources", op))
-        elif type(op) is delta.HPDelta:
-            if (
-                hp is not None
-                or op.target_id != target
-                or (op.amount < 0 if healing else op.amount > 0)
-            ):
+        elif healing and type(op) is delta.HPDelta:
+            if hp is not None or op.target_id != target or op.amount < 0:
                 _invalid("Spell changed an unrelated HP value")
-            if healing and op.resulting_hp > actors[target]["hp_max"]:
+            if op.resulting_hp > actors[target]["hp_max"]:
                 _invalid("Spell healing exceeds target maximum HP")
             edit("actor", target, "hp_current", op.expected_hp, op.resulting_hp)
             hp = op
-        elif type(op) is delta.DamageAttributionUpdate:
-            if healing or attribution is not None or op.target_id != target or op.value != caster:
-                _invalid("Spell damage attribution differs from the caster")
-            edit("actor", target, "last_damaged_by", op.expected, op.value)
-            attribution = op
-        elif type(op) is delta.DamageSequenceUpdate:
-            if (
-                healing
-                or sequence is not None
-                or op.combat_id != combat["combat_id"]
-                or op.value != op.expected + 1
-            ):
-                _invalid("Spell damage sequence differs from one resolved instance")
-            edit("combat", op.combat_id, "damage_instance_sequence", op.expected, op.value)
-            sequence = op
+        elif not healing and type(op) in DAMAGE_OPERATIONS:
+            adopt_damage_operation(request, target_before.entity_type.lower(), op, edit)
         elif type(op) is delta.ActionBudgetUpdate:
             if op.actor_id not in ({caster, next_actor} if turn_advanced else {caster}):
                 _invalid("Spell changed an unrelated action budget")
@@ -312,18 +318,9 @@ def ordinary_spell_changes(request, result, mechanism, activity_id):
                 or op.value.monster_turn_start_done != op.expected.monster_turn_start_done
             ):
                 _invalid("Spell turn transition differs from caster's ended turn")
-            live = snapshot.combat_state.initiative_ids
-            eligible = [
-                (snapshot.combat_state.current_turn_index + offset) % len(live)
-                for offset in range(1, len(live) + 1)
-                if live[(snapshot.combat_state.current_turn_index + offset) % len(live)]
-                not in snapshot.combat_state.dead_ids
-            ]
-            if not eligible or op.value.current_turn_index != eligible[0]:
+            if eligible is None or op.value.current_turn_index != eligible[0]:
                 _invalid("Spell turn skipped the next live actor")
-            if op.value.round_number != op.expected.round_number + int(
-                eligible[0] <= op.expected.current_turn_index
-            ):
+            if op.value.round_number != op.expected.round_number + int(eligible[1]):
                 _invalid("Spell round transition is inconsistent")
             expected_turn = op.expected.model_dump(mode="json")
             value_turn = op.value.model_dump(mode="json")
@@ -384,31 +381,10 @@ def ordinary_spell_changes(request, result, mechanism, activity_id):
         ledger.slot_kind != resource.value.kind or ledger.level != resource.value.level
     ):
         _invalid("Spell payment and ledger disagree")
-    target_before = next(actor for actor in snapshot.character_states if actor.entity_id == target)
     if healing:
         expected_healing = min(healed[0].amount, target_before.hp_max - target_before.hp_current)
         if hp is None and expected_healing != 0 or hp is not None and hp.amount != expected_healing:
             _invalid("Spell HP differs from the healing event")
-    else:
-        damage = sum(event.amount for event in damaged)
-        if any(event.source_actor_id != caster or event.amount < 0 for event in damaged):
-            _invalid("Spell damage event attribution differs from the caster")
-        if any(
-            event.source_id != f"spell:{spell_id}:{activity_id}"
-            or event.source_parent_id is not None
-            or event.is_crit
-            for event in damaged
-        ):
-            _invalid("Spell damage event provenance differs from the cast activity")
-        expected_damage = min(damage, target_before.hp_current)
-        if hp is None and expected_damage != 0 or hp is not None and hp.amount != -expected_damage:
-            _invalid("Spell HP differs from the damage event")
-        if bool(damaged) != (sequence is not None):
-            _invalid("Spell damage metadata is incomplete")
-        if damaged[0].damage_instance_id != (f"damage:{sequence.value}:{caster}:{target}"):
-            _invalid("Spell damage instance differs from the accepted sequence")
-        if damaged and actors[target]["last_damaged_by"] != caster:
-            _invalid("Spell damage attribution is incomplete")
     data.update(
         character_states=[actors[a.entity_id] for a in snapshot.character_states],
         combat_state=combat,
