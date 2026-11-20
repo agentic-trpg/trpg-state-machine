@@ -25,6 +25,7 @@ from dnd5e_engine.evaluation_contracts import (
     RuleEvaluationResult,
 )
 from dnd5e_engine.evaluation_haste import has_haste_effects, haste_speed
+from dnd5e_engine.evaluation_movement import timed_walk_bonus, walk_speed
 from dnd5e_engine.evaluation_preflight import template_support_failure
 from dnd5e_engine.evaluation_rng import RNGState
 from dnd5e_engine.evaluation_ruleset import (
@@ -52,6 +53,7 @@ from dnd5e_engine.turn_rules import (
 from pydantic import ValidationError
 
 from .combat import DND_RULESET, _remap, process_id, validate_foundation
+from .combat_movement import ordinary_walk_changes
 from .concentration_adoption import (
     concentration_release_changes,
     effect_identity,
@@ -71,6 +73,7 @@ from .haste_adoption import haste_cast_admission, haste_pass_admission
 from .package import canonical_json
 from .scoped_reads import scoped_read
 from .session_access import _binding
+from .spatial import SpatialPosition
 from .spell_adoption import ordinary_spell_changes
 from .timed_spell_adoption import timed_spell_changes
 
@@ -1058,6 +1061,8 @@ def validate_dnd_result(request, result, *, loader=None):
         and (request.payload.intent_type == "pass" or request.payload.target_id == source)
     ):
         return result, hold_effect_changes(request, result, source)
+    if request.operation_kind == "combat.intent" and request.payload.intent_type == "move":
+        return result, ordinary_walk_changes(request, result)
     if request.operation_kind == "combat.intent" and request.payload.intent_type == "pass":
         if has_haste_effects(request.state_snapshot):
             return result, haste_effect_changes(request, result)
@@ -1209,8 +1214,8 @@ class RulesAdapter:
         self.characters.rule_components(row["session_id"], set(actors), full_audit=True)
 
     @scoped_read
-    def _combat_snapshot(self, row, *, for_pass=False):
-        """Build fixed combat facts, limiting Pass to effects with a turn dependency."""
+    def _combat_snapshot(self, row, *, for_pass=False, for_walk=False):
+        """Build fixed combat facts with the required Pass or walking projection."""
         sid = row["session_id"]
         if row["mechanical_schema_version"] not in (
             "engine-snapshot/17",
@@ -1247,7 +1252,7 @@ class RulesAdapter:
             actors = self.characters.combat_rule_actors(
                 sid, roster, components["inventory_state"]["entries"]
             )
-            return CombatSnapshot.model_validate_json(
+            snapshot = CombatSnapshot.model_validate_json(
                 canonical_json(
                     {
                         "snapshot_schema_version": row["mechanical_schema_version"],
@@ -1261,10 +1266,38 @@ class RulesAdapter:
                     }
                 )
             )
+            return self._project_walk_budgets(snapshot) if for_walk else snapshot
         except (ValidationError, KeyError, TypeError) as exc:
             raise StateMachineError(
                 "invalid_mechanical_state", "Stored Engine state is incomplete"
             ) from exc
+
+    @staticmethod
+    def _project_walk_budgets(snapshot):
+        """For a reviewed timed walk, project its target's budget from the existing ledger."""
+        try:
+            timed = timed_walk_bonus(snapshot)
+        except ValueError:
+            # Keep the complete fixed input for other mechanics and RE refusal of walking.
+            return snapshot
+        if timed is None:
+            return snapshot
+        target, bonus = timed
+        ledger = snapshot.combat_state.movement_ledgers[target]
+        if ledger.active_mode != "walk":
+            return snapshot
+        return snapshot.model_copy(
+            update={
+                "character_states": tuple(
+                    actor.model_copy(
+                        update={"movement_remaining": ledger.remaining(walk_speed(actor, bonus))}
+                    )
+                    if actor.entity_id == target
+                    else actor
+                    for actor in snapshot.character_states
+                )
+            }
+        )
 
     def _current_cells(self, sid, scene_id, roster, grid):
         """Read required actor cells and check map consistency and duplicate occupancy."""
@@ -1479,6 +1512,22 @@ class RulesAdapter:
             ):
                 return "spell.capability"
             return None
+        if payload.intent_type == "move":
+            if (
+                payload.source_id not in (None, actor_id)
+                or combat.pending_reactions
+                or combat.active_reaction_responses
+                or combat.reaction_effects_pending_expiry
+            ):
+                return "intent.capability"
+            if any(
+                combat.actor_zone[identity] == payload.target_zone_id
+                for identity in combat.dead_ids
+            ):
+                # RE leaves dead creatures out of its movement occupancy. SM
+                # still holds their position and its World grid requires one actor per cell.
+                return "position_conflict"
+            return None
         if payload.intent_type != "attack":
             if payload.intent_type == "pass":
                 basic = type(payload)(intent_type="pass", source_id=payload.source_id)
@@ -1616,6 +1665,11 @@ class RulesAdapter:
                 self.characters.effects.apply_follow_up(sid, value)
             elif component == "hold_concentration":
                 self.characters.effects.apply_concentration(sid, value)
+            elif component == "position":
+                position = self.characters.position(sid, identity)
+                if (position.scene_id, position.cell) != (value.scene_id, value.expected):
+                    raise StateMachineError("version_conflict", "Walking position changed")
+                self.characters.move(sid, identity, SpatialPosition(value.scene_id, value.value))
             elif component == "actor" and field == "hp_current":
                 self.characters.set_hp(sid, identity, value)
             elif component == "actor":

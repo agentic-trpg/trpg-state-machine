@@ -114,8 +114,9 @@ class RuleExecution:
                 return self.rules._noncombat_snapshot(value, actor_ids=spell_actor_ids)
             if type(command.payload) is CheckPayload or domain_check or exploration_item:
                 return self.rules._noncombat_snapshot(value, package)
+            intent_type = getattr(command.payload, "intent_type", None)
             return self.rules._combat_snapshot(
-                value, for_pass=getattr(command.payload, "intent_type", None) == "pass"
+                value, for_pass=intent_type == "pass", for_walk=intent_type == "move"
             )
 
         with self.store.transaction():

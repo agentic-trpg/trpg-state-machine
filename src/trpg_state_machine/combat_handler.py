@@ -182,7 +182,7 @@ class CombatHandler:
             row = self.sessions._session(session_id, package, context)
             if not package.legacy_audit_only:
                 self.rules._verify_dnd_binding(package, row)
-            return self.rules._combat_snapshot(row)
+            return self.rules._combat_snapshot(row, for_walk=True)
 
     def read_rng_context(self, session_id, package, *, context):
         """Authorize access and return the RNG context for the fixed ruleset binding."""

@@ -7,6 +7,7 @@ import pytest
 from dnd5e_engine.evaluation_contracts import CombatIntentPayload, ExplorationSpellCastPayload
 from dnd5e_engine.evaluation_rng import RNGState
 from dnd5e_engine.evaluation_ruleset import ruleset_binding
+from dnd5e_engine.monster_rules import monster_rule_facts
 from dnd5e_engine.rules.character import proficiency_grants
 from dnd5e_srd_data import BundledAssetLoader, MemoryAssetLoader
 from dnd5e_srd_data.schema.common import PassiveEffectChange
@@ -42,11 +43,14 @@ def timed_spell_world(tmp_path, context):
         spell_id="longstrider",
         database="timed-spell.sqlite",
         seed=0,
+        walking=False,
+        attack_after_walk=False,
     ):
         canonical = BundledAssetLoader()
         base = item_loader()
         wizard = canonical.get_class("wizard")
         evoker = canonical.get_subclass("evoker")
+        ogre = canonical.get_monster("ogre") if attack_after_walk else None
         spell = canonical.get_spell("longstrider")
         if spell_id == PERCEPTION_SPELL:
             # Reuse the supported activity shape under a distinct fixture-only rule identity.
@@ -78,7 +82,7 @@ def timed_spell_world(tmp_path, context):
         )
         loader = MemoryAssetLoader(
             items=[*base._items.values(), canonical.get_item("component-pouch")],
-            monsters=list(base._monsters.values()),
+            monsters=[ogre] if ogre else list(base._monsters.values()),
             classes=[wizard],
             subclasses=[evoker],
             features=[canonical.get_feature(slug) for slug in features],
@@ -87,9 +91,17 @@ def timed_spell_world(tmp_path, context):
         data = item_data()
         data["manifest"]["ruleset_binding"] = ruleset_binding(loader).model_dump(mode="json")
         data["time_binding"] = asdict(TimeBinding())
+        foe_cell = "8,0" if attack_after_walk else "11,2"
         for actor in data["actors"]:
             actor.pop("npc_state", None)
-            actor["initial_cell"] = "1,0"
+            actor["initial_cell"] = foe_cell if walking else "1,0"
+        if walking:
+            for scene in data["scenes"]:
+                scene["grid"]["width"] = 12
+            combat = data["rule_bindings"]["combat_foundation"]["snapshot"]["combat_state"]
+            combat["monster_slug_by_entity"] = {NPC: ogre.slug} if ogre else {}
+            combat["initiative_ids"].reverse()
+            combat["actor_zone"][NPC] = foe_cell
         template = data["pc_templates"][0]
         template["character"]["inventory"] = ["component-pouch"] if material else []
         if material:
@@ -117,6 +129,10 @@ def timed_spell_world(tmp_path, context):
             foundation["rng_state"] = RNGState.capture(random.Random(seed)).model_dump(mode="json")
             fixed = foundation["snapshot"]
             fixed["snapshot_schema_version"] = "engine-snapshot/20"
+            if walking:
+                fixed["scene_state"]["grid"]["width"] = 12
+                for scene in foundation.get("additional_scenes", ()):
+                    scene["grid"]["width"] = 12
             pc, npc = fixed["character_states"]
             pc.update(
                 class_slug="wizard",
@@ -155,6 +171,30 @@ def timed_spell_world(tmp_path, context):
                 if material
                 else []
             )
+            if ogre:
+                npc.update(
+                    {
+                        key: value.model_dump(mode="json")
+                        if hasattr(value, "model_dump")
+                        else value
+                        for key, value in monster_rule_facts(ogre).items()
+                    },
+                    dexterity=ogre.ability_scores.dex,
+                    hp_current=ogre.hp,
+                    hp_max=ogre.hp,
+                    ac=ogre.ac,
+                    creature_type=ogre.creature_type,
+                    base_speed=ogre.movement.walk,
+                    movement_remaining=ogre.movement.walk,
+                    senses=ogre.senses.model_dump(mode="json", exclude={"passive_perception"}),
+                    damage_resistances=list(ogre.damage_resistances),
+                    damage_immunities=list(ogre.damage_immunities),
+                    damage_vulnerabilities=list(ogre.damage_vulnerabilities),
+                    condition_immunities=list(ogre.condition_immunities),
+                    granted_features=[],
+                    physical_resistances_nonmagical_only=False,
+                    attack_bonus=None,
+                )
             fixed["resource_state"] = {
                 "pools": [
                     {
@@ -507,8 +547,13 @@ def test_public_ordinary_attack_with_active_timed_spell(
 
             return (rng.version, rng.state), (after_rng.version, after_rng.state), budgets
 
-    baseline = attack(with_effect=False)
-    assert attack(with_effect=True) == baseline
+    before_rng, after_rng, budgets = attack(with_effect=False)
+    expected_walk_bonus = 10 if spell_id == "longstrider" and seconds_before > 6 else 0
+    assert attack(with_effect=True) == (
+        before_rng,
+        after_rng,
+        (budgets[0] + expected_walk_bonus, budgets[1]),
+    )
 
 
 def test_public_longstrider_expires_on_combat_round_boundary(timed_spell_world):
@@ -604,3 +649,272 @@ def test_late_receipt_failure_reverts_effect_and_slot(timed_spell_world, spell_i
         assert sm.submit_command(command, package, context=context) == receipt
         assert first_level_balance(sm, command) == 3
         assert len(sm.read_noncombat_snapshot(sid, package, context=context).effect_states) == 1
+
+
+def move_command(session, destination, key):
+    """Prepare an ordinary walking intent with the current public world version."""
+    sm, sid, package, context = session
+    snapshot = sm.read_combat_snapshot(sid, package, context=context)
+    actor = snapshot.combat_state.initiative_ids[snapshot.combat_state.current_turn_index]
+    return TypedCommand(
+        sid,
+        key,
+        actor,
+        "combat.intent",
+        CombatIntentPayload(intent_type="move", target_zone_id=destination),
+        snapshot.world_version,
+    )
+
+
+@pytest.mark.parametrize("total_distance", [35, 40])
+def test_public_ordinary_walk_adopts_longstrider_and_preserves_spent_feet(
+    timed_spell_world, total_distance
+):
+    """Move on the last active turn and use only base speed on the next own turn."""
+    session = timed_spell_world(walking=True)
+    sm, sid, package, context = session
+
+    def read():
+        return sm.read_combat_snapshot(sid, package, context=context)
+
+    def execute(command):
+        return sm.submit_command(command, package, context=context)
+
+    def move(destination, key):
+        return execute(move_command(session, destination, key))
+
+    def movement(snapshot, actor_id):
+        actor = next(actor for actor in snapshot.character_states if actor.entity_id == actor_id)
+        ledger = snapshot.combat_state.movement_ledgers[actor_id]
+        return actor.movement_remaining, ledger.spent_ft, ledger.distance_ft
+
+    with sm:
+        cast = cast_command(session)
+        assert execute(cast).status == "committed"
+        assert submit(session, AdvanceSessionTime(3594), "last-combat-round").status == "committed"
+        assert initialize(sm, sid, package, context).status == "committed"
+        assert execute(pass_command(sid, read(), "npc-pass")).status == "committed"
+        start = read()
+        actor_id = cast.actor_id
+        rng = sm.read_rng_context(sid, package, context=context)
+        assert movement(start, actor_id) == (40, 0, 0)
+        invalid = move("999,0", "invalid-destination")
+        assert (invalid.status, invalid.error_code) == ("rejected", "movement.destination")
+        assert move("2,0", "walk-ten").status == "committed"
+        first = read()
+        assert movement(first, actor_id) == (30, 10, 10)
+        assert first.combat_state.actor_zone[actor_id] == "2,0"
+        stale_command = replace(
+            move_command(session, "3,0", "stale-walk"), expected_world_version=start.world_version
+        )
+        assert execute(stale_command).status == "conflict"
+        assert read() == first
+        too_far = move("9,0", "walk-too-far")
+        assert (too_far.status, too_far.error_code) == ("rejected", "movement.insufficient")
+        destination = f"{total_distance // 5},0"
+        finish = move(destination, "walk-over-base-limit")
+        assert finish.status == "committed", finish
+        used = read()
+        assert movement(used, actor_id) == (40 - total_distance, total_distance, total_distance)
+        assert used.combat_state.actor_zone[actor_id] == destination
+        position = sm.read_actor_position(sid, actor_id, package, context=context)
+        assert position.cell == destination
+        assert start.combat_state.actor_zone[actor_id] == "0,0"
+        assert movement(start, actor_id) == (40, 0, 0)
+        assert sm.read_rng_context(sid, package, context=context) == rng
+
+        expiry = execute(pass_command(sid, used, "expire-on-round-boundary"))
+        assert expiry.status == "committed", expiry
+        expired = read()
+        assert not expired.effect_states
+        assert movement(expired, actor_id) == (0, total_distance, total_distance)
+        events = sm.read_events(sid, package, context=context)
+        (event,) = [event for event in events if event.event_type == "effect.expired"]
+        assert event.event_seq in expiry.event_seqs
+        assert event.payload["boundary_tick"] == 3600
+        assert execute(pass_command(sid, expired, "npc-next-pass")).status == "committed"
+        reset = read()
+        assert movement(reset, actor_id) == (30, 0, 0)
+        out_of_base_range = move("0,0", "outside-base-range")
+        assert (out_of_base_range.status, out_of_base_range.error_code) == (
+            "rejected",
+            "movement.insufficient",
+        )
+        assert move(f"{total_distance // 5 - 6},0", "walk-base-limit").status == "committed"
+        assert movement(read(), actor_id) == (0, 30, 30)
+
+
+@pytest.mark.parametrize("with_effect", [False, True])
+def test_public_walk_rolls_back_late_failure(timed_spell_world, with_effect):
+    """A receipt fault reverts the proposed route, actual spend, budget, and audit event."""
+    session = timed_spell_world(walking=True)
+    sm, sid, package, context = session
+    remaining = 35 if with_effect else 25
+    with sm:
+        if with_effect:
+            assert sm.submit_command(cast_command(session), package, context=context).status == (
+                "committed"
+            )
+        assert initialize(sm, sid, package, context).status == "committed"
+        first = sm.read_combat_snapshot(sid, package, context=context)
+        assert (
+            sm.submit_command(pass_command(sid, first, "npc-pass"), package, context=context).status
+            == "committed"
+        )
+        fixed = sm.read_combat_snapshot(sid, package, context=context)
+        command = move_command(session, "1,0", "walk.rollback")
+        pc = command.actor_id
+        before_position = sm.read_actor_position(sid, pc, package, context=context)
+        before_events = sm.read_events(sid, package, context=context)
+        before_rng = sm.read_rng_context(sid, package, context=context)
+        sm._conn.execute(
+            "CREATE TEMP TRIGGER fail_walk_receipt BEFORE INSERT ON command_receipts "
+            "WHEN NEW.command_id='walk.rollback' "
+            "AND EXISTS (SELECT 1 FROM actors WHERE session_id=NEW.session_id AND cell='1,0') "
+            "AND EXISTS (SELECT 1 FROM combats WHERE session_id=NEW.session_id "
+            "AND 5 IN (SELECT json_extract(value,'$.spent_ft') "
+            "FROM json_each(state_json,'$.movement_ledgers'))) "
+            "AND EXISTS (SELECT 1 FROM mechanical_actors WHERE session_id=NEW.session_id "
+            f"AND json_extract(state_json,'$.movement_remaining')={remaining}) "
+            "BEGIN SELECT RAISE(ABORT,'injected walk receipt failure'); END"
+        )
+        with pytest.raises(StateMachineError):
+            sm.submit_command(command, package, context=context)
+        assert sm.get_command_receipt(sid, command.command_id, package, context=context) is None
+        assert sm.read_actor_position(sid, pc, package, context=context) == before_position
+        assert sm.read_combat_snapshot(sid, package, context=context) == fixed
+        assert sm.read_rng_context(sid, package, context=context) == before_rng
+        assert sm.read_events(sid, package, context=context) == before_events
+
+        sm._conn.execute("DROP TRIGGER fail_walk_receipt")
+        receipt = sm.submit_command(command, package, context=context)
+        assert receipt.status == "committed", receipt
+        assert sm.submit_command(command, package, context=context) == receipt
+        assert sm.read_actor_position(sid, pc, package, context=context).cell == "1,0"
+        after = sm.read_combat_snapshot(sid, package, context=context)
+        ledger = after.combat_state.movement_ledgers[pc]
+        actor = next(actor for actor in after.character_states if actor.entity_id == pc)
+        assert (ledger.spent_ft, ledger.distance_ft, actor.movement_remaining) == (5, 5, remaining)
+        assert actor.action_available and actor.bonus_action_available
+        (event,) = [
+            event.payload["engine_event"]
+            for event in sm.read_events(sid, package, context=context)
+            if event.event_seq in receipt.event_seqs
+        ]
+        assert (event["type"], event["distance_ft"], event["movement_cost_ft"]) == (
+            "actor_moved",
+            5,
+            5,
+        )
+        assert event["path"] == ["0,0", "1,0"]
+        assert fixed.combat_state.actor_zone[pc] == "0,0"
+
+
+def test_public_attack_uses_position_adopted_by_longstrider_walk(timed_spell_world):
+    """The Ogre's Greatclub reaches the target only after the committed walk."""
+    session = timed_spell_world(walking=True, attack_after_walk=True, seed=1)
+    sm, sid, package, context = session
+
+    def read():
+        """Read the fixed combat state published by the current command."""
+        return sm.read_combat_snapshot(sid, package, context=context)
+
+    with sm:
+        cast = cast_command(session)
+        assert sm.submit_command(cast, package, context=context).status == "committed"
+        assert initialize(sm, sid, package, context).status == "committed"
+        fixed = read()
+        rng = sm.read_rng_context(sid, package, context=context)
+        strike = TypedCommand(
+            sid,
+            "strike.before-walk",
+            NPC,
+            "combat.intent",
+            CombatIntentPayload(
+                intent_type="attack", target_id=cast.actor_id, stat_block_action_id="greatclub"
+            ),
+            fixed.world_version,
+        )
+        far = sm.submit_command(strike, package, context=context)
+        assert (far.status, far.error_code) == ("rejected", "out_of_range"), far
+        assert (
+            sm.submit_command(pass_command(sid, fixed, "npc-pass"), package, context=context).status
+            == "committed"
+        )
+        walk = sm.submit_command(move_command(session, "7,0", "approach"), package, context=context)
+        assert walk.status == "committed", walk
+        occupied = sm.submit_command(
+            move_command(session, "8,0", "occupied"), package, context=context
+        )
+        assert (occupied.status, occupied.error_code) == ("rejected", "movement.occupied")
+        assert sm.read_rng_context(sid, package, context=context) == rng
+
+        assert (
+            sm.submit_command(pass_command(sid, read(), "pc-pass"), package, context=context).status
+            == "committed"
+        )
+        strike = replace(
+            strike, command_id="strike.after-walk", expected_world_version=read().world_version
+        )
+        attack = sm.submit_command(strike, package, context=context)
+        assert attack.status == "committed", attack
+        (rolled,) = [
+            event.payload["engine_event"]
+            for event in sm.read_events(sid, package, context=context)
+            if event.event_seq in attack.event_seqs
+            and event.payload.get("engine_event", {}).get("type") == "attack_rolled"
+        ]
+        assert (rolled["attacker_id"], rolled["target_id"]) == (NPC, cast.actor_id)
+        after = read()
+        assert after.combat_state.actor_zone[cast.actor_id] == "7,0"
+        assert after.effect_states == fixed.effect_states
+        assert sm.read_rng_context(sid, package, context=context).version == rng.version + 1
+
+
+def test_timed_walk_refuses_consistent_but_nonadjacent_result(timed_spell_world, monkeypatch):
+    """A correlated event and ledger cannot authorize a jump outside the fixed grid."""
+    from dnd5e_engine.evaluation_delta import PositionUpdate
+
+    session = timed_spell_world(walking=True)
+    sm, sid, package, context = session
+    with sm:
+        cast = cast_command(session)
+        assert sm.submit_command(cast, package, context=context).status == "committed"
+        assert initialize(sm, sid, package, context).status == "committed"
+        fixed = sm.read_combat_snapshot(sid, package, context=context)
+        assert (
+            sm.submit_command(pass_command(sid, fixed, "npc-pass"), package, context=context).status
+            == "committed"
+        )
+        fixed = sm.read_combat_snapshot(sid, package, context=context)
+        command = move_command(session, "2,0", "walk-with-bad-route")
+        real = sm._rules._evaluate_dnd
+        path = ("0,0", "11,0", "2,0")
+
+        async def forged(request):
+            """Change only the matching paths in the real authenticated proposal."""
+            result = await real(request)
+            assert result.status == "accepted"
+            assert result.stage_facts.coverage == "uncovered"
+            edits = tuple(
+                operation.model_copy(update={"path": path})
+                if isinstance(operation, PositionUpdate)
+                else operation
+                for operation in result.state_delta.operations
+            )
+            (event,) = result.proposed_events
+            return result.model_copy(
+                update={
+                    "state_delta": result.state_delta.model_copy(update={"operations": edits}),
+                    "proposed_events": (event.model_copy(update={"path": path}),),
+                }
+            )
+
+        with monkeypatch.context() as scope:
+            scope.setattr(sm._rules, "_evaluate_dnd", forged)
+            with pytest.raises(StateMachineError) as error:
+                sm.submit_command(command, package, context=context)
+        assert error.value.code == "invalid_rule_result"
+        assert sm.get_command_receipt(sid, command.command_id, package, context=context) is None
+        assert sm.read_combat_snapshot(sid, package, context=context) == fixed
+        assert sm.submit_command(command, package, context=context).status == "committed"
