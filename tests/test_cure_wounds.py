@@ -1,7 +1,7 @@
 """Public Cure Wounds acceptance with an authored class source and real RE assets."""
 
 from copy import deepcopy
-from dataclasses import replace
+from dataclasses import asdict, replace
 from random import Random
 
 import pytest
@@ -15,9 +15,16 @@ from dnd5e_engine.evaluation_rng import RNGState
 from dnd5e_engine.evaluation_ruleset import ruleset_binding
 from dnd5e_srd_data import BundledAssetLoader, MemoryAssetLoader
 from dnd_support import create, initialize
-from item_support import NPC, item_data, item_loader
+from item_support import NPC, A, item_data, item_loader, submit
+from test_combat_healing_potion import FIRST
 
-from trpg_state_machine import StateMachine, StateMachineError, TypedCommand
+from trpg_state_machine import (
+    PickupItem,
+    StateMachine,
+    StateMachineError,
+    TimeBinding,
+    TypedCommand,
+)
 from trpg_state_machine.package import _validate
 
 SLOT = "spell:1"
@@ -27,7 +34,7 @@ HEALING_WORD = "healing-word"
 BYSTANDER = "npc.attendant"
 
 
-def cure_loader(*, equipped=False, extra_spells=()):
+def cure_loader(*, equipped=False, extra_spells=(), with_potion=False):
     """Bind the canonical first-level cleric and Cure Wounds to authored items."""
     base = item_loader()
     canonical = BundledAssetLoader()
@@ -43,7 +50,8 @@ def cure_loader(*, equipped=False, extra_spells=()):
         ],
         spells=[canonical.get_spell(spell) for spell in (SPELL, *extra_spells)],
         items=list(base._items.values())
-        + ([canonical.get_item(s) for s in ("mace", "chain-shirt")] if equipped else []),
+        + ([canonical.get_item(s) for s in ("mace", "chain-shirt")] if equipped else [])
+        + ([canonical.get_item("potion-of-healing")] if with_potion else []),
         monsters=list(base._monsters.values()),
     )
 
@@ -66,14 +74,32 @@ def cure_world(
     target_temp_hp=0,
     second_enemy=False,
     same_attribution=False,
+    with_potion=False,
+    timed=False,
 ):
     """Create and initialize one combat from a complete, original Package."""
-    loader = cure_loader(equipped=equipped, extra_spells=extra_spells)
+    loader = cure_loader(equipped=equipped, extra_spells=extra_spells, with_potion=with_potion)
     data = item_data()
     data["manifest"]["ruleset_binding"] = ruleset_binding(loader).model_dump(mode="json")
     data["manifest"]["package_version"] = "spell-01/1"
     data["pc_templates"][0]["character"]["hp"]["current"] = hp
     data["pc_templates"][0]["character"]["inventory"] = []
+    if with_potion:
+        data["scenes"][0]["objects"].append(
+            dict(
+                object_id=FIRST, state=None, movable=False, blocks_passage=False, initial_cell="0,0"
+            )
+        )
+        data["item_transfers"].append(
+            dict(
+                instance_id=FIRST,
+                item_slug="potion-of-healing",
+                initial_owner_id=None,
+                quantity=1,
+                charges_remaining_per_unit=1,
+                policy="ordinary_public",
+            )
+        )
     if equipped:
         owner = data["pc_templates"][0]["pc_template_id"]
         data["pc_templates"][0]["character"]["inventory"] = ["mace", "chain-shirt"]
@@ -255,10 +281,17 @@ def cure_world(
                 }
             ]
         }
+    if timed:
+        data["time_binding"] = asdict(TimeBinding())
+        for person in data["actors"]:
+            person.pop("npc_state", None)
     package = _validate(data)
     db = tmp_path / "cure-wounds.sqlite"
     sm = StateMachine(db, dnd_loader=loader)
     sid = create(sm, package, context)
+    if with_potion:
+        picked = submit(sm, sid, package, context, PickupItem(FIRST, A, "0,0"), "pick.potion")
+        assert picked.status == "committed", picked
     assert initialize(sm, sid, package, context).status == "committed"
     return sm, sid, package, loader, db
 
@@ -331,13 +364,27 @@ def test_healing_word_retains_turn_and_blocks_second_paid_spell(tmp_path, contex
         assert reopened.read_rng_context(sid, package, context=context) == next_rng
 
 
-def test_healing_word_budget_resets_on_real_turn_wrap(tmp_path, context):
+@pytest.mark.parametrize("with_potion", [False, True], ids=["empty", "picked-up-potion"])
+def test_healing_word_budget_resets_on_real_turn_wrap(tmp_path, context, with_potion):
     """Explicit end turn refreshes both budgets and permits a new paid cast."""
-    sm, sid, package, _, _ = cure_world(tmp_path, context, extra_spells=(HEALING_WORD,))
+    sm, sid, package, _, _ = cure_world(
+        tmp_path, context, extra_spells=(HEALING_WORD,), with_potion=with_potion, timed=True
+    )
     with sm:
         command = cast_command(sm, sid, package, context, spell=HEALING_WORD)
+        initial = sm.read_combat_snapshot(sid, package, context=context)
+        first_tick = sm.read_session(sid, package, context=context).world.game_tick
+        if with_potion:
+            stock = [
+                entry for entry in initial.inventory_state.entries if entry.instance_id == FIRST
+            ]
+            assert len(stock) == 1
+            assert stock[0].owner_id == command.actor_id
         assert sm.submit_command(command, package, context=context).status == "committed"
         before = sm.read_combat_snapshot(sid, package, context=context)
+        cast_rng = sm.read_rng_context(sid, package, context=context)
+        assert before.combat_state.turn_serial == initial.combat_state.turn_serial
+        assert sm.read_session(sid, package, context=context).world.game_tick == first_tick
         for actor_id in (command.actor_id, NPC):
             state = sm.read_combat_snapshot(sid, package, context=context)
             end_turn = replace(
@@ -349,6 +396,9 @@ def test_healing_word_budget_resets_on_real_turn_wrap(tmp_path, context):
             )
             receipt = sm.submit_command(end_turn, package, context=context)
             assert receipt.status == "committed", receipt
+            assert sm.read_session(sid, package, context=context).world.game_tick == (
+                first_tick if actor_id == command.actor_id else first_tick + 6
+            )
         reset = sm.read_combat_snapshot(sid, package, context=context)
         caster = actor(reset, command.actor_id)
         assert reset.combat_state.turn_serial == before.combat_state.turn_serial + 2
@@ -356,6 +406,9 @@ def test_healing_word_budget_resets_on_real_turn_wrap(tmp_path, context):
         assert caster.action_available and not caster.action_taken_this_turn
         assert caster.bonus_action_available and not caster.bonus_action_taken_this_turn
         assert pool(reset).current == 1
+        assert reset.combat_state.expended_resources == before.combat_state.expended_resources
+        assert reset.inventory_state == before.inventory_state == initial.inventory_state
+        assert sm.read_rng_context(sid, package, context=context) == cast_rng
         next_cast = cast_command(sm, sid, package, context, key="next.cast", spell=HEALING_WORD)
         assert sm.submit_command(next_cast, package, context=context).status == "committed"
         after = sm.read_combat_snapshot(sid, package, context=context)
