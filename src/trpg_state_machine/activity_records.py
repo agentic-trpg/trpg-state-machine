@@ -22,7 +22,7 @@ class _NavigationExecution:
 
 
 class ActivityRecords:
-    """Persist navigation progress and coordinate NPC activity claims through one Store."""
+    """Persist navigation progress and latest completed rest through one Store."""
 
     def __init__(self, store):
         """Bind the shared Store and a private execution-credential issuer."""
@@ -47,6 +47,24 @@ class ActivityRecords:
             "AND actor_id=? AND status='active'",
             (sid, actor),
         ).fetchone()
+
+    def last_long_rest(self, sid, actor):
+        """Read the actor's durable long-rest cooldown anchor by owner key."""
+        return self._conn.execute(
+            "SELECT completed_tick FROM latest_long_rests WHERE session_id=? AND actor_id=?",
+            (sid, actor),
+        ).fetchone()
+
+    def complete_long_rest(self, sid, actor, scene, command_id, start, completed):
+        """Save the one-step activity's completion in the same scope as its benefits."""
+        self.store.require_write()
+        self._conn.execute(
+            "INSERT INTO latest_long_rests VALUES (?,?,?,?,?,?) "
+            "ON CONFLICT(session_id, actor_id) DO UPDATE SET "
+            "scene_id=excluded.scene_id,command_id=excluded.command_id,"
+            "start_tick=excluded.start_tick,completed_tick=excluded.completed_tick",
+            (sid, actor, scene, command_id, start, completed),
+        )
 
     @scoped_read
     def snapshot(self, record, world_version):

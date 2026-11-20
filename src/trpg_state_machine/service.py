@@ -156,6 +156,7 @@ class StateMachine(
             self._event_capture,
             self._package_effects,
             self._event_persistence,
+            self._activity_records,
         )
 
         self._creation = SessionCreation(

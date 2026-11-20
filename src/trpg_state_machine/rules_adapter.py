@@ -77,6 +77,7 @@ from .dnd_closure import closure_changes
 from .errors import StateMachineError
 from .haste_adoption import haste_cast_admission, haste_pass_admission
 from .package import canonical_json
+from .rest_activity import long_rest_changes
 from .scoped_reads import scoped_read
 from .session_access import _binding
 from .spatial import SpatialPosition
@@ -1015,6 +1016,8 @@ def validate_dnd_result(request, result, *, loader=None):
         return result, ()
     if request.operation_kind == "rules.check":
         return result, check_changes(request, result)
+    if request.operation_kind == "rules.rest":
+        return result, long_rest_changes(request, result)
     if type(request.payload) is ExplorationItemUsePayload:
         return result, exploration_potion_changes(request, result)
     if type(request.payload) is ExplorationSpellCastPayload:
@@ -1655,6 +1658,8 @@ class RulesAdapter:
                 self.characters.spend_resource(
                     sid, identity, field, amount, expected_current=expected_current
                 )
+            elif component == "resource_restore":
+                self.characters.restore_resource(sid, identity, field, *value)
             elif component == "world_effect" and field == "create":
                 self.world.runtime.time.consumers["effects"].apply_verified(sid, value)
             elif component == "combat_effect":

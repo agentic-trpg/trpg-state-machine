@@ -18,6 +18,7 @@ def components(path, loader=None):
     """Explicit test wiring, deliberately never imports/constructs StateMachine."""
     from dnd5e_engine.evaluation_ruleset import freeze_ruleset, get_default_ruleset
 
+    from trpg_state_machine.activity_records import ActivityRecords
     from trpg_state_machine.combat_handler import CombatHandler
     from trpg_state_machine.domain_facts import CharacterFacts, CombatRecords, WorldFacts
     from trpg_state_machine.event_capture import EventCapture
@@ -40,7 +41,17 @@ def components(path, loader=None):
     effects = PackageEffects(store, world, capture)
     rules = RulesAdapter(store, loader, characters, facts, records, world)
     combat = CombatHandler(
-        store, sessions, characters, facts, records, world, rules, capture, effects, persistence
+        store,
+        sessions,
+        characters,
+        facts,
+        records,
+        world,
+        rules,
+        capture,
+        effects,
+        persistence,
+        ActivityRecords(store),
     )
     return SimpleNamespace(**locals())
 

@@ -48,6 +48,7 @@ from .navigation_models import (
     ResumeNavigation,
     StartNavigation,
 )
+from .rest_activity import LongRest
 from .time_coordination import AdvanceSessionTime, SetTimeRunning, validate_time_operation
 from .time_waits import TimeWaitReference, validate_wait_reference
 from .world_commands import (
@@ -86,6 +87,7 @@ OPERATIONS = {
     "activity.advance_navigation": AdvanceNavigation,
     "activity.resume_navigation": ResumeNavigation,
     "activity.cancel_navigation": CancelNavigation,
+    "activity.long_rest": LongRest,
     "world.step_actor": StepActor,
     "world.traverse_passage": TraversePassage,
     "world.place_object": PlaceObject,
@@ -168,6 +170,7 @@ class TypedCommand:
         | ItemUsePayload
         | ExplorationItemUsePayload
         | ExplorationSpellCastPayload
+        | LongRest
         | CombatClosePayload
         | CheckPayload
         | AdvanceGameTime
@@ -234,6 +237,7 @@ def validate_command(command: TypedCommand) -> None:
             RuleOperation,
             ExplorationItemUsePayload,
             ExplorationSpellCastPayload,
+            LongRest,
         ):
             raise StateMachineError(
                 "invalid_time_wait", "This operation cannot be a domain wait reply"
@@ -276,6 +280,8 @@ def validate_command(command: TypedCommand) -> None:
     operation_type = OPERATIONS.get(command.command_type)
     if operation_type is None or type(command.payload) is not operation_type:
         raise StateMachineError("unsupported_operation", "Unknown command or payload type")
+    if operation_type is LongRest:
+        return
     if type(command.payload) in ENVIRONMENT_OPERATIONS:
         validate_environment_operation(command.payload)
         return
@@ -436,6 +442,7 @@ class CommandRuntime:
             ItemUsePayload,
             ExplorationItemUsePayload,
             ExplorationSpellCastPayload,
+            LongRest,
             CombatClosePayload,
             CheckPayload,
             *OPENABLE_CHECK_OPERATIONS,
@@ -599,6 +606,7 @@ def world_command_from_data(data):
         "activity.advance_navigation",
         "activity.resume_navigation",
         "activity.cancel_navigation",
+        "activity.long_rest",
     ):
         raise StateMachineError("unsupported_operation", "Unregistered world operation")
     if type(data["payload"]) is not dict:

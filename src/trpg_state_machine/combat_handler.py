@@ -19,6 +19,7 @@ from .combat import (
 from .commands import validate_command
 from .errors import StateMachineError
 from .package import canonical_json
+from .rest_activity import LongRest
 
 
 class CombatHandler:
@@ -36,6 +37,7 @@ class CombatHandler:
         capture,
         effects,
         persistence,
+        activities,
     ):
         """Bind combat domain interfaces and their shared Store."""
         self.runtime = world.runtime
@@ -49,6 +51,7 @@ class CombatHandler:
         self.capture = capture
         self.effects = effects
         self.persistence = persistence
+        self.activities = activities
 
     @property
     def _conn(self):
@@ -206,6 +209,7 @@ class CombatHandler:
             ItemUsePayload,
             ExplorationItemUsePayload,
             ExplorationSpellCastPayload,
+            LongRest,
             CombatClosePayload,
             CheckPayload,
             *OPENABLE_CHECK_OPERATIONS,

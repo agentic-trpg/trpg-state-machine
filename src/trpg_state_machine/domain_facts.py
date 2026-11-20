@@ -325,6 +325,18 @@ class CharacterFacts:
             (amount, sid, actor_id, resource_id, row[0]),
         )
 
+    def restore_resource(self, sid, actor_id, resource_id, expected_current, value):
+        """Credit a keyed pool from its verified old balance, within its stored capacity."""
+        self.store.require_write()
+        changed = self._conn.execute(
+            "UPDATE character_resources SET current=? "
+            "WHERE session_id=? AND actor_id=? AND resource_id=? AND current=? "
+            "AND current<? AND maximum>=?",
+            (value, sid, actor_id, resource_id, expected_current, value, value),
+        ).rowcount
+        if changed != 1:
+            raise StateMachineError("invalid_rule_result", "Resource restoration balance changed")
+
     def award_xp(self, sid, actor_id, value):
         """Add experience, rejecting a missing character."""
         self.store.require_write()

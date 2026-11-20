@@ -9,6 +9,7 @@ from dnd5e_engine.evaluation_contracts import (
     ExplorationSpellCastPayload,
     ExplorationSpellPositions,
     ItemUsePayload,
+    RestPayload,
 )
 from dnd5e_engine.evaluation_openable import OpenableCheckRequest, evaluate_openable
 from dnd5e_engine.evaluation_ruleset import EVALUATOR_VERSION, RulesetBindingError
@@ -18,6 +19,7 @@ from ._execution import _WorldEffectKind, _WorldEffectOrigin
 from .combat import process_id
 from .dnd_checks import world_effects_ready
 from .errors import StateMachineError
+from .rest_activity import LongRest, advance_long_rest, prepare_long_rest
 from .rules_adapter import UnsupportedEffectConsequence, validate_dnd_result
 from .spell_adoption import UnsupportedSpellConsequence
 from .time_binding import TimeBinding
@@ -37,6 +39,7 @@ class RuleExecution:
         self.capture = owner.capture
         self.effects = owner.effects
         self.persistence = owner.persistence
+        self.activities = owner.activities
 
     @property
     def _conn(self):
@@ -71,7 +74,8 @@ class RuleExecution:
         exploration_item = type(command.payload) is ExplorationItemUsePayload
         exploration_spell = type(command.payload) is ExplorationSpellCastPayload
         exploration_rule = exploration_item or exploration_spell
-        if not exploration_rule:
+        long_rest = type(command.payload) is LongRest
+        if not (exploration_rule or long_rest):
             command = self.runtime.prepare_timed_command(command, package, context, fingerprint)
         object_check = type(command.payload) in OPENABLE_CHECK_OPERATIONS
         mechanism_check = type(command.payload) is CheckMechanism
@@ -81,6 +85,7 @@ class RuleExecution:
         )
         plan, prepare_error, rule_command = None, None, command
         initial_exploration_error = None
+        rest_plan = None
         spell_actor_ids, spell_positions = None, None
 
         def exploration_error(value):
@@ -109,6 +114,8 @@ class RuleExecution:
                 # Preserve a durable rejected receipt without pretending a combat
                 # snapshot is a noncombat check or relaxing any capability guard.
                 return self.rules._combat_snapshot(value)
+            if long_rest:
+                return self.rules._noncombat_snapshot(value, actor_ids=(command.actor_id,))
             if exploration_spell:
                 # Touch delivery depends on explicit placement and the mechanical grid.
                 return self.rules._noncombat_snapshot(value, actor_ids=spell_actor_ids)
@@ -134,6 +141,21 @@ class RuleExecution:
             if exploration_rule:
                 initial_exploration_error = exploration_error(row)
                 prepare_error = initial_exploration_error
+            if long_rest:
+                rest_plan, prepare_error = prepare_long_rest(
+                    row, command.actor_id, self.world, self.activities
+                )
+                if prepare_error is None:
+                    rule_command = replace(
+                        command,
+                        command_type="rules.rest",
+                        payload=RestPayload(
+                            kind="rules.rest",
+                            target_id=command.actor_id,
+                            rest_type="long",
+                            hit_dice=(),
+                        ),
+                    )
             if exploration_spell and prepare_error is None:
                 prepare_error, spell_actor_ids, spell_positions = self._spell_positions(
                     row, command
@@ -159,7 +181,7 @@ class RuleExecution:
             if (
                 type(command.payload) is not CheckPayload
                 and not domain_check
-                and not exploration_rule
+                and not (exploration_rule or long_rest)
             ):
                 combat = self._conn.execute(
                     "SELECT process_id FROM combats WHERE session_id=?", (command.session_id,)
@@ -180,8 +202,10 @@ class RuleExecution:
             request = self.rules.request(
                 rule_command, package, snapshot, rng, row=row, spell_positions=spell_positions
             )
-            capability = self.rules._dnd_capability(
-                rule_command.payload, command.actor_id, snapshot
+            capability = (
+                None
+                if long_rest
+                else self.rules._dnd_capability(rule_command.payload, command.actor_id, snapshot)
             )
             payload = rule_command.payload
             if capability is None and getattr(payload, "intent_type", None) == "cast_spell":
@@ -275,8 +299,12 @@ class RuleExecution:
             version = row["world_version"]
             status, error = "committed", None
             current_exploration_error = exploration_error(row) if exploration_rule else None
+            changed_rest_plan = long_rest and prepare_long_rest(
+                row, command.actor_id, self.world, self.activities
+            ) != (rest_plan, prepare_error)
             if (
                 self.runtime.version_conflict(row, command)
+                or changed_rest_plan
                 or (exploration_rule and current_exploration_error != initial_exploration_error)
                 or (snapshot is not None and build_snapshot(row) != snapshot)
                 or self.rules._rng_context(row) != rng
@@ -300,7 +328,7 @@ class RuleExecution:
             elif result.status != "accepted":
                 status, error = "rejected", result.error.code
             else:
-                if not exploration_spell:
+                if not (exploration_spell or long_rest):
                     self.sessions._npc_combat_target_guard(command, package, build_snapshot(row))
                 result, changes = validate_dnd_result(
                     request,
@@ -324,6 +352,27 @@ class RuleExecution:
                         if hasattr(snapshot, "combat_state")
                         else None
                     )
+                    time_events = []
+                    if long_rest:
+                        time_events = advance_long_rest(
+                            row, package, command.command_id, self.runtime.time, rest_plan
+                        )
+                        sid = command.session_id
+                        start, target, place = rest_plan
+                        if (
+                            self.world._active_combat(sid)
+                            or self.world.facts.time_state(sid)[1] != target
+                            or self.world.facts.carrier_position(sid, command.actor_id) != place
+                            or self.activities.active(sid, command.actor_id) is not None
+                            or build_snapshot(row) != snapshot
+                            or self.rules._rng_context(row) != rng
+                        ):
+                            raise StateMachineError(
+                                "rest_interrupted", "Time work changed the rest's dependencies"
+                            )
+                        self.activities.complete_long_rest(
+                            sid, command.actor_id, place[0], command.command_id, start, target
+                        )
                     self.rules._apply_dnd_changes(row, changes, command_id=command.command_id)
                     # Failure consequences and automatic hooks both consume the
                     # original rule result's candidate RNG successor. Never
@@ -339,6 +388,8 @@ class RuleExecution:
                             if exploration_item
                             else "world.spell_cast"
                             if exploration_spell
+                            else "activity.long_rest"
+                            if long_rest
                             else "combat.engine_event",
                             {
                                 **(
@@ -376,6 +427,12 @@ class RuleExecution:
                                     if exploration_item
                                     else {"spell_id": command.payload.spell_id}
                                     if exploration_spell
+                                    else {
+                                        "actor_id": command.actor_id,
+                                        "started_tick": rest_plan[0],
+                                        "completed_tick": rest_plan[1],
+                                    }
+                                    if long_rest
                                     else {
                                         "combat_id": snapshot.combat_state.combat_id,
                                         **(
@@ -437,7 +494,14 @@ class RuleExecution:
                     events.extend(
                         self.runtime.finish_time_wait_reply(row, package, command, events)
                     )
-                    events = self.effects._expand_events(row, package, events, command.command_id)
+                    outcome_row = (
+                        {**dict(row), "event_seq": row["event_seq"] + len(time_events)}
+                        if time_events
+                        else row
+                    )
+                    events = time_events + self.effects._expand_events(
+                        outcome_row, package, events, command.command_id
+                    )
                     events.extend(
                         self.runtime.coordinate_combat_time(
                             row, package, command.command_id, previous_round, len(events)
@@ -476,6 +540,8 @@ class RuleExecution:
                         "mechanism_needs_choice",
                         "unsupported_item_binding",
                         "equipped_item_unsupported",
+                        "rest_time_unsettled",
+                        "rest_interrupted",
                     }:
                         # Malformed rule results/storage failures remain faults: the
                         # outer transaction rolls back without persisting a refusal.
