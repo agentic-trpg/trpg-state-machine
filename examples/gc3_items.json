@@ -8,7 +8,7 @@
     "ruleset_binding": {
       "ruleset_id": "dnd-2024-srd-5.2.1",
       "data_revision": "sha256:d67e647f7657f919adac89211ff235ff5f7054e679c99907cdf07b97a8605247",
-      "evaluator_version": "dnd5e-evaluation/50"
+      "evaluator_version": "dnd5e-evaluation/51"
     },
     "player_setup": {
       "player_count": 1,
