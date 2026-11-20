@@ -38,6 +38,8 @@ Requirements:
 
 ## Development workflow
 
+- 查看、认领或更新待办时，读 [Linear 项目与 Issue 流程](https://github.com/agentic-trpg/agentic-trpg/blob/3b362cb2f51b63bf6ce8b0fc0dbe64671d5efb45/docs/LINEAR_WORKFLOW.md)。
+
 - Before editing, record cwd, remote, branch, HEAD, origin/main baseline and `git status --short --branch`; inspect relevant source/tests, the top-level domain docs and local Progress. Work on a separate branch. Preserve unrelated changes. Resolve sibling-document paths relative to the logical workspace (parallel worktrees may supply the siblings); report inaccessible required documents.
 - Work in the existing directory when switching branches and editing can preserve the user's files. Use a separate worktree if switching or editing would interfere with existing changes, if another task needs the current directory, or if the user asks for isolation. Unrelated untracked files can stay in place. Record why a temporary worktree is needed and remove it when its work is safely saved and the directory is no longer needed.
 - Do not merge main, reset, stash, rebase, force push, delete other branches or overwrite other work without explicit authorization. A commit/push request does not authorize a main merge.
