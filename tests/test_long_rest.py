@@ -5,7 +5,7 @@ from dataclasses import asdict, replace
 import pytest
 from dnd5e_engine.evaluation_ruleset import ruleset_binding
 from dnd_support import create
-from item_support import item_data
+from item_support import B, item_data
 from test_cure_wounds import cure_loader
 
 from trpg_state_machine import (
@@ -21,12 +21,34 @@ from trpg_state_machine.package import _validate
 from trpg_state_machine.time_coordination import DueResult
 
 
-def rest_package(*, timed=True, hp=2):
+def rest_package(*, timed=True, hp=2, unrelated_items=0):
     """Author a canonical first-level Cleric with explicit HP and resource facts."""
     loader = cure_loader()
     data = item_data()
     del data["rule_bindings"]["combat_foundation"]
     data["manifest"]["ruleset_binding"] = ruleset_binding(loader).model_dump(mode="json")
+    workshop = next(scene for scene in data["scenes"] if scene["scene_id"] == B)
+    for number in range(unrelated_items):
+        item_id = f"object.workshop_dagger_{number}"
+        workshop["objects"].append(
+            dict(
+                object_id=item_id,
+                state=None,
+                movable=False,
+                blocks_passage=False,
+                initial_cell="2,1",
+            )
+        )
+        data["item_transfers"].append(
+            dict(
+                instance_id=item_id,
+                item_slug="dagger",
+                initial_owner_id=None,
+                quantity=1,
+                charges_remaining_per_unit=0,
+                policy="ordinary_public",
+            )
+        )
     if timed:
         data["time_binding"] = asdict(TimeBinding())
         for person in data["actors"]:
@@ -169,7 +191,7 @@ def test_long_rest_without_time_or_hp_has_no_benefit(tmp_path, context, timed, h
         assert sm.world_time.read(sid, package, context=host).game_tick == 0
 
 
-@pytest.mark.parametrize("status", ["waiting", "interrupted", "continue"])
+@pytest.mark.parametrize("status", ["waiting", "interrupted", "continue", "budget"])
 def test_long_rest_rolls_back_time_boundary_and_recovery(tmp_path, context, status):
     package, loader = rest_package()
     host = replace(context, can_authorize_long_rest=True)
@@ -181,11 +203,13 @@ def test_long_rest_rolls_back_time_boundary_and_recovery(tmp_path, context, stat
 
         class Boundary:
             def next_boundary(self, sid, package):
-                if sm._world_facts.time_state(sid)[1] < 60:
+                if status == "budget" or sm._world_facts.time_state(sid)[1] < 60:
                     return 60
                 return None
 
             def settle_one(self, row, package, command_id):
+                if status == "budget":
+                    return DueResult()
                 sm._characters.set_hp(row["session_id"], command.actor_id, 1)
                 return DueResult(status=status)
 
@@ -233,3 +257,37 @@ def test_late_failure_rolls_back_every_rest_write_and_same_key_can_retry(
         assert sm.read_noncombat_snapshot(sid, package, context=host) == before
         assert sm.read_time_sync(sid, package, context=host).committed_tick == 0
         assert sm.submit_command(command, package, context=host).status == "committed"
+
+
+def test_long_rest_actor_work_stays_local_as_unrelated_items_grow(tmp_path, context, monkeypatch):
+    def track(original, key, actor_id, counted):
+        def count(session_id, owner_ids):
+            assert owner_ids == {actor_id}
+            counted[key] += len(owner_ids)
+            return original(session_id, owner_ids)
+
+        return count
+
+    host = replace(context, can_authorize_long_rest=True)
+    work = []
+    for unrelated in (0, 40):
+        package, loader = rest_package(unrelated_items=unrelated)
+        with StateMachine(tmp_path / f"rest-{unrelated}.sqlite", dnd_loader=loader) as sm:
+            sid = create(sm, package, host)
+            command = rest_command(sm, sid, package, host, "rest.scope")
+            counted = {"actors": 0, "components": 0}
+
+            monkeypatch.setattr(
+                sm._characters,
+                "rule_actors",
+                track(sm._characters.rule_actors, "actors", command.actor_id, counted),
+            )
+            monkeypatch.setattr(
+                sm._characters,
+                "rule_components",
+                track(sm._characters.rule_components, "components", command.actor_id, counted),
+            )
+            assert sm.submit_command(command, package, context=host).status == "committed"
+            work.append(counted)
+    assert work[0] == work[1]
+    assert work[0]["actors"] > 0 and work[0]["components"] > 0

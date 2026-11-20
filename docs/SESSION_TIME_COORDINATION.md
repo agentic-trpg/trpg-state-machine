@@ -266,6 +266,7 @@ Session，也不自动填充新表。迁移、真实机关、固定 RE、可控�
 授权所选 PC 的休息安排，确认地点安全、至少 6 小时睡眠和最多 2 小时轻度活动。
 该命令用于非战斗的 `world-time/1` Session，计划推进固定 28,800 tick。
 最近一次完成后至少经过 57,600 tick 才能再次发起长休。
+参见 [D&D 2024 Long Rest](https://www.dndbeyond.com/sources/dnd/br-2024/rules-glossary#LongRest)。
 
 Activity 保存所选角色最近一次实际完成的起止 tick，结果由固定 RE `rules.rest`
 从角色的 HP、拥有的资源及规则依赖产生，沿原事务外求值流程执行。采用之前，SM
