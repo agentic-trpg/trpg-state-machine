@@ -5,8 +5,6 @@ from itertools import pairwise
 from dnd5e_engine import evaluation_delta as delta
 from dnd5e_engine.evaluation_movement import timed_walk_bonus, walk_speed
 from dnd5e_engine.events import ActorMoved
-from dnd5e_engine.spatial import GridTopology
-from dnd5e_engine.specs import GridScene
 
 from .errors import StateMachineError
 
@@ -20,7 +18,7 @@ def ordinary_walk_changes(request, result):
     """Bind the event and guarded position, expenditure and budget to the fixed route.
 
     RE owns routing, pricing and reaction admission. The host correlates the
-    event and guarded changes and checks that the placement fits its World facts.
+    event and guarded changes. The write scope checks current World route dependencies.
     """
     snapshot, actor_id = request.state_snapshot, request.actor_id
     combat = snapshot.combat_state
@@ -57,10 +55,7 @@ def ordinary_walk_changes(request, result):
     if actor_id in combat.dead_ids or not actor.is_alive or actor.hp_current <= 0:
         _invalid("Incapacitated actor cannot walk")
     events = result.proposed_events
-    grid = GridTopology(GridScene.model_validate(snapshot.scene_state.grid.model_dump()))
-    distance = (len(position.path) - 1) * grid.cell_size_ft
-    if any(grid.edge_distance(start, end) is None for start, end in pairwise(position.path)):
-        _invalid("Walking route contains an invalid grid edge")
+    distance = (len(position.path) - 1) * snapshot.scene_state.grid.cell_size_ft
     if (
         len(events) != 1
         or not isinstance(event := events[0], ActorMoved)
@@ -103,3 +98,22 @@ def ordinary_walk_changes(request, result):
         ("ledger", actor_id, "movement", ledger.value.model_dump(mode="json")),
         ("actor", actor_id, "movement_remaining", remaining),
     )
+
+
+def require_walk_route(world, sid, position):
+    """Validate live path edges and exclude unadopted region transitions before writes.
+
+    The command's OCC and fixed snapshot checks have already matched the current
+    map. Reuse its prepared topology and query only the proposed path's cells.
+    """
+    scene = position.scene_id
+    grid = world.facts.maps.scene(sid, scene).grid.topology
+    path = position.path
+    if any(grid.edge_distance(start, end) is None for start, end in pairwise(path)):
+        _invalid("Walking route contains an invalid grid edge")
+    environment = world.environment
+    initial = environment.region_condition_sources(sid, scene, path[0])
+    if any(
+        environment.region_condition_sources(sid, scene, end) != initial for end in path[1:]
+    ) or world.objects.mechanisms.has_armed_region_entry(sid, scene, path):
+        raise StateMachineError("movement.capability", "Route exceeds supported combat movement")

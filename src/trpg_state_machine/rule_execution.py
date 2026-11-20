@@ -456,6 +456,7 @@ class RuleExecution:
                         "invalid_spatial_state",
                         "object_obstructed",
                         "position_conflict",
+                        "movement.capability",
                         "version_conflict",
                         "mechanism_target_unavailable",
                         "unsupported_mechanism_target",

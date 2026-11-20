@@ -53,7 +53,7 @@ from dnd5e_engine.turn_rules import (
 from pydantic import ValidationError
 
 from .combat import DND_RULESET, _remap, process_id, validate_foundation
-from .combat_movement import ordinary_walk_changes
+from .combat_movement import ordinary_walk_changes, require_walk_route
 from .concentration_adoption import (
     concentration_release_changes,
     effect_identity,
@@ -1669,6 +1669,7 @@ class RulesAdapter:
                 position = self.characters.position(sid, identity)
                 if (position.scene_id, position.cell) != (value.scene_id, value.expected):
                     raise StateMachineError("version_conflict", "Walking position changed")
+                require_walk_route(self.world, sid, value)
                 self.characters.move(sid, identity, SpatialPosition(value.scene_id, value.value))
             elif component == "actor" and field == "hp_current":
                 self.characters.set_hp(sid, identity, value)

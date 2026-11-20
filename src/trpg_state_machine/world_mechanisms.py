@@ -7,6 +7,7 @@ hooks consume admitted mechanical events in the caller's savepoint, never NPC OB
 import hashlib
 import json
 from dataclasses import asdict, replace
+from itertools import pairwise
 
 from ._execution import _WorldEffectKind, _WorldEffectOrigin
 from ._operations import ObjectState, SetObjectState
@@ -68,6 +69,29 @@ class MechanismService:
                     for target in targets:
                         index.setdefault((kind, scene, target), []).append((oid, number, trigger))
         return TriggerIndex({key: tuple(sorted(entries)) for key, entries in index.items()})
+
+    @staticmethod
+    def _region_entries(index, scene, start, end):
+        """Return indexed destination triggers whose region does not contain the origin."""
+        return (
+            entry
+            for entry in index.get(("enter_region", scene, end), ())
+            if start not in entry[2].cells
+        )
+
+    def has_armed_region_entry(self, sid, scene, path):
+        """Check the actual same-scene path against armed entry triggers."""
+        index = self._scene_index(sid, scene)
+        for start, end in pairwise(path):
+            for oid, _, _ in self._region_entries(index, scene, start, end):
+                state = self.h.facts.mechanism_state(sid, oid)
+                if (
+                    state is not None
+                    and state.status == "armed"
+                    and self.h.facts.placement(sid, oid)["scene_id"] == scene
+                ):
+                    return True
+        return False
 
     def qualify_link(self, sid, origin, target, kind, value, package):
         """Validate internal linkage origin and target parameters."""
@@ -687,7 +711,8 @@ class MechanismService:
             if motion is None:
                 return derived
             scene, actor = motion.to_scene_id, motion.actor_id
-            candidates = index.get(("enter_region", scene, motion.to_cell), ())
+            origin = motion.from_cell if motion.from_scene_id == scene else None
+            candidates = self._region_entries(index, scene, origin, motion.to_cell)
             target_kind = "enter_region"
         elif kind == "rules.check_rolled":
             adjudication = payload.get("adjudication", {})
@@ -710,15 +735,10 @@ class MechanismService:
         for oid, _, trigger in candidates:
             if oid in fired:
                 continue  # One matching operation per instance and mechanical source event.
-            if target_kind == "enter_region":
-                if motion.to_cell not in trigger.cells or (
-                    motion.from_scene_id == scene and motion.from_cell in trigger.cells
-                ):
-                    continue
-            elif target_kind == "check_result":
+            if target_kind == "check_result":
                 if payload["engine_event"]["succeeded"] != trigger.succeeded:
                     continue
-            elif (
+            elif target_kind == "object_operation" and (
                 kind != trigger.event_type
                 or trigger.value is not None
                 and payload.get(

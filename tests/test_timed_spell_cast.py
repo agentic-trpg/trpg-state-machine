@@ -13,15 +13,25 @@ from dnd5e_srd_data import BundledAssetLoader, MemoryAssetLoader
 from dnd5e_srd_data.schema.common import PassiveEffectChange
 from dnd5e_srd_data.schema.spell import SpellDuration, SpellDurationUnits
 from dnd_support import create, initialize
-from item_support import NPC, item_data, item_loader
+from item_support import NPC, A, item_data, item_loader
+from lock_support import CRED
+from spatial_support import submit as submit_world
 from test_hold_effect_candidate import pass_command
+from test_mechanism_service import extended_data, trigger
 from test_real_checks import check_command
 from test_session_time_coordination import submit
+from test_world_mechanisms import LEVER
 
 from trpg_state_machine import (
     AdvanceSessionTime,
+    EnvironmentArea,
+    EnvironmentConditions,
+    EnvironmentSceneFacts,
+    EnvironmentSource,
+    InitializeEnvironment,
     StateMachine,
     StateMachineError,
+    StepActor,
     TimeBinding,
     TypedCommand,
 )
@@ -45,6 +55,7 @@ def timed_spell_world(tmp_path, context):
         seed=0,
         walking=False,
         attack_after_walk=False,
+        region_mechanism=False,
     ):
         canonical = BundledAssetLoader()
         base = item_loader()
@@ -89,6 +100,17 @@ def timed_spell_world(tmp_path, context):
             spells=[spell],
         )
         data = item_data()
+        if region_mechanism:
+            fixture = extended_data(triggers=[trigger("enter_region", cells=["1,0", "1,1", "1,2"])])
+            objects = {LEVER, CRED}
+            data["manifest"]["schema_version"] = "state-machine-foundation/10"
+            data["lockable_doors"] = []
+            data.setdefault("world_objects", []).extend(
+                item for item in fixture["world_objects"] if item["object_id"] in objects
+            )
+            data["scenes"][0]["objects"].extend(
+                item for item in fixture["scenes"][0]["objects"] if item["object_id"] in objects
+            )
         data["manifest"]["ruleset_binding"] = ruleset_binding(loader).model_dump(mode="json")
         data["time_binding"] = asdict(TimeBinding())
         foe_cell = "8,0" if attack_after_walk else "11,2"
@@ -918,3 +940,101 @@ def test_timed_walk_refuses_consistent_but_nonadjacent_result(timed_spell_world,
         assert sm.get_command_receipt(sid, command.command_id, package, context=context) is None
         assert sm.read_combat_snapshot(sid, package, context=context) == fixed
         assert sm.submit_command(command, package, context=context).status == "committed"
+
+
+@pytest.mark.parametrize(
+    ("cells", "destination", "status"),
+    [
+        (("1,0",), "1,0", "rejected"),
+        (("1,0", "1,1", "1,2"), "2,0", "rejected"),
+        (("0,0", "1,0"), "1,0", "committed"),
+        (("6,0",), "2,0", "committed"),
+    ],
+    ids=["enter", "enter-exit", "same-region", "unrelated"],
+)
+def test_timed_walk_respects_fixed_region_coverage(timed_spell_world, cells, destination, status):
+    """Trace every routed cell through the trusted by-cell environmental index."""
+    session = timed_spell_world(walking=True)
+    sm, sid, package, context = session
+    with sm:
+        source = EnvironmentSource(
+            "toxic.area",
+            EnvironmentConditions(),
+            EnvironmentArea(cells),
+            region_condition="poisoned",
+        )
+        seeded = sm.environment.initialize(
+            sid,
+            (InitializeEnvironment(A, EnvironmentSceneFacts(sources=(source,))),),
+            package,
+            command_id="seed.region",
+            expected_world_version=sm.read_session(sid, package, context=context).world_version,
+            context=replace(context, can_manage_environment=True),
+        )
+        assert seeded.status == "committed", seeded
+        cast = cast_command(session)
+        assert sm.submit_command(cast, package, context=context).status == "committed"
+        assert initialize(sm, sid, package, context).status == "committed"
+        fixed = sm.read_combat_snapshot(sid, package, context=context)
+        assert (
+            sm.submit_command(pass_command(sid, fixed, "npc-pass"), package, context=context).status
+            == "committed"
+        )
+        fixed = sm.read_combat_snapshot(sid, package, context=context)
+        rng = sm.read_rng_context(sid, package, context=context)
+        command = move_command(session, destination, "walk.region")
+        receipt = sm.submit_command(command, package, context=context)
+        assert receipt.status == status, receipt
+        current = sm.read_combat_snapshot(sid, package, context=context)
+        assert sm.read_rng_context(sid, package, context=context) == rng
+        if status == "rejected":
+            assert receipt.error_code == "movement.capability"
+            assert receipt.event_seqs == ()
+            assert current == fixed
+            assert sm.submit_command(command, package, context=context) == receipt
+            assert (
+                sm.read_actor_position(sid, cast.actor_id, package, context=context).cell == "0,0"
+            )
+        else:
+            assert current.combat_state.actor_zone[cast.actor_id] == destination
+
+
+def test_timed_walk_refuses_world_region_mechanism_entry(timed_spell_world):
+    """A real armed regional trip cannot be skipped on a multi-edge walk."""
+    control = timed_spell_world(walking=True, region_mechanism=True, database="trip-control.db")
+    control_sm, control_sid, control_package, control_context = control
+    with control_sm:
+        entered = submit_world(
+            control_sm,
+            control_sid,
+            control_package,
+            control_context,
+            StepActor(A, "0,0", "1,0"),
+            "step.exploration.trip",
+        )
+        assert entered.status == "committed", entered
+        assert control_sm._world_facts.mechanism_state(control_sid, LEVER).activation_count == 1
+        assert control_sm._world_facts.light_state(control_sid, CRED)["enabled"]
+
+    session = timed_spell_world(walking=True, region_mechanism=True)
+    sm, sid, package, context = session
+    with sm:
+        cast = cast_command(session)
+        assert sm.submit_command(cast, package, context=context).status == "committed"
+        assert initialize(sm, sid, package, context).status == "committed"
+        fixed = sm.read_combat_snapshot(sid, package, context=context)
+        assert (
+            sm.submit_command(pass_command(sid, fixed, "npc-pass"), package, context=context).status
+            == "committed"
+        )
+        fixed = sm.read_combat_snapshot(sid, package, context=context)
+        mechanism = sm._world_facts.mechanism_state(sid, LEVER)
+        assert mechanism.status == "armed"
+        receipt = sm.submit_command(
+            move_command(session, "2,0", "walk.across.trip"), package, context=context
+        )
+        assert (receipt.status, receipt.error_code) == ("rejected", "movement.capability")
+        assert receipt.event_seqs == ()
+        assert sm._world_facts.mechanism_state(sid, LEVER) == mechanism
+        assert not sm._world_facts.light_state(sid, CRED)["enabled"]
+        assert sm.read_combat_snapshot(sid, package, context=context) == fixed
