@@ -368,24 +368,31 @@ class ObjectSpatialService:
         return self.project(sid, oid, package).occupied_cells if state.scene_id == scene_id else ()
 
     @scoped_read
-    def visible_cells(self, sid, actor, oid, package):
-        """Filter object target cells by the actor's current visibility."""
-        position = self.h._public_scope(sid, actor, package)
+    def _object_visibility(self, sid, position, oid, package):
+        """Read all local target cells and the subset visible from an authorized position."""
         targets = self.target_cells(sid, position.scene_id, oid, package)
-        base = self.h.grid.base_topology(sid, position.scene_id, package, cells=targets)
-        return tuple(cell for cell in targets if base.can_see(position.cell, cell))
+        visibility = self.h._prepare_visibility(sid, position, package, cells=targets)
+        return targets, tuple(cell for cell in targets if visibility.can_see(cell))
+
+    def visible_cells(self, sid, actor, oid, package, *, position=None):
+        """Filter target cells using the actor's authorized position in the current read scope."""
+        with self.h.grid.read_scope():
+            if position is None:
+                position = self.h._public_scope(sid, actor, package)
+            _, visible = self._object_visibility(sid, position, oid, package)
+            return visible
 
     def contact_cell(self, sid, actor, oid, package):
         """Nearest visible legal adjacent contact, excluding only the target itself.
 
-        Business authorization (door standing ports, container access, tools, etc.)
-        belongs to callers. This helper does not authorize an operation.
+        Callers own operation authorization, including door standing ports, container access and
+        tools.
         """
         position = self.h._public_scope(sid, actor, package)
-        visible = self.visible_cells(sid, actor, oid, package)
+        targets, visible = self._object_visibility(sid, position, oid, package)
         # Existing manual access permits contact at the actor's own cell even
         # without visual light there (e.g. an owned local emitter switch).
-        if position.cell in self.target_cells(sid, position.scene_id, oid, package):
+        if position.cell in targets:
             visible = tuple(dict.fromkeys((*visible, position.cell)))
         if not visible:
             raise StateMachineError("invalid_target", "No authorized local object")

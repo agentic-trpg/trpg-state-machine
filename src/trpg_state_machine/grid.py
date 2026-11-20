@@ -483,17 +483,20 @@ class GridService:
     @_read
     @scoped_read
     def base_topology(self, sid, scene_id, package=None, *, with_extent=False, cells=None):
-        """Legacy static/Light authorized-visibility input; not the combined current view."""
+        """Prepare static or light-overlaid topology for authorized visibility.
+
+        An explicit selection only overlays illumination for its valid cells.
+        """
         scene = self.reader.maps.scene(sid, scene_id, spatial_only=True)
         if scene is None or scene.grid is None:
             raise StateMachineError("spatial_unconfigured", "Scene has no fine spatial capability")
         prepared = scene.grid
         if package is not None and cells is not None:
-            lighting = {
-                cell: self.h.objects.lights.current_cell(sid, scene_id, package, cell)[0]
-                for cell in dict.fromkeys(cells)
-                if cell_in_bounds(prepared.topology, cell)
-            }
+            selected = (
+                cell for cell in dict.fromkeys(cells) if cell_in_bounds(prepared.topology, cell)
+            )
+            levels = self.h.objects.lights.current_cells(sid, scene_id, package, selected)
+            lighting = {cell: result[0] for cell, result in levels.items()}
             topology = prepared.topology.with_lighting(lighting)
             return (
                 (topology, (prepared.data["width"], prepared.data["height"]))

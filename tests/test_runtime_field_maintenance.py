@@ -454,7 +454,9 @@ def test_capability_subtree_shading_carrier_move_and_rollback(tmp_path, context,
                 == "committed"
             )
             assert (
-                sm.get_illumination(sid, actor, "1,0", package, context=context)["illumination"]
+                sm.get_illumination_area(sid, actor, ("1,0",), package, context=context)[0][
+                    "illumination"
+                ]
                 == "dark"
             )
             assert (
@@ -464,7 +466,9 @@ def test_capability_subtree_shading_carrier_move_and_rollback(tmp_path, context,
                 == "committed"
             )
             assert (
-                sm.get_illumination(sid, actor, "1,0", package, context=context)["illumination"]
+                sm.get_illumination_area(sid, actor, ("1,0",), package, context=context)[0][
+                    "illumination"
+                ]
                 == "bright"
             )
             assert (

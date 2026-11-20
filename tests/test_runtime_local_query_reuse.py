@@ -148,7 +148,7 @@ def test_light_scalar_hit_cost(tmp_path, context, monkeypatch, n):
         actor = sm.read_session(sid, package, context=context).pc_actor_id
 
         def read(cell="1,0"):
-            return sm.get_illumination(sid, actor, cell, package, context=context)
+            return sm.get_illumination_area(sid, actor, (cell,), package, context=context)[0]
 
         assert read()["illumination"] == "dark"
         with work(sm, monkeypatch) as counts:

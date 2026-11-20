@@ -264,7 +264,9 @@ def test_public_point_queries_cannot_probe_hidden_vertical_or_horizontal_scope(t
         sm._conn.execute("PRAGMA query_only=ON")
         try:
             outputs = [
-                sm.environment.query_cell(sid, pc, A, cell, p, context=context, height_ft=z)
+                sm.environment.query_area(
+                    sid, pc, A, EnvironmentArea((cell,)), p, context=context, height_ft=z
+                )[0]
                 for cell in ("0,0", "1,0", "2,0")
                 for z in (0, 2, 3, 4, 6)
             ]
@@ -383,7 +385,9 @@ def test_scene_field_disclosure_stable_across_hidden_changes_and_all_query_paths
             try:
                 cells = ("0,0", "1,0", "2,0")
                 points = tuple(
-                    sm.environment.query_cell(sid, pc, A, c, p, context=context, height_ft=z)
+                    sm.environment.query_area(
+                        sid, pc, A, EnvironmentArea((c,)), p, context=context, height_ft=z
+                    )[0]
                     for c in cells
                     for z in (0, 2, 3, 4, 6)
                 )

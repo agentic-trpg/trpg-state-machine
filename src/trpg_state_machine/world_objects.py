@@ -471,13 +471,19 @@ class WorldObjectService:
             raise StateMachineError("item_charges_exhausted", "No item charges remain")
         return item
 
-    def _visible(self, sid, actor_id, oid, package):
-        """Check actual object placement and visible/touchable eligibility."""
-        h = self.handler
-        h._public_scope(sid, actor_id, package)
+    def _visible(self, sid, actor_id, oid, package, *, position=None):
+        """Check local object disclosure for an already authorized caller."""
+        if position is None:
+            position = self.handler._public_scope(sid, actor_id, package)
         obj = self.facts.object(sid, oid)
         if obj is None:
             raise StateMachineError("invalid_target", "No authorized local object")
+        self._require_visible(sid, actor_id, position, obj, package)
+        return obj
+
+    def _require_visible(self, sid, actor_id, position, obj, package, *, visible=None):
+        """Admit a selected row by visual contact or the existing inventory access rules."""
+        oid = obj["object_id"]
         if obj["item_slug"] is not None and not self.facts.instances.is_portable(sid, oid):
             raise StateMachineError("invalid_target", "No authorized local object")
         if obj["container_id"] is not None:
@@ -485,25 +491,26 @@ class WorldObjectService:
                 self.containers.reachable(sid, actor_id, oid, package)
             except StateMachineError as exc:
                 raise StateMachineError("invalid_target", "No authorized local object") from exc
-            return obj
+            return
         if obj["carrier_id"] == actor_id:
-            return obj
-        if not self.spatial.visible_cells(sid, actor_id, oid, package):
+            return
+        if visible is None:
+            visible = bool(
+                self.spatial.visible_cells(sid, actor_id, oid, package, position=position)
+            )
+        if not visible:
             raise StateMachineError("invalid_target", "No authorized local object")
-        return obj
 
     @scoped_read
-    def _view_inputs(self, sid, actor_id):
-        """Prepare actor position and world version once for object views."""
-        return self.handler._actor_position(sid, actor_id), self.handler._conn.execute(
+    def _view_session(self, sid):
+        """Share the current Session capability inputs among object views in this read."""
+        return self.handler._conn.execute(
             "SELECT * FROM sessions WHERE session_id=?", (sid,)
         ).fetchone()
 
-    def view(self, sid, actor_id, oid, package, *, containment=None):
-        """Combine instance capabilities/current state into an authorized contents-aware
-        object view.
-        """
-        obj = self._visible(sid, actor_id, oid, package)
+    def _view(self, sid, actor_id, position, obj, package):
+        """Build the contents-aware view of a row already admitted for this observer."""
+        oid = obj["object_id"]
         definition = self.facts.object_definition(sid, oid)
         config = (
             asdict(definition)
@@ -530,7 +537,7 @@ class WorldObjectService:
         projection = self.spatial.project(sid, oid, package)
         from ._operations import ObjectState, SetObjectState
 
-        position, row = self._view_inputs(sid, actor_id)
+        row = self._view_session(sid)
         available = {}
         for name, op in (
             ("can_activate", ActivateMechanism(position.scene_id, oid, position.cell)),
@@ -590,7 +597,7 @@ class WorldObjectService:
             "capabilities": declared,
             "effective_capabilities": () if destroyed else declared,
             "open_state": obj["state"],
-            "location": self.facts.object_position(sid, oid),
+            "location": self.facts.object_position(sid, oid, row=obj),
         }
 
     def get_object(self, sid, actor_id, oid, package, *, context):
@@ -600,7 +607,9 @@ class WorldObjectService:
         h = self.handler
         with h._transaction():
             h._spatial_reader(sid, actor_id, package, context)
-            return self.view(sid, actor_id, oid, package)
+            position = h._public_scope(sid, actor_id, package)
+            obj = self._visible(sid, actor_id, oid, package, position=position)
+            return self._view(sid, actor_id, position, obj, package)
 
     def list_objects(self, sid, actor_id, package, *, context):
         """List actual visible scene/door-associated objects using shared read inputs."""
@@ -617,9 +626,37 @@ class WorldObjectService:
             candidates = self.facts.scene_object_rows(
                 sid, position.scene_id, carrier_id=actor_id, extra=doors
             )
+            targets = {
+                obj["object_id"]: self.spatial.target_cells(
+                    sid, position.scene_id, obj["object_id"], package
+                )
+                for obj in candidates
+                if obj["container_id"] is None
+                and obj["carrier_id"] != actor_id
+                and (
+                    obj["item_slug"] is None
+                    or self.facts.instances.is_portable(sid, obj["object_id"])
+                )
+            }
+            visible = frozenset()
+            if targets:
+                cells = tuple(
+                    dict.fromkeys(cell for footprint in targets.values() for cell in footprint)
+                )
+                sight = h._prepare_visibility(sid, position, package, cells=cells)
+                visible = frozenset(cell for cell in cells if sight.can_see(cell))
             for obj in candidates:
                 try:
-                    result.append(self.view(sid, actor_id, obj["object_id"], package))
+                    cells = targets.get(obj["object_id"])
+                    self._require_visible(
+                        sid,
+                        actor_id,
+                        position,
+                        obj,
+                        package,
+                        visible=None if cells is None else not visible.isdisjoint(cells),
+                    )
+                    result.append(self._view(sid, actor_id, position, obj, package))
                 except StateMachineError as exc:
                     if exc.code != "invalid_target":
                         raise

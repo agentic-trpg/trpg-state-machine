@@ -37,7 +37,7 @@ def test_light_candidate_map_shading_rollback_and_reload(tmp_path, context, monk
         lights = sm._objects.lights
 
         def current():
-            return lights.current_cell(sid, A, package, "1,0")
+            return lights.current_cells(sid, A, package, ("1,0",))["1,0"]
 
         assert current()[0] == "dark"
         with pytest.raises(ValueError), sm._transaction(write=True):
@@ -85,7 +85,9 @@ def test_light_candidate_map_shading_rollback_and_reload(tmp_path, context, monk
     with StateMachine(db, dnd_loader=lock_loader()) as recovered:
         recovered.resume_session(sid, package, context=context)
         assert (
-            recovered.get_illumination(sid, actor, "1,0", package, context=context)["illumination"]
+            recovered.get_illumination_area(sid, actor, ("1,0",), package, context=context)[0][
+                "illumination"
+            ]
             == "bright"
         )
 
@@ -97,7 +99,7 @@ def test_light_geometry_only_invalidates_relevant_ground_changes(tmp_path, conte
         lights, facts = sm._objects.lights, sm._world_facts
         with sm._transaction(write=True):
             facts.set_light_state(sid, CRED, True, "normal")
-        old = lights.current_cell(sid, A, package, "2,0")
+        old = lights.current_cells(sid, A, package, ("2,0",))["2,0"]
         assert old[0] == "dim" and not old[1]
         with sm._transaction(write=True):
             config = facts.instances.get(sid, "object", BAG)
@@ -107,10 +109,10 @@ def test_light_geometry_only_invalidates_relevant_ground_changes(tmp_path, conte
                 "AND domain='object' AND instance_id=?",
                 (canonical_json(config), sid, BAG),
             )
-        assert lights.current_cell(sid, A, package, "2,0")[1]
+        assert lights.current_cells(sid, A, package, ("2,0",))["2,0"][1]
         with sm._transaction(write=True):
             facts.transfer_item(sid, facts.object(sid, BAG), scene_id=A, cell="0,1")
-        assert lights.current_cell(sid, A, package, "2,0") == old
+        assert lights.current_cells(sid, A, package, ("2,0",))["2,0"] == old
         with sm._transaction(write=True):
             config = facts.instances.get(sid, "object", BAG)
             config["blocks_passage"] = False
@@ -119,11 +121,11 @@ def test_light_geometry_only_invalidates_relevant_ground_changes(tmp_path, conte
                 "AND domain='object' AND instance_id=?",
                 (canonical_json(config), sid, BAG),
             )
-        lights.current_cell(sid, A, package, "2,0")
+        lights.current_cells(sid, A, package, ("2,0",))["2,0"]
         with sm._transaction(write=True):
             facts.transfer_item(sid, facts.object(sid, BAG), scene_id=A, cell="1,0")
         with work(sm, monkeypatch) as counts:
-            assert lights.current_cell(sid, A, package, "2,0") == old
+            assert lights.current_cells(sid, A, package, ("2,0",))["2,0"] == old
         assert counts["instance_builds"] == 0
 
 
@@ -340,7 +342,7 @@ def test_light_recovery_invalidates_old_context_and_preserves_old_input(
     first, sid, package, db = setup(tmp_path, context, lighting_data())
     with first, StateMachine(db, dnd_loader=lock_loader()) as second:
         actor = first.read_session(sid, package, context=context).pc_actor_id
-        old = first.get_illumination(sid, actor, "1,0", package, context=context)
+        old = first.get_illumination_area(sid, actor, ("1,0",), package, context=context)[0]
         second.read_session(sid, package, context=context)
         op = command(
             first,
@@ -369,10 +371,12 @@ def test_light_recovery_invalidates_old_context_and_preserves_old_input(
             "committed_publication_pending" if failure == "publish" else "commit_outcome_unknown"
         )
         with pytest.raises(StateMachineError, match="reconciliation"):
-            first.get_illumination(sid, actor, "1,0", package, context=context)
+            first.get_illumination_area(sid, actor, ("1,0",), package, context=context)[0]
         second.resume_session(sid, package, context=context)
         assert (
-            first.get_illumination(sid, actor, "1,0", package, context=context)["illumination"]
+            first.get_illumination_area(sid, actor, ("1,0",), package, context=context)[0][
+                "illumination"
+            ]
             == "bright"
         )
         assert old["illumination"] == "dark" and old["contributing_sources"] == ()

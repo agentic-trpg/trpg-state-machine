@@ -372,6 +372,44 @@ class SpellRef:
         return self
 
 
+def _field_owner(memory, key):
+    """Get the staged or published owner, falling back to its empty field set."""
+    cached = memory.get(key)
+    if cached is not None:
+        return cached[0]
+    _, sid, kind, identity = key
+    if kind == "object":
+        return ObjectRuntime(sid, identity)
+    if kind == "scene":
+        return SceneRuntime(sid, identity)
+    if kind == "actor":
+        return CharacterRuntime(sid, identity)
+    return WorldRuntime(sid)
+
+
+def _stage_field_entries(memory, key, owner, component, name, entries):
+    """Stage an immutable field replacement with its retained dependencies."""
+    if component:
+        group = replace(getattr(owner, component), **{name: entries})
+        owner = replace(owner, **{component: group})
+    else:
+        owner = replace(owner, **{name: entries})
+
+    def retained_dependencies(group):
+        """Collect dependency version groups retained by the field structure."""
+        for descriptor in fields(group):
+            value = getattr(group, descriptor.name)
+            if is_dataclass(value):
+                yield from retained_dependencies(value)
+            elif isinstance(value, tuple):
+                for entry in value:
+                    if isinstance(entry, FieldValue):
+                        yield entry.dependencies
+
+    retained = DependencyGroups(tuple(retained_dependencies(owner)))
+    memory.put(key, (owner, None, retained, ()))
+
+
 def resolve_field(
     store,
     kind,
@@ -407,24 +445,7 @@ def resolve_field(
     store._scope.memory_sessions.add(sid)
     key = ("instance", sid, kind, identity)
 
-    def owner():
-        """Resolve the runtime owner from an existing field or instance kind."""
-        cached = memory.get(key)
-        return (
-            cached[0]
-            if cached
-            else (
-                ObjectRuntime(sid, identity)
-                if kind == "object"
-                else SceneRuntime(sid, identity)
-                if kind == "scene"
-                else CharacterRuntime(sid, identity)
-                if kind == "actor"
-                else WorldRuntime(sid)
-            )
-        )
-
-    current = owner()
+    current = _field_owner(memory, key)
     group = getattr(current, component) if component else current
     entries = getattr(group, name)
     # These fields have an explicit mutation protocol in SessionMemory.changed.
@@ -470,27 +491,110 @@ def resolve_field(
         (stamp,) if maintained else tuple(memory.version(d) for d in dependencies),
     )
     # Nested computations may have filled other fields of this same owner.
-    current = owner()
+    current = _field_owner(memory, key)
     group = getattr(current, component) if component else current
     entries = (entry, *(e for e in getattr(group, name) if e.parameter != parameter))[:capacity]
-    group = replace(group, **{name: entries})
-    current = replace(current, **{component: group}) if component else group
-
-    # Keep dependency metadata alive under the same byte/entry budget as facts.
-    def retained_dependencies(group):
-        """Collect dependency version groups retained by the field structure."""
-        for descriptor in fields(group):
-            value = getattr(group, descriptor.name)
-            if is_dataclass(value):
-                yield from retained_dependencies(value)
-            elif isinstance(value, tuple):
-                for entry in value:
-                    if isinstance(entry, FieldValue):
-                        yield entry.dependencies
-
-    retained = DependencyGroups(tuple(retained_dependencies(current)))
-    memory.put(key, (current, None, retained, ()))
+    _stage_field_entries(memory, key, current, component, name, entries)
     return deepcopy(value)
+
+
+def resolve_field_batch(
+    store,
+    kind,
+    sid,
+    identity,
+    component,
+    name,
+    parameters,
+    compute_missing,
+    *,
+    capacity=1,
+    versioned_parameters=False,
+    maintained=None,
+):
+    """Reuse valid fields and compute only missing parameters in one fixed scope.
+
+    The callback receives unique misses in request order and returns a value for
+    each. Capture hits before any eviction, then stage one owner replacement.
+    """
+    requested = tuple(dict.fromkeys(parameters))
+    if not requested:
+        return {}
+    if store._scope is None:
+        with store.transaction():
+            return resolve_field_batch(
+                store,
+                kind,
+                sid,
+                identity,
+                component,
+                name,
+                requested,
+                compute_missing,
+                capacity=capacity,
+                versioned_parameters=versioned_parameters,
+                maintained=maintained,
+            )
+    memory = store.memory
+    memory.guard(sid)
+    store._scope.memory_sessions.add(sid)
+    key = ("instance", sid, kind, identity)
+    owner = _field_owner(memory, key)
+    group = getattr(owner, component) if component else owner
+    cached = {entry.parameter: entry for entry in getattr(group, name)}
+    stamps = {}
+
+    def version(dependency):
+        """Share the version sampled before the batch computes any fields."""
+        if dependency not in stamps:
+            stamps[dependency] = memory.version(dependency)
+        return stamps[dependency]
+
+    hits = {}
+    missing = []
+    for parameter in requested:
+        entry = cached.get(parameter)
+        if entry is not None and entry.stamps == tuple(version(d) for d in entry.dependencies):
+            hits[parameter] = deepcopy(entry.value)
+        else:
+            missing.append(parameter)
+    for dependency in {d for parameter in hits for d in cached[parameter].dependencies}:
+        memory.dependency(*dependency)
+    memory.stats["instance_hits"] += len(hits)
+    if not missing:
+        return hits
+
+    dependencies_by_parameter = {}
+    collected = set()
+    if maintained:
+        for parameter in missing:
+            dependency = memory.maintained_dependency(maintained, sid, identity, parameter)
+            dependencies_by_parameter[parameter] = (dependency,)
+            version(dependency)
+    collectors = memory.collectors
+    if maintained:
+        memory.collectors = []
+    memory.collectors.append(collected)
+    try:
+        memory.stats["instance_builds"] += len(missing)
+        computed = compute_missing(tuple(missing))
+        values = {parameter: computed[parameter] for parameter in missing}
+    finally:
+        memory.collectors.pop()
+        memory.collectors = collectors
+
+    shared = () if maintained or versioned_parameters else tuple(sorted(collected, key=repr))
+    entries = []
+    for parameter in tuple(reversed(missing))[:capacity]:
+        dependencies = dependencies_by_parameter.get(parameter, shared)
+        stamp = tuple(stamps[d] if maintained else memory.version(d) for d in dependencies)
+        entries.append(FieldValue(parameter, values[parameter], dependencies, stamp))
+    # Nested field reads can prepare siblings on this owner during the callback.
+    owner = _field_owner(memory, key)
+    group = getattr(owner, component) if component else owner
+    entries.extend(entry for entry in getattr(group, name) if entry.parameter not in values)
+    _stage_field_entries(memory, key, owner, component, name, tuple(entries[:capacity]))
+    return {p: hits[p] if p in hits else deepcopy(values[p]) for p in requested}
 
 
 def instance_read(kind, component, name, *, capacity=1, maintained=None):
@@ -619,3 +723,36 @@ class SceneFieldCache:
             capacity=self.capacity,
             versioned_parameters=True,
         )
+
+    def resolve_cells(self, scope, identity, versions, parameters, compute_missing):
+        """Resolve a batch of cell results with the same per-cell cache keys."""
+        parameters = tuple(dict.fromkeys(parameters))
+        if not parameters:
+            return {}
+        if scope is None:
+            return compute_missing(parameters)
+        sid, _, _, _, _, scene, _ = identity
+        prefix = (
+            (self.generation, self.session_generations.get(sid, 0)),
+            identity[1:],
+            versions,
+        )
+
+        def compute(keys):
+            """Translate versioned cache keys to the caller's cell parameters."""
+            values = compute_missing(tuple(key[-1] for key in keys))
+            return {key: values[key[-1]] for key in keys}
+
+        values = resolve_field_batch(
+            self.store,
+            "scene",
+            sid,
+            scene,
+            "environment",
+            self.name,
+            (prefix + (parameter,) for parameter in parameters),
+            compute,
+            capacity=self.capacity,
+            versioned_parameters=True,
+        )
+        return {key[-1]: value for key, value in values.items()}

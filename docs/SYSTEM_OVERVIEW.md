@@ -118,7 +118,9 @@ SM 推进一小时，并与 RE 返回的所选生命骰支付、治疗和适用�
 常用入口：`StateMachine.create_session`、`read_session`、`save_session`、
 `resume_session`、`unload_session`、`close`；规则命令另有 `submit_command_async`。
 局部查询包括 `query_world_action`、`get_object`、`read_carried_items`、
-`get_spatial_view`、`get_illumination` 及 `environment` 的授权查询。
+`get_spatial_view`、`get_illumination_area` 及 `environment` 的授权查询。
+对象详情、场景对象列表及空间视图在同一读取版本内准备观察者位置和所需格子的照明，
+并复用既有的场景缓存。光照和环境的区域入口也接受只含一个格子的请求。
 `read_session` 是显式完整 SessionSnapshot 读取，普通局部操作不必先构造它。
 
 ## 3. 代表性处理流程

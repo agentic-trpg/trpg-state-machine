@@ -2881,12 +2881,12 @@ class WorldFacts:
         if removed.rowcount != 1:
             raise StateMachineError("version_conflict", "Consumed item changed")
 
-    def object_position(self, sid, object_id):
-        """Resolve the object's current spatial position."""
-        obj = self.object(sid, object_id)
+    def object_position(self, sid, object_id, *, row=None):
+        """Resolve spatial position, reusing the object's row from the current scope if supplied."""
+        obj = row if row is not None else self.object(sid, object_id)
         return (
             {
-                **self.placement(sid, object_id),
+                **self.placement(sid, object_id, row=obj),
                 "state": obj["state"],
                 "orientation": obj["orientation"],
             }

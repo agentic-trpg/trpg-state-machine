@@ -6,10 +6,11 @@ from dnd5e_engine.spatial import cell_id, parse_cell
 
 from ._execution import _execution_data
 from .errors import StateMachineError
-from .runtime_instances import instance_read
+from .runtime_instances import instance_read, resolve_field_batch
 from .world_commands import SetLightEnabled
 
 _RANK = {"dark": 0, "dim": 1, "bright": 2}
+_MAX_QUERY_CELLS = 256
 
 
 @dataclass(frozen=True, slots=True)
@@ -100,21 +101,81 @@ class LightService:
         grid, _, _ = self.current_project(sid, scene, package)
         return prepared.topology.with_lighting(grid["lighting"])
 
-    @instance_read("scene", "lighting", "cells", capacity=128, maintained="light_result")
-    def current_cell(self, sid, scene, package, cell):
-        """Compute illumination for the requested cell, using base light directly when no
-        sources contribute.
+    def current_cells(self, sid, scene, package, cells):
+        """Resolve trusted in-bounds cells through the Scene's maintained per-cell field.
+
+        Reuse available cells and prepare one source selection and geometry for the misses.
         """
+        package_key = ("package", package.package_digest)
+        parameters = {cell: ((package_key, cell), ()) for cell in cells}
+
+        def compute_missing(missing):
+            """Build only the scalar entries that were absent or invalidated."""
+            levels = self._compute_cells(sid, scene, package, tuple(key[0][1] for key in missing))
+            return {key: levels[key[0][1]] for key in missing}
+
+        values = resolve_field_batch(
+            self.h.store,
+            "scene",
+            sid,
+            scene,
+            "lighting",
+            "cells",
+            parameters.values(),
+            compute_missing,
+            capacity=128,
+            maintained="light_result",
+        )
+        return {cell: values[key] for cell, key in parameters.items()}
+
+    def _compute_cells(self, sid, scene, package, cells):
+        """Prepare the base grid and evaluate candidate light contributions for cache misses."""
         prepared = self.h.grid.reader.current_grid(sid, scene, package)
         sources = self.sources(sid, scene, package)
         if not sources:
-            return (
-                prepared.data["lighting"].get(cell, prepared.data["default_lighting"]),
-                False,
-                (),
+            lighting = prepared.data["lighting"]
+            default = prepared.data["default_lighting"]
+            return {cell: (lighting.get(cell, default), False, ()) for cell in cells}
+        by_cell = self._sources_for_cells(prepared.topology, sources, cells)
+        geometry = self.geometry(sid, scene, package) if any(by_cell.values()) else None
+        return {
+            cell: (
+                self._illuminate_cell(
+                    prepared.topology, geometry.topology, geometry.candidates, by_cell[cell], cell
+                )
+                if by_cell.get(cell)
+                else (prepared.topology.light_on_cell(cell), False, ())
             )
-        candidates, geometry = self.geometry(sid, scene, package)
-        return self._illuminate_cell(prepared.topology, geometry, candidates, sources, cell)
+            for cell in cells
+        }
+
+    @staticmethod
+    def _sources_for_cells(topology, sources, cells):
+        """Traverse scene emitters once and assign them to reachable selected cells.
+
+        Unknown or out-of-bounds origins still participate in every requested cell.
+        Actual cover, sight lines and transmission are resolved during composition.
+        """
+        coordinates = {cell: parse_cell(cell) for cell in cells}
+        columns, rows = zip(*coordinates.values(), strict=True)
+        left, right = min(columns), max(columns)
+        top, bottom = min(rows), max(rows)
+        by_cell = {cell: [] for cell in cells}
+        for source in sources:
+            origin = source["cell"]
+            if origin is None or topology.distance_ft(origin, origin) is None:
+                for candidates in by_cell.values():
+                    candidates.append(source)
+                continue
+            x, y = parse_cell(origin)
+            # Match GridTopology's Chebyshev radius, including its outer boundary.
+            radius = source["mode"].dim_outer_radius_ft // topology.cell_size_ft
+            if not (left - radius <= x <= right + radius and top - radius <= y <= bottom + radius):
+                continue
+            for cell, (col, row) in coordinates.items():
+                if max(abs(col - x), abs(row - y)) <= radius:
+                    by_cell[cell].append(source)
+        return by_cell
 
     @staticmethod
     def _illuminate_cell(topology, uncertain_geometry, candidates, sources, cell):
@@ -338,36 +399,51 @@ class LightService:
         )
         return events
 
-    def query_illumination(self, sid, actor, cell, package, *, context):
-        """Authorize visible cell access and source disclosure, returning known or unknown
-        illumination.
+    def query_area(self, sid, actor, cells, package, *, context):
+        """Return illumination records in caller order after authorizing every cell.
+
+        Resolve current values in one read scope. Disclose each source only if the
+        actor can access it under the current object visibility rules.
         """
-        if type(cell) is not str or not 0 < len(cell) <= 128:
-            raise StateMachineError("invalid_query", "Cell must be a bounded coordinate string")
+        if type(cells) not in (list, tuple) or not 1 <= len(cells) <= _MAX_QUERY_CELLS:
+            raise StateMachineError("invalid_query", "Select between 1 and 256 grid cells")
+        cells = tuple(cells)
+        if any(type(cell) is not str or not 0 < len(cell) <= 128 for cell in cells):
+            raise StateMachineError("invalid_query", "Cells must be bounded coordinate strings")
         h = self.h
         with h._transaction():
             position = h._spatial_reader(sid, actor, package, context)
             h._public_scope(sid, actor, package)
             prepared = h.grid.reader.prepared_scene(sid, position.scene_id, package)
             topology = prepared.topology
-            try:
-                visible_cell = topology.has_line_of_sight(position.cell, cell)
-            except (ValueError, TypeError) as exc:
-                raise StateMachineError("invalid_query", "Invalid grid coordinate") from exc
-            if not visible_cell:
-                raise StateMachineError("invalid_target", "No authorized local position")
-            level, uncertain, sources = self.current_cell(sid, position.scene_id, package, cell)
-            visible = []
-            for oid in sources:
+            for cell in dict.fromkeys(cells):
                 try:
-                    h.objects._visible(sid, actor, oid, package)
-                    visible.append(oid)
-                except StateMachineError:
-                    pass
-            return {
-                "cell": cell,
-                "illumination": None if uncertain else level,
-                "status": "unknown" if uncertain else "known",
-                "contributing_sources": tuple(visible),
-                "sunlight": prepared.data["sunlight"],
-            }
+                    visible_cell = topology.has_line_of_sight(position.cell, cell)
+                except (ValueError, TypeError) as exc:
+                    raise StateMachineError("invalid_query", "Invalid grid coordinate") from exc
+                if not visible_cell:
+                    raise StateMachineError("invalid_target", "No authorized local position")
+            values = self.current_cells(sid, position.scene_id, package, cells)
+            visibility, records = {}, []
+            for cell in cells:
+                level, uncertain, sources = values[cell]
+                visible = []
+                for oid in sources:
+                    if oid not in visibility:
+                        try:
+                            h.objects._visible(sid, actor, oid, package)
+                            visibility[oid] = True
+                        except StateMachineError:
+                            visibility[oid] = False
+                    if visibility[oid]:
+                        visible.append(oid)
+                records.append(
+                    {
+                        "cell": cell,
+                        "illumination": None if uncertain else level,
+                        "status": "unknown" if uncertain else "known",
+                        "contributing_sources": tuple(visible),
+                        "sunlight": prepared.data["sunlight"],
+                    }
+                )
+            return tuple(records)

@@ -324,8 +324,13 @@ def test_npc_spatial_view_projects_only_visibility_targets(tmp_path, context, mo
     data["scenes"][0]["objects"][0]["initial_cell"] = "4,4"
     data["passages"][0]["endpoints"][0].update(standing_cell="1,1", threshold_cell="1,2")
     sm, sid, package, _ = setup(tmp_path, context, data)
-    evaluated = []
+    selected, evaluated = [], []
+    filter_sources = LightService._sources_for_cells
     illuminate_cell = LightService._illuminate_cell
+
+    def count_selection(topology, sources, cells):
+        selected.append(sorted(cells))
+        return filter_sources(topology, sources, cells)
 
     def count_cell(topology, uncertain_geometry, candidates, sources, cell):
         evaluated.append(cell)
@@ -336,27 +341,33 @@ def test_npc_spatial_view_projects_only_visibility_targets(tmp_path, context, mo
         npc_context = NPCContext("agent:spatial", sid, NPC)
         enabled = submit(sm, sid, package, context, SetLightEnabled(A, CRED, "0,0", True), "light")
         assert enabled.status == "committed"
+        monkeypatch.setattr(LightService, "_sources_for_cells", staticmethod(count_selection))
         monkeypatch.setattr(LightService, "_illuminate_cell", staticmethod(count_cell))
 
+        targets = ["1,0", "1,1", "1,2", "2,0", "4,4"]
         view = sm.get_spatial_view(sid, NPC, package, context=npc_context)
-        assert sorted(evaluated) == ["1,0", "1,1", "1,2", "2,0", "4,4"]
+        assert selected == [targets]
+        assert sorted(evaluated) == ["1,0", "1,1", "1,2", "2,0"]
         assert view.actor_position == SpatialPosition(A, "2,2")
         assert view.world_version == sm.read_session(sid, package, context=context).world_version
         assert [o[0] for o in view.objects] == [TWIN, OTHER_CRED, BOX, BAG]
         assert view.exits == ((B, PASSAGE, "1,1", "1,2"),)
         assert view.doors == (SpatialDoor(PASSAGE, DOOR, "open", "1,1", "1,2"),)
 
+        selected.clear()
         evaluated.clear()
         assert sm.get_spatial_view(sid, NPC, package, context=npc_context) == view
-        assert evaluated == []
+        assert selected == evaluated == []
 
         hooded = submit(
             sm, sid, package, context, SwitchLightMode(A, CRED, "0,0", "hooded"), "hood"
         )
         assert hooded.status == "committed"
+        selected.clear()
         evaluated.clear()
         current = sm.get_spatial_view(sid, NPC, package, context=npc_context)
-        assert sorted(evaluated) == ["1,0", "1,1", "1,2", "2,0", "4,4"]
+        assert selected == [targets]
+        assert sorted(evaluated) == ["1,0", "1,1"]
         assert current.world_version > view.world_version
         assert [o[0] for o in current.objects] == [BOX, BAG]
         assert current.exits == view.exits

@@ -220,7 +220,7 @@ def test_shared_door_multiple_passages_and_scene_light_maintenance(tmp_path, con
         before = {s: lights.geometry(sid, s, package) for s in (A, B, C)}
         actor = sm.read_session(sid, package, context=context).pc_actor_id
         cell = next(e.threshold_cell for e in shared[0].endpoints if e.scene_id == A)
-        old_light = sm.get_illumination(sid, actor, cell, package, context=context)
+        old_light = sm.get_illumination_area(sid, actor, (cell,), package, context=context)[0]
         assert (
             submit(
                 sm, sid, package, context, SetObjectState(A, DOOR, ObjectState.CLOSED), "close"
@@ -233,7 +233,7 @@ def test_shared_door_multiple_passages_and_scene_light_maintenance(tmp_path, con
             }
             assert thresholds <= lights.geometry(sid, scene, package).candidates
             assert not thresholds.intersection(before[scene].candidates)
-        closed_light = sm.get_illumination(sid, actor, cell, package, context=context)
+        closed_light = sm.get_illumination_area(sid, actor, (cell,), package, context=context)[0]
         assert old_light["status"] == "known" and closed_light["status"] == "unknown"
         assert (
             submit(
@@ -243,7 +243,10 @@ def test_shared_door_multiple_passages_and_scene_light_maintenance(tmp_path, con
         )
         for scene in (A, B, C):
             assert lights.geometry(sid, scene, package).candidates == before[scene].candidates
-        assert sm.get_illumination(sid, actor, cell, package, context=context)["status"] == "known"
+        assert (
+            sm.get_illumination_area(sid, actor, (cell,), package, context=context)[0]["status"]
+            == "known"
+        )
         assert old.door_scenes[DOOR] == (A, B) and old.by_door[OTHER_DOOR]
 
 

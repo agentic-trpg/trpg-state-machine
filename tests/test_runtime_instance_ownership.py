@@ -282,11 +282,13 @@ def test_cell_light_uses_one_cell_and_keeps_fixed_snapshots(tmp_path, context, m
 
         monkeypatch.setattr(light, "_illuminate_cell", counted)
         assert (
-            sm.get_illumination(sid, actor, "1,0", package, context=context)["illumination"]
+            sm.get_illumination_area(sid, actor, ("1,0",), package, context=context)[0][
+                "illumination"
+            ]
             == "bright"
         )
         assert calls == ["1,0"]
-        sm.get_illumination(sid, actor, "1,0", package, context=context)
+        sm.get_illumination_area(sid, actor, ("1,0",), package, context=context)[0]
         assert len(calls) == 1
         assert (
             old.scene_state.grid.lighting.get("1,0", old.scene_state.grid.default_lighting)

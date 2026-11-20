@@ -27,6 +27,7 @@ from trpg_state_machine import (
     BatchEnvironment,
     EnvironmentArea,
     HeightInterval,
+    Obscurant,
     Precipitation,
     ReplaceEnvironmentSource,
     RepositionObject,
@@ -128,7 +129,7 @@ def test_hits_never_read_detailed_inputs_in_trusted_public_and_range_interfaces(
         env = sm.environment
         pc = sm.read_session(sid, p, context=context).pc_actor_id
         a = project(sm, sid, p, "3,3")
-        public = env.query_cell(sid, pc, A, "3,3", p, context=context)
+        public = env.query_area(sid, pc, A, EnvironmentArea(("3,3",)), p, context=context)[0]
         with sm._transaction():
             ranges = env.project_height_range(sid, A, "3,3", HeightInterval(0, 8), p)
         public_ranges = env.query_height_range(
@@ -142,7 +143,9 @@ def test_hits_never_read_detailed_inputs_in_trusted_public_and_range_interfaces(
         monkeypatch.setattr(sm._objects.spatial, "prepare_scene_protection", forbidden)
         monkeypatch.setattr(sm._world.grid.reader, "scene_grid", forbidden)
         assert project(sm, sid, p, "3,3") == a
-        assert env.query_cell(sid, pc, A, "3,3", p, context=context) == public
+        assert (
+            env.query_area(sid, pc, A, EnvironmentArea(("3,3",)), p, context=context)[0] == public
+        )
         with sm._transaction():
             assert env.project_height_range(sid, A, "3,3", HeightInterval(0, 8), p) == ranges
         assert (
@@ -150,7 +153,14 @@ def test_hits_never_read_detailed_inputs_in_trusted_public_and_range_interfaces(
             == public_ranges
         )
         with pytest.raises(StateMachineError):
-            env.query_cell(sid, pc, A, "3,3", p, context=replace(context, player_id="other"))
+            env.query_area(
+                sid,
+                pc,
+                A,
+                EnvironmentArea(("3,3",)),
+                p,
+                context=replace(context, player_id="other"),
+            )[0]
 
 
 @pytest.mark.parametrize(
@@ -195,9 +205,9 @@ def test_skip_versions_batch_replay_rejection_conflict_and_rollback_alias(
                 sid, A, Facts(replace(WEATHER, temperature=Temperature(99)))
             )
             assert sm.environment.versions.current(sid, A) == (start[0] + 1, start[1])
-            assert value(sm.environment.project_cell(sid, A, "3,3", p).temperature) == Temperature(
-                99
-            )
+            assert value(
+                sm.environment.project_area(sid, A, EnvironmentArea(("3,3",)), p)[0].temperature
+            ) == Temperature(99)
             raise RuntimeError("version N candidate must not be shared")
         assert sm.environment.versions.current(sid, A) == start
         assert project(sm, sid, p, "3,3") == baseline
@@ -324,7 +334,9 @@ def test_old_reader_result_is_not_published_as_current_and_versions_do_not_accum
                 SetEnvironmentBase(A, Conditions(Temperature(88))),
                 "new",
             )
-            assert value(env.project_cell(sid, A, "4,3", p).temperature) == Temperature(8)
+            assert value(
+                env.project_area(sid, A, EnvironmentArea(("4,3",)), p)[0].temperature
+            ) == Temperature(8)
         assert not any(
             entry.parameter[2] == old and entry.parameter[3][-2:] == ("4,3", None)
             for entry in entries()
@@ -545,7 +557,7 @@ def test_failed_commit_restores_versions_and_uncommitted_results_never_publish(t
                     return original.commit()
                 assert sm.environment.versions.current(sid, A)[0] == before[0] + 1
                 assert value(
-                    sm.environment.project_cell(sid, A, "2,1", p).temperature
+                    sm.environment.project_area(sid, A, EnvironmentArea(("2,1",)), p)[0].temperature
                 ) == Temperature(99)
                 raise sqlite3.OperationalError("injected COMMIT failure")
 
@@ -661,7 +673,7 @@ def test_standalone_internal_and_whole_area_hits_need_no_environment_map_prepara
     with sm:
         env = sm.environment
         pc = sm.read_session(sid, p, context=context).pc_actor_id
-        baseline = env.project_cell(sid, A, "2,1", p)
+        baseline = env.project_area(sid, A, EnvironmentArea(("2,1",)), p)[0]
         whole = env.query_area(sid, pc, A, EnvironmentArea(), p, context=context)
 
         def forbidden(*a, **k):
@@ -669,8 +681,114 @@ def test_standalone_internal_and_whole_area_hits_need_no_environment_map_prepara
 
         monkeypatch.setattr(env, "_inputs", forbidden)
         monkeypatch.setattr(sm._world.grid.reader, "scene_grid", forbidden)
-        assert env.project_cell(sid, A, "2,1", p) == baseline
+        assert env.project_area(sid, A, EnvironmentArea(("2,1",)), p)[0] == baseline
         assert env.query_area(sid, pc, A, EnvironmentArea(), p, context=context) == whole
+
+
+@pytest.mark.parametrize("unrelated_count", [0, 32])
+def test_area_batches_only_misses_and_preserves_protection_and_disclosure(
+    tmp_path, context, monkeypatch, unrelated_count
+):
+    sm, sid, p, _, _, owner = ready(tmp_path, context)
+    with sm:
+        env = sm.environment
+        pc = sm.read_session(sid, p, context=context).pc_actor_id
+        cached, north, east, high = "4,3", "3,4", "4,4", "5,3"
+        owner.current = (
+            Source(
+                "hidden",
+                Conditions(obscurant=Obscurant("smoke", "dense")),
+                EnvironmentArea(("0,0",)),
+            ),
+            Source(
+                "east",
+                Conditions(temperature=Temperature(30), wind=Wind(20, "east")),
+                EnvironmentArea((east,)),
+                observable=True,
+            ),
+            Source(
+                "high",
+                Conditions(precipitation=Precipitation("snow", "heavy")),
+                EnvironmentArea((high,), HeightInterval(8, 10)),
+                observable=True,
+            ),
+            *(
+                Source(
+                    f"unrelated.{i}",
+                    Conditions(temperature=Temperature(50)),
+                    EnvironmentArea(("0,1",)),
+                    observable=True,
+                )
+                for i in range(unrelated_count)
+            ),
+        )
+
+        def query(*cells):
+            return env.query_area(
+                sid, pc, A, EnvironmentArea(cells), p, context=context, height_ft=3
+            )
+
+        warm = query(cached)[0]
+        assert warm.ground_precipitation.status == "none"  # Overhang from the 3,3 anchor.
+        scans, shelter_targets, candidate_inputs = [], [], []
+        source_lookup, shelter_lookup, resolve = (
+            env._sources_by_cell,
+            env._protection_by_cell,
+            env._conditions,
+        )
+
+        def count_sources(facts, effects, cells):
+            scans.append((len(effects), cells))
+            return source_lookup(facts, effects, cells)
+
+        def count_shelter(sid, scene, package, static, by_direction, cache):
+            shelter_targets.append(
+                {direction: tuple(cells) for direction, cells in by_direction.items()}
+            )
+            return shelter_lookup(sid, scene, package, static, by_direction, cache)
+
+        def count_conditions(base, sources, height):
+            candidate_inputs.append((tuple(ref for ref, _ in sources), height))
+            return resolve(base, sources, height)
+
+        monkeypatch.setattr(env, "_sources_by_cell", count_sources)
+        monkeypatch.setattr(env, "_protection_by_cell", count_shelter)
+        monkeypatch.setattr(env, "_conditions", count_conditions)
+        count = counts(monkeypatch, sm)
+        batch = query(high, cached, east, north)
+        results = {result.cell: result for result in batch}
+        assert tuple(results) == (north, cached, east, high)
+        assert results[cached] == warm
+        assert results[north].wind_exposure.status == "none"  # Downwind from the excluded anchor.
+        assert value(results[east].temperature) == Temperature(30)
+        assert value(results[east].wind).wind_from == "east"
+        assert value(results[high].precipitation) == WEATHER.precipitation
+        assert (
+            results[high].ground_precipitation.status == "unknown"
+        )  # Ground has no known altitude.
+        assert all(result.obscurant.status == "unknown" for result in batch)
+        assert all(
+            not result.protection.rain_sources and not result.protection.wind_bands
+            for result in batch
+        )
+        assert scans == [
+            (2 + unrelated_count, (north, east, high))
+        ]  # Hidden effect was processed first.
+        assert shelter_targets == [{"north": (north, high), "east": (east,)}]
+        assert candidate_inputs == [
+            ((), 3),
+            (("effect:east",), 3),
+            (("effect:high",), 3),
+            ((), None),
+            (("effect:east",), None),
+            (("effect:high",), None),
+        ]
+        assert count["compose"] == 3 and count["sources"] == 0
+        assert count["projection"] == 1  # The north projection was already valid.
+        assert query(high, east) == (results[east], results[high])
+        assert query(north, cached, east, high) == batch
+        assert len(scans) == len(shelter_targets) == 1
+        assert len(candidate_inputs) == 6 and count["compose"] == 3
 
 
 def test_provider_manifest_reopen_and_missing_dependency_trigger_fail_closed(tmp_path, context):
@@ -770,7 +888,12 @@ def test_formal_provider_versions_follow_open_and_damage_with_rollback(tmp_path,
         with pytest.raises(RuntimeError), sm._transaction(write=True):
             sm._world.facts.apply_object_hp(sid, OBSTACLE, 10, 0)
             assert env.versions.current(sid, A) == (prior[0], prior[1] + 1)
-            assert env.project_cell(sid, A, "1,0", p).ground_precipitation.status != "none"
+            assert (
+                env.project_area(sid, A, EnvironmentArea(("1,0",)), p)[
+                    0
+                ].ground_precipitation.status
+                != "none"
+            )
             raise RuntimeError("rollback admitted damage")
         assert env.versions.current(sid, A) == prior
         assert project(sm, sid, p, "1,0").ground_precipitation.status == "none"

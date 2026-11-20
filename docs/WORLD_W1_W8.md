@@ -357,8 +357,9 @@ real-time timers, Effects sources, cones and sunlight emitters are unsupported.
 SetLightEnabled/SwitchLightMode are closed typed commands with query, parser,
 authorization, sync/async and combat/activity guards. New NPC Evaluation conversion
 is not implemented; explicitly controlled NPC commands remain authorized through
-existing grants. Public get_illumination reads only this actor's public scene and
-filters hidden source identities. Closed contents do not leak through contributors.
+existing grants. Public `get_illumination_area` accepts 1–256 explicitly selected cells
+in the actor's public scene, checks sight lines and reports results in input order.
+Source identities follow object visibility, including access to container contents.
 
 Light positions follow carrier/parent facts automatically. Contributions combine
 by the greatest bright/dim/dark category, never arbitrary addition. Existing static

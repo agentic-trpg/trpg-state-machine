@@ -1,4 +1,5 @@
 import json
+from copy import deepcopy
 
 import pytest
 from dnd5e_engine.spatial import GridTopology
@@ -13,6 +14,7 @@ from trpg_state_machine import (
     PutItem,
     SetLightEnabled,
     SetObjectState,
+    StateMachineError,
     StepActor,
     SwitchLightMode,
 )
@@ -76,24 +78,169 @@ def evidence(sm, sid, seq):
     )
 
 
+@pytest.mark.parametrize("far_sources", (0, 30))
+def test_illumination_area_filters_only_misses_and_keeps_source_disclosure(
+    tmp_path, context, monkeypatch, far_sources
+):
+    data = lighting_data()
+    snapshot_grid = data["rule_bindings"]["noncombat_foundation"]["snapshot"]["scene_state"]["grid"]
+    for grid in (data["scenes"][0]["grid"], snapshot_grid):
+        grid.update(width=34, height=8, blocked_cells=["1,1"])
+    fixed = ("2,2", *(f"{x},7" for x in range(far_sources)))
+    for i, cell in enumerate(fixed):
+        oid = f"object.area_emitter_{i}"
+        data["scenes"][0]["objects"].append(
+            {
+                "object_id": oid,
+                "state": None,
+                "initial_cell": cell,
+                "movable": False,
+                "blocks_passage": False,
+            }
+        )
+        profile = deepcopy(data["world_objects"][1])
+        light = {**light_config(), "initial_enabled": True}
+        data["world_objects"].append(
+            {
+                **profile,
+                "object_id": oid,
+                "definition_ref": f"definition.area_emitter_{i}",
+                "capabilities": [light],
+            }
+        )
+    sm, sid, package, _ = setup(tmp_path, context, data)
+    with sm:
+        actor = sm.read_session(sid, package, context=context).pc_actor_id
+
+        def read(cells):
+            return sm.get_illumination_area(sid, actor, cells, package, context=context)
+
+        lights = sm._objects.lights
+        select = lights._sources_for_cells
+        illuminate = lights._illuminate_cell
+        filtered, composed = [], []
+
+        def count_filter(topology, sources, cells):
+            filtered.append((cells, len(sources)))
+            return select(topology, sources, cells)
+
+        def count_compose(topology, uncertain, candidates, sources, cell):
+            composed.append((cell, tuple(source["object_id"] for source in sources)))
+            return illuminate(topology, uncertain, candidates, sources, cell)
+
+        monkeypatch.setattr(lights, "_sources_for_cells", count_filter)
+        monkeypatch.setattr(lights, "_illuminate_cell", count_compose)
+
+        dark = read(("0,0",))[0]
+        assert dark["illumination"] == "dark"  # The source ray hits the blocked cell.
+        assert filtered[0] == (("0,0",), len(fixed))
+        filtered.clear()
+        composed.clear()
+
+        cells = ("0,2", "0,0", "0,3", "0,2")
+        dim, again, nearby, duplicate = read(cells)
+        assert (again, duplicate) == (dark, dim)
+        assert (dim["cell"], nearby["cell"]) == ("0,2", "0,3")
+        assert dim["illumination"] == nearby["illumination"] == "dim"
+        # The emitter is outside the request and sits behind a blocker from the actor.
+        assert dim["contributing_sources"] == nearby["contributing_sources"] == ()
+        assert filtered[0] == (("0,2", "0,3"), len(fixed))
+        assert all(set(cells).isdisjoint(other_cells) for other_cells, _ in filtered[1:])
+        assert composed[:2] == [
+            ("0,2", ("object.area_emitter_0",)),
+            ("0,3", ("object.area_emitter_0",)),
+        ]
+        filtered.clear()
+        composed.clear()
+
+        assert read(cells) == (dim, again, nearby, duplicate)
+        assert filtered == composed == []
+        with pytest.raises(StateMachineError) as denied:
+            read(("0,2", "2,2"))
+        assert denied.value.code == "invalid_target"
+        with pytest.raises(StateMachineError) as unauthorized:
+            sm.get_illumination_area(sid, "actor.other", cells, package, context=context)
+        assert unauthorized.value.code == "unauthorized"
+        assert filtered == composed == []
+
+
+def test_illumination_area_bounds_and_scene_invalidation(tmp_path, context):
+    sm, sid, package, _ = setup(tmp_path, context, lighting_data())
+    with sm:
+        actor = sm.read_session(sid, package, context=context).pc_actor_id
+
+        def read(cells):
+            return sm.get_illumination_area(sid, actor, cells, package, context=context)
+
+        for cells in (None, (), "1,0", (None,), ("1,0",) * 257):
+            with pytest.raises(StateMachineError) as invalid:
+                read(cells)
+            assert invalid.value.code == "invalid_query"
+        cells = ["2,0", "1,0"]
+        prior = read(cells)
+        assert tuple(record["illumination"] for record in prior) == ("dark", "dark")
+        maximum = ("1,0",) * 256
+        assert read(maximum) == (prior[1],) * len(maximum)
+        receipt = submit(sm, sid, package, context, SetLightEnabled(A, CRED, "0,0", True), "on")
+        assert receipt.status == "committed", receipt
+        dim, bright = read(cells)
+        assert (dim["illumination"], bright["illumination"]) == ("dim", "bright")
+        assert dim["contributing_sources"] == bright["contributing_sources"] == (CRED,)
+        assert tuple(record["illumination"] for record in prior) == ("dark", "dark")
+
+
+def test_spatial_view_batches_target_light_misses(tmp_path, context, monkeypatch):
+    sm, sid, package, _ = setup(tmp_path, context, lighting_data())
+    with sm:
+        actor = sm.read_session(sid, package, context=context).pc_actor_id
+        receipt = submit(sm, sid, package, context, SetLightEnabled(A, CRED, "0,0", True), "on")
+        assert receipt.status == "committed", receipt
+        sm.get_illumination_area(sid, actor, ("1,0",), package, context=context)
+
+        lights = sm._objects.lights
+        select = lights._sources_for_cells
+        calls = []
+
+        def count_filter(topology, sources, cells):
+            calls.append(set(cells))
+            return select(topology, sources, cells)
+
+        monkeypatch.setattr(lights, "_sources_for_cells", count_filter)
+        view = sm.get_spatial_view(sid, actor, package, context=context)
+        assert BOX in {row[0] for row in view.objects}
+        assert len(calls) == 1 and {"2,0", "2,2"} <= calls[0]
+        assert "1,0" not in calls[0]
+        assert sm.get_spatial_view(sid, actor, package, context=context) == view
+        assert len(calls) == 1
+
+
 def test_light_modes_carry_container_shading_snapshot_and_stage_evidence(tmp_path, context):
     sm, sid, p, _ = setup(tmp_path, context, lighting_data())
     with sm:
         actor = sm.read_session(sid, p, context=context).pc_actor_id
-        assert sm.get_illumination(sid, actor, "1,0", p, context=context)["illumination"] == "dark"
+        assert (
+            sm.get_illumination_area(sid, actor, ("1,0",), p, context=context)[0]["illumination"]
+            == "dark"
+        )
         receipt = submit(sm, sid, p, context, SetLightEnabled(A, CRED, "0,0", True), "on")
         assert receipt.status == "committed", receipt
         before, after = (evidence(sm, sid, seq) for seq in receipt.event_seqs)
         assert before["scenes"][A]["grid"]["default_lighting"] == "dark"
         assert after["scenes"][A]["grid"]["lighting"]["1,0"] == "bright"
-        assert sm.get_illumination(sid, actor, "2,0", p, context=context)["illumination"] == "dim"
+        assert (
+            sm.get_illumination_area(sid, actor, ("2,0",), p, context=context)[0]["illumination"]
+            == "dim"
+        )
         snapshot = sm.read_noncombat_snapshot(sid, p, context=context)
         assert snapshot.scene_state.grid.lighting["1,0"] == "bright"
         assert (
             submit(sm, sid, p, context, SwitchLightMode(A, CRED, "0,0", "hooded"), "hood").status
             == "committed"
         )
-        assert sm.get_illumination(sid, actor, "1,0", p, context=context)["illumination"] == "dim"
+        assert (
+            sm.get_illumination_area(sid, actor, ("1,0",), p, context=context)[0]["illumination"]
+            == "dim"
+        )
         assert (
             submit(sm, sid, p, context, SwitchLightMode(A, CRED, "0,0", "normal"), "normal").status
             == "committed"
@@ -107,14 +254,18 @@ def test_light_modes_carry_container_shading_snapshot_and_stage_evidence(tmp_pat
             submit(sm, sid, p, context, SetObjectState(A, BOX, ObjectState.CLOSED), "close").status
             == "committed"
         )
-        assert sm.get_illumination(sid, actor, "1,0", p, context=context)["illumination"] == "dark"
+        assert (
+            sm.get_illumination_area(sid, actor, ("1,0",), p, context=context)[0]["illumination"]
+            == "dark"
+        )
         assert (
             submit(sm, sid, p, context, SetObjectState(A, BOX, ObjectState.OPEN), "open").status
             == "committed"
         )
         assert submit(sm, sid, p, context, StepActor(A, "0,0", "1,0"), "move").status == "committed"
         assert (
-            sm.get_illumination(sid, actor, "2,0", p, context=context)["illumination"] == "bright"
+            sm.get_illumination_area(sid, actor, ("2,0",), p, context=context)[0]["illumination"]
+            == "bright"
         )
         assert evidence(sm, sid, receipt.event_seqs[-1]) == after
 
@@ -139,7 +290,7 @@ def test_unknown_container_transmission_is_not_a_deterministic_brightness(tmp_pa
         assert "1,0" not in before["light_uncertain_cells"]
         assert "1,0" in after["light_uncertain_cells"]
         assert "1,0" not in after["lighting_sources"]
-        view = sm.get_illumination(sid, actor, "1,0", p, context=context)
+        view = sm.get_illumination_area(sid, actor, ("1,0",), p, context=context)[0]
         assert view["status"] == "unknown" and view["illumination"] is None
         assert CRED not in view["contributing_sources"]
 
@@ -209,7 +360,7 @@ def test_carried_light_event_work_and_evidence_depend_on_radius(
         ]
 
 
-@pytest.mark.parametrize("origin", (None, "3,3"))
+@pytest.mark.parametrize("origin", (None, "3,3", "not-a-coordinate"))
 def test_event_preserves_uncertainty_when_source_position_is_unavailable(
     tmp_path, context, monkeypatch, origin
 ):
@@ -226,6 +377,14 @@ def test_event_preserves_uncertainty_when_source_position_is_unavailable(
         scene = evidence(sm, sid, receipt.event_seqs[-1])["scenes"][A]
         assert scene["light_uncertain_cells"] == [f"{x},{y}" for y in range(3) for x in range(3)]
         assert scene["lighting_sources"] == {}
+        actor = sm.read_session(sid, package, context=context).pc_actor_id
+        cells = ("1,0", "2,2")
+        results = sm.get_illumination_area(sid, actor, cells, package, context=context)
+        assert len(results) == len(cells)
+        assert all(
+            result["status"] == "unknown" and result["illumination"] is None for result in results
+        )
+        assert all(result["contributing_sources"] == () for result in results)
 
 
 def test_light_envelopes_merge_overlap_and_skip_gaps():
@@ -340,13 +499,17 @@ def test_fixed_emitter_and_failed_commit_leave_no_candidate_light(tmp_path, cont
         with pytest.raises(StateMachineError):
             sm.submit_command(cmd, p, context=context)
         actor = sm.read_session(sid, p, context=context).pc_actor_id
-        assert sm.get_illumination(sid, actor, "1,0", p, context=context)["illumination"] == "dark"
+        assert (
+            sm.get_illumination_area(sid, actor, ("1,0",), p, context=context)[0]["illumination"]
+            == "dark"
+        )
         sm._conn.execute("DROP TRIGGER fail_light")
         receipt = sm.submit_command(cmd, p, context=context)
         assert receipt.status == "committed"
         assert sm.submit_command(cmd, p, context=context) == receipt
         assert (
-            sm.get_illumination(sid, actor, "1,0", p, context=context)["illumination"] == "bright"
+            sm.get_illumination_area(sid, actor, ("1,0",), p, context=context)[0]["illumination"]
+            == "bright"
         )
 
 
@@ -366,7 +529,7 @@ def test_dynamic_movement_geometry_is_unknown_for_light_and_not_passed_to_rules(
             submit(sm, sid, p, context, SetLightEnabled(A, CRED, "0,0", True), "on").status
             == "committed"
         )
-        result = sm.get_illumination(sid, actor, "2,0", p, context=context)
+        result = sm.get_illumination_area(sid, actor, ("2,0",), p, context=context)[0]
         assert result["status"] == "unknown" and result["illumination"] is None
         with pytest.raises(StateMachineError, match="uncertainty"):
             sm.read_noncombat_snapshot(sid, p, context=context)
@@ -398,7 +561,10 @@ def test_destroyed_emitter_ceases_contributing_without_identity_loss(tmp_path, c
         )
         version = sm.read_session(sid, p, context=context).world_version
         adopt(sm, sid, p, context, _ObjectHPSettlement(sid, CRED, "destroy.emitter", version, 5, 0))
-        assert sm.get_illumination(sid, actor, "1,0", p, context=context)["illumination"] == "dark"
+        assert (
+            sm.get_illumination_area(sid, actor, ("1,0",), p, context=context)[0]["illumination"]
+            == "dark"
+        )
         assert sm.get_object(sid, actor, CRED, p, context=context)["destroyed"]
 
 

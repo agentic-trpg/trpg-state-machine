@@ -144,9 +144,9 @@ def first_phase(db):
         issue(sm, sid, p, SetLightEnabled(A, BEAD, "0,0", True), "bead.on")
         issue(sm, sid, p, PutItem(A, BEAD, POUCH, "0,0"), "bead.inside")
         actor = sm.read_session(sid, p, context=CONTEXT).pc_actor_id
-        lit = sm.get_illumination(sid, actor, "1,0", p, context=CONTEXT)
+        lit = sm.get_illumination_area(sid, actor, ("1,0",), p, context=CONTEXT)[0]
         issue(sm, sid, p, SetObjectState(A, POUCH, ObjectState.CLOSED), "pouch.close")
-        shaded = sm.get_illumination(sid, actor, "1,0", p, context=CONTEXT)
+        shaded = sm.get_illumination_area(sid, actor, ("1,0",), p, context=CONTEXT)[0]
         assert (lit["illumination"], shaded["illumination"]) == ("bright", "dim")
         issue(sm, sid, p, SetObjectState(A, POUCH, ObjectState.OPEN), "pouch.open")
         issue(sm, sid, p, PutItem(A, KEY, POUCH, "0,0"), "key.inside")
@@ -250,9 +250,9 @@ def continuation(db, prior):
             "final_cell": location["cell"],
             "final_world_version": final.world_version,
             "final_event_seq": final.event_seq,
-            "local_illumination": sm.get_illumination(sid, actor, "2,0", p, context=CONTEXT)[
-                "illumination"
-            ],
+            "local_illumination": sm.get_illumination_area(
+                sid, actor, ("2,0",), p, context=CONTEXT
+            )[0]["illumination"],
         }
 
 
