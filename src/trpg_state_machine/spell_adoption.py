@@ -1,7 +1,9 @@
 """Validate supported ordinary spell Deltas before SM adopts any facts."""
 
 from dnd5e_engine import evaluation_delta as delta
+from dnd5e_engine.areas import creature_count
 from dnd5e_engine.attack_rules import can_retain_turn
+from dnd5e_engine.damage_rules import healing_balance
 from dnd5e_engine.evaluation_actor import combatant
 from dnd5e_engine.evaluation_state import CombatSnapshot, MovementLedgerState
 from dnd5e_engine.movement import project_speeds, speed_for_mode
@@ -36,10 +38,12 @@ def _invalid(message):
 
 
 def ordinary_spell_changes(request, result, mechanism, spell):
-    """Validate one immediate healing, save or attack spell against fixed input.
+    """Validate immediate healing, save or attack consequences against fixed input.
 
     The bound spell supplies casting timing, damage source and declared type.
     Attack evidence is linked to the damage instance and to the caster's budget.
+    Each selected creature needs ordered healing evidence and the matching capped
+    HP change, with one slot and action payment for the entire cast.
     The returned edits are candidates for the caller's existing write transaction.
     Resource and combat expenditure guards must both be applied there; this
     function does not change persistent state.
@@ -58,14 +62,30 @@ def ordinary_spell_changes(request, result, mechanism, spell):
         _invalid("Unsupported ordinary spell mechanism")
     data = snapshot.model_dump(mode="json")
     actors = {actor["entity_id"]: actor for actor in data["character_states"]}
+    before_actors = {actor.entity_id: actor for actor in snapshot.character_states}
     combat = data["combat_state"]
     pools = data["resource_state"]["pools"]
+    combat_before = snapshot.combat_state
     if caster not in snapshot.combat_state.party_ids or target not in actors:
         _invalid("Spell actor or target is outside the admitted encounter")
     if snapshot.combat_state.pending_reactions or snapshot.effect_states:
         _invalid("Spell result needs unsupported reaction or effect adoption")
-    target_before = next(actor for actor in snapshot.character_states if actor.entity_id == target)
-    combat_before = snapshot.combat_state
+    target_before = before_actors[target]
+    selected = payload.target_ids if payload.target_ids is not None else (target,)
+    if healing and (
+        not selected
+        or selected[0] != target
+        or len(set(selected)) != len(selected)
+        or len(selected) > (creature_count(activity) or 1)
+        or any(
+            (actor := before_actors.get(identity)) is None
+            or not actor.is_alive
+            or actor.hp_current <= 0
+            or identity in combat_before.dead_ids
+            for identity in selected
+        )
+    ):
+        _invalid("Healing targets differ from the admitted living creatures")
     if not healing and caster == target and target_before.last_damaged_by != caster:
         _invalid("Spell damage attribution is incomplete")
     if (
@@ -102,8 +122,8 @@ def ordinary_spell_changes(request, result, mechanism, spell):
         or cast[0].actor_id != caster
         or cast[0].spell_id != spell_id
         or cast[0].slot_level != (payload.slot_level if slot_paid else None)
-        or (len(healed) != 1 if healing else bool(healed))
-        or (healing and (healed[0].target_id != target or healed[0].amount < 0))
+        or tuple(event.target_id for event in healed) != (selected if healing else ())
+        or any(event.amount < 0 for event in healed)
         or (healing and bool(damaged or deaths))
         or len(saved) != int(mechanism == "save_damage")
         or (saved and (saved[0].target_id != target or len(damaged) != 1))
@@ -127,6 +147,22 @@ def ordinary_spell_changes(request, result, mechanism, spell):
         )
     ):
         _invalid("Spell events differ from the submitted caster and target")
+    healing_order = ["intent_submitted", "spell_cast", *("healing_applied" for _ in healed)]
+    if healing and [e.type for e in result.proposed_events[: len(healing_order)]] != healing_order:
+        _invalid("Healing events precede or interrupt the submitted cast")
+    healing_results = {
+        event.target_id: healing_balance(
+            before_actors[event.target_id].hp_current,
+            before_actors[event.target_id].hp_max,
+            event.amount,
+        )
+        for event in healed
+    }
+    hp_changes = {
+        identity: value
+        for identity, value in healing_results.items()
+        if value != before_actors[identity].hp_current
+    }
     if attack:
         roll = rolled[0]
         if (
@@ -165,7 +201,6 @@ def ordinary_spell_changes(request, result, mechanism, spell):
         changes.append((component, identity, field, value))
 
     resource = ledger = None
-    hp = None
     budget_paid = False
     newly_dead = (
         set()
@@ -203,7 +238,7 @@ def ordinary_spell_changes(request, result, mechanism, spell):
             for actor_id in snapshot.combat_state.initiative_ids
         )
     )
-    caster_before = next(actor for actor in snapshot.character_states if actor.entity_id == caster)
+    caster_before = before_actors[caster]
     actor_before = combatant(caster_before)
     if bonus:
         if not actor_before.bonus_action_available or actor_before.bonus_action_taken_this_turn:
@@ -227,7 +262,7 @@ def ordinary_spell_changes(request, result, mechanism, spell):
 
     def ordinary_reset(actor_id):
         """Project RE's ordinary next-turn budget from fixed actor facts."""
-        before = next(actor for actor in snapshot.character_states if actor.entity_id == actor_id)
+        before = before_actors[actor_id]
         reset = reset_turn_budget(
             combatant(before), effective_speed=effective_speed(before, "walk"), attacks=1
         ).model_dump(mode="json")
@@ -275,11 +310,7 @@ def ordinary_spell_changes(request, result, mechanism, spell):
         )
     ):
         _invalid("Spell turn handoff events differ from the accepted transition")
-    if not turn_advanced and [event.type for event in result.proposed_events] != [
-        "intent_submitted",
-        "spell_cast",
-        "healing_applied",
-    ]:
+    if not turn_advanced and [event.type for event in result.proposed_events] != healing_order:
         _invalid("Retained spell turn has unrelated events")
     if attack:
         event_order: list[str | tuple[str, str | None, int]] = [
@@ -315,12 +346,10 @@ def ordinary_spell_changes(request, result, mechanism, spell):
             if old not in pools or new["current"] != old["current"] - 1:
                 _invalid("Spell slot differs from the fixed resource pool")
             pools[pools.index(old)] = new
-            if (
-                actors[caster]["spell_slots"].get(1, actors[caster]["spell_slots"].get("1"))
-                != old["current"]
-            ):
+            level = str(op.expected.level)
+            if actors[caster]["spell_slots"].get(level) != old["current"]:
                 _invalid("Caster slot mirror differs from the paid pool")
-            actors[caster]["spell_slots"]["1"] = new["current"]
+            actors[caster]["spell_slots"][level] = new["current"]
             resource = op
             changes.append(("resource", caster, op.pool_id, (old["current"], 1)))
         elif type(op) is delta.SlotSpendLedgerUpdate:
@@ -337,12 +366,10 @@ def ordinary_spell_changes(request, result, mechanism, spell):
             ledger = op
             changes.append(("slot_ledger", caster, "expended_resources", op))
         elif healing and type(op) is delta.HPDelta:
-            if hp is not None or op.target_id != target or op.amount < 0:
-                _invalid("Spell changed an unrelated HP value")
-            if op.resulting_hp > actors[target]["hp_max"]:
-                _invalid("Spell healing exceeds target maximum HP")
-            edit("actor", target, "hp_current", op.expected_hp, op.resulting_hp)
-            hp = op
+            expected_result = hp_changes.pop(op.target_id, None)
+            if expected_result is None or op.resulting_hp != expected_result:
+                _invalid("Spell HP differs from the healing event")
+            edit("actor", op.target_id, "hp_current", op.expected_hp, op.resulting_hp)
         elif not healing and type(op) in DAMAGE_OPERATIONS:
             adopt_damage_operation(request, target_before.entity_type.lower(), op, edit)
         elif type(op) is delta.ActionBudgetUpdate:
@@ -449,10 +476,8 @@ def ordinary_spell_changes(request, result, mechanism, spell):
         ledger.slot_kind != resource.value.kind or ledger.level != resource.value.level
     ):
         _invalid("Spell payment and ledger disagree")
-    if healing:
-        expected_healing = min(healed[0].amount, target_before.hp_max - target_before.hp_current)
-        if hp is None and expected_healing != 0 or hp is not None and hp.amount != expected_healing:
-            _invalid("Spell HP differs from the healing event")
+    if hp_changes:
+        _invalid("Spell omitted HP changes required by its healing events")
     data.update(
         character_states=[actors[a.entity_id] for a in snapshot.character_states],
         combat_state=combat,

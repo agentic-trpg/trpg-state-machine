@@ -1497,6 +1497,9 @@ class RulesAdapter:
                 source_id=payload.source_id,
                 spell_id=payload.spell_id,
                 target_id=payload.target_id,
+                target_ids=payload.target_ids
+                if mechanism == "healing" and spell.activities[0].target.affects.count != "1"
+                else None,
                 slot_level=payload.slot_level,
                 spell_source_id=payload.spell_source_id,
             )

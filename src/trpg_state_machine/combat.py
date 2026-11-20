@@ -49,7 +49,9 @@ def validate_foundation(value):
         from dnd5e_engine.evaluation_class_dependencies import operation_dependencies
         from dnd5e_engine.evaluation_ruleset import get_default_ruleset
 
-        reason = operation_dependencies(snapshot, get_default_ruleset(), equipped=True)
+        reason = operation_dependencies(
+            snapshot, get_default_ruleset(), equipped=True, reviewed_class_lifecycle=True
+        )
     else:
         reason = snapshot_support_failure(snapshot)
     if reason:

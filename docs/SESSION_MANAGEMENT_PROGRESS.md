@@ -1,5 +1,17 @@
 # Session Management 重构进度
 
+## 2026-11-20 Mass Healing Word 多目标即时治疗（候选）
+
+公开 `combat.intent` 使用同一个施法意图提交起始 `target_id` 和有序 `target_ids`。
+受支持的五级 Lore Bard 通过已知且已准备的显式来源，支付一个附赠动作和一个三环
+法术位。每个目标对应一条有序治疗事件，实际 HP 变化以上限为准。SM 在同一次提交
+中采用所有 HP、动作预算、法术位、遭遇支出、RNG、事件和回执。满 HP 目标仍有
+治疗事件，但没有 HP 写入。首个目标必须与 `target_id` 相同。
+
+公开回归覆盖同一 PC 和一个 NPC、次回合恢复预算、重复或范围外目标、伪造结果及
+两个治疗与支付进入 SQLite 后的回执写入故障。参见
+[多目标治疗回归](../tests/test_mass_healing_word.py)。
+
 ## 2026-11-20 即时治疗法术的动作支付（候选）
 
 一级牧师通过公开 `combat.intent` 施放 Healing Word 时支付一个附赠动作和一个一环法术位。
