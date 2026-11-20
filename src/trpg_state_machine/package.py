@@ -30,6 +30,7 @@ OPENABLE_SCHEMA_VERSION = "state-machine-foundation/7"
 OBJECT_SPATIAL_SCHEMA_VERSION = "state-machine-foundation/8"
 MECHANISM_SCHEMA_VERSION = "state-machine-foundation/10"
 MAX_PACKAGE_BYTES = 1_048_576
+_MAX_SCENE_GRID_CELLS = 40_000
 _ID = re.compile(r"[a-z][a-z0-9_]*(?:\.[a-z][a-z0-9_]*)+")
 
 
@@ -966,7 +967,7 @@ def _validate(data: dict, *, allow_legacy_audit=False) -> AdventurePackage:
 
 
 def _grid_config(raw, path):
-    """Validate and normalize mechanical grid configuration."""
+    """Validate and normalize a GC-1 grid of up to 40,000 cells per Scene."""
     if raw is None:
         return None
     from dnd5e_engine.evaluation_state import MechanicalGrid
@@ -977,8 +978,12 @@ def _grid_config(raw, path):
         # Closed upstream schema plus its canonical geometry validation.
         grid = MechanicalGrid.model_validate_json(canonical_json(raw))
         GridScene(**grid.model_dump())
-        if grid.width * grid.height > 4096:
-            _fail("unsupported_mechanism", path, "GC-1 supports at most 4096 cells per Scene")
+        if grid.width * grid.height > _MAX_SCENE_GRID_CELLS:
+            _fail(
+                "unsupported_mechanism",
+                path,
+                f"GC-1 supports at most {_MAX_SCENE_GRID_CELLS:,} cells per Scene",
+            )
         return grid.model_dump_json()
     except (ValidationError, ValueError, TypeError) as exc:
         _fail("schema_error", path, f"Invalid mechanical grid: {type(exc).__name__}")

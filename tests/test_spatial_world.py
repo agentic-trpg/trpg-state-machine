@@ -19,6 +19,7 @@ from trpg_state_machine import (
     StateMachineError,
     StepActor,
     TraversePassage,
+    load_adventure_package,
     world_command_from_data,
 )
 from trpg_state_machine.package import _validate
@@ -33,6 +34,47 @@ def world(package_data):
 def assert_ok(receipt):
     assert receipt.status == "committed", receipt
     return receipt
+
+
+@pytest.mark.parametrize("side", [100, 200])
+def test_large_scene_grid_survives_save_and_resume(tmp_path, package_data, context, side):
+    data = spatial_data(package_data)
+    data["scenes"][0]["grid"].update(width=side, height=side)
+    start, corner = f"{side - 2},{side - 1}", f"{side - 1},{side - 1}"
+    data["pc_templates"][0]["initial_cell"] = start
+    source = tmp_path / "package.json"
+    source.write_text(json.dumps(data), encoding="utf-8")
+    loaded = load_adventure_package(source)
+    assert loaded.status == "valid", loaded.errors
+    assert loaded.package is not None
+    package = loaded.package
+
+    db = tmp_path / "large-grid.db"
+    with StateMachine(db) as sm:
+        sid = create(sm, package, context)
+        pc = sm.read_session(sid, package, context=context).pc_actor_id
+        assert sm.read_actor_position(sid, pc, package, context=context).cell == start
+        assert_ok(submit(sm, sid, package, context, StepActor(A, start, corner), "corner"))
+        sm.save_session(sid, package, context=context)
+
+    with StateMachine(db) as sm:
+        sm.resume_session(sid, package, context=context)
+        assert sm.read_actor_position(sid, pc, package, context=context).cell == corner
+        assert_ok(submit(sm, sid, package, context, StepActor(A, corner, start), "return"))
+
+
+def test_package_rejects_scene_grid_over_cell_limit(tmp_path, package_data):
+    data = spatial_data(package_data)
+    data["scenes"][0]["grid"].update(width=221, height=181)  # 40,001 cells
+    source = tmp_path / "package.json"
+    source.write_text(json.dumps(data), encoding="utf-8")
+
+    loaded = load_adventure_package(source)
+    assert loaded.status == "invalid"
+    assert loaded.package is None
+    (issue,) = loaded.errors
+    assert (issue.code, issue.path) == ("unsupported_mechanism", "scenes[0].grid")
+    assert issue.message == "GC-1 supports at most 40,000 cells per Scene"
 
 
 @pytest.mark.parametrize("object_id,start", [("object.crate", "3,2"), ("object.stool", "3,0")])
