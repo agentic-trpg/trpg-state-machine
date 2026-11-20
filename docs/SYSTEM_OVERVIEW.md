@@ -76,6 +76,11 @@ Effects 和 SessionTime 共同保存及消费到期时间。`drop_concentration`
 RE `dnd5e-evaluation/44` 的 `engine-evaluation/30` 结果。Effects 在同一提交内依序
 解除旧效果并采用返回的 Lethargy。疲乏持续到目标下一自然回合结束。当前范围为单条
 Haste 或 Lethargy 效果图的回合推进与解除，Haste 额外行动、重叠和受伤中断另行接入。
+
+固定 RE `/52` 的候选通过原战斗施法入口采用命中产生的战斗效果，Effects 将初始
+回合时钟和减速随伤害共同提交。普通步行读取效果，回合推进采用 RE 的到期移除。
+参见[命中速度效果](SESSION_MANAGEMENT_PROGRESS.md#2026-11-20-法术命中与战斗减速候选)。
+
 完整 Agent Host、通用规则采用、完整活跃战斗恢复及未来多人负载不是已验收能力。
 
 ## 2. 公开入口和主要协作模块

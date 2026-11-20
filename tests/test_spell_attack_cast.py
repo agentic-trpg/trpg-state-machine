@@ -1,5 +1,6 @@
 """Exercise canonical ranged spell attacks through public SM combat commands."""
 
+from copy import deepcopy
 from random import Random
 
 import pytest
@@ -21,6 +22,7 @@ from trpg_state_machine.package import _validate
 SOURCE = "class:wizard"
 FIRE_BOLT = "fire-bolt"
 POISON_SPRAY = "poison-spray"
+OTHER_ENEMY = "npc.attendant"
 SPELLS = {
     FIRE_BOLT: (24, 10, "fire"),
     POISON_SPRAY: (6, 12, "poison"),
@@ -31,16 +33,27 @@ SPELLS = {
 def open_spell_combat(tmp_path, context):
     """Create the same Wizard 1 Package for both spells, varying only test facts."""
 
-    def open_world(*, seed=16, column=6, hp=40, temp_hp=1, omit_spell=None):
+    def open_world(
+        *,
+        seed=16,
+        column=6,
+        hp=40,
+        temp_hp=1,
+        omit_spell=None,
+        extra_spells=(),
+        walking=False,
+        other_enemy_turn=False,
+    ):
         canonical = BundledAssetLoader()
         base = item_loader()
+        spells = (*SPELLS, *extra_spells)
         wizard = canonical.get_class("wizard")
         features = ["spellcasting", "ritual-adept", "arcane-recovery"]
         proficiency = proficiency_grants([(wizard, 1, "primary")])
         loader = MemoryAssetLoader(
             classes=[wizard],
             features=[canonical.get_feature(slug) for slug in features],
-            spells=[canonical.get_spell(slug) for slug in SPELLS],
+            spells=[canonical.get_spell(slug) for slug in spells],
             items=list(base._items.values()),
             monsters=list(base._monsters.values()),
         )
@@ -49,6 +62,22 @@ def open_spell_combat(tmp_path, context):
         data["pc_templates"][0]["character"]["inventory"] = []
         data["actors"][0]["initial_cell"] = f"{column},0"
         data["scenes"][0]["grid"]["width"] = 26
+        if other_enemy_turn:
+            other = deepcopy(data["actors"][0])
+            other.update(actor_id=OTHER_ENEMY, name="Attendant", initial_cell="2,1")
+            other["npc_state"].update(
+                initial_knowledge_ids=[],
+                memories=[],
+                beliefs=[],
+                relationships=[],
+                goals=[],
+                plans=[],
+            )
+            data["actors"].append(other)
+            data["scenes"][0]["actor_ids"].append(OTHER_ENEMY)
+            data["navigation"]["actor_grants"].append(
+                {"actor_id": OTHER_ENEMY, "region_ids": ["region.public"]}
+            )
 
         for foundation in data["rule_bindings"].values():
             foundation["rng_state"] = RNGState.capture(Random(seed)).model_dump(mode="json")
@@ -57,6 +86,9 @@ def open_spell_combat(tmp_path, context):
             snapshot["scene_state"]["grid"]["width"] = 26
             if "combat_state" in snapshot:
                 snapshot["combat_state"]["actor_zone"][NPC] = f"{column},0"
+                if walking:
+                    snapshot["combat_state"]["monster_slug_by_entity"].pop(NPC)
+                    snapshot["combat_state"]["opportunity_attack_weapons"].clear()
             pc, npc = snapshot["character_states"]
             pc.update(
                 class_slug="wizard",
@@ -78,6 +110,21 @@ def open_spell_combat(tmp_path, context):
             npc.update(hp_current=hp, ac=12, temp_hp=temp_hp, granted_features=[])
             pc.pop("spells_known", None)
             npc.pop("spells_known", None)
+            if other_enemy_turn:
+                snapshot["character_states"].append(
+                    {**deepcopy(npc), "entity_id": OTHER_ENEMY, "name": "Attendant"}
+                )
+                if "combat_state" in snapshot:
+                    combat = snapshot["combat_state"]
+                    combat["initiative_ids"].insert(1, OTHER_ENEMY)
+                    combat["encounter_ids"].append(OTHER_ENEMY)
+                    combat["actor_zone"][OTHER_ENEMY] = "2,1"
+                    combat["movement_ledgers"][OTHER_ENEMY] = deepcopy(
+                        combat["movement_ledgers"][NPC]
+                    )
+                    combat["xp_value_by_entity"][OTHER_ENEMY] = 0
+                else:
+                    foundation["xp"][OTHER_ENEMY] = 0
             snapshot["inventory_state"]["entries"] = []
             snapshot["resource_state"] = {
                 "pools": [
@@ -111,7 +158,7 @@ def open_spell_combat(tmp_path, context):
                                 "ability": "int",
                                 "spells": [
                                     {"spell_id": slug, "prepared_order": None, "material": None}
-                                    for slug in SPELLS
+                                    for slug in spells
                                     if slug != omit_spell
                                 ],
                             }

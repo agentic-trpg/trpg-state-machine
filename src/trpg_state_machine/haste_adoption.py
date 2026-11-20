@@ -161,7 +161,7 @@ def haste_pass_admission(request, result):
             ConditionRemoved(target_id=effect.target_id, condition=name)
             for name in sorted(ended.get(effect.target_id, ()))
         )
-        adopted.append(("hold_lifecycle", identity, "update", removed))
+        adopted.append(("effect_lifecycle", identity, "update", removed))
         if follow_up := follow_ups.get(identity):
             position = 2 + len(boundary)
             if position >= len(events):

@@ -4,6 +4,11 @@ from itertools import pairwise
 
 from dnd5e_engine import evaluation_delta as delta
 from dnd5e_engine.evaluation_movement import timed_walk_bonus, walk_speed
+from dnd5e_engine.evaluation_speed_effects import (
+    has_speed_effects,
+    speed_effect_support_failure,
+    speed_with_effects,
+)
 from dnd5e_engine.events import ActorMoved
 
 from .errors import StateMachineError
@@ -14,7 +19,7 @@ def _invalid(message):
     raise StateMachineError("invalid_rule_result", message)
 
 
-def ordinary_walk_changes(request, result):
+def ordinary_walk_changes(request, result, *, loader):
     """Bind the event and guarded position, expenditure and budget to the fixed route.
 
     RE owns routing, pricing and reaction admission. The host correlates the
@@ -70,8 +75,13 @@ def ordinary_walk_changes(request, result):
     ):
         _invalid("Walking event differs from the adopted route")
     try:
-        timed = timed_walk_bonus(snapshot)
-        speed = walk_speed(actor, timed[1] if timed is not None and timed[0] == actor_id else 0)
+        if has_speed_effects(snapshot):
+            if loader is None or speed_effect_support_failure(snapshot, loader) is not None:
+                _invalid("Walking result requires the bound speed effect graph")
+            speed = speed_with_effects(actor, snapshot.effect_states)
+        else:
+            timed = timed_walk_bonus(snapshot)
+            speed = walk_speed(actor, timed[1] if timed is not None and timed[0] == actor_id else 0)
         expected_ledger = ledger.expected.spend(
             cost_ft=event.movement_cost_ft,
             distance_ft=distance,

@@ -130,6 +130,25 @@ class OngoingEffects:
         """Persist one RE-declared terminal effect and its clock deadline atomically."""
         self.add_effect(sid, proposal.effect.model_dump(mode="json"), expires_tick=expires_tick)
 
+    def apply_combat_creation(self, sid, operation):
+        """Insert one verified effect, clock and lineage under the keyed absence guard."""
+        self.store.require_write()
+        if (
+            self._conn.execute(
+                "SELECT 1 FROM ongoing_effects WHERE session_id=? AND target_id=? "
+                "AND effect_id=? AND origin=?",
+                (sid, *operation.identity),
+            ).fetchone()
+            is not None
+        ):
+            raise StateMachineError("invalid_effect", "Combat effect already exists")
+        self.add_effect(
+            sid,
+            operation.effect.model_dump(mode="json"),
+            conditions=operation.lineage.statuses,
+            lifecycle=operation.lifecycle.model_dump(mode="json")["state"],
+        )
+
     def apply_follow_up(self, sid, operation):
         """Create an independent target effect after its exact parent has been removed."""
         self.store.require_write()

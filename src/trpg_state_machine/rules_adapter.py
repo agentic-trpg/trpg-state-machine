@@ -34,6 +34,12 @@ from dnd5e_engine.evaluation_ruleset import (
     get_default_ruleset,
     verify_ruleset,
 )
+from dnd5e_engine.evaluation_speed_effects import (
+    has_speed_effects,
+    speed_effect_support_failure,
+    speed_with_effects,
+    spell_attack_has_speed_effect,
+)
 from dnd5e_engine.evaluation_spells import ordinary_spell_mechanism
 from dnd5e_engine.evaluation_state import (
     CharacterStateV2,
@@ -74,6 +80,7 @@ from .package import canonical_json
 from .scoped_reads import scoped_read
 from .session_access import _binding
 from .spatial import SpatialPosition
+from .speed_effect_adoption import speed_effect_pass_admission, supports_pass_roster
 from .spell_adoption import ordinary_spell_changes
 from .timed_spell_adoption import timed_spell_changes
 
@@ -461,7 +468,13 @@ def exploration_potion_changes(request, result):
 
 
 def _turn_intent_scope(
-    request, result, *, effect_operations=(), condition_changes=None, effect_movement=None
+    request,
+    result,
+    *,
+    effect_operations=(),
+    condition_changes=None,
+    effect_movement=None,
+    effect_speed=haste_speed,
 ):
     """Bind the ordinary turn handoff and validate its affected target's movement ledger."""
     snapshot = request.state_snapshot
@@ -502,7 +515,7 @@ def _turn_intent_scope(
     def speed(actor, mode):
         """Use the RE movement projection for the target's adopted effect or conditions."""
         if effect_movement is not None and actor.entity_id == effect_movement[0]:
-            return haste_speed(actor, effect_movement[1], mode)
+            return effect_speed(actor, effect_movement[1], mode)
         return speed_for_mode(
             project_speeds(
                 actor.base_speed,
@@ -945,7 +958,7 @@ def hold_effect_changes(request, result, source):
         raise UnsupportedEffectConsequence
     return (
         *base,
-        *(("hold_lifecycle", op.identity, "update", op) for op in lifecycles),
+        *(("effect_lifecycle", op.identity, "update", op) for op in lifecycles),
         *(("hold_concentration", source, "update", op) for op in concentrations),
     )
 
@@ -1048,7 +1061,12 @@ def validate_dnd_result(request, result, *, loader=None):
         if mechanism is None:
             _invalid("Accepted spell is outside the bound ordinary mechanism")
         spell = loader.get_spell(request.payload.spell_id)
-        return result, ordinary_spell_changes(request, result, mechanism, spell)
+        hit_effect = mechanism == "attack_damage" and spell_attack_has_speed_effect(
+            loader, request.payload.spell_id
+        )
+        return result, ordinary_spell_changes(
+            request, result, mechanism, spell, hit_effect=hit_effect
+        )
     if (
         request.operation_kind == "combat.intent"
         and request.payload.intent_type == "drop_concentration"
@@ -1062,10 +1080,27 @@ def validate_dnd_result(request, result, *, loader=None):
     ):
         return result, hold_effect_changes(request, result, source)
     if request.operation_kind == "combat.intent" and request.payload.intent_type == "move":
-        return result, ordinary_walk_changes(request, result)
+        return result, ordinary_walk_changes(request, result, loader=loader)
     if request.operation_kind == "combat.intent" and request.payload.intent_type == "pass":
         if has_haste_effects(request.state_snapshot):
             return result, haste_effect_changes(request, result)
+        snapshot = request.state_snapshot
+        if has_speed_effects(snapshot):
+            if loader is None or speed_effect_support_failure(snapshot, loader) is not None:
+                _invalid("Pass result requires the bound speed effect graph")
+            adopted, target, final_effects = speed_effect_pass_admission(request, result)
+            operations = (delta.EffectLifecycleUpdate,)
+            _turn_intent_scope(
+                request,
+                result,
+                effect_operations=operations,
+                effect_movement=(target, final_effects),
+                effect_speed=speed_with_effects,
+            )
+            base = delta_changes(
+                request, result, effect_operations=operations, effect_targets=(target,)
+            )
+            return result, (*base, *adopted)
         _turn_intent_scope(request, result)
     return result, (
         closure_changes(request, result)
@@ -1512,6 +1547,10 @@ class RulesAdapter:
                 or actor_id not in combat.party_ids
                 or combat.pending_reactions
                 or snapshot.effect_states
+                or (
+                    snapshot.snapshot_schema_version != "engine-snapshot/20"
+                    and spell_attack_has_speed_effect(canonical, payload.spell_id)
+                )
             ):
                 return "spell.capability"
             return None
@@ -1544,14 +1583,12 @@ class RulesAdapter:
                         or combat.reaction_effects_pending_expiry
                         or combat.sap_marks
                     )
-                    and all(
-                        actor.is_alive and actor.hp_current > 0
-                        for actor in snapshot.character_states
-                    )
+                    and supports_pass_roster(snapshot.character_states)
                     and (
                         not _has_combat_effects(snapshot)
                         or _hold_source(snapshot) is not None
                         or has_haste_effects(snapshot)
+                        or has_speed_effects(snapshot)
                     )
                 ):
                     return None
@@ -1584,7 +1621,8 @@ class RulesAdapter:
             in {
                 "hold_graph",
                 "haste_graph",
-                "hold_lifecycle",
+                "combat_effect",
+                "effect_lifecycle",
                 "hold_concentration",
                 "effect_follow_up",
             }
@@ -1619,6 +1657,8 @@ class RulesAdapter:
                 )
             elif component == "world_effect" and field == "create":
                 self.world.runtime.time.consumers["effects"].apply_verified(sid, value)
+            elif component == "combat_effect":
+                self.characters.effects.apply_combat_creation(sid, value)
             elif component == "slot_ledger":
                 self.records.spend_slot(
                     sid,
@@ -1662,7 +1702,7 @@ class RulesAdapter:
                         },
                     ),
                 )
-            elif component == "hold_lifecycle":
+            elif component == "effect_lifecycle":
                 self.characters.effects.apply_lifecycle(sid, value)
             elif component == "effect_follow_up":
                 self.characters.effects.apply_follow_up(sid, value)
@@ -1722,6 +1762,15 @@ class RulesAdapter:
                     or (
                         command.payload.intent_type in {"pass", "drop_concentration"}
                         and has_haste_effects(snapshot)
+                    )
+                    or (
+                        command.payload.intent_type == "cast_spell"
+                        and command.payload.spell_id is not None
+                        and spell_attack_has_speed_effect(self.loader, command.payload.spell_id)
+                    )
+                    or (
+                        command.payload.intent_type in {"move", "pass"}
+                        and has_speed_effects(snapshot)
                     )
                 )
                 else "engine-evaluation/29"

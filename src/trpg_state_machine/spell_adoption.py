@@ -5,6 +5,7 @@ from dnd5e_engine.areas import creature_count
 from dnd5e_engine.attack_rules import can_retain_turn
 from dnd5e_engine.damage_rules import healing_balance
 from dnd5e_engine.evaluation_actor import combatant
+from dnd5e_engine.evaluation_speed_effects import speed_with_effects
 from dnd5e_engine.evaluation_state import CombatSnapshot, MovementLedgerState
 from dnd5e_engine.movement import project_speeds, speed_for_mode
 from dnd5e_engine.rules.conditions import active_condition_names, exhaustion_level_of
@@ -17,6 +18,7 @@ from dnd5e_engine.turn_rules import (
 from dnd5e_srd_data.schema.spell import CastingTimeUnit
 from pydantic import ValidationError
 
+from .concentration_adoption import require_effect_applied
 from .damage_adoption import (
     DAMAGE_OPERATIONS,
     adopt_damage_operation,
@@ -26,6 +28,7 @@ from .damage_adoption import (
 )
 from .errors import StateMachineError
 from .package import canonical_json
+from .speed_effect_adoption import supports_pass_roster
 
 
 class UnsupportedSpellConsequence(Exception):
@@ -37,11 +40,12 @@ def _invalid(message):
     raise StateMachineError("invalid_rule_result", message)
 
 
-def ordinary_spell_changes(request, result, mechanism, spell):
-    """Validate immediate healing, save or attack consequences against fixed input.
+def ordinary_spell_changes(request, result, mechanism, spell, *, hit_effect=False):
+    """Validate ordinary healing, save or attack consequences against fixed input.
 
     The bound spell supplies casting timing, damage source and declared type.
     Attack evidence is linked to the damage instance and to the caster's budget.
+    An admitted speed rider requires a complete effect, clock and lineage on a hit.
     Each selected creature needs ordered healing evidence and the matching capped
     HP change, with one slot and action payment for the entire cast.
     The returned edits are candidates for the caller's existing write transaction.
@@ -112,6 +116,8 @@ def ordinary_spell_changes(request, result, mechanism, spell):
     rolled = [event for event in result.proposed_events if event.type == "attack_rolled"]
     damaged = [event for event in result.proposed_events if event.type == "damage_applied"]
     deaths = [event for event in result.proposed_events if event.type == "death"]
+    applied = [event for event in result.proposed_events if event.type == "effect_applied"]
+    creations = [op for op in result.state_delta.operations if type(op) is delta.CombatEffectCreate]
     if (
         len(submitted) != 1
         or submitted[0].actor_id != caster
@@ -128,6 +134,7 @@ def ordinary_spell_changes(request, result, mechanism, spell):
         or len(saved) != int(mechanism == "save_damage")
         or (saved and (saved[0].target_id != target or len(damaged) != 1))
         or len(rolled) != int(attack)
+        or (not hit_effect and (applied or creations))
         or any(
             event.type
             not in {
@@ -137,6 +144,7 @@ def ordinary_spell_changes(request, result, mechanism, spell):
                 "save_rolled",
                 "attack_rolled",
                 "damage_applied",
+                "effect_applied",
                 "death",
                 "turn_phase",
                 "turn_ended",
@@ -163,6 +171,7 @@ def ordinary_spell_changes(request, result, mechanism, spell):
         for identity, value in healing_results.items()
         if value != before_actors[identity].hp_current
     }
+    creation = None
     if attack:
         roll = rolled[0]
         if (
@@ -181,6 +190,22 @@ def ordinary_spell_changes(request, result, mechanism, spell):
             or (damaged and damaged[0].damage_type != activity.damage.parts[0].types[0])
         ):
             _invalid("Damage differs from the authorized spell attack")
+        creates_effect = hit_effect and roll.is_hit
+        if len(creations) != int(creates_effect) or len(applied) != int(creates_effect):
+            _invalid("Spell attack requires one effect creation and application only on a hit")
+        if creates_effect:
+            (creation,) = creations
+            if (
+                creation.combat_id != combat_before.combat_id
+                or creation.identity[0] != target
+                or creation.lifecycle.state.application.source_id != caster
+                or creation.lifecycle.state.applied_turn_serial != combat_before.turn_serial
+                or creation.lifecycle.state.applied_round != combat_before.round_number
+                or creation.expected_absent is not True
+                or creation.lineage.statuses
+            ):
+                _invalid("Spell attack effect differs from its fixed cast or target")
+            require_effect_applied(applied[0], creation.effect)
     changes = []
     seen = set()
 
@@ -251,6 +276,8 @@ def ordinary_spell_changes(request, result, mechanism, spell):
 
     def effective_speed(before, mode):
         """Use RE's fixed-actor speed projection for a turn ledger mode."""
+        if creation is not None and before.entity_id == target:
+            return speed_with_effects(before, (creation.effect,), mode)
         source = combatant(before)
         speeds = project_speeds(
             source.base_speed,
@@ -322,6 +349,8 @@ def ordinary_spell_changes(request, result, mechanism, spell):
             event_order.append("damage_applied")
         if deaths:
             event_order.append("death")
+        if applied:
+            event_order.append("effect_applied")
         next_round = turn_update.value.round_number
         event_order.extend((("turn_end", caster, combat_before.round_number), "turn_ended"))
         if rollover:
@@ -372,9 +401,12 @@ def ordinary_spell_changes(request, result, mechanism, spell):
             edit("actor", op.target_id, "hp_current", op.expected_hp, op.resulting_hp)
         elif not healing and type(op) in DAMAGE_OPERATIONS:
             adopt_damage_operation(request, target_before.entity_type.lower(), op, edit)
+        elif type(op) is delta.CombatEffectCreate and op is creation:
+            data["effect_states"].append(op.effect.model_dump(mode="json"))
+            combat["effect_lifecycles"].append(op.lifecycle.model_dump(mode="json"))
+            combat["conditions_by_effect"].append(op.lineage.model_dump(mode="json"))
+            changes.append(("combat_effect", op.identity, "create", op))
         elif type(op) is delta.ActionBudgetUpdate:
-            if op.actor_id not in ({caster, next_actor} if turn_advanced else {caster}):
-                _invalid("Spell changed an unrelated action budget")
             expected_budget = op.expected.model_dump(mode="json")
             value_budget = op.value.model_dump(mode="json")
             changed = {
@@ -391,8 +423,10 @@ def ordinary_spell_changes(request, result, mechanism, spell):
                 if not changed <= permitted or not payment.keys() <= changed:
                     _invalid("Spell changed an unrelated caster budget")
                 budget_paid = all(value_budget[field] == value for field, value in payment.items())
-            elif not turn_advanced:
-                _invalid("Spell changed next actor without a turn transition")
+            elif (op.actor_id != next_actor or not turn_advanced) and (
+                creation is None or op.actor_id != target or changed != {"movement_remaining"}
+            ):
+                _invalid("Spell changed an unrelated action budget")
             for field in value_budget:
                 edit(
                     "actor",
@@ -466,6 +500,12 @@ def ordinary_spell_changes(request, result, mechanism, spell):
             _invalid("Outgoing caster budget differs from its paid turn end")
     if turn_advanced and combat["movement_ledgers"].get(next_actor) != fresh_ledger:
         _invalid("Next actor omitted or changed its ordinary movement ledger")
+    if creation is not None and target not in (caster, next_actor):
+        target_ledger = combat_before.movement_ledgers[target]
+        if actors[target]["movement_remaining"] != target_ledger.remaining(
+            effective_speed(target_before, target_ledger.active_mode)
+        ):
+            _invalid("Spell attack target movement differs from its applied effect")
     if (
         not (budget_paid or solo_wrap)
         or (resource is None) == slot_paid
@@ -484,9 +524,13 @@ def ordinary_spell_changes(request, result, mechanism, spell):
     )
     data["resource_state"]["pools"] = pools
     try:
-        CombatSnapshot.model_validate_json(canonical_json(data))
+        candidate = CombatSnapshot.model_validate_json(canonical_json(data))
     except ValidationError as exc:
         raise StateMachineError(
             "invalid_rule_result", "Spell Delta violates snapshot invariants"
         ) from exc
+    # A new clock needs public Pass to reach its expiry. Reuse that admission
+    # until the host can advance this graph across a nonliving roster.
+    if creation is not None and not supports_pass_roster(candidate.character_states):
+        raise UnsupportedSpellConsequence
     return tuple(changes)

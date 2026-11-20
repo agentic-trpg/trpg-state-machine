@@ -286,7 +286,7 @@ def concentration_release_changes(request, result):
         _invalid("Concentration release events differ from the adopted graph transition")
 
     for identity in chain:
-        changes.append(("hold_lifecycle", identity, "update", lifecycles[identity]))
+        changes.append(("effect_lifecycle", identity, "update", lifecycles[identity]))
         if follow_up := follow_ups.get(identity):
             changes.append(
                 ("effect_follow_up", effect_identity(follow_up.effect), "create", follow_up)
