@@ -1,5 +1,17 @@
 # Session Management 重构进度
 
+## 2026-11-20 探索即时治疗与战斗速度效果共存（候选）
+
+`world.cast_spell` 可按已准备的一级 Cure Wounds 与明确施法来源，对自己或触及的
+正 HP 存活目标采用即时治疗。已核验的是普通一级牧师来源。法术位、受上限约束的 HP、
+RNG、施法事件与回执在同一提交中采用。满 HP 时仍支付一个法术位并记录治疗掷骰。
+
+公开战斗施法接入同目标的一条世界时间步行修正与一条回合减速。Longstrider 和 Ray of Frost
+可以同时参与普通步行和 Pass 的预算计算。世界截止点与施法者下回合开始各按
+完整效果身份移除，保留同一移动账本已花的尺数。该候选覆盖两个错开的到期边界、非致死
+命中和普通步行，仍由原协议表达创建及移除。见[混合速度回归](../tests/test_combat_speed_hit_effect.py)
+和[探索治疗回归](../tests/test_exploration_cure_wounds.py)。
+
 ## 2026-11-20 单次无中断长休（候选）
 
 所选 PC 通过可信主持授权的 `activity.long_rest` 在非战斗秒制 Session 休息 8 小时。
