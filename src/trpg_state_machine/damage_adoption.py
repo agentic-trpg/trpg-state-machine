@@ -43,12 +43,8 @@ def ordinary_damage_target(state, target):
     )
 
 
-def validate_damage_result(request, result, target, *, source_id, is_crit):
-    """Check one ordinary damage instance or a miss and return newly dead identities.
-
-    RE owns damage, zero-HP consequences and their evidence. This check binds that
-    evidence to the guarded edits without rerunning rolls or the death lifecycle.
-    """
+def damage_result_balances(request, result, target, *, source_id, is_crit):
+    """Bind one damage packet or miss to its typed HP, temporary HP and attribution edits."""
     snapshot = request.state_snapshot
     state = snapshot.combat_state
     actor_id = request.actor_id
@@ -62,7 +58,6 @@ def validate_damage_result(request, result, target, *, source_id, is_crit):
             ops[op_type] = op
 
     events = [event for event in result.proposed_events if event.type == "damage_applied"]
-    deaths = [event for event in result.proposed_events if event.type == "death"]
     sequence = state.damage_instance_sequence + 1
     instance = f"damage:{sequence}:{actor_id}:{target_id}"
     if any(
@@ -97,6 +92,21 @@ def validate_damage_result(request, result, target, *, source_id, is_crit):
         ):
             _invalid("Damage edits differ from the resolved damage balances or metadata")
 
+    return hp, ops, instance
+
+
+def validate_damage_result(request, result, target, *, source_id, is_crit):
+    """Check one ordinary damage instance or a miss and return newly dead identities.
+
+    RE owns damage, zero-HP consequences and their evidence. This check binds that
+    evidence to the guarded edits without rerunning rolls or the death lifecycle.
+    """
+    target_id = target.entity_id
+    deaths = [event for event in result.proposed_events if event.type == "death"]
+    hp, ops, _ = damage_result_balances(
+        request, result, target, source_id=source_id, is_crit=is_crit
+    )
+
     lethal = hp == 0
     life = ops.get(delta.DeathStateUpdate)
     ledger = ops.get(delta.DeathLedgerUpdate)
@@ -108,7 +118,7 @@ def validate_damage_result(request, result, target, *, source_id, is_crit):
         return set()
 
     if (
-        not ordinary_damage_target(state, target)
+        not ordinary_damage_target(request.state_snapshot.combat_state, target)
         or life is None
         or life.value.is_alive
         or life.value.death_saves != target.death_saves
@@ -122,6 +132,34 @@ def validate_damage_result(request, result, target, *, source_id, is_crit):
     ):
         _invalid("Zero-HP ordinary damage requires matching death evidence, state and ledger")
     return {target_id}
+
+
+def adopt_death_state(op, edit):
+    """Stage the typed life and save counters for the operation's verified actor."""
+    for field in type(op.value).model_fields:
+        edit("actor", op.target_id, field, getattr(op.expected, field), getattr(op.value, field))
+
+
+def adopt_death_ledger(snapshot, op, target, killer, target_kind, edit):
+    """Preserve committed history and stage only the verified terminal actor's record."""
+    if (
+        not op.expected_dead_ids <= op.dead_ids
+        or op.records[: len(op.expected_records)] != op.expected_records
+    ):
+        _invalid("Death history cannot be erased or rewritten")
+    new_dead_ids = op.dead_ids - op.expected_dead_ids
+    records = op.records[len(op.expected_records) :]
+    if new_dead_ids - {target} or [record.target_id for record in records] != sorted(new_dead_ids):
+        _invalid("Death ledger additions must match the verified actor")
+    if any(
+        record.killer_id != killer
+        or record.location_id != snapshot.scene_state.scene_id
+        or record.target_kind != target_kind
+        for record in records
+    ):
+        _invalid("Death record attribution differs from the authorized operation")
+    edit("combat", op.combat_id, "dead_ids", op.expected_dead_ids, op.dead_ids)
+    edit("combat", op.combat_id, "deaths_recorded", op.expected_records, op.records)
 
 
 def adopt_damage_operation(request, target_kind, op, edit):
@@ -141,8 +179,7 @@ def adopt_damage_operation(request, target_kind, op, edit):
             _invalid("Damage cannot grant temporary HP")
         edit("actor", target, "temp_hp", op.expected_temp_hp, op.temp_hp)
     elif type(op) is delta.DeathStateUpdate:
-        for field in type(op.value).model_fields:
-            edit("actor", target, field, getattr(op.expected, field), getattr(op.value, field))
+        adopt_death_state(op, edit)
     elif type(op) is delta.DamageAttributionUpdate:
         if op.value not in (None, source):
             _invalid("Damage attribution belongs to another actor")
@@ -160,23 +197,4 @@ def adopt_damage_operation(request, target_kind, op, edit):
             )
         edit("combat", combat, "processed_zero_hp_damage_instances", op.expected, op.value)
     elif type(op) is delta.DeathLedgerUpdate:
-        if (
-            not op.expected_dead_ids <= op.dead_ids
-            or op.records[: len(op.expected_records)] != op.expected_records
-        ):
-            _invalid("Death history cannot be erased or rewritten")
-        new_dead_ids = op.dead_ids - op.expected_dead_ids
-        records = op.records[len(op.expected_records) :]
-        if new_dead_ids - {target} or [record.target_id for record in records] != sorted(
-            new_dead_ids
-        ):
-            _invalid("Death identities and records must match the declared target exactly once")
-        if any(
-            record.killer_id != source
-            or record.location_id != snapshot.scene_state.scene_id
-            or record.target_kind != target_kind
-            for record in records
-        ):
-            _invalid("Death record attribution differs from the authorized damage")
-        edit("combat", combat, "dead_ids", op.expected_dead_ids, op.dead_ids)
-        edit("combat", combat, "deaths_recorded", op.expected_records, op.records)
+        adopt_death_ledger(snapshot, op, target, source, target_kind, edit)
