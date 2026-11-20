@@ -81,10 +81,18 @@ Haste 或 Lethargy 效果图的回合推进与解除，Haste 额外行动、重�
 回合时钟和减速随伤害共同提交。普通步行读取效果，回合推进采用 RE 的到期移除。
 参见[命中速度效果](SESSION_MANAGEMENT_PROGRESS.md#2026-11-20-法术命中与战斗减速候选)。
 
+受支持的 Hold Person 施法者被普通武器攻击打到 0 HP 时，Combat 与 Effects 共同
+采用生命值、专注结束和效果清理。对应的死亡豁免和合法关闭沿用类型化 RE 结果。
+参见 [0 HP 专注与战斗关闭](SESSION_MANAGEMENT_PROGRESS.md#2026-11-20-专注者降到-0-hp-与战斗关闭候选)。
+
 `activity.long_rest` 将可信主持确认的单次无中断长休接入 SessionTime 和
 RuleExecution。非战斗秒制 Session 在同一提交中推进 8 小时，采用固定 RE
 的角色 HP 和资源恢复，并保存 Activity 的最近完成时间及回执。
 参见[单次无中断长休](SESSION_TIME_COORDINATION.md#单次无中断长休)。
+
+`activity.short_rest` 复用这条时间与提交路径。可信主持确认一次无中断的短休后，
+SM 推进一小时，并与 RE 返回的所选生命骰支付、治疗和适用的资源恢复共同提交。
+参见[单次无中断短休](SESSION_TIME_COORDINATION.md#单次无中断短休)。
 
 完整 Agent Host、通用规则采用、完整活跃战斗恢复及未来多人负载不是已验收能力。
 
