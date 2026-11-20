@@ -1,19 +1,32 @@
 """Exercise a spell hit rider through public cast, walking and Pass commands."""
 
 from dataclasses import replace
+from random import Random
 
 import pytest
 from dnd5e_engine import evaluation_delta as delta
-from item_support import NPC
+from dnd_support import initialize
+from item_support import NPC, A
+from spatial_support import submit as submit_world
 from test_cure_wounds import actor
 from test_dnd_runtime import authority
 from test_hold_effect_candidate import pass_command
 from test_ordinary_spells import assert_committed_events, observe_evaluation
+from test_scoped_runtime_validation import grow_scenes, measure
+from test_session_time_coordination import submit
 from test_spell_attack_cast import OTHER_ENEMY, cast_command
 from test_spell_attack_cast import open_spell_combat as open_spell_combat
+from test_timed_spell_cast import cast_command as world_cast_command
 from test_timed_spell_cast import move_command
+from test_timed_spell_cast import timed_spell_world as timed_spell_world
 
-from trpg_state_machine import StateMachine, StateMachineError
+from trpg_state_machine import (
+    AdvanceSessionTime,
+    StateMachine,
+    StateMachineError,
+    StepActor,
+    effect_time,
+)
 
 RAY = "ray-of-frost"
 
@@ -27,6 +40,281 @@ def effect_rows(sm, sid):
         )
         for table in ("ongoing_effects", "effect_concentrations")
     )
+
+
+def test_speed_rider_rejects_elapsed_modifier_on_another_target(timed_spell_world):
+    """Refuse an elapsed speed dependency outside the reviewed same-target combination."""
+    sm, sid, package, context = timed_spell_world(seed=16, walking=True, hit_rider=RAY)
+    with sm:
+        cast = world_cast_command((sm, sid, package, context))
+        assert (
+            receipt := sm.submit_command(cast, package, context=context)
+        ).status == "committed", receipt
+        assert (receipt := initialize(sm, sid, package, context)).status == "committed", receipt
+        command = cast_command(sm, sid, package, context, RAY)
+        before = sm.read_combat_snapshot(sid, package, context=context)
+        assert len(before.effect_states) == 1 and before.effect_states[0].target_id == cast.actor_id
+        stored = authority(sm, sid), effect_rows(sm, sid)
+        stored[0].pop("command_receipts")
+        rng = sm.read_rng_context(sid, package, context=context)
+        events = sm.read_events(sid, package, context=context)
+        receipt = sm.submit_command(command, package, context=context)
+        assert (receipt.status, receipt.error_code) == ("rejected", "spell.capability"), receipt
+        assert receipt.event_seqs == ()
+        assert receipt.world_version == before.world_version
+        assert sm.read_combat_snapshot(sid, package, context=context) == before
+        assert sm.read_rng_context(sid, package, context=context) == rng
+        assert sm.read_events(sid, package, context=context) == events
+        after = authority(sm, sid)
+        after.pop("command_receipts")
+        assert (after, effect_rows(sm, sid)) == stored
+
+
+def test_wizard_five_cannot_supply_wizard_one_attack_proficiency(timed_spell_world):
+    """Reject the obsolete +2 override at authored combat dependency admission."""
+    with pytest.raises(StateMachineError, match="Wizard proficiency"):
+        timed_spell_world(walking=True, hit_rider=RAY, proficiency_override=2)
+
+
+def retry_clock_expiry_after_growth(sm, command, package, context, monkeypatch):
+    """Fail a public Pass after exact expiry, grow remote scenes, and retry on the same facts."""
+    sid = command.session_id
+    target = NPC
+    samples = []
+    refresh = effect_time.refresh_world_walk_expiry
+
+    def observed_refresh(world, sid, expired):
+        """Count just the new targeted budget maintenance reached from the clock consumer."""
+        memory = sm._store.memory
+        parsed = memory.stats["parsed_builds"]
+        snapshots = memory.stats["snapshot_builds"]
+        with measure(sm) as (counts, sql):
+            refresh(world, sid, expired)
+        samples.append(
+            (
+                counts["sql_selects"],
+                counts["sql_rows"],
+                memory.stats["parsed_builds"] - parsed,
+                memory.stats["snapshot_builds"] - snapshots,
+            )
+        )
+        effect_reads = [s for s in sql if "FROM ongoing_effects" in s]
+        assert len(effect_reads) <= 1 and all("AND target_id=?" in s for s in effect_reads), sql
+        assert sum("SELECT json_extract(state_json,?) FROM combats" in s for s in sql) == 1, sql
+
+    monkeypatch.setattr(effect_time, "refresh_world_walk_expiry", observed_refresh)
+    before = sm.read_combat_snapshot(sid, package, context=context)
+    time_before = sm.read_time_sync(sid, package, context=context)
+    facts = authority(sm, sid), effect_rows(sm, sid)
+    sm._conn.execute(
+        "CREATE TEMP TRIGGER fail_expiry_receipt BEFORE INSERT ON command_receipts "
+        f"WHEN NEW.command_id='{command.command_id}' "
+        "AND (SELECT count(*) FROM ongoing_effects WHERE session_id=NEW.session_id)=1 "
+        "AND EXISTS (SELECT 1 FROM mechanical_actors WHERE session_id=NEW.session_id "
+        f"AND actor_id='{target}' AND json_extract(state_json,'$.movement_remaining')=20) "
+        "BEGIN SELECT RAISE(ABORT,'injected after world expiry and movement refresh'); END"
+    )
+    with pytest.raises(StateMachineError) as failure:
+        sm.submit_command(command, package, context=context)
+    assert failure.value.code == "storage_error"
+    assert "injected after world expiry and movement refresh" in str(failure.value.__cause__)
+    assert (authority(sm, sid), effect_rows(sm, sid)) == facts
+    assert sm.read_combat_snapshot(sid, package, context=context) == before
+    assert sm.read_time_sync(sid, package, context=context) == time_before
+    assert sm.get_command_receipt(sid, command.command_id, package, context=context) is None
+    sm._conn.execute("DROP TRIGGER fail_expiry_receipt")
+    grow_scenes(sm, sid, 100)
+
+    receipt = sm.submit_command(command, package, context=context)
+    assert receipt.status == "committed", receipt
+    assert sm.submit_command(command, package, context=context) == receipt
+    assert len(samples) == 2 and samples[0] == samples[1]
+    assert samples[0][3] == 0
+    print(
+        "expiry maintenance at +0 / +100 scenes (selects, rows, parsed builds, snapshots):", samples
+    )
+    return receipt
+
+
+@pytest.mark.parametrize("world_first", [False, True], ids=["ray-start-first", "world-clock-first"])
+def test_longstrider_ray_overlap(timed_spell_world, world_first, monkeypatch):
+    """Compose one target's walking budget and independently settle both effect clocks."""
+    session = timed_spell_world(seed=16, walking=True, hit_rider=RAY, target_first=world_first)
+    sm, sid, package, context = session
+
+    def execute(command):
+        """Submit the typed command through the public handler."""
+        return sm.submit_command(command, package, context=context)
+
+    def read():
+        """Read the published combat snapshot."""
+        return sm.read_combat_snapshot(sid, package, context=context)
+
+    def identity(effect):
+        """Use the stored composite identity shared by the two expiry paths."""
+        return effect.target_id, effect.id, effect.origin
+
+    def movement(snapshot):
+        """Report remaining feet and previously spent movement on the shared ledger."""
+        ledger = snapshot.combat_state.movement_ledgers[NPC]
+        return actor(snapshot, NPC).movement_remaining, ledger.spent_ft, ledger.distance_ft
+
+    def pass_turn(key, expected_actor):
+        """Advance the expected actor's turn using the public Pass command."""
+        command = pass_command(sid, read(), key)
+        assert command.actor_id == expected_actor
+        receipt = execute(command)
+        assert receipt.status == "committed", receipt
+        return receipt
+
+    def walk(cell, key):
+        """Issue ordinary walking for the current actor."""
+        return execute(move_command(session, cell, key))
+
+    def events_for(receipt):
+        """Read the committed events belonging to this receipt."""
+        return [
+            event
+            for event in sm.read_events(sid, package, context=context)
+            if event.event_seq in receipt.event_seqs
+        ]
+
+    def check_ray_expiry(receipt, ray):
+        """Check exact Ray removal at the caster START on the closing Pass."""
+        engine_events = [
+            event.payload["engine_event"]
+            for event in events_for(receipt)
+            if event.event_type == "combat.engine_event"
+        ]
+        (index,) = [i for i, e in enumerate(engine_events) if e["type"] == "effect_expired"]
+        expiry = engine_events[index]
+        assert (expiry["target_id"], expiry["effect_id"], expiry["origin"]) == identity(ray)
+        start = engine_events[index - 1]
+        assert (start["type"], start["phase"], start["actor_id"]) == (
+            "turn_phase",
+            "turn_start",
+            caster,
+        )
+        assert not any(event.event_type == "effect.expired" for event in events_for(receipt))
+
+    def check_world_expiry(receipt, longstrider):
+        """Check exact Longstrider removal at tick 3600 on the closing Pass."""
+        (expiry,) = [e for e in events_for(receipt) if e.event_type == "effect.expired"]
+        assert tuple(expiry.payload["identity"]) == identity(longstrider)
+        assert expiry.payload["boundary_tick"] == 3600
+        assert not any(
+            event.payload["engine_event"]["type"] == "effect_expired"
+            for event in events_for(receipt)
+            if event.event_type == "combat.engine_event"
+        )
+
+    with sm:
+        cast = world_cast_command(session, target_id=NPC)
+        caster = cast.actor_id
+        assert (receipt := execute(cast)).status == "committed", receipt
+        for start, end in (("0,0", "0,1"), ("0,1", "0,2")):
+            step = submit_world(sm, sid, package, context, StepActor(A, start, end), f"seek.{end}")
+            assert step.status == "committed", step
+        tick = 3594 if world_first else 3588
+        assert (receipt := submit(session, AdvanceSessionTime(tick), "before-combat")).status == (
+            "committed"
+        ), receipt
+        assert (receipt := initialize(sm, sid, package, context)).status == "committed", receipt
+        (longstrider,) = read().effect_states
+        assert identity(longstrider) == (NPC, "effect:longstrider", f"cast:longstrider:{caster}")
+        assert movement(read()) == (40, 0, 0)
+
+        if world_first:
+            assert (receipt := walk("2,0", "longstrider.walk-five")).status == "committed", receipt
+            pass_turn("target.to.caster", NPC)
+            assert sm.read_time_sync(sid, package, context=context).committed_tick == 3594
+
+        before_ray = read()
+        assert (hit := execute(cast_command(sm, sid, package, context, RAY))).status == (
+            "committed"
+        ), hit
+        both = read()
+        assert both.effect_states[0] == longstrider
+        ray = both.effect_states[1]
+        (clock,) = both.combat_state.effect_lifecycles
+        assert len(both.effect_states) == 2
+        assert clock.identity == identity(ray) and ray.target_id == NPC
+        assert clock.state.expiry_actor_id == caster and clock.state.application.source_slug == RAY
+        hit_events = [
+            event.payload["engine_event"]
+            for event in events_for(hit)
+            if event.event_type == "combat.engine_event"
+        ]
+        (roll,) = [event for event in hit_events if event["type"] == "attack_rolled"]
+        (damage,) = [event for event in hit_events if event["type"] == "damage_applied"]
+        rng = Random(16)
+        natural = rng.randint(1, 20)
+        cold_damage = rng.randint(1, 8) + rng.randint(1, 8)
+        assert roll["is_hit"] and not roll["is_crit"] and roll["advantage"] == "normal"
+        assert (roll["natural"], roll["modifier"], roll["roll_total"]) == (natural, 7, natural + 7)
+        assert (damage["amount"], damage["damage_type"]) == (cold_damage, "cold")
+        assert actor(both, NPC).hp_current == actor(before_ray, NPC).hp_current - cold_damage > 0
+        assert actor(both, NPC).base_speed == 30
+        assert both.resource_state == before_ray.resource_state
+        assert {row[1:4] for row in effect_rows(sm, sid)[0]} == {
+            identity(longstrider),
+            identity(ray),
+        }
+
+        if world_first:
+            assert movement(both) == (25, 5, 5)
+            assert sm.read_time_sync(sid, package, context=context).committed_tick == 3594
+            boundary_command = pass_command(sid, both, "third.expires.longstrider")
+            assert boundary_command.actor_id == OTHER_ENEMY
+            boundary = retry_clock_expiry_after_growth(
+                sm, boundary_command, package, context, monkeypatch
+            )
+            check_world_expiry(boundary, longstrider)
+            reduced = read()
+            assert sm.read_time_sync(sid, package, context=context).committed_tick == 3600
+            assert reduced.effect_states == (ray,)
+            assert reduced.combat_state.effect_lifecycles == (clock,)
+            assert tuple(row[1:4] for row in effect_rows(sm, sid)[0]) == (identity(ray),)
+            assert movement(reduced) == (20, 0, 0)
+            too_far = walk("7,0", "ray.walk-twenty-five")
+            assert (too_far.status, too_far.error_code) == ("rejected", "movement.insufficient")
+            assert read() == reduced
+            assert (receipt := walk("6,0", "ray.walk-twenty")).status == "committed", receipt
+            check_ray_expiry(pass_turn("target.expires.ray", NPC), ray)
+            assert movement(read()) == (10, 20, 20)
+            pass_turn("caster.to.third", caster)
+            pass_turn("third.to.target", OTHER_ENEMY)
+        else:
+            assert movement(both) == (30, 0, 0)
+            too_far = walk("8,0", "both.walk-thirty-five")
+            assert (too_far.status, too_far.error_code) == ("rejected", "movement.insufficient")
+            assert read() == both
+            assert (receipt := walk("7,0", "both.walk-thirty")).status == "committed", receipt
+            assert movement(read()) == (0, 30, 30)
+            pass_turn("target.to.third", NPC)
+            assert read().effect_states == (longstrider, ray)
+            check_ray_expiry(pass_turn("third.expires.ray", OTHER_ENEMY), ray)
+            assert read().effect_states == (longstrider,)
+            assert not read().combat_state.effect_lifecycles
+            assert sm.read_time_sync(sid, package, context=context).committed_tick == 3594
+            assert movement(read()) == (10, 30, 30)
+            assert tuple(row[1:4] for row in effect_rows(sm, sid)[0]) == (identity(longstrider),)
+            pass_turn("caster.to.target", caster)
+            assert movement(read()) == (40, 0, 0)
+            assert (receipt := walk("0,0", "longstrider.walk-thirty-five")).status == (
+                "committed"
+            ), receipt
+            assert movement(read()) == (5, 35, 35)
+            pass_turn("target.to.third.again", NPC)
+            check_world_expiry(pass_turn("third.expires.longstrider", OTHER_ENEMY), longstrider)
+            assert sm.read_time_sync(sid, package, context=context).committed_tick == 3600
+            assert movement(read()) == (0, 35, 35)
+            pass_turn("caster.to.target.again", caster)
+
+        final = read()
+        assert movement(final) == (30, 0, 0)
+        assert not final.effect_states and not final.combat_state.effect_lifecycles
+        assert effect_rows(sm, sid) == ((), ())
 
 
 @pytest.mark.parametrize("other_enemy_turn", [False, True], ids=["target-next", "target-later"])

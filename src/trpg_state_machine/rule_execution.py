@@ -13,6 +13,7 @@ from dnd5e_engine.evaluation_contracts import (
 )
 from dnd5e_engine.evaluation_openable import OpenableCheckRequest, evaluate_openable
 from dnd5e_engine.evaluation_ruleset import EVALUATOR_VERSION, RulesetBindingError
+from dnd5e_engine.evaluation_speed_effects import spell_attack_has_speed_effect
 from pydantic import ValidationError
 
 from ._execution import _WorldEffectKind, _WorldEffectOrigin
@@ -122,8 +123,13 @@ class RuleExecution:
             if type(command.payload) is CheckPayload or domain_check or exploration_item:
                 return self.rules._noncombat_snapshot(value, package)
             intent_type = getattr(command.payload, "intent_type", None)
+            projects_walk = intent_type == "move" or (
+                intent_type == "cast_spell"
+                and command.payload.spell_id is not None
+                and spell_attack_has_speed_effect(self.rules.loader, command.payload.spell_id)
+            )
             return self.rules._combat_snapshot(
-                value, for_pass=intent_type == "pass", for_walk=intent_type == "move"
+                value, for_pass=intent_type == "pass", for_walk=projects_walk
             )
 
         with self.store.transaction():

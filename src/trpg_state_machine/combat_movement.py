@@ -3,20 +3,55 @@
 from itertools import pairwise
 
 from dnd5e_engine import evaluation_delta as delta
+from dnd5e_engine.evaluation_effects import EffectState
 from dnd5e_engine.evaluation_movement import timed_walk_bonus, walk_speed
 from dnd5e_engine.evaluation_speed_effects import (
     has_speed_effects,
+    is_bound_attack_speed_effect,
     speed_effect_support_failure,
     speed_with_effects,
+    world_walk_bonus,
 )
+from dnd5e_engine.evaluation_state import CharacterStateV2, MovementLedgerState
 from dnd5e_engine.events import ActorMoved
 
 from .errors import StateMachineError
+from .package import canonical_json
 
 
 def _invalid(message):
     """Report a malformed walking proposal without committing a rules refusal."""
     raise StateMachineError("invalid_rule_result", message)
+
+
+def refresh_world_walk_expiry(world, sid, expired):
+    """Refresh one combat movement mirror after a supported elapsed walk modifier ends."""
+    if not any(change.key == "system.attributes.movement.walk" for change in expired.changes):
+        return
+    try:
+        world_walk_bonus(expired)
+    except ValueError:
+        return
+    target = expired.target_id
+    ledger_json = world.combats.active_movement_ledger(sid, target)
+    if ledger_json is None:
+        return
+    ledger = MovementLedgerState.model_validate_json(ledger_json)
+    if ledger.active_mode != "walk":
+        return
+    remaining = tuple(
+        EffectState.model_validate_json(canonical_json(data))
+        for data in world.characters.effects.for_targets(sid, (target,))
+    )
+    if len(remaining) > 1 or (
+        remaining and not is_bound_attack_speed_effect(remaining[0], world.loader)
+    ):
+        return
+    facts = world.characters.rule_actors(sid, (target,))[target]
+    actor = CharacterStateV2.model_validate_json(canonical_json(facts))
+    budget = ledger.remaining(speed_with_effects(actor, remaining, ledger.active_mode))
+    if budget != actor.movement_remaining:
+        world.characters.update_rule_metadata(sid, target, "movement_remaining", budget)
 
 
 def ordinary_walk_changes(request, result, *, loader):

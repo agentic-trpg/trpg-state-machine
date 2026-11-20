@@ -3091,6 +3091,15 @@ class CombatRecords:
             ("$.movement_ledgers." + canonical_json(actor_id), canonical_json(value), sid),
         )
 
+    def active_movement_ledger(self, sid, actor_id):
+        """Read the named actor's ledger JSON from the active encounter, if present."""
+        row = self._conn.execute(
+            "SELECT json_extract(state_json,?) FROM combats "
+            "WHERE session_id=? AND json_extract(state_json,'$.ended')=0",
+            ("$.movement_ledgers." + canonical_json(actor_id), sid),
+        ).fetchone()
+        return row[0] if row is not None else None
+
     def spend_slot(self, sid, combat_id, owner_id, slot_kind, level, expected, value):
         """Apply one evaluator-guarded owner ledger replacement in the shared write scope."""
         self.store.require_write()

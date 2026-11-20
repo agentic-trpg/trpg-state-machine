@@ -36,6 +36,7 @@ from dnd5e_engine.evaluation_ruleset import (
 )
 from dnd5e_engine.evaluation_speed_effects import (
     has_speed_effects,
+    speed_cast_support_failure,
     speed_effect_support_failure,
     speed_with_effects,
     spell_attack_has_speed_effect,
@@ -1280,13 +1281,6 @@ class RulesAdapter:
             )
         try:
             components = self.characters.rule_components(sid, roster)
-            if for_pass:
-                independent = self.characters.effects.world_passive_identities(sid, roster)
-                components["effect_states"] = [
-                    effect
-                    for effect in components["effect_states"]
-                    if (effect["target_id"], effect["id"], effect["origin"]) not in independent
-                ]
             actors = self.characters.combat_rule_actors(
                 sid, roster, components["inventory_state"]["entries"]
             )
@@ -1304,6 +1298,18 @@ class RulesAdapter:
                     }
                 )
             )
+            if for_pass and not has_speed_effects(snapshot):
+                independent = self.characters.effects.world_passive_identities(sid, roster)
+                if independent:
+                    snapshot = snapshot.model_copy(
+                        update={
+                            "effect_states": tuple(
+                                effect
+                                for effect in snapshot.effect_states
+                                if effect_identity(effect) not in independent
+                            )
+                        }
+                    )
             return self._project_walk_budgets(snapshot) if for_walk else snapshot
         except (ValidationError, KeyError, TypeError) as exc:
             raise StateMachineError(
@@ -1530,6 +1536,7 @@ class RulesAdapter:
             if spell is None:
                 return "spell.capability"
             level = spell.level
+            hit_speed_rider = spell_attack_has_speed_effect(canonical, payload.spell_id)
             basic = type(payload)(
                 intent_type="cast_spell",
                 source_id=payload.source_id,
@@ -1549,10 +1556,13 @@ class RulesAdapter:
                 or payload.target_id is None
                 or actor_id not in combat.party_ids
                 or combat.pending_reactions
-                or snapshot.effect_states
+                or (snapshot.effect_states and not hit_speed_rider)
                 or (
-                    snapshot.snapshot_schema_version != "engine-snapshot/20"
-                    and spell_attack_has_speed_effect(canonical, payload.spell_id)
+                    hit_speed_rider
+                    and (
+                        snapshot.snapshot_schema_version != "engine-snapshot/20"
+                        or speed_cast_support_failure(snapshot, payload.target_id) is not None
+                    )
                 )
             ):
                 return "spell.capability"

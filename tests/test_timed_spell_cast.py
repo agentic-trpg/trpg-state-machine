@@ -1,6 +1,7 @@
 """Public exploration spell adoption, expiration, and rollback."""
 
 import random
+from copy import deepcopy
 from dataclasses import asdict, replace
 
 import pytest
@@ -20,6 +21,7 @@ from test_hold_effect_candidate import pass_command
 from test_mechanism_service import extended_data, trigger
 from test_real_checks import check_command
 from test_session_time_coordination import submit
+from test_spell_attack_cast import OTHER_ENEMY
 from test_world_mechanisms import LEVER
 
 from trpg_state_machine import (
@@ -56,6 +58,9 @@ def timed_spell_world(tmp_path, context):
         walking=False,
         attack_after_walk=False,
         region_mechanism=False,
+        hit_rider=None,
+        target_first=False,
+        proficiency_override=None,
     ):
         canonical = BundledAssetLoader()
         base = item_loader()
@@ -97,7 +102,7 @@ def timed_spell_world(tmp_path, context):
             classes=[wizard],
             subclasses=[evoker],
             features=[canonical.get_feature(slug) for slug in features],
-            spells=[spell],
+            spells=[spell, *([canonical.get_spell(hit_rider)] if hit_rider else [])],
         )
         data = item_data()
         if region_mechanism:
@@ -124,6 +129,16 @@ def timed_spell_world(tmp_path, context):
             combat["monster_slug_by_entity"] = {NPC: ogre.slug} if ogre else {}
             combat["initiative_ids"].reverse()
             combat["actor_zone"][NPC] = foe_cell
+        if hit_rider:
+            foe_cell = "1,0"
+            data["actors"][0]["initial_cell"] = foe_cell
+            other = deepcopy(data["actors"][0])
+            other.update(actor_id=OTHER_ENEMY, name="Attendant", initial_cell="2,1")
+            data["actors"].append(other)
+            data["scenes"][0]["actor_ids"].append(OTHER_ENEMY)
+            data["navigation"]["actor_grants"].append(
+                {"actor_id": OTHER_ENEMY, "region_ids": ["region.public"]}
+            )
         template = data["pc_templates"][0]
         template["character"]["inventory"] = ["component-pouch"] if material else []
         if material:
@@ -156,6 +171,27 @@ def timed_spell_world(tmp_path, context):
                 for scene in foundation.get("additional_scenes", ()):
                     scene["grid"]["width"] = 12
             pc, npc = fixed["character_states"]
+            pc.pop("spells_known", None)
+            npc.pop("spells_known", None)
+            if hit_rider:
+                npc.update(hp_current=40, ac=12, temp_hp=0, granted_features=[])
+                fixed["character_states"].append(
+                    {**deepcopy(npc), "entity_id": OTHER_ENEMY, "name": "Attendant"}
+                )
+                if "combat_state" in fixed:
+                    combat = fixed["combat_state"]
+                    if not target_first:
+                        combat["initiative_ids"].reverse()
+                    combat["initiative_ids"].append(OTHER_ENEMY)
+                    combat["encounter_ids"].append(OTHER_ENEMY)
+                    combat["actor_zone"].update({NPC: foe_cell, OTHER_ENEMY: "2,1"})
+                    combat["movement_ledgers"][OTHER_ENEMY] = deepcopy(
+                        combat["movement_ledgers"][NPC]
+                    )
+                    combat["opportunity_attack_weapons"].clear()
+                    combat["xp_value_by_entity"][OTHER_ENEMY] = 0
+                else:
+                    foundation["xp"][OTHER_ENEMY] = 0
             pc.update(
                 class_slug="wizard",
                 classes={"wizard": 5},
@@ -173,12 +209,10 @@ def timed_spell_world(tmp_path, context):
                 weapon_grip="none",
                 other_hand_occupied=False,
                 ac=10 + (pc["dexterity"] - 10) // 2,
-                proficiency_bonus_override=None,
+                proficiency_bonus_override=proficiency_override,
                 attack_bonus=None,
                 stealth_disadvantage=False,
             )
-            pc.pop("spells_known", None)
-            npc.pop("spells_known", None)
             fixed["inventory_state"]["entries"] = (
                 [
                     {
@@ -256,7 +290,20 @@ def timed_spell_world(tmp_path, context):
                                 "source_id": "class:wizard",
                                 "class_slug": "wizard",
                                 "ability": "int",
-                                "spells": [prepared],
+                                "spells": [
+                                    prepared,
+                                    *(
+                                        [
+                                            {
+                                                "spell_id": hit_rider,
+                                                "prepared_order": None,
+                                                "material": None,
+                                            }
+                                        ]
+                                        if hit_rider
+                                        else []
+                                    ),
+                                ],
                             }
                         ],
                     }

@@ -3,6 +3,7 @@
 from dnd5e_engine import evaluation_delta as delta
 from dnd5e_engine.events import EffectExpired, IntentSubmitted
 
+from .concentration_adoption import effect_identity
 from .errors import StateMachineError
 
 
@@ -24,9 +25,11 @@ def speed_effect_pass_admission(request, result):
     """
     snapshot = request.state_snapshot
     combat = snapshot.combat_state
-    (effect,) = snapshot.effect_states
     (clock,) = combat.effect_lifecycles
     (lineage,) = combat.conditions_by_effect
+    effect = next(
+        effect for effect in snapshot.effect_states if effect_identity(effect) == clock.identity
+    )
     turns = [op for op in result.state_delta.operations if type(op) is delta.TurnUpdate]
     updates = [
         op for op in result.state_delta.operations if type(op) is delta.EffectLifecycleUpdate
@@ -60,7 +63,7 @@ def speed_effect_pass_admission(request, result):
     if len(expiry) != int(expires):
         _invalid("Speed effect Pass must pair expiry evidence with its typed removal")
     if not expires:
-        return (), effect.target_id, (effect,)
+        return (), effect.target_id, snapshot.effect_states
 
     (op,) = updates
     if (
@@ -86,4 +89,7 @@ def speed_effect_pass_admission(request, result):
         or events[index - 1].phase != "turn_start"
     ):
         _invalid("Speed effect expiry evidence differs from the incoming START")
-    return (("effect_lifecycle", op.identity, "update", op),), effect.target_id, ()
+    remaining = tuple(
+        effect for effect in snapshot.effect_states if effect_identity(effect) != clock.identity
+    )
+    return (("effect_lifecycle", op.identity, "update", op),), effect.target_id, remaining

@@ -5,7 +5,7 @@ from dnd5e_engine.areas import creature_count
 from dnd5e_engine.attack_rules import can_retain_turn
 from dnd5e_engine.damage_rules import healing_balance
 from dnd5e_engine.evaluation_actor import combatant
-from dnd5e_engine.evaluation_speed_effects import speed_with_effects
+from dnd5e_engine.evaluation_speed_effects import speed_cast_support_failure, speed_with_effects
 from dnd5e_engine.evaluation_state import CombatSnapshot, MovementLedgerState
 from dnd5e_engine.movement import project_speeds, speed_for_mode
 from dnd5e_engine.rules.conditions import active_condition_names, exhaustion_level_of
@@ -45,7 +45,8 @@ def ordinary_spell_changes(request, result, mechanism, spell, *, hit_effect=Fals
 
     The bound spell supplies casting timing, damage source and declared type.
     Attack evidence is linked to the damage instance and to the caster's budget.
-    An admitted speed rider requires a complete effect, clock and lineage on a hit.
+    An admitted speed rider requires a complete effect, clock and lineage on a hit
+    and uses any admitted elapsed movement modifier in the resulting budgets.
     Each selected creature needs ordered healing evidence and the matching capped
     HP change, with one slot and action payment for the entire cast.
     The returned edits are candidates for the caller's existing write transaction.
@@ -72,7 +73,11 @@ def ordinary_spell_changes(request, result, mechanism, spell, *, hit_effect=Fals
     combat_before = snapshot.combat_state
     if caster not in snapshot.combat_state.party_ids or target not in actors:
         _invalid("Spell actor or target is outside the admitted encounter")
-    if snapshot.combat_state.pending_reactions or snapshot.effect_states:
+    if combat_before.pending_reactions or (
+        speed_cast_support_failure(snapshot, target) is not None
+        if hit_effect
+        else bool(snapshot.effect_states)
+    ):
         _invalid("Spell result needs unsupported reaction or effect adoption")
     target_before = before_actors[target]
     selected = payload.target_ids if payload.target_ids is not None else (target,)
@@ -274,10 +279,14 @@ def ordinary_spell_changes(request, result, mechanism, spell, *, hit_effect=Fals
         if not payment or actor_before.action_taken_this_turn:
             _invalid("Caster lacked the ordinary action before the spell")
 
+    resulting_effects = snapshot.effect_states + (
+        (creation.effect,) if creation is not None else ()
+    )
+
     def effective_speed(before, mode):
         """Use RE's fixed-actor speed projection for a turn ledger mode."""
-        if creation is not None and before.entity_id == target:
-            return speed_with_effects(before, (creation.effect,), mode)
+        if hit_effect:
+            return speed_with_effects(before, resulting_effects, mode)
         source = combatant(before)
         speeds = project_speeds(
             source.base_speed,

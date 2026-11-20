@@ -6,13 +6,16 @@ only RE's resolved effect and terminal removal policy, not a second rules clock.
 
 from dataclasses import asdict
 
+from dnd5e_engine.evaluation_effects import EffectState
 from dnd5e_engine.evaluation_ruleset import RulesetBinding
 from dnd5e_engine.evaluation_world_effect import (
     WorldEffectApplicationRequest,
     plan_longstrider_application,
 )
 
+from .combat_movement import refresh_world_walk_expiry
 from .errors import StateMachineError
+from .package import canonical_json
 
 
 class EffectTimeConsumer:
@@ -81,7 +84,7 @@ class EffectTimeConsumer:
         sid = row["session_id"]
         tick = self.world.facts.time_state(sid)[1]
         due = self.db.execute(
-            "SELECT target_id,effect_id,origin,expires_tick "
+            "SELECT target_id,effect_id,origin,expires_tick,payload_json "
             "FROM ongoing_effects WHERE session_id=? AND expires_tick<=? "
             "ORDER BY expires_tick,target_id,effect_id,origin LIMIT 1",
             (sid, tick),
@@ -89,7 +92,18 @@ class EffectTimeConsumer:
         if due is None:
             raise StateMachineError("invalid_time_consumer", "Missing due effect boundary")
         identity = (due["target_id"], due["effect_id"], due["origin"])
+        expired = EffectState.model_validate_json(
+            canonical_json(
+                {
+                    "target_id": identity[0],
+                    "id": identity[1],
+                    "origin": identity[2],
+                    **self.store.memory.json(due["payload_json"]),
+                }
+            )
+        )
         self.owner.expire_world_effect(sid, identity, due["expires_tick"])
+        refresh_world_walk_expiry(self.world, sid, expired)
         location = self.db.execute(
             "SELECT current_scene_id FROM actors WHERE session_id=? AND actor_id=?",
             (sid, identity[0]),
