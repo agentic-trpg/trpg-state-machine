@@ -23,6 +23,7 @@ class TrustedContext:
     can_manage_environment: bool = False
     can_spend_item_charge: bool = False
     can_authorize_long_rest: bool = False
+    can_authorize_short_rest: bool = False
 
 
 @dataclass(frozen=True, slots=True)

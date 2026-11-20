@@ -79,7 +79,7 @@ from .errors import StateMachineError
 from .exploration_spell_adoption import exploration_spell_changes
 from .haste_adoption import haste_cast_admission, haste_pass_admission
 from .package import canonical_json
-from .rest_activity import long_rest_changes
+from .rest_activity import rest_changes
 from .scoped_reads import scoped_read
 from .session_access import _binding
 from .spatial import SpatialPosition
@@ -1018,7 +1018,7 @@ def validate_dnd_result(request, result, *, loader=None):
     if request.operation_kind == "rules.check":
         return result, check_changes(request, result)
     if request.operation_kind == "rules.rest":
-        return result, long_rest_changes(request, result)
+        return result, rest_changes(request, result)
     if type(request.payload) is ExplorationItemUsePayload:
         return result, exploration_potion_changes(request, result)
     if type(request.payload) is ExplorationSpellCastPayload:

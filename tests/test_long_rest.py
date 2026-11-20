@@ -11,6 +11,7 @@ from test_cure_wounds import cure_loader
 from trpg_state_machine import (
     AdvanceGameTime,
     LongRest,
+    ShortRest,
     StateMachine,
     StateMachineError,
     TimeBinding,
@@ -21,7 +22,7 @@ from trpg_state_machine.package import _validate
 from trpg_state_machine.time_coordination import DueResult
 
 
-def rest_package(*, timed=True, hp=2, unrelated_items=0):
+def rest_data(*, timed=True, hp=2, unrelated_items=0):
     """Author a canonical first-level Cleric with explicit HP and resource facts."""
     loader = cure_loader()
     data = item_data()
@@ -97,6 +98,12 @@ def rest_package(*, timed=True, hp=2, unrelated_items=0):
                 ),
             ]
         }
+    return data, loader
+
+
+def rest_package(*, timed=True, hp=2, unrelated_items=0):
+    """Validate the authored long-rest fixture against the public package schema."""
+    data, loader = rest_data(timed=timed, hp=hp, unrelated_items=unrelated_items)
     return _validate(data), loader
 
 
@@ -259,7 +266,13 @@ def test_late_failure_rolls_back_every_rest_write_and_same_key_can_retry(
         assert sm.submit_command(command, package, context=host).status == "committed"
 
 
-def test_long_rest_actor_work_stays_local_as_unrelated_items_grow(tmp_path, context, monkeypatch):
+@pytest.mark.parametrize(
+    ("kind", "payload"),
+    [("activity.long_rest", LongRest()), ("activity.short_rest", ShortRest())],
+)
+def test_rest_actor_work_stays_local_as_unrelated_items_grow(
+    tmp_path, context, monkeypatch, kind, payload
+):
     def track(original, key, actor_id, counted):
         def count(session_id, owner_ids):
             assert owner_ids == {actor_id}
@@ -268,13 +281,17 @@ def test_long_rest_actor_work_stays_local_as_unrelated_items_grow(tmp_path, cont
 
         return count
 
-    host = replace(context, can_authorize_long_rest=True)
+    host = replace(context, can_authorize_long_rest=True, can_authorize_short_rest=True)
     work = []
     for unrelated in (0, 40):
         package, loader = rest_package(unrelated_items=unrelated)
         with StateMachine(tmp_path / f"rest-{unrelated}.sqlite", dnd_loader=loader) as sm:
             sid = create(sm, package, host)
-            command = rest_command(sm, sid, package, host, "rest.scope")
+            command = replace(
+                rest_command(sm, sid, package, host, "rest.scope"),
+                command_type=kind,
+                payload=payload,
+            )
             counted = {"actors": 0, "components": 0}
 
             monkeypatch.setattr(

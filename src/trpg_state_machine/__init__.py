@@ -51,7 +51,7 @@ from .navigation_models import (
     StartNavigation,
 )
 from .package import load_adventure_package
-from .rest_activity import LongRest
+from .rest_activity import HitDiceSpend, LongRest, ShortRest
 from .scene_lifecycle import SceneLifecycleService
 from .service import StateMachine
 from .time_binding import LegacyTimeBinding, TimeBinding, time_binding_from_data
@@ -147,7 +147,9 @@ __all__ = [
     "AdvanceNavigation",
     "ResumeNavigation",
     "CancelNavigation",
+    "HitDiceSpend",
     "LongRest",
+    "ShortRest",
     "pump_navigation",
     "AdvanceGameTime",
     "CheckWorldEffects",

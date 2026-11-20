@@ -48,7 +48,7 @@ from .navigation_models import (
     ResumeNavigation,
     StartNavigation,
 )
-from .rest_activity import LongRest
+from .rest_activity import HitDiceSpend, LongRest, ShortRest, validate_short_rest
 from .time_coordination import AdvanceSessionTime, SetTimeRunning, validate_time_operation
 from .time_waits import TimeWaitReference, validate_wait_reference
 from .world_commands import (
@@ -88,6 +88,7 @@ OPERATIONS = {
     "activity.resume_navigation": ResumeNavigation,
     "activity.cancel_navigation": CancelNavigation,
     "activity.long_rest": LongRest,
+    "activity.short_rest": ShortRest,
     "world.step_actor": StepActor,
     "world.traverse_passage": TraversePassage,
     "world.place_object": PlaceObject,
@@ -171,6 +172,7 @@ class TypedCommand:
         | ExplorationItemUsePayload
         | ExplorationSpellCastPayload
         | LongRest
+        | ShortRest
         | CombatClosePayload
         | CheckPayload
         | AdvanceGameTime
@@ -238,6 +240,7 @@ def validate_command(command: TypedCommand) -> None:
             ExplorationItemUsePayload,
             ExplorationSpellCastPayload,
             LongRest,
+            ShortRest,
         ):
             raise StateMachineError(
                 "invalid_time_wait", "This operation cannot be a domain wait reply"
@@ -281,6 +284,9 @@ def validate_command(command: TypedCommand) -> None:
     if operation_type is None or type(command.payload) is not operation_type:
         raise StateMachineError("unsupported_operation", "Unknown command or payload type")
     if operation_type is LongRest:
+        return
+    if operation_type is ShortRest:
+        validate_short_rest(command.payload)
         return
     if type(command.payload) in ENVIRONMENT_OPERATIONS:
         validate_environment_operation(command.payload)
@@ -443,6 +449,7 @@ class CommandRuntime:
             ExplorationItemUsePayload,
             ExplorationSpellCastPayload,
             LongRest,
+            ShortRest,
             CombatClosePayload,
             CheckPayload,
             *OPENABLE_CHECK_OPERATIONS,
@@ -607,6 +614,7 @@ def world_command_from_data(data):
         "activity.resume_navigation",
         "activity.cancel_navigation",
         "activity.long_rest",
+        "activity.short_rest",
     ):
         raise StateMachineError("unsupported_operation", "Unregistered world operation")
     if type(data["payload"]) is not dict:
@@ -615,6 +623,11 @@ def world_command_from_data(data):
         payload = data["payload"]
         if kind == "set_object_state":
             payload = {**payload, "state": ObjectState(payload["state"])}
+        if kind == "activity.short_rest" and "hit_dice" in payload:
+            selections = payload["hit_dice"]
+            if type(selections) not in (list, tuple):
+                raise ValueError("Expected ordered Hit Dice selections")
+            payload = {**payload, "hit_dice": tuple(HitDiceSpend(**spend) for spend in selections)}
         operation = (
             environment_operation_from_data(kind, payload)
             if kind in ENVIRONMENT_COMMANDS

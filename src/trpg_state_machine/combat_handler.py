@@ -19,7 +19,7 @@ from .combat import (
 from .commands import validate_command
 from .errors import StateMachineError
 from .package import canonical_json
-from .rest_activity import LongRest
+from .rest_activity import LongRest, ShortRest
 
 
 class CombatHandler:
@@ -210,6 +210,7 @@ class CombatHandler:
             ExplorationItemUsePayload,
             ExplorationSpellCastPayload,
             LongRest,
+            ShortRest,
             CombatClosePayload,
             CheckPayload,
             *OPENABLE_CHECK_OPERATIONS,

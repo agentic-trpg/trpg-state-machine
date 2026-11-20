@@ -32,7 +32,7 @@ from .navigation_models import NAVIGATION_OPERATIONS
 from .npc_outputs import _handoff_command
 from .package import AdventurePackage, RulesetBinding
 from .perception import NPCContext
-from .rest_activity import LongRest
+from .rest_activity import LongRest, ShortRest
 from .time_coordination import AdvanceSessionTime, SetTimeRunning
 from .world_commands import WORLD_CAPABILITY_OPERATIONS, RepositionObject, SpendItemCharge
 
@@ -55,6 +55,7 @@ def _trusted(context: TrustedContext) -> None:
         or type(context.can_manage_environment) is not bool
         or type(context.can_spend_item_charge) is not bool
         or type(context.can_authorize_long_rest) is not bool
+        or type(context.can_authorize_short_rest) is not bool
     ):
         raise StateMachineError(
             "invalid_context", "GM adjudication grant must be a trusted boolean"
@@ -118,6 +119,12 @@ class SessionAccess:
         ):
             raise StateMachineError(
                 "unauthorized", "Trusted host long-rest grant for the selected PC required"
+            )
+        if type(payload) is ShortRest and (
+            actor_id != row["pc_actor_id"] or not context.can_authorize_short_rest
+        ):
+            raise StateMachineError(
+                "unauthorized", "Trusted host short-rest grant for the selected PC required"
             )
         if (
             type(payload) in (ItemUsePayload, ExplorationItemUsePayload)

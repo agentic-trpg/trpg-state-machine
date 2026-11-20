@@ -317,7 +317,7 @@ class CharacterFacts:
             raise StateMachineError(
                 "invalid_delta", "Resource debit is outside its current balance"
             )
-        if expected_current is not None and (amount != 1 or row[0] != expected_current):
+        if expected_current is not None and row[0] != expected_current:
             raise StateMachineError("invalid_rule_result", "Resource balance changed")
         self._conn.execute(
             "UPDATE character_resources SET current=current-? "
