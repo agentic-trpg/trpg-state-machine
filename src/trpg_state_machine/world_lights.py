@@ -2,6 +2,8 @@
 
 from dataclasses import asdict, dataclass
 
+from dnd5e_engine.spatial import cell_id, parse_cell
+
 from ._execution import _execution_data
 from .errors import StateMachineError
 from .runtime_instances import instance_read
@@ -84,9 +86,7 @@ class LightService:
 
     @instance_read("scene", "lighting", "projection", maintained="light_result")
     def current_project(self, sid, scene, package):
-        """Build the full illumination projection from current map, light sources and
-        geometry.
-        """
+        """Build the effective current grid, storing dynamic light only within source reach."""
         raw = self.h.grid.reader.current_grid(sid, scene, package)
         geometry = self.geometry(sid, scene, package) if self.sources(sid, scene, package) else None
         return self.project(sid, scene, package, raw, geometry=geometry)
@@ -118,7 +118,7 @@ class LightService:
 
     @staticmethod
     def _illuminate_cell(topology, uncertain_geometry, candidates, sources, cell):
-        """Original light composition for one requested cell, shared by full maps."""
+        """Compose light for a cell using the shared single-cell and map rules."""
         level = topology.light_on_cell(cell)
         contributions, unknown = [], False
         for source in sources:
@@ -182,7 +182,11 @@ class LightService:
         return LightGeometry(frozenset(candidates), uncertain_geometry)
 
     def project(self, sid, scene, package, raw, *, cells=None, geometry=None):
-        """Explicit fixed-map inputs remain separate from current scene fields."""
+        """Project current sources on a supplied fixed map.
+
+        Keep base overrides and defaults. With no explicit cell selection, add only
+        cells within source reach, or every cell if any source location is unknown.
+        """
         from .grid_maps import PreparedGrid
 
         topology = self.h.grid.reader.topology_for_grid(sid, scene, raw)
@@ -195,22 +199,76 @@ class LightService:
         candidates, uncertain_geometry = (
             self._geometry(sid, scene, package, supplied) if geometry is None else geometry
         )
-        uncertain, evidence = [], {}
         selected = (
-            cells
-            if cells is not None
-            else (f"{x},{y}" for y in range(raw["height"]) for x in range(raw["width"]))
+            cells if cells is not None else self._affected_light_cells(topology, raw, sources)
         )
-        for cell in selected:
+        uncertain, evidence = self._project_cells(
+            topology, uncertain_geometry, candidates, sources, selected, grid["lighting"]
+        )
+        return grid, uncertain, evidence
+
+    def event_overlay(self, sid, scene, package, *, fixed_grid=None):
+        """Capture stage-local light levels, uncertainty and sources for event evidence.
+
+        Levels overlay the base grid's explicit lighting and default. Keep all cells
+        in each source's reach, including cells whose light level equals the base.
+        A source without an in-bounds origin can make any cell uncertain.
+        """
+        sources = self.sources(sid, scene, package)
+        if not sources:
+            return {}, (), {}
+        if fixed_grid is None:
+            grid = self.h.grid.reader.current_grid(sid, scene, package)
+            candidates, uncertain_geometry = self.geometry(sid, scene, package)
+        else:
+            grid = fixed_grid
+            candidates, uncertain_geometry = self._geometry(sid, scene, package, grid)
+        cells = self._affected_light_cells(grid.topology, grid.data, sources)
+        levels = {}
+        uncertain, evidence = self._project_cells(
+            grid.topology, uncertain_geometry, candidates, sources, cells, levels
+        )
+        return levels, uncertain, evidence
+
+    @staticmethod
+    def _affected_light_cells(topology, grid, sources):
+        """Yield each possible affected cell once in row-major order."""
+        width, height = grid["width"], grid["height"]
+        origins = [source["cell"] for source in sources]
+        if any(
+            origin is None or topology.distance_ft(origin, origin) is None for origin in origins
+        ):
+            # Preserve cell-level uncertainty from unsupported source locations.
+            yield from (cell_id(x, y) for y in range(height) for x in range(width))
+            return
+
+        row_ranges = {}
+        for source, origin in zip(sources, origins, strict=True):
+            x, y = parse_cell(origin)
+            # The pinned GridTopology uses Chebyshev distance in feet.
+            radius = source["mode"].dim_outer_radius_ft // topology.cell_size_ft
+            columns = (max(0, x - radius), min(width, x + radius + 1))
+            for row in range(max(0, y - radius), min(height, y + radius + 1)):
+                row_ranges.setdefault(row, []).append(columns)
+        for row in sorted(row_ranges):
+            covered_until = 0
+            for start, stop in sorted(row_ranges[row]):
+                yield from (cell_id(col, row) for col in range(max(start, covered_until), stop))
+                covered_until = max(covered_until, stop)
+
+    def _project_cells(self, topology, uncertain_geometry, candidates, sources, cells, levels):
+        """Overlay levels and return unknown cells and evidence in the supplied cell order."""
+        uncertain, evidence = [], {}
+        for cell in cells:
             level, unknown, contributions = self._illuminate_cell(
                 topology, uncertain_geometry, candidates, sources, cell
             )
             if unknown:
                 uncertain.append(cell)
-            grid["lighting"][cell] = level
+            levels[cell] = level
             if contributions:
                 evidence[cell] = list(contributions)
-        return grid, tuple(uncertain), evidence
+        return tuple(uncertain), evidence
 
     def validate(self, row, actor, op, package):
         """Validate actor, placement and capability for manual light operations."""

@@ -1,5 +1,8 @@
 import json
 
+import pytest
+from dnd5e_engine.spatial import GridTopology
+from dnd5e_engine.specs import GridScene
 from lock_support import CRED, A
 from test_world_containers import BOX, container_data
 from world_support import setup, submit
@@ -13,6 +16,8 @@ from trpg_state_machine import (
     StepActor,
     SwitchLightMode,
 )
+from trpg_state_machine.world_lights import LightService
+from trpg_state_machine.world_package import LightMode
 
 
 def light_config():
@@ -125,14 +130,136 @@ def test_unknown_container_transmission_is_not_a_deterministic_brightness(tmp_pa
             submit(sm, sid, p, context, SetLightEnabled(A, CRED, "0,0", True), "on").status
             == "committed"
         )
-        assert (
-            submit(sm, sid, p, context, PutItem(A, CRED, BOX, "0,0"), "put").status == "committed"
-        )
+        put = submit(sm, sid, p, context, PutItem(A, CRED, BOX, "0,0"), "put")
+        assert put.status == "committed"
+        before = evidence(sm, sid, put.event_seqs[-1])["scenes"][A]
         receipt = submit(sm, sid, p, context, SetObjectState(A, BOX, ObjectState.CLOSED), "close")
         assert receipt.status == "committed"
+        after = evidence(sm, sid, receipt.event_seqs[-1])["scenes"][A]
+        assert "1,0" not in before["light_uncertain_cells"]
+        assert "1,0" in after["light_uncertain_cells"]
+        assert "1,0" not in after["lighting_sources"]
         view = sm.get_illumination(sid, actor, "1,0", p, context=context)
         assert view["status"] == "unknown" and view["illumination"] is None
         assert CRED not in view["contributing_sources"]
+
+
+@pytest.mark.parametrize("size", (12, 92))
+def test_carried_light_event_work_and_evidence_depend_on_radius(
+    tmp_path, context, monkeypatch, size
+):
+    data = lighting_data()
+    snapshot_grid = data["rule_bindings"]["noncombat_foundation"]["snapshot"]["scene_state"]["grid"]
+    for grid in (data["scenes"][0]["grid"], snapshot_grid):
+        grid.update(width=size, height=size, lighting={"0,1": "bright", "8,8": "dim"})
+    sm, sid, package, _ = setup(tmp_path, context, data)
+    evaluated = []
+    illuminate_cell = LightService._illuminate_cell
+
+    def count_cell(topology, uncertain_geometry, candidates, sources, cell):
+        evaluated.append(cell)
+        return illuminate_cell(topology, uncertain_geometry, candidates, sources, cell)
+
+    initial_cells = [f"{x},{y}" for y in range(3) for x in range(3)]
+    moved_cells = [f"{x},{y}" for y in range(3) for x in range(4)]
+    with sm, monkeypatch.context() as patch:
+        patch.setattr(LightService, "_illuminate_cell", staticmethod(count_cell))
+        light_on = submit(sm, sid, package, context, SetLightEnabled(A, CRED, "0,0", True), "light")
+        assert light_on.status == "committed", light_on
+        assert evaluated == initial_cells
+        before, after = (evidence(sm, sid, seq)["scenes"][A] for seq in light_on.event_seqs)
+        assert before["grid"]["lighting"] == {"0,1": "bright", "8,8": "dim"}
+        assert set(after["grid"]["lighting"]) == {*initial_cells, "8,8"}
+        assert after["grid"]["lighting"]["1,0"] == "bright"
+        assert after["grid"]["lighting"]["0,1"] == "bright"
+        assert after["grid"]["lighting"]["2,0"] == "dim"
+        assert after["lighting_sources"]["0,1"] == [CRED]
+
+        evaluated.clear()
+        step = submit(sm, sid, package, context, StepActor(A, "0,0", "1,0"), "step")
+        assert step.status == "committed", step
+        assert evaluated == moved_cells
+        moved = evidence(sm, sid, step.event_seqs[-1])["scenes"][A]
+        assert set(moved["grid"]["lighting"]) == {*moved_cells, "8,8"}
+        assert moved["grid"]["lighting"]["2,0"] == "bright"
+        assert "3,0" in moved["lighting_sources"]
+        assert moved["light_uncertain_cells"] == []
+        assert evidence(sm, sid, light_on.event_seqs[-1])["scenes"][A] == after
+
+        evaluated.clear()
+        snapshot = sm.read_noncombat_snapshot(sid, package, context=context)
+        assert evaluated == moved_cells
+        assert snapshot.scene_state.grid.lighting == moved["grid"]["lighting"]
+        assert moved["grid"]["lighting"]["8,8"] == "dim"
+        with sm._transaction():
+            lights = sm._objects.lights
+            base = sm._world.grid.reader.current_grid(sid, A, package)
+            full_grid, unknown, sources = lights.project(
+                sid,
+                A,
+                package,
+                base,
+                cells=(f"{x},{y}" for y in range(size) for x in range(size)),
+            )
+        assert not unknown
+        assert sources == moved["lighting_sources"]
+        sparse = GridTopology(GridScene(**moved["grid"]))
+        assert {cell: sparse.light_on_cell(cell) for cell in full_grid["lighting"]} == full_grid[
+            "lighting"
+        ]
+
+
+@pytest.mark.parametrize("origin", (None, "3,3"))
+def test_event_preserves_uncertainty_when_source_position_is_unavailable(
+    tmp_path, context, monkeypatch, origin
+):
+    sm, sid, package, _ = setup(tmp_path, context, lighting_data())
+    sources = LightService.sources
+
+    def missing_source_position(self, sid, scene, package):
+        return [{**source, "cell": origin} for source in sources(self, sid, scene, package)]
+
+    with sm:
+        monkeypatch.setattr(LightService, "sources", missing_source_position)
+        receipt = submit(sm, sid, package, context, SetLightEnabled(A, CRED, "0,0", True), "light")
+        assert receipt.status == "committed", receipt
+        scene = evidence(sm, sid, receipt.event_seqs[-1])["scenes"][A]
+        assert scene["light_uncertain_cells"] == [f"{x},{y}" for y in range(3) for x in range(3)]
+        assert scene["lighting_sources"] == {}
+
+
+def test_light_envelopes_merge_overlap_and_skip_gaps():
+    grid = {"width": 8, "height": 3, "cell_size_ft": 3}
+    topology = GridTopology(GridScene(**grid))
+    mode = LightMode("test", None, 4)
+    sources = [{"cell": cell, "mode": mode} for cell in ("0,0", "2,0", "7,1")]
+    assert list(LightService._affected_light_cells(topology, grid, sources)) == [
+        *(f"{x},{y}" for y in range(2) for x in (0, 1, 2, 3, 6, 7)),
+        "6,2",
+        "7,2",
+    ]
+
+
+def test_light_equal_to_bright_default_preserves_missing_position_judgment(tmp_path, context):
+    from trpg_state_machine.perception_conditions import judge_signal, signal_environment
+
+    data = lighting_data()
+    snapshot_grid = data["rule_bindings"]["noncombat_foundation"]["snapshot"]["scene_state"]["grid"]
+    for grid in (data["scenes"][0]["grid"], snapshot_grid):
+        grid["default_lighting"] = "bright"
+    sm, sid, package, _ = setup(tmp_path, context, data)
+    with sm:
+        receipt = submit(sm, sid, package, context, SetLightEnabled(A, CRED, "0,0", True), "light")
+        assert receipt.status == "committed", receipt
+        signal = sm.read_events(sid, package, context=context)[-1].signals[0]
+        before, after = (evidence(sm, sid, seq) for seq in receipt.event_seqs)
+        for stage, judgment_allowed in ((before, True), (after, False)):
+            condition = signal_environment(signal, stage)
+            condition["origin_cell"] = None
+            decision = judge_signal(signal, stage["actors"][0], condition)
+            assert decision.reason == "missing_spatial_evidence"
+            assert decision.judgment_allowed is judgment_allowed
+        assert set(after["scenes"][A]["grid"]["lighting"].values()) == {"bright"}
 
 
 def test_current_perception_uses_frozen_local_grid_and_recovery(tmp_path, context):

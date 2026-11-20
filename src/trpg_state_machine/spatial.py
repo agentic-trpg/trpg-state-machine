@@ -783,7 +783,7 @@ class WorldHandler:
             return WorldActionAvailability("available", "available", row["world_version"])
 
     def get_spatial_view(self, session_id, actor_id, package, *, context):
-        """Authorize and construct the current spatial view, objects and exits."""
+        """Read authorized objects, exits and doors at one version using target-cell light."""
         with self._transaction():
             self._spatial_reader(session_id, actor_id, package, context)
             if self._active_combat(session_id):
@@ -791,13 +791,31 @@ class WorldHandler:
                     "unsupported_spatial_view", "Active combat needs its perception adapter"
                 )
             position = self._public_scope(session_id, actor_id, package)
-            topology = self.grid.base_topology(session_id, position.scene_id, package)
-            objects = []
-            for obj in self._conn.execute(
+            scene_id = position.scene_id
+            object_rows = self._conn.execute(
                 "SELECT object_id,cell FROM objects WHERE session_id=? AND scene_id=? "
                 "ORDER BY object_id",
-                (session_id, position.scene_id),
-            ):
+                (session_id, scene_id),
+            ).fetchall()
+            passages = self.facts.instances.passages(session_id, scene_id=scene_id)
+            endpoints = {
+                p.passage_id: tuple(e for e in p.endpoints if e.scene_id == scene_id)
+                for p in passages
+            }
+            exit_targets = tuple(
+                (target, pid, e)
+                for target, pid in self.facts.instances.scene(session_id, scene_id).exit_passages
+                for e in endpoints.get(pid, ())
+            )
+            door_targets = tuple(
+                (p, e) for p in passages if p.door_object_id for e in endpoints[p.passage_id]
+            )
+            cells = [obj[1] for obj in object_rows if obj[1] is not None]
+            cells.extend(e.standing_cell for _, _, e in exit_targets)
+            cells.extend(e.threshold_cell for _, e in door_targets)
+            topology = self.grid.base_topology(session_id, scene_id, package, cells=cells)
+            objects = []
+            for obj in object_rows:
                 if topology.can_see(position.cell, obj[1]):
                     definition = self.facts.instances.legacy_object(session_id, obj[0])
                     blocking = self.objects.spatial.blocks(session_id, obj[0], package)
@@ -811,14 +829,8 @@ class WorldHandler:
                     )
             exits = tuple(
                 (target, pid, e.standing_cell, e.threshold_cell)
-                for target, pid in self.facts.instances.scene(
-                    session_id, position.scene_id
-                ).exit_passages
-                for p in self.facts.instances.passages(session_id, scene_id=position.scene_id)
-                if p.passage_id == pid
-                for e in p.endpoints
-                if e.scene_id == position.scene_id
-                and topology.can_see(position.cell, e.standing_cell)
+                for target, pid, e in exit_targets
+                if topology.can_see(position.cell, e.standing_cell)
             )
             doors = tuple(
                 SpatialDoor(
@@ -832,11 +844,8 @@ class WorldHandler:
                     e.threshold_cell,
                     self.objects.openable.lock_status(session_id, p.door_object_id, package),
                 )
-                for p in self.facts.instances.passages(session_id, scene_id=position.scene_id)
-                if p.door_object_id
-                for e in p.endpoints
-                if e.scene_id == position.scene_id
-                and topology.can_see(position.cell, e.threshold_cell)
+                for p, e in door_targets
+                if topology.can_see(position.cell, e.threshold_cell)
             )
             version = self._conn.execute(
                 "SELECT world_version FROM sessions WHERE session_id=?", (session_id,)
