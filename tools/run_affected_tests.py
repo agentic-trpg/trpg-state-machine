@@ -8,6 +8,7 @@ import os
 import posixpath
 import subprocess
 import sys
+import tomllib
 from collections import defaultdict
 from dataclasses import dataclass, field
 from pathlib import Path, PurePosixPath
@@ -16,6 +17,13 @@ ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_COMMAND = "uv run --locked python -m pytest -q"
 RUNNER = "tools/run_affected_tests.py"
 SOURCE_AUDIT = "tests/test_domain_runtime.py"
+RE_PIN_FILES = {"pyproject.toml", "uv.lock"}
+RE_PACKAGES = {"dnd5e-engine", "dnd5e-srd-data"}
+RE_PIN_TESTS = (
+    "tests/test_lockable_migration.py::test_public_example_uses_common_pump_and_new_process_restore",
+    "tests/test_item_transfers.py::test_public_item_transfer_example_uses_bound_ruleset",
+    "tests/test_world_example.py::test_public_world_station_survives_process_boundary_and_continues",
+)
 TEST_ROOTS = ("tests/", "tools/tests/")
 INPUT_ROOTS = ("src/", "tests/", "examples/", "tools/")
 ASSET_SUFFIXES = {".json", ".yaml", ".yml"}
@@ -55,6 +63,7 @@ class Plan:
     tests: dict[str, list[str]] = field(default_factory=dict)
     full: list[str] = field(default_factory=list)
     notes: list[str] = field(default_factory=list)
+    re_pins: list[str] = field(default_factory=list)
 
 
 def git(root: Path, *args: str) -> str:
@@ -63,14 +72,41 @@ def git(root: Path, *args: str) -> str:
     return os.fsdecode(subprocess.check_output(["git", *args], cwd=root, stderr=subprocess.PIPE))
 
 
-def changed_files(root: Path, base: str | None) -> list[str]:
-    """Use staged, unstaged and untracked paths; add the requested committed changes."""
+def re_pin_sources(root: Path, path: str, revision: str | None) -> dict[str, object] | None:
+    """Read the RE Git sources from the worktree or a Git blob. Return None for invalid TOML."""
+
+    try:
+        if revision is None:
+            content = (root / path).read_text(encoding="utf-8")
+        else:
+            content = git(root, "show", f"{revision}:{path}")
+        document = tomllib.loads(content)
+        if path == "pyproject.toml":
+            sources = document.get("tool", {}).get("uv", {}).get("sources", {})
+            return {
+                name: source
+                for name, source in sources.items()
+                if name in RE_PACKAGES and isinstance(source, dict) and "git" in source
+            }
+        return {
+            package["name"]: package["source"]["git"]
+            for package in document.get("package", [])
+            if package.get("name") in RE_PACKAGES and "git" in package.get("source", {})
+        }
+    except (FileNotFoundError, subprocess.CalledProcessError):
+        return {}
+    except (tomllib.TOMLDecodeError, UnicodeError, TypeError, AttributeError):
+        return None
+
+
+def changed_files(root: Path, base: str | None) -> tuple[list[str], list[str]]:
+    """Collect changed paths and identify touched configuration files with a changed RE pin."""
 
     diff_args = ("--name-only", "--no-renames", "-z")
-    changed = {
-        *git(root, "diff", *diff_args).split("\0"),
-        *git(root, "diff", "--cached", *diff_args).split("\0"),
-        *git(
+    unstaged = set(git(root, "diff", *diff_args).split("\0"))
+    staged = set(git(root, "diff", "--cached", *diff_args).split("\0"))
+    untracked = set(
+        git(
             root,
             "ls-files",
             "--others",
@@ -80,12 +116,16 @@ def changed_files(root: Path, base: str | None) -> list[str]:
             ".",
             ":(exclude,top).worktrees/**",
             ":(exclude,top,glob)*.txt",
-        ).split("\0"),
-    }
-    changed.discard("")
+        ).split("\0")
+    )
+    changed = (unstaged | staged | untracked) - {""}
+    comparisons = [("", None, unstaged | untracked), ("HEAD", "", staged)]
+    committed_before = "HEAD^1"
     if base is not None:
-        commit = git(root, "rev-parse", "--verify", "--end-of-options", f"{base}^{{commit}}")
-        committed = git(root, "diff", *diff_args, commit.strip(), "HEAD", "--")
+        committed_before = git(
+            root, "rev-parse", "--verify", "--end-of-options", f"{base}^{{commit}}"
+        ).strip()
+        committed = git(root, "diff", *diff_args, committed_before, "HEAD", "--")
     elif not changed:
         committed = git(
             root,
@@ -99,7 +139,16 @@ def changed_files(root: Path, base: str | None) -> list[str]:
         )
     else:
         committed = ""
-    return sorted(changed | (set(committed.split("\0")) - {""}))
+    committed_paths = set(committed.split("\0")) - {""}
+    comparisons.append((committed_before, "HEAD", committed_paths))
+    changed_pins = set()
+    for before, after, paths in comparisons:
+        for path in (paths & RE_PIN_FILES) - changed_pins:
+            old = re_pin_sources(root, path, before)
+            new = re_pin_sources(root, path, after)
+            if old is not None and new is not None and old != new:
+                changed_pins.add(path)
+    return sorted(changed | committed_paths), sorted(changed_pins)
 
 
 def is_test(path: str) -> bool:
@@ -419,12 +468,16 @@ def build_plan(root: Path, changed: list[str]) -> Plan:
     return plan
 
 
-def print_plan(plan: Plan) -> None:
+def print_plan(plan: Plan, *, preview: bool) -> None:
     """Show the changed paths, selection reasons and execution decision."""
 
     print("Changed files:")
     for path in plan.changed or ["(none)"]:
         print(f"  {path}")
+    if plan.re_pins:
+        print(f"Public examples to run first (RE pin changed in {', '.join(plan.re_pins)}):")
+        for test in RE_PIN_TESTS:
+            print(f"  {test}")
     print("Candidate tests:" if plan.full else "Selected tests:")
     if not plan.tests:
         print("  (none)")
@@ -433,10 +486,14 @@ def print_plan(plan: Plan) -> None:
     for note in plan.notes:
         print(f"  {note}")
     if plan.full:
-        print("Full SM test scope required. Scoped pytest will not run:")
+        if plan.re_pins:
+            print("Full SM test scope required after the public examples:")
+        else:
+            print("Full SM test scope required. Scoped pytest will not run:")
         for reason in plan.full:
             print(f"  {reason}")
-        print(f"Run separately: {DEFAULT_COMMAND}")
+        if preview or not plan.re_pins:
+            print(f"Run separately: {DEFAULT_COMMAND}")
         tooling = sorted(test for test in plan.tests if test.startswith("tools/tests/"))
         if tooling:
             print(f"Tooling tests: {DEFAULT_COMMAND} {' '.join(tooling)}")
@@ -445,14 +502,16 @@ def print_plan(plan: Plan) -> None:
 
 
 def main() -> int:
-    """Print the plan and run listed files with this interpreter, preserving pytest's status."""
+    """Check RE pin examples first, then run a supported scope or request full SM pytest."""
 
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--base", help="compare this commit directly to HEAD, plus local edits")
     parser.add_argument("--plan", action="store_true", help="show the scope without running pytest")
     args = parser.parse_args()
     try:
-        plan = build_plan(ROOT, changed_files(ROOT, args.base))
+        changed, re_pins = changed_files(ROOT, args.base)
+        plan = build_plan(ROOT, changed)
+        plan.re_pins = re_pins
     except subprocess.CalledProcessError as exc:
         parser.exit(
             2, f"Git could not determine the test scope: {os.fsdecode(exc.stderr).strip()}\n"
@@ -460,15 +519,23 @@ def main() -> int:
     except FileNotFoundError as exc:
         parser.exit(2, f"Git could not determine the test scope: {exc}\n")
 
-    print_plan(plan)
+    print_plan(plan, preview=args.plan)
     if args.plan:
         return 0
+    pytest_command = [sys.executable, "-m", "pytest", "-q"]
+    if plan.re_pins:
+        sys.stdout.flush()
+        status = subprocess.call([*pytest_command, *RE_PIN_TESTS], cwd=ROOT)
+        if status:
+            return status
     if plan.full:
+        if plan.re_pins:
+            print(f"Public examples passed. Run separately: {DEFAULT_COMMAND}")
         return 2
     if not plan.tests:
         return 0
     sys.stdout.flush()
-    return subprocess.call([sys.executable, "-m", "pytest", "-q", *sorted(plan.tests)], cwd=ROOT)
+    return subprocess.call([*pytest_command, *sorted(plan.tests)], cwd=ROOT)
 
 
 if __name__ == "__main__":

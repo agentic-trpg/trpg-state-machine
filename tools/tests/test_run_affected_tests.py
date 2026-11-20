@@ -189,6 +189,97 @@ def test_full_scope_does_not_accidentally_run_pytest(repo, path, content, reason
         assert reason in broad.stdout and "pytest started" not in broad.stdout
 
 
+PUBLIC_EXAMPLES = (
+    (
+        "tests/test_lockable_migration.py",
+        "test_public_example_uses_common_pump_and_new_process_restore",
+    ),
+    ("tests/test_item_transfers.py", "test_public_item_transfer_example_uses_bound_ruleset"),
+    (
+        "tests/test_world_example.py",
+        "test_public_world_station_survives_process_boundary_and_continues",
+    ),
+)
+
+
+def test_re_pin_prioritizes_only_public_example_nodes_before_full_scope(repo):
+    """Run only the prioritized nodes, and preserve their pytest failure status."""
+
+    lock = """\
+[[package]]
+name = "dnd5e-engine"
+source = { git = "https://example.invalid/re#old" }
+"""
+    write(repo, "uv.lock", lock)
+    for path, node in PUBLIC_EXAMPLES:
+        write(
+            repo,
+            path,
+            f"def {node}():\n    assert True\n\ndef test_out_of_scope():\n    assert False\n",
+        )
+    git(repo, "add", ".")
+    git(repo, "commit", "-qm", "add lock and public example tests")
+
+    unrelated = lock + '\n[[package]]\nname = "unrelated"\nsource = { git = "other#new" }\n'
+    write(repo, "uv.lock", unrelated)
+    write(
+        repo,
+        "pyproject.toml",
+        (repo / "pyproject.toml").read_text(encoding="utf-8") + "addopts = '-ra'\n",
+    )
+    broad = run(repo)
+    assert broad.returncode == 2, broad.stdout + broad.stderr
+    assert "Scoped pytest will not run" in broad.stdout
+
+    write(repo, "uv.lock", unrelated.replace("re#old", "re#new"))
+    preview = run(repo, "--plan")
+    assert preview.returncode == 0, preview.stdout + preview.stderr
+    assert "RE pin changed in uv.lock" in preview.stdout
+    for path, node in PUBLIC_EXAMPLES:
+        assert f"{path}::{node}" in preview.stdout
+    assert "3 passed" not in preview.stdout
+
+    success = run(repo)
+    assert success.returncode == 2, success.stdout + success.stderr
+    assert success.stdout.index("3 passed") < success.stdout.index("Run separately:")
+    path, node = PUBLIC_EXAMPLES[0]
+    write(repo, path, f"def {node}():\n    assert False\n")
+    failure = run(repo)
+    assert failure.returncode == 1, failure.stdout + failure.stderr
+    assert "1 failed, 2 passed" in failure.stdout
+    assert "Full SM test scope required" in failure.stdout
+    assert "Run separately:" not in failure.stdout
+
+
+def test_re_pin_respects_staged_unstaged_and_committed_comparisons(repo):
+    """Use the same Git endpoints as the changed-path list for RE source changes."""
+
+    original = (repo / "pyproject.toml").read_text(encoding="utf-8")
+    original += (
+        "\n[tool.uv.sources]\n"
+        'dnd5e-engine = { git = "https://example.invalid/re", rev = "old" }\n'
+        'dnd5e-srd-data = { git = "https://example.invalid/re", rev = "old" }\n'
+    )
+    write(repo, "pyproject.toml", original)
+    git(repo, "add", "pyproject.toml")
+    git(repo, "commit", "-qm", "add RE sources")
+    base = git(repo, "rev-parse", "HEAD")
+    updated = original.replace('rev = "old"', 'rev = "new"')
+
+    write(repo, "pyproject.toml", updated)
+    assert "RE pin changed in pyproject.toml" in run(repo, "--plan").stdout
+    git(repo, "add", "pyproject.toml")
+    write(repo, "pyproject.toml", updated + "# unrelated unstaged change\n")
+    assert "RE pin changed in pyproject.toml" in run(repo, "--plan").stdout
+    write(repo, "pyproject.toml", updated)
+    git(repo, "commit", "-qm", "update both RE package pins")
+    assert "RE pin changed in pyproject.toml" in run(repo, "--plan").stdout
+    assert "RE pin changed" not in run(repo, "--plan", "--base", "HEAD").stdout
+    write(repo, "README.md", "# unrelated local edit\n")
+    assert "RE pin changed" not in run(repo, "--plan").stdout
+    assert "RE pin changed in pyproject.toml" in run(repo, "--plan", "--base", base).stdout
+
+
 def test_unresolved_dynamic_consumer_blocks_partial_source_selection(repo):
     write(repo, "src/local_api.py", "VALUE = 1\n")
     write(repo, "tests/test_selected.py", "import local_api\n")
