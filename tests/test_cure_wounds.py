@@ -76,8 +76,10 @@ def cure_world(
     same_attribution=False,
     with_potion=False,
     timed=False,
+    exploration=False,
+    target_cell="1,0",
 ):
-    """Create and initialize one combat from a complete, original Package."""
+    """Create a bound exploration session or initialize combat for the same cast."""
     loader = cure_loader(equipped=equipped, extra_spells=extra_spells, with_potion=with_potion)
     data = item_data()
     data["manifest"]["ruleset_binding"] = ruleset_binding(loader).model_dump(mode="json")
@@ -124,7 +126,7 @@ def cure_world(
                 }
             )
     target = next(actor for actor in data["actors"] if actor["actor_id"] == NPC)
-    target["initial_cell"] = "1,0"
+    target["initial_cell"] = target_cell
     if second_enemy:
         second = deepcopy(target)
         second.update(actor_id=BYSTANDER, name="Attendant", initial_cell="2,0")
@@ -281,7 +283,7 @@ def cure_world(
                 }
             ]
         }
-    if timed:
+    if timed or exploration:
         data["time_binding"] = asdict(TimeBinding())
         for person in data["actors"]:
             person.pop("npc_state", None)
@@ -292,7 +294,8 @@ def cure_world(
     if with_potion:
         picked = submit(sm, sid, package, context, PickupItem(FIRST, A, "0,0"), "pick.potion")
         assert picked.status == "committed", picked
-    assert initialize(sm, sid, package, context).status == "committed"
+    if not exploration:
+        assert initialize(sm, sid, package, context).status == "committed"
     return sm, sid, package, loader, db
 
 

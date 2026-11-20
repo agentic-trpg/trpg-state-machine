@@ -75,6 +75,7 @@ from .damage_adoption import (
 from .dnd_checks import check_changes
 from .dnd_closure import closure_changes
 from .errors import StateMachineError
+from .exploration_spell_adoption import exploration_spell_changes
 from .haste_adoption import haste_cast_admission, haste_pass_admission
 from .package import canonical_json
 from .rest_activity import long_rest_changes
@@ -83,7 +84,6 @@ from .session_access import _binding
 from .spatial import SpatialPosition
 from .speed_effect_adoption import speed_effect_pass_admission, supports_pass_roster
 from .spell_adoption import ordinary_spell_changes
-from .timed_spell_adoption import timed_spell_changes
 
 
 def _invalid(message):
@@ -1021,7 +1021,7 @@ def validate_dnd_result(request, result, *, loader=None):
     if type(request.payload) is ExplorationItemUsePayload:
         return result, exploration_potion_changes(request, result)
     if type(request.payload) is ExplorationSpellCastPayload:
-        return result, timed_spell_changes(request, result, loader)
+        return result, exploration_spell_changes(request, result, loader)
     if type(request.payload) is ItemUsePayload:
         changes = delta_changes(request, result)
         bottle = next(
