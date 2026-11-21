@@ -249,9 +249,19 @@ class SceneLifecycleService:
                 sid, after.scene_id, after.cell
             )
         }
-        entered, left = current - previous, previous - current
-        if not entered and not left:
+        self.apply_region_membership_changes(
+            row, actor_id, entered=current - previous, left=previous - current, loader=loader
+        )
+
+    def apply_region_membership_changes(self, row, actor_id, *, entered, left, loader):
+        """Adopt exact regional exits and entries in the caller's write candidate.
+
+        Each source is identified by scene, source ID and bound rule reference.
+        Moving an actor and changing the footprint use the same Effects adoption.
+        """
+        if not left and not entered:
             return
+        sid = row["session_id"]
         immunities = self.characters.condition_immunities(sid, actor_id) if entered else ()
         if immunities is None:
             raise StateMachineError(

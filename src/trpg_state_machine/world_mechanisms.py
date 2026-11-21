@@ -792,16 +792,29 @@ class MechanismService:
 
         return DueResult(tuple(self._reset_due(row, package)))
 
+    def _due_reset(self, sid, tick):
+        """Read the first indexed mechanism reset at or before the supplied tick."""
+        return self.h._conn.execute(
+            "SELECT object_id,reset_at_tick FROM object_mechanisms "
+            "WHERE session_id=? AND reset_at_tick<=? "
+            "ORDER BY reset_at_tick,object_id LIMIT 1",
+            (sid, tick),
+        ).fetchone()
+
+    def next_reset_scene(self, sid, tick):
+        """Return the event scene of the next mechanism reset due on this exact tick."""
+        due = self._due_reset(sid, tick)
+        if due is None or due["reset_at_tick"] != tick:
+            return None
+        return self.h.facts.placement(sid, due["object_id"])["scene_id"]
+
     def _reset_due(self, row, package):
         """Reset due mechanism state against the sole world clock and record events."""
         sid, events = row["session_id"], []
         tick = self.h.facts.time_state(sid)[1]
-        due = self.h._conn.execute(
-            "SELECT object_id FROM object_mechanisms WHERE session_id=? AND reset_at_tick<=? "
-            "ORDER BY reset_at_tick,object_id LIMIT 1",
-            (sid, tick),
-        ).fetchall()
-        for (oid,) in due:
+        due = self._due_reset(sid, tick)
+        if due is not None:
+            oid = due["object_id"]
             state = self.h.facts.mechanism_state(sid, oid)
             c = self.config(row["session_id"], oid)
             self._state(sid, oid, c, package)

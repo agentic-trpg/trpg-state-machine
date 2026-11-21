@@ -2,29 +2,38 @@
 
 from dnd5e_engine import evaluation_delta as delta
 from dnd5e_engine.damage_rules import healing_balance
+from dnd5e_engine.evaluation_cast_activity import casting_activity_seconds
 from dnd5e_engine.evaluation_charged_item import exploration_charged_cast_profile
 from dnd5e_engine.evaluation_effects import effect_state
 from dnd5e_engine.evaluation_exploration_healing import exploration_healing_activity
 from dnd5e_engine.evaluation_multi_spells import verify_multi_spell_definition
+from dnd5e_engine.evaluation_payments import spell_payment
+from dnd5e_engine.evaluation_spell_materials import spell_material_payment
 from dnd5e_engine.evaluation_spells import spell_event
-from dnd5e_engine.evaluation_world_effect import WorldEffectApplicationRequest
+from dnd5e_engine.evaluation_timed_spells import verify_timed_spell_effect
 from dnd5e_engine.events import EffectApplied, HealingApplied, IntentSubmitted, SpellCast
+from dnd5e_engine.spellcasting import spell_component_metadata
 
 from .errors import StateMachineError
 
 
-def _slot_change(request, spend):
-    """Bind a single ordinary slot payment to the caster's fixed pool and level."""
+def _slot_change(request, spend, *, allow_pact=False):
+    """Bind one slot payment to the caster's fixed pool and supported payment policy."""
     resources = request.state_snapshot.resource_state
     if (
         resources is None
         or spend.owner_id != request.actor_id
         or spend.expected not in resources.pools
-        or spend.expected.kind != "spell_slot"
+        or spend.expected.kind
+        not in (("spell_slot", "pact_slot") if allow_pact else ("spell_slot",))
         or spend.expected.level != request.payload.slot_level
         or spend.amount != -1
     ):
         raise StateMachineError("invalid_rule_result", "Exploration spell payment differs")
+    if allow_pact and spend != spell_payment(
+        resources, request.actor_id, request.payload.slot_level
+    ):
+        raise StateMachineError("invalid_rule_result", "Exploration spell slot choice differs")
     return ("resource", spend.owner_id, spend.pool_id, (spend.expected.current, 1))
 
 
@@ -33,7 +42,47 @@ def exploration_spell_changes(request, result, loader):
     spell = loader.get_spell(request.payload.spell_id)
     if spell is not None and (activity := exploration_healing_activity(loader, spell)):
         return _healing_changes(request, result, spell, activity)
-    return _timed_spell_changes(request, result, spell)
+    return _timed_spell_changes(request, result, spell, loader)
+
+
+def casting_activity_changes(request, result, loader):
+    """Verify the frozen spell definition and translate a finish to guarded edits."""
+    from dnd5e_engine.evaluation_timed_spells import _passive_profile
+
+    payload = request.payload
+    operations = result.state_delta.operations
+    spell = loader.get_spell(payload.spell_id) if loader is not None else None
+    if spell is None:
+        raise StateMachineError("invalid_rule_result", "Casting activity lacks a bound spell")
+    try:
+        seconds = casting_activity_seconds(spell, as_ritual=payload.as_ritual)
+        if payload.phase == "start":
+            if operations[0].duration_seconds != seconds:
+                raise ValueError("Activity duration differs from its bound spell")
+            return ()
+        activity, effect, _ = _passive_profile(
+            spell,
+            target_id=request.actor_id,
+            caster_id=request.actor_id,
+            casting_activity=True,
+        )
+        if payload.elapsed_seconds != seconds or operations[-1].value.effect != effect_state(
+            effect
+        ):
+            raise ValueError("Casting effect differs from its bound spell")
+        intent, cast, _ = result.proposed_events
+        components, material, consumed, cost = spell_component_metadata(spell)
+        if intent.activity_id != activity.id or (
+            cast.components,
+            cast.material,
+            cast.material_consumed,
+            cast.material_cost_gp,
+        ) != (list(components), material, consumed, cost):
+            raise ValueError("Casting evidence differs from its bound spell")
+    except ValueError as exc:
+        raise StateMachineError("invalid_rule_result", str(exc)) from exc
+    edits = () if payload.as_ritual else (_slot_change(request, operations[0]),)
+    return (*edits, ("world_effect", request.actor_id, "create", operations[-1].value))
 
 
 def multi_exploration_spell_changes(request, result, loader):
@@ -55,11 +104,15 @@ def multi_exploration_spell_changes(request, result, loader):
 
 
 def environmental_spell_changes(request, result):
-    """Bind the payment of a previously verified environmental cast to its one owned slot."""
+    """Bind the owned slot of a previously verified environmental cast."""
     # RuleEvaluationResult.verify_request checks the exact typed environmental
     # create operation, the payment (if any), and the unchanged RNG and events.
     operations = result.state_delta.operations
-    return (_slot_change(request, operations[0]),) if request.payload.slot_level else ()
+    return (
+        (_slot_change(request, operations[0], allow_pact=request.payload.spell_id == "darkness"),)
+        if request.payload.slot_level
+        else ()
+    )
 
 
 def charged_item_changes(request, result, loader):
@@ -140,7 +193,7 @@ def _healing_changes(request, result, spell, activity):
     return (spend, ("actor", target.entity_id, "hp_current", hp))
 
 
-def _timed_spell_changes(request, result, spell):
+def _timed_spell_changes(request, result, spell, loader):
     """Return candidate writes for one paid cast and one terminal world effect.
 
     The caller validates the shared result envelope and rechecks the version
@@ -150,53 +203,49 @@ def _timed_spell_changes(request, result, spell):
     payload = request.payload
     snapshot = request.state_snapshot
     operations = result.state_delta.operations
-    if len(operations) != 2 or {type(op) for op in operations} != {
-        delta.ResourceUpdate,
-        delta.WorldEffectCreate,
-    }:
+    material_changes = ()
+    expected_types = {delta.ResourceUpdate, delta.WorldEffectCreate}
+    if payload.material_instance_id is not None:
+        expected_types.add(delta.SpellMaterialConsume)
+    if len(operations) != len(expected_types) or {type(op) for op in operations} != expected_types:
         raise StateMachineError("invalid_rule_result", "Timed spell requires a slot and effect")
 
+    if payload.material_instance_id is not None:
+        if spell is None or len(spell.activities) != 1:
+            raise StateMachineError("invalid_rule_result", "Material spell definition differs")
+        try:
+            material = spell_material_payment(
+                spell,
+                spell.activities[0].consumption,
+                snapshot.inventory_state,
+                actor_id=request.actor_id,
+                instance_id=payload.material_instance_id,
+                loader=loader,
+            )
+        except ValueError as exc:
+            raise StateMachineError(
+                "invalid_rule_result", "Spell material binding differs"
+            ) from exc
+        debit = next(op for op in operations if type(op) is delta.SpellMaterialConsume)
+        if debit != material:
+            raise StateMachineError("invalid_rule_result", "Spell material debit differs")
+        material_changes = (
+            ("item", material.expected.instance_id, "consume", material.expected.model_dump()),
+        )
     spend = _slot_change(request, next(op for op in operations if type(op) is delta.ResourceUpdate))
     create = next(op for op in operations if type(op) is delta.WorldEffectCreate)
     if result.rng_transition.state_changed:
         raise StateMachineError("invalid_rule_result", "Timed spell RNG differs")
 
     proposal = create.value
-    association = WorldEffectApplicationRequest(
-        schema_version="engine-world-effect/1",
-        session_id=request.session_id,
-        command_id=request.command_id,
-        source_id=request.actor_id,
-        target_id=payload.target_id,
-        ruleset_binding=request.ruleset_binding,
-    )
+    if spell is None:
+        raise StateMachineError("invalid_rule_result", "Timed spell has no bound definition")
     try:
-        proposal.verify_request(association)
+        verify_timed_spell_effect(request, spell, create)
     except ValueError as exc:
         raise StateMachineError(
-            "invalid_rule_result", "Timed spell effect association differs"
+            "invalid_rule_result", "Timed spell effect differs from its bound definition"
         ) from exc
-
-    caster = next(
-        (actor for actor in snapshot.character_states if actor.entity_id == request.actor_id), None
-    )
-    if (
-        not create.expected_absent
-        or caster is None
-        or spell is None
-        or spell.concentration != proposal.concentration
-        or not any(actor.entity_id == payload.target_id for actor in snapshot.character_states)
-        or any(
-            (effect.target_id, effect.id, effect.origin) == proposal.identity
-            and not (
-                proposal.concentration
-                and caster.concentration_effect_id == effect.id
-                and effect.flags.get("concentration") is True
-            )
-            for effect in snapshot.effect_states
-        )
-    ):
-        raise StateMachineError("invalid_rule_result", "Timed spell effect precondition differs")
 
     events = result.proposed_events
     if len(events) != 3 or tuple(type(event) for event in events) != (
@@ -206,6 +255,7 @@ def _timed_spell_changes(request, result, spell):
     ):
         raise StateMachineError("invalid_rule_result", "Unexpected timed spell events")
     intent, cast, applied = events
+    components, material_name, _, material_cost = spell_component_metadata(spell)
     if (
         intent.intent_type != "cast_spell"
         or intent.actor_id != request.actor_id
@@ -217,12 +267,21 @@ def _timed_spell_changes(request, result, spell):
         or cast.spell_id != payload.spell_id
         or cast.slot_level != payload.slot_level
         or cast.ritual
-        or cast.material_consumed
+        or cast.material_consumed != bool(material_changes)
+        or (
+            material_changes
+            and (
+                cast.components != list(components)
+                or cast.material != material_name
+                or cast.material_cost_gp != material_cost
+            )
+        )
         or effect_state(applied.effect) != proposal.effect
     ):
         raise StateMachineError("invalid_rule_result", "Timed spell events do not match the writes")
 
     return (
         spend,
+        *material_changes,
         ("world_effect", payload.target_id, "create", proposal),
     )

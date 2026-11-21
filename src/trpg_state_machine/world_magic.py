@@ -6,6 +6,10 @@ from typing import Literal
 from dnd5e_engine.areas import AreaTemplate, area_cells, has_line_of_effect
 from dnd5e_engine.environment import EnvironmentalSource, environmental_dispels
 from dnd5e_engine.evaluation_contracts import EnvironmentalItemFacts, ExplorationSpellPositions
+from dnd5e_engine.evaluation_environmental_contracts import (
+    EnvironmentalMagicEffectFacts,
+    EnvironmentalMagicEffectTarget,
+)
 from dnd5e_engine.spatial import parse_cell
 from dnd5e_srd_data.schema.environment import EnvironmentalSpec
 
@@ -102,8 +106,20 @@ class WorldMagic:
         if grid is None or not cell_in_bounds(grid.topology, source[1]):
             return None
         target = command.payload.target
-        item_facts = None
-        if target.kind == "point":
+        item_facts, effect_facts = None, None
+        if isinstance(target, EnvironmentalMagicEffectTarget):
+            try:
+                self.h._public_scope(sid, command.actor_id, package)
+            except StateMachineError as exc:
+                if exc.code in ("unsupported_target_visibility", "unsupported_interaction_scope"):
+                    return None
+                raise
+            record = self.owner.get(sid, target.effect_id)
+            if record is None or record["fixed_scene_id"] != scene:
+                return None
+            effect_facts = self._ending_facts(record)
+            cell = effect_facts.cell_id
+        elif target.kind == "point":
             cell = target.cell_id
         else:
             oid = target.item_id
@@ -152,7 +168,24 @@ class WorldMagic:
             ):
                 return None
         return ExplorationSpellPositions(
-            source_cell=source[1], target_cell=cell, target_item=item_facts
+            source_cell=source[1],
+            target_cell=cell,
+            target_item=item_facts,
+            target_effect=effect_facts,
+        )
+
+    @staticmethod
+    def _ending_facts(record):
+        """Project the exact fixed-point application and provenance for a rules decision."""
+        return EnvironmentalMagicEffectFacts(
+            effect_id=record["effect_id"],
+            caster_id=record["caster_id"],
+            spell_source_id=record["spell_source_id"],
+            spell_id=record["spell_id"],
+            slot_level=record["slot_level"],
+            cell_id=record["fixed_cell"],
+            expires_tick=record["expires_tick"],
+            concentration_id=record["concentration_id"],
         )
 
     def _anchor(self, sid, record):
@@ -347,8 +380,14 @@ class WorldMagic:
             for event in self.reconcile_scene(sid, actual, package)
         ]
 
-    def drop_concentration(self, sid, caster, package):
+    def drop_concentration(self, sid, caster, package, *, command_id):
         """Voluntarily end only the caster's current exploration group."""
+        casting = self.h.spell_casts.active(sid, caster)
+        if casting is not None:
+            if casting["status"] == "waiting":
+                # Active deadline waits finish only through the authorized reply finalizer.
+                return []
+            return [self.h.spell_casts.interrupt(casting, package, command_id)]
         events = self.h.runtime.time.consumers["effects"].end_world_concentration(
             sid, package, caster, "concentration_ended"
         )
@@ -369,3 +408,16 @@ class WorldMagic:
         identity = self.owner.add(sid, scene, command_id, proposal, deadline)
         ended.extend(self.reconcile_scene(sid, scene, package))
         return identity, ended
+
+    def apply_end(self, row, package, proposal):
+        """End a verified application within the caster's existing write transaction."""
+        sid = row["session_id"]
+        expected = proposal.expected
+        record = self.owner.get(sid, expected.effect_id)
+        if (
+            record is None
+            or record["fixed_scene_id"] != row["current_scene_id"]
+            or self._ending_facts(record) != expected
+        ):
+            raise StateMachineError("version_conflict", "Spatial spell selection changed")
+        return self.end_event(sid, package, record, proposal.reason)

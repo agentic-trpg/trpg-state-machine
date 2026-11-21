@@ -149,9 +149,11 @@ class WorldHandler:
         )
 
         from .environment import EnvironmentService
+        from .spell_cast_activity import SpellCastActivities
         from .world_magic import WorldMagic
 
         self.environment = EnvironmentService(self)
+        self.spell_casts = SpellCastActivities(self)
         self.magic = WorldMagic(self)
         self.capture.lights = self.objects.lights
 
@@ -1089,7 +1091,9 @@ class WorldHandler:
         if type(operation) not in (PutItem, TakeItem):
             self._world_operation_capability(row, operation)
         if type(operation) is DropWorldConcentration:
-            return self.magic.drop_concentration(row["session_id"], actor_id, package)
+            return self.magic.drop_concentration(
+                row["session_id"], actor_id, package, command_id=source_command_id
+            )
         if type(operation) in ENVIRONMENT_OPERATIONS:
             return self.environment.operate(row, operation, package)
         if type(operation) in WORLD_CAPABILITY_OPERATIONS:

@@ -37,6 +37,7 @@ from .npc_outputs import _handoff_command
 from .package import AdventurePackage, RulesetBinding
 from .perception import NPCContext
 from .rest_activity import LongRest, ShortRest
+from .spell_cast_activity import FinishSpellCast, StartSpellCast
 from .time_coordination import AdvanceSessionTime, SetTimeRunning
 from .world_commands import WORLD_CAPABILITY_OPERATIONS, RepositionObject, SpendItemCharge
 
@@ -142,6 +143,8 @@ class SessionAccess:
                 ExplorationEnvironmentalSpellCastPayload,
                 ExplorationMultiSpellCastPayload,
                 ChoiceFinalizeSpellOperationPayload,
+                StartSpellCast,
+                FinishSpellCast,
             )
             and actor_id != row["pc_actor_id"]
         ):

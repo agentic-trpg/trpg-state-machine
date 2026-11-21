@@ -10,6 +10,7 @@ from spatial_support import command as world_command
 from spatial_support import submit as submit_world
 from test_mechanism_effects import FixturePort, install, rule_action, rule_data, state_rows
 from test_ongoing_effect_storage import _effect
+from test_scoped_runtime_validation import measure
 from test_session_time_coordination import submit as submit_time
 from test_timed_spell_cast import timed_spell_world as timed_spell_world
 from test_world_mechanisms import LEVER
@@ -35,6 +36,12 @@ CASE = "object.dark_case"
 
 @pytest.fixture
 def magic_world(timed_spell_world, request):
+    return _magic_world(timed_spell_world, opaque_case=getattr(request, "param", False))
+
+
+def _magic_world(timed_spell_world, *, opaque_case=False, growth=0):
+    """Make a fixed spatial cast scene with optional unrelated placed objects."""
+
     def configure(data):
         data["manifest"]["schema_version"] = "state-machine-foundation/6"
         data["lockable_doors"] = []
@@ -50,7 +57,25 @@ def magic_world(timed_spell_world, request):
                 "capabilities": [],
             }
         ]
-        if getattr(request, "param", False):
+        data["scenes"][0]["objects"].extend(
+            {
+                "object_id": f"object.unrelated_{index}",
+                "state": None,
+                "movable": False,
+                "blocks_passage": False,
+                "initial_cell": "13,1",
+            }
+            for index in range(growth)
+        )
+        data["world_objects"].extend(
+            {
+                **data["world_objects"][0],
+                "object_id": f"object.unrelated_{index}",
+                "definition_ref": f"definition.unrelated_{index}",
+            }
+            for index in range(growth)
+        )
+        if opaque_case:
             data["world_objects"][0].update(
                 volume_cu_ft=1, fit_profile="station.small", content_kind="station.unit"
             )
@@ -101,10 +126,22 @@ def magic_world(timed_spell_world, request):
             for scene in foundation.get("additional_scenes", ()):
                 scene["grid"]["width"] = 14
 
-    return timed_spell_world(additional_spells=("light", "darkness"), configure=configure)
+    return timed_spell_world(
+        additional_spells=("light", "darkness", "dispel-magic"),
+        database=f"magic-{growth}.sqlite" if growth else "timed-spell.sqlite",
+        configure=configure,
+    )
 
 
 def cast(session, command_id, spell, slot, target):
+    """Submit an authored spatial spell using the current public Session version."""
+    command = prepare_cast(session, command_id, spell, slot, target)
+    sm, _, package, context = session
+    return command, sm.submit_command(command, package, context=context)
+
+
+def prepare_cast(session, command_id, spell, slot, target):
+    """Construct a public cast so a failing submission can be retried exactly."""
     sm, sid, package, context = session
     state = sm.read_session(sid, package, context=context)
     payload = {
@@ -126,7 +163,7 @@ def cast(session, command_id, spell, slot, target):
         }
     )
     assert type(command.payload) is ExplorationEnvironmentalSpellCastPayload
-    return command, sm.submit_command(command, package, context=context)
+    return command
 
 
 def sources(session):
@@ -208,6 +245,144 @@ def test_darkness_dispels_a_paid_overlap_and_releases_its_own_concentration(magi
         assert dropped.status == "committed", dropped
         assert sources(magic_world) == ()
         assert sm._conn.execute("SELECT count(*) FROM effect_concentrations").fetchone()[0] == 0
+
+
+def test_public_dispel_ends_the_observed_darkness_and_keeps_unrelated_light(magic_world):
+    """Spend once on an exact effect identified through committed cast evidence."""
+    sm, sid, package, context = magic_world
+    with sm:
+        actor = sm.read_session(sid, package, context=context).pc_actor_id
+        cell = "12,0"
+
+        def illumination():
+            return sm.get_illumination_area(sid, actor, (cell,), package, context=context)[0]
+
+        assert (
+            cast(magic_world, "light", "light", 0, {"kind": "item", "item_id": ITEM})[1].status
+            == "committed"
+        )
+        normal_light = illumination()
+        _, darkness = cast(magic_world, "dark", "darkness", 2, {"kind": "point", "cell_id": cell})
+        assert darkness.status == "committed", darkness
+        old_light = illumination()
+        assert old_light["magical_darkness"]
+        cast_events = sm.read_events(sid, package, context=context)
+        effect_id = next(
+            e.payload["effect_id"] for e in cast_events if e.source_command_id == "dark"
+        )
+        assert effect_id == "spatial:dark"
+        snapshot = sm.read_noncombat_snapshot(sid, package, context=context)
+        resources = snapshot.resource_state
+        rng = sm.read_rng_context(sid, package, context=context)
+        old_sources = sources(magic_world)
+        target = {"kind": "effect", "effect_id": effect_id}
+        command, receipt = cast(magic_world, "dispel", "dispel-magic", 3, target)
+        assert receipt.status == "committed", receipt
+        assert sm.submit_command(command, package, context=context) == receipt
+        assert illumination() == normal_light
+        assert old_light["magical_darkness"]
+        assert {e.effect_id for e in old_sources} == {"spatial:dark", "spatial:light"}
+        assert [e.effect_id for e in sources(magic_world)] == ["spatial:light"]
+        assert sm._conn.execute("SELECT count(*) FROM effect_concentrations").fetchone()[0] == 0
+        current = sm.read_noncombat_snapshot(sid, package, context=context)
+        spend = {
+            pool.pool_id: pool.current - prev.current
+            for pool, prev in zip(current.resource_state.pools, resources.pools, strict=True)
+            if pool.current != prev.current
+        }
+        assert spend == {"spell:3": -1}
+        assert sm.read_rng_context(sid, package, context=context) == rng
+        ended = [
+            e
+            for e in sm.read_events(sid, package, context=context)
+            if e.event_type == "effect.spatial_light_ended"
+        ]
+        assert len(ended) == 1
+        assert ended[0].payload["effect_id"] == effect_id
+        assert ended[0].payload["reason"] == "dispelled"
+        assert ended[0].source_command_id == command.command_id
+
+        for absent in (effect_id, "spatial:unknown", "spatial:light"):
+            _, refused = cast(
+                magic_world,
+                f"dispel:{absent}",
+                "dispel-magic",
+                3,
+                {"kind": "effect", "effect_id": absent},
+            )
+            assert (refused.status, refused.error_code) == ("rejected", "target_invalid")
+        assert (
+            sm.read_noncombat_snapshot(sid, package, context=context).resource_state
+            == current.resource_state
+        )
+
+
+def test_dispel_receipt_failure_restores_spatial_effect_concentration_and_slot(magic_world):
+    """Reject publication of the removal when committing its receipt fails."""
+    sm, sid, package, context = magic_world
+    with sm:
+        _, darkness = cast(magic_world, "dark", "darkness", 2, {"kind": "point", "cell_id": "5,0"})
+        assert darkness.status == "committed", darkness
+        command = prepare_cast(
+            magic_world,
+            "dispel.rollback",
+            "dispel-magic",
+            3,
+            {"kind": "effect", "effect_id": "spatial:dark"},
+        )
+        snapshot = sm.read_noncombat_snapshot(sid, package, context=context)
+        events = sm.read_events(sid, package, context=context)
+        old_sources = sources(magic_world)
+        old_light = sm.get_illumination_area(
+            sid, command.actor_id, ("5,0",), package, context=context
+        )
+        sm._conn.execute(
+            "CREATE TEMP TRIGGER fail_dispel_receipt BEFORE INSERT ON command_receipts "
+            "WHEN NEW.command_id='dispel.rollback' AND NOT EXISTS ("
+            "SELECT 1 FROM spatial_light_effects WHERE session_id=NEW.session_id "
+            "AND effect_id='spatial:dark') AND EXISTS (SELECT 1 FROM character_resources "
+            "WHERE session_id=NEW.session_id AND resource_id='spell:3' AND current=1) "
+            "BEGIN SELECT RAISE(ABORT,'injected dispel receipt failure'); END"
+        )
+        with pytest.raises(StateMachineError):
+            sm.submit_command(command, package, context=context)
+        assert sm.get_command_receipt(sid, command.command_id, package, context=context) is None
+        assert sm.read_noncombat_snapshot(sid, package, context=context) == snapshot
+        assert sm.read_events(sid, package, context=context) == events
+        assert sources(magic_world) == old_sources
+        assert sm._conn.execute("SELECT count(*) FROM effect_concentrations").fetchone()[0] == 1
+        assert (
+            sm.get_illumination_area(sid, command.actor_id, ("5,0",), package, context=context)
+            == old_light
+        )
+        sm._conn.execute("DROP TRIGGER fail_dispel_receipt")
+        receipt = sm.submit_command(command, package, context=context)
+        assert receipt.status == "committed", receipt
+        assert sm.submit_command(command, package, context=context) == receipt
+        assert sources(magic_world) == ()
+
+
+def test_public_dispel_scope_fixed_when_unrelated_objects_increase(timed_spell_world):
+    """Count actual reads at the same public command with a fixed effect and approach."""
+    observed = []
+    for growth in (0, 25):
+        session = _magic_world(timed_spell_world, growth=growth)
+        sm, _, package, context = session
+        with sm:
+            _, darkness = cast(session, "dark", "darkness", 2, {"kind": "point", "cell_id": "5,0"})
+            assert darkness.status == "committed", darkness
+            command = prepare_cast(
+                session,
+                "dispel",
+                "dispel-magic",
+                3,
+                {"kind": "effect", "effect_id": "spatial:dark"},
+            )
+            with measure(sm) as (counts, _):
+                result = sm.submit_command(command, package, context=context)
+            assert result.status == "committed", result
+            observed.append(tuple(counts[k] for k in ("sql_selects", "sql_rows", "returned_bytes")))
+    assert observed[0] == observed[1]
 
 
 def test_observer_cannot_see_lit_cell_across_committed_magical_darkness(magic_world):

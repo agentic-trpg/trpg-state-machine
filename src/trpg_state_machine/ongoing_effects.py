@@ -26,6 +26,7 @@ from .runtime_instances import instance_read
 from .scoped_reads import scoped_read
 from .shield_adoption import is_retained_shield
 from .spatial_light_effects import SpatialLightEffects
+from .spell_cast_activity import CASTING_FOCUS_PREFIX, casting_focus_id
 
 
 def _fixed_region_effect(row, statuses):
@@ -45,6 +46,7 @@ class ConcentrationGroup:
     rounds_remaining: int
     actor_members: tuple[tuple[str, str, str], ...]
     spatial_member: dict | None
+    casting_activity_id: str | None = None
 
 
 class OngoingEffects:
@@ -94,6 +96,16 @@ class OngoingEffects:
                     lifecycle=member.get("lifecycle"),
                     expires_tick=member.get("expires_tick"),
                 )
+
+    def create_casting_focus(self, sid, caster_id, activity_id):
+        """Reserve the one concentration slot for an admitted casting Activity."""
+        self.store.require_write()
+        identity = casting_focus_id(activity_id)
+        self._conn.execute(
+            "INSERT INTO effect_concentrations VALUES (?,?,?,?,0)",
+            (sid, identity, caster_id, identity),
+        )
+        return identity
 
     def add_effect(
         self,
@@ -527,6 +539,21 @@ class OngoingEffects:
         if row is None:
             return None
         group_id, effect_id, rounds = row
+        if effect_id.startswith(CASTING_FOCUS_PREFIX):
+            activity = self._conn.execute(
+                "SELECT activity_id,actor_id FROM spell_cast_activities "
+                "WHERE session_id=? AND concentration_id=?",
+                (sid, group_id),
+            ).fetchone()
+            if (
+                activity is None
+                or activity["actor_id"] != caster_id
+                or group_id != casting_focus_id(activity["activity_id"])
+                or effect_id != group_id
+                or rounds != 0
+            ):
+                raise StateMachineError("invalid_mechanical_state", "Casting focus differs")
+            return ConcentrationGroup(group_id, caster_id, effect_id, 0, (), None, activity[0])
         spatial = self.spatial_lights.for_concentration(sid, group_id)
         members = tuple(
             tuple(member)
@@ -561,6 +588,11 @@ class OngoingEffects:
             return ()
         if resolution.outcome not in {"broken", "ended"}:
             raise StateMachineError("invalid_rule_result", "Unknown concentration outcome")
+        if group.casting_activity_id is not None:
+            raise StateMachineError(
+                "unsupported_mechanism_effect_lifecycle",
+                "Mechanism interruption of casting is not adopted by this port",
+            )
         if group.spatial_member is not None:
             return (end_spatial(group.spatial_member),)
         self.remove_concentration(sid, group.concentration_id)
@@ -576,7 +608,9 @@ class OngoingEffects:
         ).fetchone()
         if row is None:
             return None
-        if self.spatial_lights.for_concentration(sid, row["concentration_id"]) is not None:
+        if row["effect_id"].startswith(CASTING_FOCUS_PREFIX) or (
+            self.spatial_lights.for_concentration(sid, row["concentration_id"]) is not None
+        ):
             # The actor effect wire field only accepts actor-target concentration chains.
             return None
         if (

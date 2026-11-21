@@ -73,6 +73,8 @@ class ActivityHandler:
             raise StateMachineError(
                 "unsupported_combat_world_operation", "Navigation is noncombat only"
             )
+        if self.world.spell_casts.active(row["session_id"], actor):
+            raise StateMachineError("activity_conflict", "The actor is casting a timed spell")
         self.world._world_actor_ready(row["session_id"], actor, movement=True)
         self.world._public_scope(row["session_id"], actor, package)
 

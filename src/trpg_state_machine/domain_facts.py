@@ -11,6 +11,7 @@ from uuid import uuid4
 
 from dnd5e_engine.activities.passive_stats import CombatantSenses, interpret_passive_stats
 from dnd5e_engine.evaluation_casting import CastingState
+from dnd5e_engine.evaluation_charged_item import exploration_charged_cast_profile
 from dnd5e_engine.evaluation_effects import EffectState
 from dnd5e_engine.evaluation_resources import ResourceState
 from dnd5e_engine.evaluation_state import InventoryState
@@ -20,6 +21,7 @@ from dnd5e_srd_data.schema.common import PassiveEffectChange
 from pydantic import TypeAdapter
 
 from .errors import StateMachineError
+from .item_recharge import next_item_dawn
 from .item_units import core_item_id, item_unit_from_row, valid_item_unit
 from .light_fuel import LightFuel
 from .package import canonical_json
@@ -32,7 +34,7 @@ from .runtime_instances import (
     instance_read,
 )
 from .scoped_reads import scoped_read
-from .time_binding import deadline_after_seconds
+from .time_binding import MAX_TICK, deadline_after_seconds
 
 _EFFECTS = TypeAdapter(tuple[EffectState, ...])
 _SENSE_KEY_PREFIX = "system.attributes.senses."
@@ -2542,16 +2544,31 @@ class WorldFacts:
         )
 
     def initialize_items(self, row, package, loader):
-        """Initialize portable item instances and their related records."""
+        """Initialize portable items and the bound dawn plan of eligible exact instances."""
         self.store.require_write()
         sid = row["session_id"]
         if row["world_version"] or row["event_seq"]:
             raise StateMachineError(
                 "invalid_item_foundation", "Item initialization requires a fresh session"
             )
+        dawn = None
         for item in package.portable_items:
-            if loader.get_item(item.item_slug) is None:
+            asset = loader.get_item(item.item_slug)
+            if asset is None:
                 raise StateMachineError("invalid_item_foundation", "Unknown pinned mechanical item")
+            capacity = due = None
+            if item.policy == "charge_exhaust_retain" and asset.uses and asset.uses.recovery:
+                profile = exploration_charged_cast_profile(asset, loader)
+                if profile is not None and profile.recovers_at_dawn:
+                    capacity = profile.capacity
+                    if item.charges_remaining_per_unit > capacity:
+                        raise StateMachineError(
+                            "invalid_item_foundation", "Initial item charges exceed bound capacity"
+                        )
+                    if dawn is None:
+                        dawn = next_item_dawn(*self.time_state(sid))
+                    if item.charges_remaining_per_unit < capacity:
+                        due = dawn
             owner = (
                 row["pc_actor_id"]
                 if item.initial_owner_id == row["pc_template_id"]
@@ -2575,16 +2592,25 @@ class WorldFacts:
                     raise StateMachineError(
                         "invalid_item_foundation", "Portable instance differs from item facts"
                     )
+                if capacity is not None:
+                    self._conn.execute(
+                        "UPDATE objects SET item_recharge_capacity=?,item_recharge_due_tick=? "
+                        "WHERE session_id=? AND object_id=?",
+                        (capacity, due, sid, item.instance_id),
+                    )
                 continue
             self._conn.execute(
                 "UPDATE objects SET portable_marker='{}',item_slug=?,"
                 "item_charges=?,item_accessible=?,"
+                "item_recharge_capacity=?,item_recharge_due_tick=?,"
                 "carrier_id=?,scene_id=?,cell=? "
                 "WHERE session_id=? AND object_id=?",
                 (
                     data["item_slug"],
                     data["charges_remaining_per_unit"],
                     int(data["accessible"]),
+                    capacity,
+                    due,
                     owner,
                     None if owner else old["scene_id"],
                     None if owner else old["cell"],
@@ -2907,22 +2933,66 @@ class WorldFacts:
     def spend_item_charge(self, sid, before, *, amount=1):
         """Persist an admitted positive charge spend against the exact item row.
 
-        The row remains after exhaustion. The outer command scope owns rollback,
-        durable receipt, version, event and RAM publication.
+        The row remains after exhaustion. An eligible item keeps its first pending
+        dawn or schedules one on the first spend after a refill. The caller owns
+        rollback, receipt, version and RAM publication.
         """
         self.store.require_write()
         if before["item_slug"] is None or not 1 <= amount <= before["item_charges"]:
             raise StateMachineError("item_charges_exhausted", "No item charges remain")
+        due = before["item_recharge_due_tick"]
+        if before["item_recharge_capacity"] is not None and due is None:
+            due = next_item_dawn(*self.time_state(sid))
+        self._replace_item_charge(sid, before, before["item_charges"] - amount, due)
+
+    def next_item_recharge(self, sid):
+        """Read the earliest reachable dawn from the index of depleted items."""
+        due = self._conn.execute(
+            "SELECT item_recharge_due_tick FROM objects "
+            "WHERE session_id=? AND item_recharge_due_tick<=? "
+            "ORDER BY item_recharge_due_tick,object_id LIMIT 1",
+            (sid, MAX_TICK),
+        ).fetchone()
+        return due[0] if due else None
+
+    def due_item_recharge(self, sid, tick):
+        """Read one due item in stable deadline order in the caller's candidate."""
+        return self._conn.execute(
+            "SELECT * FROM objects WHERE session_id=? AND item_recharge_due_tick<=? "
+            "ORDER BY item_recharge_due_tick,object_id LIMIT 1",
+            (sid, tick),
+        ).fetchone()
+
+    def recover_item_charges(self, sid, before):
+        """Refill one deferred balance and clear its dawn in the shared time write."""
+        self.store.require_write()
+        capacity = before["item_recharge_capacity"]
+        if capacity is None or before["item_recharge_due_tick"] is None:
+            raise StateMachineError("invalid_time_consumer", "Item recovery is not due")
+        self._replace_item_charge(sid, before, capacity, None)
+
+    def _replace_item_charge(self, sid, before, balance, due):
+        """Compare and replace one instance's balance and pending dawn together."""
         cursor = self._conn.execute(
-            "UPDATE objects SET item_charges=item_charges-? "
-            "WHERE session_id=? AND object_id=? AND item_slug=? AND item_charges=?",
-            (amount, sid, before["object_id"], before["item_slug"], before["item_charges"]),
+            "UPDATE objects SET item_charges=?,item_recharge_due_tick=? "
+            "WHERE session_id=? AND object_id=? AND item_slug=? AND item_charges=? "
+            "AND item_recharge_capacity IS ? AND item_recharge_due_tick IS ?",
+            (
+                balance,
+                due,
+                sid,
+                before["object_id"],
+                before["item_slug"],
+                before["item_charges"],
+                before["item_recharge_capacity"],
+                before["item_recharge_due_tick"],
+            ),
         )
         if cursor.rowcount != 1:
             raise StateMachineError("version_conflict", "Item balance changed")
 
     def consume_item(self, sid, before, command_id):
-        """Remove one exact owned potion and record its receipt-linked absence.
+        """Remove one exact owned unit and record its receipt-linked absence.
 
         The caller owns the shared write scope and validated mechanical Delta.
         Authored scene dependencies are retired before deletion, so the ordinary

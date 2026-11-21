@@ -6,21 +6,24 @@ from dataclasses import replace
 import pytest
 from dnd5e_engine.evaluation_region_effect import region_condition_identity
 from dnd5e_engine.evaluation_ruleset import get_default_ruleset
-from lock_support import PASSAGE, A, B
+from lock_support import PASSAGE, A, B, lock_loader
 from spatial_support import create
 from test_migrations import stored_rows
 from test_object_protection import large_data
-from test_scoped_runtime_validation import measure, observe
+from test_scoped_runtime_validation import grow, measure, observe
 from world_support import command, setup, submit
 
 from trpg_state_machine import (
     AddEnvironmentSource,
+    BatchEnvironment,
     EnvironmentArea,
     EnvironmentConditions,
     EnvironmentSceneFacts,
     EnvironmentSource,
     InitializeEnvironment,
     Obscurant,
+    RemoveEnvironmentSource,
+    ReplaceEnvironmentSource,
     StateMachine,
     StateMachineError,
     StepActor,
@@ -144,6 +147,201 @@ def test_public_fixed_area_rule_applies_and_clears_deafened(tmp_path, context, i
         ).conditions
         if not immune:
             assert entered.effect_states[0].statuses == {"deafened"}
+
+
+@pytest.mark.parametrize("immune", [False, True])
+def test_dynamic_area_changes_update_stationary_actor(tmp_path, context, immune):
+    """Creating, moving or removing a source reconciles only its current coverage."""
+    loader = get_default_ruleset()
+    data = large_data()
+    data["manifest"]["ruleset_binding"] = loader.binding.model_dump(mode="json")
+    if immune:
+        for foundation in data["rule_bindings"].values():
+            foundation["snapshot"]["character_states"][0]["condition_immunities"] = ["deafened"]
+    package = _validate(data)
+    with StateMachine(tmp_path / "world.db", dnd_loader=loader) as sm:
+        sid = create(sm, package, context)
+        gm = replace(context, can_manage_environment=True)
+        pc = sm.read_session(sid, package, context=context).pc_actor_id
+        origin = sm.read_actor_position(sid, pc, package, context=context)
+        rng = sm.read_rng_context(sid, package, context=context)
+        first = EnvironmentSource(
+            "silent.first",
+            EnvironmentConditions(),
+            EnvironmentArea(("0,0",)),
+            region_effect_rule="condition:deafened",
+        )
+        other = replace(first, source_id="silent.other")
+
+        def current_effects():
+            snapshot = sm.read_noncombat_snapshot(sid, package, context=context)
+            actor = next(actor for actor in snapshot.character_states if actor.entity_id == pc)
+            assert {record.condition for record in actor.conditions} == (
+                {"deafened"} if snapshot.effect_states else set()
+            )
+            assert {record.source_effect_id for record in actor.conditions} == {
+                effect.id for effect in snapshot.effect_states
+            }
+            return {effect.id for effect in snapshot.effect_states}
+
+        def effect_ids(*sources):
+            if immune:
+                return set()
+            return {
+                region_condition_identity(A, s.source_id, pc, rule_ref=s.region_rule_ref)[1]
+                for s in sources
+            }
+
+        before = sm.read_noncombat_snapshot(sid, package, context=context)
+        add = command(sm, sid, package, gm, AddEnvironmentSource(A, first), "cover.stationary")
+        receipt = sm.submit_command(add, package, context=gm)
+        assert receipt.status == "committed", receipt
+        assert current_effects() == effect_ids(first)
+        assert not before.effect_states
+        assert sm.submit_command(add, package, context=gm) == receipt
+        assert current_effects() == effect_ids(first)
+
+        distant = replace(first, area=EnvironmentArea(("2,0",)))
+        batch = BatchEnvironment(
+            (ReplaceEnvironmentSource(A, distant), AddEnvironmentSource(A, other))
+        )
+        assert submit(sm, sid, package, gm, batch, "change.same.tick").status == "committed"
+        assert current_effects() == effect_ids(other)
+        assert (
+            submit(sm, sid, package, gm, ReplaceEnvironmentSource(A, first), "move.back").status
+            == "committed"
+        )
+        assert current_effects() == effect_ids(first, other)
+        assert (
+            submit(
+                sm, sid, package, gm, RemoveEnvironmentSource(A, first.source_id), "end.first"
+            ).status
+            == "committed"
+        )
+        assert current_effects() == effect_ids(other)
+        assert (
+            submit(
+                sm, sid, package, gm, RemoveEnvironmentSource(A, other.source_id), "end.other"
+            ).status
+            == "committed"
+        )
+        assert current_effects() == set()
+        assert sm.read_actor_position(sid, pc, package, context=context).cell == origin.cell
+        assert sm.read_rng_context(sid, package, context=context) == rng
+
+
+@pytest.mark.parametrize(
+    ("initial_cell", "expected_effects"),
+    [("0,0", 0), ("1,0", 1)],
+    ids=["same_footprint", "new_coverage"],
+)
+def test_initialization_and_runtime_area_edit_use_distinct_boundaries(
+    tmp_path, context, monkeypatch, initial_cell, expected_effects
+):
+    """A same-batch runtime edit compares with the immediately preceding seed."""
+    from trpg_state_machine import ongoing_effects
+
+    sm, sid, package, _ = setup(tmp_path, context, large_data())
+    gm = replace(context, can_manage_environment=True)
+    with sm:
+        pc = sm.read_session(sid, package, context=context).pc_actor_id
+        source = _toxic_fog("fog.seeded", initial_cell)
+        updated = replace(source, area=EnvironmentArea(("0,0",)), priority=1)
+        batch = BatchEnvironment(
+            (
+                InitializeEnvironment(A, EnvironmentSceneFacts(sources=(source,))),
+                ReplaceEnvironmentSource(A, updated),
+            )
+        )
+        calls = Counter()
+        observe(monkeypatch, ongoing_effects, "plan_region_effect_transition", calls, "region")
+        receipt = submit(sm, sid, package, gm, batch, "seed.and.edit")
+        assert receipt.status == "committed", receipt
+        assert sm.environment.read_facts(sid, A, package, context=gm).sources == (updated,)
+        assert sm.read_actor_position(sid, pc, package, context=context).cell == "0,0"
+        assert len(_poisoned_effects(sm, sid, package, context, pc)) == expected_effects
+        assert calls["region"] == expected_effects
+
+
+def test_dynamic_region_withdrawal_rolls_back_and_replays(tmp_path, context):
+    """A late receipt fault preserves the source, its effects and overlapping sources."""
+    sm, sid, package, db = setup(tmp_path, context, large_data())
+    gm = replace(context, can_manage_environment=True)
+    with sm:
+        pc = sm.read_session(sid, package, context=context).pc_actor_id
+        first, second = (_toxic_fog(name, "0,0") for name in ("fog.first", "fog.second"))
+        batch = BatchEnvironment((AddEnvironmentSource(A, first), AddEnvironmentSource(A, second)))
+        assert submit(sm, sid, package, gm, batch, "cover.actor").status == "committed"
+        effects = _poisoned_effects(sm, sid, package, context, pc)
+        assert len(effects) == 2
+        before = stored_rows(db)
+        facts = sm.environment.read_facts(sid, A, package, context=gm)
+        assert facts.sources == (first, second)
+        remove = command(
+            sm, sid, package, gm, RemoveEnvironmentSource(A, first.source_id), "withdraw.first"
+        )
+        sm._conn.execute(
+            "CREATE TEMP TRIGGER fail_region_withdrawal BEFORE INSERT ON command_receipts "
+            "WHEN NEW.command_id='withdraw.first' AND "
+            "(SELECT count(*) FROM ongoing_effects WHERE session_id=NEW.session_id)=1 "
+            "BEGIN SELECT RAISE(ABORT,'withdrawal fault after effect adoption'); END"
+        )
+        with pytest.raises(StateMachineError) as error:
+            sm.submit_command(remove, package, context=gm)
+        assert error.value.code == "storage_error"
+        assert stored_rows(db) == before
+        assert sm.environment.read_facts(sid, A, package, context=gm) == facts
+        assert _poisoned_effects(sm, sid, package, context, pc) == effects
+        assert sm.get_command_receipt(sid, remove.command_id, package, context=gm) is None
+        sm._conn.execute("DROP TRIGGER fail_region_withdrawal")
+
+        receipt = sm.submit_command(remove, package, context=gm)
+        assert receipt.status == "committed", receipt
+        remaining = _poisoned_effects(sm, sid, package, context, pc)
+        assert len(remaining) == 1 and remaining[0] in effects
+        assert sm.environment.read_facts(sid, A, package, context=gm).sources == (second,)
+
+    with StateMachine(db, dnd_loader=lock_loader()) as reopened:
+        assert reopened.submit_command(remove, package, context=gm) == receipt
+        assert _poisoned_effects(reopened, sid, package, context, pc) == remaining
+        assert reopened.environment.read_facts(sid, A, package, context=gm).sources == (second,)
+
+
+def test_dynamic_region_write_cost_stays_local_with_unrelated_growth(
+    tmp_path, context, monkeypatch
+):
+    """Count SQL reads, rows and rule calls for the same public coverage edit."""
+    from trpg_state_machine import ongoing_effects
+
+    measured = []
+    gm = replace(context, can_manage_environment=True)
+    for n in (0, 24):
+        directory = tmp_path / str(n)
+        directory.mkdir()
+        sm, sid, package, _ = setup(directory, context, large_data())
+        with sm, monkeypatch.context() as patch:
+            pc = sm.read_session(sid, package, context=context).pc_actor_id
+            grow(sm, sid, n)
+            calls = Counter()
+            observe(patch, ongoing_effects, "plan_region_effect_transition", calls, "region")
+            source = _toxic_fog("local", "0,0")
+            add = command(sm, sid, package, gm, AddEnvironmentSource(A, source), "add")
+            with measure(sm) as (counts, statements):
+                added = sm.submit_command(add, package, context=gm)
+            assert added.status == "committed", added
+            assert len(_poisoned_effects(sm, sid, package, context, pc)) == 1
+            occupancy_sql = [
+                sql
+                for sql in statements
+                if sql.startswith("SELECT actor_id,cell FROM actors")
+                and "current_scene_id=? AND cell IN (SELECT value FROM json_each(?))" in sql
+            ]
+            assert len(occupancy_sql) == 1
+            assert calls == {"region": 1}
+            plan = sm._conn.execute("EXPLAIN QUERY PLAN " + occupancy_sql[0], (sid, A, '["0,0"]'))
+            assert any("actors_cell_lookup" in row[3] for row in plan)
+            measured.append(counts)
+    assert measured[0] == measured[1]
 
 
 @pytest.mark.parametrize(

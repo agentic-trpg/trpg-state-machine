@@ -113,16 +113,19 @@ class SessionTime:
         self.runtime, self.world, self.effects = runtime, world, effects
         self.store = runtime.store
         from .effect_time import EffectTimeConsumer
+        from .item_recharge import ItemRechargeTimeConsumer
         from .light_fuel import LightFuelTimeConsumer
 
         self.consumers = {
             "mechanisms": world.objects.mechanisms,
             "effects": EffectTimeConsumer(runtime, world),
             "light_fuel": LightFuelTimeConsumer(world),
+            "item_recharge": ItemRechargeTimeConsumer(world),
+            "spell_casts": world.spell_casts,
         }
         self.drivers = {}
         self.waits = TimeWaits(self)
-        # Multiple domain owners at one instant require a reviewed dependency policy.
+        # Hosts may choose an order for due groups that require explicit dependency handling.
         self.resolve_simultaneous = None
 
     @property
@@ -181,6 +184,44 @@ class SessionTime:
             integer(tick, name, code="invalid_time_consumer")
         return result
 
+    def _passive_boundary_event(self, sid, name, tick):
+        """Identify the next reviewed built-in deadline's event and Package routing scope."""
+        from .effect_time import EffectTimeConsumer
+        from .item_recharge import ItemRechargeTimeConsumer
+
+        consumer = self.consumers[name]
+        if name == "mechanisms" and consumer is self.world.objects.mechanisms:
+            scene = consumer.next_reset_scene(sid, tick)
+            return ("mechanism.reset", scene) if scene is not None else None
+        if (
+            name == "effects"
+            and type(consumer) is EffectTimeConsumer
+            and consumer.world is self.world
+        ):
+            scene = consumer.next_actor_expiry_scene(sid, tick)
+            return ("effect.expired", scene) if scene is not None else None
+        if (
+            name == "item_recharge"
+            and type(consumer) is ItemRechargeTimeConsumer
+            and consumer.world is self.world
+        ):
+            return "item.charges_recovered", None  # The event has no scene routing field.
+        return None
+
+    def _independent_same_tick(self, sid, package, due, tick):
+        """Admit same-tick resets, actor expiries and refills without Package consequences."""
+        # The reviewed built-in events do not trigger automatic World actions.
+        # Package triggers may introduce dependencies through their consequences.
+        by_trigger, _ = self.effects.capture.event_index(package)
+        for name, deadline in due.items():
+            if (
+                deadline != tick
+                or (key := self._passive_boundary_event(sid, name, tick)) is None
+                or key in by_trigger
+            ):
+                return False
+        return True
+
     def _advance(self, row, package, target, command_id, source, budget):
         """Advance the sole world tick within bounded write work, settling consumers and
         waits.
@@ -212,19 +253,18 @@ class SessionTime:
             staged_row = dict(row)
             staged_row["event_seq"] += len(events)
             clock_events = self.world.time.advance(row, AdvanceGameTime(current, next_tick))
-            events.extend(
-                self.effects._expand_events(
-                    staged_row,
-                    package,
-                    [
-                        self.world._capture_event(
-                            sid, package, kind, payload, phase="clock.after_advance"
-                        )
-                        for kind, payload in clock_events
-                    ],
-                    command_id,
-                )
+            expanded_clock = self.effects._expand_events(
+                staged_row,
+                package,
+                [
+                    self.world._capture_event(
+                        sid, package, kind, payload, phase="clock.after_advance"
+                    )
+                    for kind, payload in clock_events
+                ],
+                command_id,
             )
+            events.extend(expanded_clock)
             current = next_tick
             due = {name: tick for name, tick in boundaries if tick <= current}
             # Clock consequences may already have switched off the selected lamp.
@@ -247,6 +287,12 @@ class SessionTime:
                     # Mechanical fuel exhaustion settles at the shared exact tick.
                     # Choices between any remaining domains keep their prior policy.
                     chosen = "light_fuel"
+                elif (
+                    source != "combat"
+                    and len(expanded_clock) == len(clock_events)
+                    and self._independent_same_tick(sid, package, due, current)
+                ):
+                    chosen = next(iter(due))
                 else:
                     chosen = None
                 if chosen not in due:

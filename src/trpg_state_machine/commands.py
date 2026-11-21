@@ -58,6 +58,7 @@ from .navigation_models import (
     StartNavigation,
 )
 from .rest_activity import HitDiceSpend, LongRest, ShortRest, validate_short_rest
+from .spell_cast_activity import FinishSpellCast, StartSpellCast, validate_spell_cast_activity
 from .time_coordination import AdvanceSessionTime, SetTimeRunning, validate_time_operation
 from .time_waits import TimeWaitReference, validate_wait_reference
 from .world_commands import (
@@ -99,6 +100,8 @@ OPERATIONS = {
     "activity.cancel_navigation": CancelNavigation,
     "activity.long_rest": LongRest,
     "activity.short_rest": ShortRest,
+    "activity.start_spell_cast": StartSpellCast,
+    "activity.finish_spell_cast": FinishSpellCast,
     "world.step_actor": StepActor,
     "world.traverse_passage": TraversePassage,
     "world.place_object": PlaceObject,
@@ -192,6 +195,8 @@ class TypedCommand:
         | ChoiceFinalizeSpellOperationPayload
         | LongRest
         | ShortRest
+        | StartSpellCast
+        | FinishSpellCast
         | CombatClosePayload
         | CheckPayload
         | AdvanceGameTime
@@ -278,6 +283,7 @@ def validate_command(command: TypedCommand) -> None:
             ChoiceFinalizeSpellOperationPayload,
             LongRest,
             ShortRest,
+            StartSpellCast,
         ):
             raise StateMachineError(
                 "invalid_time_wait", "This operation cannot be a domain wait reply"
@@ -357,6 +363,13 @@ def validate_command(command: TypedCommand) -> None:
     if operation_type is LongRest:
         return
     if operation_type is DropWorldConcentration:
+        return
+    if operation_type in (StartSpellCast, FinishSpellCast):
+        if operation_type is FinishSpellCast and command.time_wait is None:
+            raise StateMachineError(
+                "invalid_time_wait", "Casting completion needs its deadline wait"
+            )
+        validate_spell_cast_activity(command.payload)
         return
     if operation_type is ShortRest:
         validate_short_rest(command.payload)
@@ -532,6 +545,8 @@ class CommandRuntime:
             ChoiceFinalizeSpellOperationPayload,
             LongRest,
             ShortRest,
+            StartSpellCast,
+            FinishSpellCast,
             CombatClosePayload,
             CheckPayload,
             *OPENABLE_CHECK_OPERATIONS,
@@ -701,6 +716,8 @@ def world_command_from_data(data):
         "activity.cancel_navigation",
         "activity.long_rest",
         "activity.short_rest",
+        "activity.start_spell_cast",
+        "activity.finish_spell_cast",
     ):
         raise StateMachineError("unsupported_operation", "Unregistered world operation")
     if type(data["payload"]) is not dict:

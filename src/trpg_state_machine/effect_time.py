@@ -107,6 +107,33 @@ class EffectTimeConsumer:
         spatial = self.owner.spatial_lights.next_deadline(session_id)
         return min((value for value in (actor, spatial) if value is not None), default=None)
 
+    def _due_actor(self, sid, tick):
+        """Read the first actor expiry in the owner’s indexed deadline order."""
+        return self.db.execute(
+            "SELECT target_id,effect_id,origin,expires_tick,payload_json "
+            "FROM ongoing_effects WHERE session_id=? AND expires_tick<=? "
+            "ORDER BY expires_tick,target_id,effect_id,origin LIMIT 1",
+            (sid, tick),
+        ).fetchone()
+
+    def _actor_scene(self, sid, actor_id):
+        """Read the scene used to route an actor effect’s expiry event."""
+        location = self.db.execute(
+            "SELECT current_scene_id FROM actors WHERE session_id=? AND actor_id=?",
+            (sid, actor_id),
+        ).fetchone()
+        return location[0] if location else None
+
+    def next_actor_expiry_scene(self, sid, tick):
+        """Return the event scene only if the next due item is an actor expiry at this tick."""
+        due = self._due_actor(sid, tick)
+        if due is None or due["expires_tick"] != tick:
+            return None
+        spatial_tick = self.owner.spatial_lights.next_deadline(sid)
+        if spatial_tick is not None and spatial_tick < tick:
+            return None
+        return self._actor_scene(sid, due["target_id"])
+
     def settle_one(self, row, package, command_id):
         """Consume one due exact identity and return its event in the shared write."""
         from .time_coordination import DueResult
@@ -114,12 +141,7 @@ class EffectTimeConsumer:
         self.store.require_write()
         sid = row["session_id"]
         tick = self.world.facts.time_state(sid)[1]
-        due = self.db.execute(
-            "SELECT target_id,effect_id,origin,expires_tick,payload_json "
-            "FROM ongoing_effects WHERE session_id=? AND expires_tick<=? "
-            "ORDER BY expires_tick,target_id,effect_id,origin LIMIT 1",
-            (sid, tick),
-        ).fetchone()
+        due = self._due_actor(sid, tick)
         spatial = self.owner.spatial_lights.due(sid, tick)
         if spatial is not None and (due is None or spatial["expires_tick"] < due["expires_tick"]):
             event = self.world.magic.end_event(sid, package, spatial, "duration")
@@ -139,10 +161,6 @@ class EffectTimeConsumer:
         )
         self.owner.expire_world_effect(sid, identity, due["expires_tick"])
         refresh_world_walk_expiry(self.world, sid, expired)
-        location = self.db.execute(
-            "SELECT current_scene_id FROM actors WHERE session_id=? AND actor_id=?",
-            (sid, identity[0]),
-        ).fetchone()
         event = self.world._capture_event(
             sid,
             package,
@@ -150,7 +168,7 @@ class EffectTimeConsumer:
             {
                 "identity": identity,
                 "actor_id": identity[0],
-                "scene_id": location[0] if location else None,
+                "scene_id": self._actor_scene(sid, identity[0]),
                 "boundary_tick": due["expires_tick"],
             },
             phase="effects.after_expiry",

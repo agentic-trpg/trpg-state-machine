@@ -8,10 +8,71 @@ from dnd_support import initialize
 from item_support import NPC
 from test_hold_effect_candidate import pass_command
 from test_session_time_coordination import submit
-from test_timed_spell_cast import cast_command, move_command
+from test_timed_spell_cast import cast_command, first_level_balance, move_command
 from test_timed_spell_cast import timed_spell_world as timed_spell_world
 
 from trpg_state_machine import AdvanceSessionTime, TypedCommand
+
+
+def test_public_longstrider_recast_keeps_two_deadlines_and_one_walk_bonus(timed_spell_world):
+    """Apply two ordinary casts and settle their exact instances across two rounds."""
+    session = timed_spell_world(walking=True)
+    sm, sid, package, context = session
+
+    def read():
+        return sm.read_combat_snapshot(sid, package, context=context)
+
+    def execute(command):
+        receipt = sm.submit_command(command, package, context=context)
+        assert receipt.status == "committed", receipt
+        return receipt
+
+    def assert_expiry(receipt, effect, tick):
+        (expiry,) = [
+            event
+            for event in sm.read_events(sid, package, context=context)
+            if event.event_seq in receipt.event_seqs and event.event_type == "effect.expired"
+        ]
+        assert tuple(expiry.payload["identity"]) == (effect.target_id, effect.id, effect.origin)
+        assert expiry.payload["boundary_tick"] == tick
+
+    with sm:
+        initial = cast_command(session, command_id="first-longstrider")
+        execute(initial)
+        assert submit(session, AdvanceSessionTime(6), "between-casts").status == "committed"
+        recast = cast_command(session, command_id="second-longstrider")
+        recast_receipt = execute(recast)
+        fixed = sm.read_noncombat_snapshot(sid, package, context=context)
+        first, second = fixed.effect_states
+        assert first.id == second.id == "effect:longstrider"
+        assert first.target_id == second.target_id == initial.actor_id
+        assert first.origin != second.origin
+        assert execute(recast) == recast_receipt
+        assert first_level_balance(sm, initial) == 2
+
+        assert submit(session, AdvanceSessionTime(3594), "before-expiry").status == "committed"
+        assert initialize(sm, sid, package, context).status == "committed"
+        execute(pass_command(sid, read(), "npc-before-first-expiry"))
+        pc = initial.actor_id
+        start = next(actor for actor in read().character_states if actor.entity_id == pc)
+        assert start.movement_remaining == 40
+        execute(move_command(session, "7,0", "walk-on-overlap"))
+        first_expiry = execute(pass_command(sid, read(), "expire-first-longstrider"))
+        assert_expiry(first_expiry, first, 3600)
+        assert read().effect_states == (second,)
+
+        execute(pass_command(sid, read(), "npc-before-second-expiry"))
+        execute(move_command(session, "6,0", "walk-on-surviving-cast"))
+        before_final = next(actor for actor in read().character_states if actor.entity_id == pc)
+        assert before_final.movement_remaining == 35
+        second_expiry = execute(pass_command(sid, read(), "expire-second-longstrider"))
+        assert_expiry(second_expiry, second, 3606)
+        final = read()
+        assert not final.effect_states
+        actor = next(actor for actor in final.character_states if actor.entity_id == pc)
+        assert actor.movement_remaining == 25
+        assert final.combat_state.movement_ledgers[pc].spent_ft == 5
+        assert fixed.effect_states == (first, second)
 
 
 def test_barkskin_and_longstrider_in_one_encounter(timed_spell_world):

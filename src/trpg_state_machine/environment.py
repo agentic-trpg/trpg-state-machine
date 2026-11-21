@@ -340,12 +340,13 @@ class EnvironmentService:
             invalid(str(exc))
 
     def operate(self, row, op, package):
-        """Trusted WorldHandler participant. Plan the entire batch BEFORE touching facts."""
+        """Plan environment writes and settle runtime region changes in one candidate."""
         self.h.store.require_write()
         validate_environment_operation(op)
         sid = row["session_id"]
         operations = op.changes if type(op) is BatchEnvironment else (op,)
         originals, planned, changes = {}, {}, []
+        regions = defaultdict(dict)
         for change in operations:
             scene = change.scene_id
             self._area(sid, scene, EnvironmentArea(), package)
@@ -400,19 +401,22 @@ class EnvironmentService:
                     if (
                         before.combat_region != change.source.combat_region
                         or before.region_rule_ref != rule_ref
-                        or (rule_ref is not None and before.area != change.source.area)
+                        or (before.combat_region is not None and before.area != change.source.area)
                     ):
-                        invalid("Replace cannot introduce or change a fixed environment region")
+                        invalid("Replace cannot change the region rule or combat coverage")
                     self._admit_region_rule(row, rule_ref)
                     sources[source_id] = change.source
                 else:
-                    if before is not None and before.region_rule_ref is not None:
-                        # Movement exits must be able to find the same region as entry.
-                        invalid("Remove cannot remove a fixed environment region")
+                    if before is not None and before.combat_region is not None:
+                        invalid("Remove cannot remove a combat environment region")
                     sources.pop(source_id, None)
                 after = sources.get(source_id)
                 if before == after:
                     continue
+                region = before or after
+                if region.region_rule_ref is not None and region.combat_region is None:
+                    first, _ = regions[scene].get(source_id, (before, None))
+                    regions[scene][source_id] = first, after
                 areas = [s.area for s in (before, after) if s is not None]
                 changed_fields = [
                     k
@@ -447,6 +451,8 @@ class EnvironmentService:
             return []
         for scene in changed_scenes:
             self.h.facts.set_environment(sid, scene, planned[scene])
+            if scene in regions:
+                self._apply_region_coverage_changes(row, scene, regions[scene])
         return [
             self.h._capture_event(
                 sid,
@@ -459,6 +465,39 @@ class EnvironmentService:
                 phase="environment.after_batch",
             )
         ]
+
+    def _apply_region_coverage_changes(self, row, scene, sources):
+        """Reconcile net footprint changes against actor positions in the write candidate.
+
+        Shared coverage with the same rule keeps the existing effect. The grid reader
+        finds only occupants of added or removed cells, and Effects owns each edit.
+        """
+        entered, left = defaultdict(set), defaultdict(set)
+        for source_id, (before, after) in sources.items():
+            old_rule = before.region_rule_ref if before is not None else None
+            new_rule = after.region_rule_ref if after is not None else None
+            previous = set(before.area.cells) if old_rule is not None else set()
+            current = set(after.area.cells) if new_rule is not None else set()
+            retained = previous & current if old_rule == new_rule else set()
+            for cell in previous - retained:
+                left[cell].add((scene, source_id, old_rule))
+            for cell in current - retained:
+                entered[cell].add((scene, source_id, new_rule))
+
+        affected = entered.keys() | left.keys()
+        if not affected:
+            return
+        actors, _ = self.h.grid.reader.region_occupants(
+            row["session_id"], scene, affected, include_actors=True, include_objects=False
+        )
+        for actor, cell in sorted(map(tuple, actors)):
+            self.h.scenes.apply_region_membership_changes(
+                row,
+                actor,
+                entered=entered.get(cell, ()),
+                left=left.get(cell, ()),
+                loader=self.h.loader,
+            )
 
     def read_facts(self, sid, scene_id, package, *, context):
         """GM import/audit API, never a player source catalogue."""

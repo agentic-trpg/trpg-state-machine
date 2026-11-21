@@ -16,11 +16,15 @@ from dnd5e_engine.evaluation_availability import (
     query_action_availability,
 )
 from dnd5e_engine.evaluation_contracts import (
+    CAST_ACTIVITY_SCHEMA_VERSION,
     CHARGED_ITEM_SCHEMA_VERSION,
     ENVIRONMENTAL_SPELL_SCHEMA_VERSION,
+    MATERIAL_SPELL_SCHEMA_VERSION,
     MULTI_SPELL_SCHEMA_VERSION,
+    SPATIAL_EFFECT_END_SCHEMA_VERSION,
     CheckPayload,
     CombatClosePayload,
+    ExplorationCastActivityPayload,
     ExplorationEnvironmentalSpellCastPayload,
     ExplorationItemUsePayload,
     ExplorationMultiSpellCastPayload,
@@ -33,6 +37,7 @@ from dnd5e_engine.evaluation_contracts import (
     RuleEvaluationResult,
     SpellWillingnessChoice,
 )
+from dnd5e_engine.evaluation_environmental_contracts import EnvironmentalMagicEffectTarget
 from dnd5e_engine.evaluation_haste import has_haste_effects, haste_speed
 from dnd5e_engine.evaluation_movement import timed_walk_bonuses, walk_speed
 from dnd5e_engine.evaluation_preflight import template_support_failure
@@ -92,6 +97,7 @@ from .dnd_checks import check_changes
 from .dnd_closure import closure_changes
 from .errors import StateMachineError
 from .exploration_spell_adoption import (
+    casting_activity_changes,
     charged_item_changes,
     environmental_spell_changes,
     exploration_spell_changes,
@@ -1328,6 +1334,8 @@ def validate_dnd_result(request, result, *, loader=None):
         return result, check_changes(request, result)
     if request.operation_kind == "rules.rest":
         return result, rest_changes(request, result)
+    if type(request.payload) is ExplorationCastActivityPayload:
+        return result, casting_activity_changes(request, result, loader)
     if type(request.payload) is ExplorationItemUsePayload:
         if request.schema_version == CHARGED_ITEM_SCHEMA_VERSION:
             return result, charged_item_changes(request, result, loader)
@@ -2225,8 +2233,13 @@ class RulesAdapter:
         row = row if row is not None else self._pinned_row(command.session_id, package)
         return RuleEvaluationRequest(
             schema_version=(
-                MULTI_SPELL_SCHEMA_VERSION
+                CAST_ACTIVITY_SCHEMA_VERSION
+                if type(command.payload) is ExplorationCastActivityPayload
+                else MULTI_SPELL_SCHEMA_VERSION
                 if type(command.payload) is ExplorationMultiSpellCastPayload
+                else SPATIAL_EFFECT_END_SCHEMA_VERSION
+                if type(command.payload) is ExplorationEnvironmentalSpellCastPayload
+                and isinstance(command.payload.target, EnvironmentalMagicEffectTarget)
                 else ENVIRONMENTAL_SPELL_SCHEMA_VERSION
                 if type(command.payload) is ExplorationEnvironmentalSpellCastPayload
                 else "engine-evaluation/30"
@@ -2248,6 +2261,9 @@ class RulesAdapter:
                         and has_speed_effects(snapshot)
                     )
                 )
+                else MATERIAL_SPELL_SCHEMA_VERSION
+                if type(command.payload) is ExplorationSpellCastPayload
+                and command.payload.material_instance_id is not None
                 else "engine-evaluation/29"
                 if type(command.payload) is ExplorationSpellCastPayload
                 else CHARGED_ITEM_SCHEMA_VERSION

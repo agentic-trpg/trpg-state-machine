@@ -214,6 +214,7 @@ class CombatHandler:
             ChoiceFinalizeSpellOperationPayload,
             ChoiceRespondOperationPayload,
         )
+        from .spell_cast_activity import FinishSpellCast, StartSpellCast
         from .world_commands import OPENABLE_CHECK_OPERATIONS, CheckMechanism
 
         if type(command.payload) not in (
@@ -227,6 +228,8 @@ class CombatHandler:
             ChoiceFinalizeSpellOperationPayload,
             LongRest,
             ShortRest,
+            StartSpellCast,
+            FinishSpellCast,
             CombatClosePayload,
             CheckPayload,
             *OPENABLE_CHECK_OPERATIONS,

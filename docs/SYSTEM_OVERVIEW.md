@@ -71,6 +71,8 @@ Effects 和 SessionTime 共同保存及消费到期时间。`drop_concentration`
 探索期间，获准的新专注施法与旧专注组释放共同提交。Effects 按原身份结束旧角色效果或
 空间效果，再安装新组。角色定时专注沿 SessionTime 到期，也可以通过 `world.drop_concentration` 解除。
 
+探索的普通长施法和仪式由 `activity.start_spell_cast` 建立可重开的 Activity。Effects 持有施法期间的专注，SessionTime 到达期限时保存完成等待。授权 `activity.finish_spell_cast` 沿同一规则采用与回执事务支付、施放并释放等待。获准开始时结束原专注，主动放弃施法专注会中断正在进行的活动。首批验收为完成后无需专注的自身定时效果。
+
 RUO-31 候选的单目标探索施法可由 RE 返回需要目标同意。`RuleExecution` 保存待答复及原命令
 回执。受控目标通过 `choice.respond` 作答，接受后按当前施法条件重新求值。答复、法术位、
 效果、事件与回执通过同一提交边界采用。等待窗口使用 60 秒游戏时间。

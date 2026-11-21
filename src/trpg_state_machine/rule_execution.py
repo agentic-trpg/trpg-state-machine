@@ -5,6 +5,7 @@ from dataclasses import asdict, replace
 
 from dnd5e_engine.evaluation_contracts import (
     CheckPayload,
+    ExplorationCastActivityPayload,
     ExplorationEnvironmentalSpellCastPayload,
     ExplorationItemUsePayload,
     ExplorationMultiSpellCastPayload,
@@ -14,6 +15,11 @@ from dnd5e_engine.evaluation_contracts import (
     RestPayload,
 )
 from dnd5e_engine.evaluation_delta import TurnUpdate
+from dnd5e_engine.evaluation_environmental_contracts import (
+    EnvironmentalMagicEffectTarget,
+    WorldEnvironmentalEffectCreate,
+    WorldEnvironmentalEffectEnd,
+)
 from dnd5e_engine.evaluation_openable import OpenableCheckRequest, evaluate_openable
 from dnd5e_engine.evaluation_resources import HitDieSpend
 from dnd5e_engine.evaluation_ruleset import EVALUATOR_VERSION, RulesetBindingError
@@ -33,6 +39,7 @@ from .rules_adapter import UnsupportedEffectConsequence, validate_dnd_result
 from .shield_adoption import UnsupportedShieldKnockout, UnsupportedShieldTerminal
 from .shield_window import ShieldWindows, guard_shield_window
 from .spell_adoption import UnsupportedSpellConsequence
+from .spell_cast_activity import FinishSpellCast, StartSpellCast
 from .time_binding import TimeBinding
 from .world_commands import OPENABLE_CHECK_OPERATIONS, CheckMechanism, PickLock
 
@@ -80,6 +87,54 @@ class RuleExecution:
             source_cell=source[1], target_cell=target[1], willing_target_id=willing_target_id
         )
         return None, ids, positions
+
+    def _prepare_cast_activity(self, row, command):
+        """Freeze the selected spell at start or its exact deadline continuation."""
+        sid, actor = row["session_id"], command.actor_id
+        operation = command.payload
+        domain = self.world.spell_casts
+        position = self.world.facts.carrier_position(sid, actor)
+        if position is None or position[0] != row["current_scene_id"]:
+            return None, None, "spell.target"
+        record = domain.get(sid, operation.activity_id)
+        if type(operation) is StartSpellCast:
+            if record is not None:
+                return None, None, "activity_exists"
+            if self.activities.active(sid, actor) or domain.active(sid, actor):
+                return None, None, "activity_conflict"
+            spell, source = operation.spell_id, operation.spell_source_id
+            slot, ritual = operation.slot_level, operation.as_ritual
+            phase, elapsed = "start", None
+        else:
+            _, tick = self.world.facts.time_state(sid)
+            if (
+                record is None
+                or record["actor_id"] != actor
+                or record["status"] != "waiting"
+                or record["deadline_tick"] != tick
+            ):
+                return None, None, "activity_inactive"
+            spell, source = record["spell_id"], record["spell_source_id"]
+            slot, ritual = record["slot_level"], bool(record["as_ritual"])
+            phase, elapsed = "finish", tick - record["start_tick"]
+        return (
+            replace(
+                command,
+                command_type="world.cast_activity",
+                payload=ExplorationCastActivityPayload(
+                    kind="world.cast_activity",
+                    phase=phase,
+                    activity_id=operation.activity_id,
+                    spell_id=spell,
+                    spell_source_id=source,
+                    slot_level=slot,
+                    as_ritual=ritual,
+                    elapsed_seconds=elapsed,
+                ),
+            ),
+            dict(record) if record is not None else None,
+            None,
+        )
 
     async def submit(self, command, package, context, fingerprint):
         """Evaluate fixed rules inputs, then revalidate and adopt their guarded result.
@@ -153,15 +208,19 @@ class RuleExecution:
         exploration_item = type(command.payload) is ExplorationItemUsePayload
         environmental_spell = type(command.payload) is ExplorationEnvironmentalSpellCastPayload
         multi_spell = type(command.payload) is ExplorationMultiSpellCastPayload
+        casting_start = type(command.payload) is StartSpellCast
+        casting_finish = type(command.payload) is FinishSpellCast
+        casting_activity = casting_start or casting_finish
         exploration_spell = (
             environmental_spell
             or multi_spell
+            or casting_activity
             or type(command.payload) is ExplorationSpellCastPayload
         )
         exploration_rule = exploration_item or exploration_spell
         rest = type(command.payload) in (LongRest, ShortRest)
         long_rest = type(command.payload) is LongRest
-        if not (exploration_rule or rest) and shield_prompt is None:
+        if casting_activity or (not (exploration_rule or rest) and shield_prompt is None):
             command = self.runtime.prepare_timed_command(command, package, context, fingerprint)
         object_check = type(command.payload) in OPENABLE_CHECK_OPERATIONS
         mechanism_check = type(command.payload) is CheckMechanism
@@ -172,6 +231,7 @@ class RuleExecution:
         plan, prepare_error, rule_command = None, None, command
         initial_exploration_error = None
         rest_plan = None
+        cast_record = None
         spell_actor_ids, spell_positions = None, None
         multi_spell_positions = None
         charged_item = None
@@ -194,6 +254,26 @@ class RuleExecution:
                 return None, exc.code
             return self.world.facts.item_entry(item) if item is not None else None, None
 
+        def cast_material(value):
+            """Read the exact accessible material without exposing ownership failures."""
+            item = self.world.facts.object(
+                value["session_id"], command.payload.material_instance_id
+            )
+            entry = (
+                self.world.facts.item_entry(item)
+                if item is not None and item["item_slug"] is not None
+                else None
+            )
+            if (
+                entry is None
+                or entry["owner_id"] != command.actor_id
+                or not entry["accessible"]
+                or entry["quantity"] != 1
+                or entry["charges_remaining_per_unit"] != 0
+            ):
+                return None
+            return entry
+
         def exploration_error(value):
             """Check mode and protocol, deferring use while saved time work is unfinished."""
             if self.world._active_combat(command.session_id):
@@ -204,13 +284,25 @@ class RuleExecution:
                 self.world.facts.time_state(command.session_id)[0], TimeBinding
             ):
                 return "unsupported_time_protocol"
-            if self.runtime.time is not None:
+            if self.runtime.time is not None and not casting_finish:
                 progress = self.runtime.time.progress(command.session_id)
                 if progress is not None and progress["status"] != "completed":
                     raise StateMachineError(
                         "time_advance_pending", "Finish the saved time work first"
                     )
+            if not casting_activity and self.world.spell_casts.active(
+                command.session_id, command.actor_id
+            ):
+                return "activity_conflict"
             return None
+
+        def prepare_rest_plan(value):
+            """A cast and rest cannot run as concurrent Activities for this actor."""
+            if self.world.spell_casts.active(command.session_id, command.actor_id):
+                return None, "rest_activity_active"
+            return prepare_rest(
+                value, command.actor_id, self.world, self.activities, command.payload
+            )
 
         def build_snapshot(value):
             """Build the required mechanical snapshot for the command and current combat
@@ -266,9 +358,7 @@ class RuleExecution:
                         "invalid_target", "Drinking a potion requires self target"
                     )
             if rest:
-                rest_plan, prepare_error = prepare_rest(
-                    row, command.actor_id, self.world, self.activities, command.payload
-                )
+                rest_plan, prepare_error = prepare_rest_plan(row)
                 if prepare_error is None:
                     rule_command = replace(
                         command,
@@ -285,11 +375,18 @@ class RuleExecution:
                             ),
                         ),
                     )
-            if environmental_spell and prepare_error is None:
+            if casting_activity and prepare_error is None:
+                spell_actor_ids = (command.actor_id,)
+                rule_command, cast_record, prepare_error = self._prepare_cast_activity(row, command)
+            elif environmental_spell and prepare_error is None:
                 spell_actor_ids = (command.actor_id,)
                 spell_positions = self.world.magic.cast_positions(row, package, command)
                 if spell_positions is None:
-                    prepare_error = "spell.target"
+                    prepare_error = (
+                        "target_invalid"
+                        if isinstance(command.payload.target, EnvironmentalMagicEffectTarget)
+                        else "spell.target"
+                    )
             elif multi_spell and prepare_error is None:
                 prepare_error, spell_actor_ids, multi_spell_positions = (
                     project_multi_spell_positions(row)
@@ -298,6 +395,15 @@ class RuleExecution:
                 prepare_error, spell_actor_ids, spell_positions = self._spell_positions(
                     row, command, willing_target_id=willing_target_id
                 )
+            material = None
+            if (
+                prepare_error is None
+                and type(command.payload) is ExplorationSpellCastPayload
+                and command.payload.material_instance_id is not None
+            ):
+                material = cast_material(row)
+                if material is None:
+                    prepare_error = "spell.material"
             snapshot = None if prepare_error else build_snapshot(row)
             if domain_check:
                 try:
@@ -349,7 +455,7 @@ class RuleExecution:
             )
             capability = (
                 None
-                if rest
+                if rest or casting_activity
                 else self.rules._dnd_capability(rule_command.payload, command.actor_id, snapshot)
             )
             payload = rule_command.payload
@@ -507,13 +613,18 @@ class RuleExecution:
             pending_choice = None
             pending_choices = None
             current_exploration_error = exploration_error(row) if exploration_rule else None
-            changed_rest_plan = rest and prepare_rest(
-                row, command.actor_id, self.world, self.activities, command.payload
-            ) != (rest_plan, prepare_error)
+            changed_rest_plan = rest and prepare_rest_plan(row) != (rest_plan, prepare_error)
             if (
                 self.runtime.version_conflict(row, command)
                 or changed_rest_plan
                 or (exploration_rule and current_exploration_error != initial_exploration_error)
+                or (
+                    casting_activity
+                    and prepare_error is None
+                    and self._prepare_cast_activity(row, command)
+                    != (rule_command, cast_record, None)
+                )
+                or (material is not None and cast_material(row) != material)
                 or (
                     environmental_spell
                     and prepare_error is None
@@ -624,10 +735,38 @@ class RuleExecution:
                                 sid, command.actor_id, place[0], command.command_id, start, target
                             )
                     spatial_effect_id, effects_events = None, []
-                    spatial_proposal = (
-                        result.state_delta.operations[-1].value if environmental_spell else None
+                    spatial_operation = (
+                        result.state_delta.operations[-1] if environmental_spell else None
                     )
-                    if exploration_spell:
+                    spatial_proposal = (
+                        spatial_operation.value
+                        if isinstance(spatial_operation, WorldEnvironmentalEffectCreate)
+                        else None
+                    )
+                    if casting_start:
+                        effects_events = self.runtime.time.consumers[
+                            "effects"
+                        ].end_world_concentration(
+                            command.session_id,
+                            package,
+                            command.actor_id,
+                            "concentration_replaced",
+                        )
+                        focus = self.world.characters.effects.create_casting_focus(
+                            command.session_id, command.actor_id, command.payload.activity_id
+                        )
+                        effects_events.append(
+                            self.world.spell_casts.start(
+                                row,
+                                package,
+                                command.actor_id,
+                                command.payload,
+                                seconds=result.state_delta.operations[0].duration_seconds,
+                                concentration_id=focus,
+                                command_id=command.command_id,
+                            )
+                        )
+                    elif exploration_spell:
                         proposal = spatial_proposal or next(
                             (value for part, _, _field, value in changes if part == "world_effect"),
                             None,
@@ -659,6 +798,11 @@ class RuleExecution:
                             row, package, command.command_id, spatial_proposal
                         )
                         effects_events.extend(spatial_events)
+                    elif isinstance(spatial_operation, WorldEnvironmentalEffectEnd):
+                        spatial_effect_id = spatial_operation.expected.effect_id
+                        effects_events.append(
+                            self.world.magic.apply_end(row, package, spatial_operation)
+                        )
                     # Failure consequences and automatic hooks both consume the
                     # original rule result's candidate RNG successor. Never
                     # overwrite a mechanism successor with this earlier state.
@@ -711,7 +855,7 @@ class RuleExecution:
                                     else {"item_instance_id": command.payload.instance_id}
                                     if exploration_item
                                     else {
-                                        "spell_id": command.payload.spell_id,
+                                        "spell_id": rule_command.payload.spell_id,
                                         **(
                                             {"effect_id": spatial_effect_id}
                                             if environmental_spell

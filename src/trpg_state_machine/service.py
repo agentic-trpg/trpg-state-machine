@@ -205,6 +205,18 @@ class StateMachine(
         """Delegate navigation activity reading to its handler."""
         return self._activities.read(session_id, actor_id, activity_id, package, context=context)
 
+    def read_spell_cast_activity(self, session_id, actor_id, activity_id, package, *, context):
+        """Read detached casting progress under the selected caster's current Session grant."""
+        with self._transaction():
+            row = self._session(session_id, package, context)
+            if actor_id != row["pc_actor_id"]:
+                raise StateMachineError("unauthorized", "Only the selected PC can read casting")
+            domain = self._world.spell_casts
+            activity = domain.get(session_id, activity_id)
+            if activity is None or activity["actor_id"] != actor_id:
+                raise StateMachineError("invalid_activity", "Expected this caster's activity")
+            return domain.snapshot(activity)
+
     def __enter__(self):
         """Check that storage is open and enter the context."""
         self._ensure_open()

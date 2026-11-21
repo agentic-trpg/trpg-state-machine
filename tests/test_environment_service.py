@@ -327,8 +327,8 @@ def test_fixed_region_source_codec_preserves_ordinary_fingerprints_and_facts():
         assert rejected.value.code == "invalid_environment"
 
 
-def test_fixed_region_source_keeps_geometry_across_environment_mutations(tmp_path, context):
-    """Allow visual updates and refuse changes that can strand a movement condition."""
+def test_fixed_region_source_keeps_rule_across_environment_mutations(tmp_path, context):
+    """Keep an existing effect rule and preserve the separate combat coverage policy."""
     sm, sid, p, _ = setup(tmp_path, context, large_data())
     ctx = gm(context)
     with sm:
@@ -345,9 +345,8 @@ def test_fixed_region_source_keeps_geometry_across_environment_mutations(tmp_pat
             ReplaceEnvironmentSource(
                 A, replace(fixed, region_condition=None, region_effect_rule="condition:deafened")
             ),
-            ReplaceEnvironmentSource(A, replace(fixed, area=EnvironmentArea(("1,1",)))),
             ReplaceEnvironmentSource(A, replace(ordinary, region_condition="poisoned")),
-            RemoveEnvironmentSource(A, fixed.source_id),
+            ReplaceEnvironmentSource(A, replace(fixed, combat_region="entry-and-turn-start")),
         )
         for i, op in enumerate(actions):
             assert submit(sm, sid, p, ctx, op, f"reject{i}").error_code == "invalid_environment"
@@ -367,6 +366,15 @@ def test_fixed_region_source_keeps_geometry_across_environment_mutations(tmp_pat
         builds = sm._store.memory.stats["instance_builds"]
         assert sm.environment.region_condition_sources(sid, A, "2,1") == (alpha_ref, fixed_ref)
         assert sm._store.memory.stats["instance_builds"] == builds
+
+        combat = replace(fixed, source_id="battle.area", combat_region="entry-and-turn-start")
+        assert submit(sm, sid, p, ctx, AddEnvironmentSource(A, combat), "battle.seed").status == (
+            "committed"
+        )
+        moved = ReplaceEnvironmentSource(A, replace(combat, area=EnvironmentArea(("1,1",))))
+        ended = RemoveEnvironmentSource(A, combat.source_id)
+        assert submit(sm, sid, p, ctx, moved, "battle.move").error_code == "invalid_environment"
+        assert submit(sm, sid, p, ctx, ended, "battle.end").error_code == "invalid_environment"
 
 
 def test_batch_prevalidation_rollback_and_net_noop(tmp_path, context, monkeypatch):

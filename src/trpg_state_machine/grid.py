@@ -472,25 +472,26 @@ class GridReader:
         )
         return actors, objects
 
-    def region_occupants(self, sid, scene_id, cells, *, include_actors=False):
-        """Read selected footprint cells and optionally actor positions in the open scope.
+    def region_occupants(self, sid, scene_id, cells, *, include_actors=False, include_objects=True):
+        """Read the requested occupant kinds in selected cells in the open scope.
 
         Return actor (id, cell) rows and object (id, cell, movement flag) rows.
         Only cells inside the caller's selection are included.
         """
         parameters = sid, scene_id, json.dumps(sorted(cells))
-        actors = ()
+        actors, objects = (), ()
         if include_actors:
             actors = self.store.connection.execute(
                 "SELECT actor_id,cell FROM actors WHERE session_id=? AND current_scene_id=? "
                 "AND cell IN (SELECT value FROM json_each(?))",
                 parameters,
             )
-        objects = self.store.connection.execute(
-            "SELECT object_id,cell,blocks FROM object_spatial_cells "
-            "WHERE session_id=? AND scene_id=? AND cell IN (SELECT value FROM json_each(?))",
-            parameters,
-        )
+        if include_objects:
+            objects = self.store.connection.execute(
+                "SELECT object_id,cell,blocks FROM object_spatial_cells "
+                "WHERE session_id=? AND scene_id=? AND cell IN (SELECT value FROM json_each(?))",
+                parameters,
+            )
         return actors, objects
 
 

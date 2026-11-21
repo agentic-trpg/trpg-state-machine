@@ -60,6 +60,7 @@ from .package import load_adventure_package
 from .rest_activity import HitDiceSpend, LongRest, ShortRest
 from .scene_lifecycle import SceneLifecycleService
 from .service import StateMachine
+from .spell_cast_activity import FinishSpellCast, SpellCastActivity, StartSpellCast
 from .time_binding import LegacyTimeBinding, TimeBinding, time_binding_from_data
 from .world_commands import (
     ActivateMechanism,
@@ -156,6 +157,9 @@ __all__ = [
     "AdvanceNavigation",
     "ResumeNavigation",
     "CancelNavigation",
+    "StartSpellCast",
+    "FinishSpellCast",
+    "SpellCastActivity",
     "HitDiceSpend",
     "LongRest",
     "ShortRest",
