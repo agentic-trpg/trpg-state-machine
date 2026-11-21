@@ -26,6 +26,7 @@ from ._operations import (
     TraversePassage,
     UnlockDoor,
 )
+from .choice_models import ChoiceRespondOperationPayload
 from .environment_commands import ENVIRONMENT_OPERATIONS
 from .errors import StateMachineError
 from .game_time import AdvanceGameTime
@@ -162,6 +163,7 @@ class SessionAccess:
                         CombatIntentPayload,
                         CombatClosePayload,
                         CheckPayload,
+                        ChoiceRespondOperationPayload,
                         StepActor,
                         TraversePassage,
                         PlaceObject,

@@ -278,7 +278,7 @@ class ReadOnlyTopology(GridTopology):
         return GridTopology._step_is_legal(self._ray_topology(a, b), a, b)
 
     def has_line_of_sight(self, a, b):
-        """Check bounds and compute visibility using the relevant wall segments."""
+        """Check geometric line of sight using the relevant wall segments."""
         if not self._in_bounds(a) or not self._in_bounds(b):
             return False
         return GridTopology.has_line_of_sight(self._ray_topology(a, b), a, b)
@@ -312,6 +312,38 @@ class ReadOnlyTopology(GridTopology):
             for cell in cells
             if cell in self._blocked or self._cover_cells.get(cell) == "total"
         }
+
+
+class ObserverTopology(ReadOnlyTopology):
+    """Request-local light overlay with exact RE geometry for one observer's clear rays.
+
+    Pinned RE ordinary sight calls the same geometry methods before evaluating
+    physical obscurement, magical darkness and light. Reuse the prefilter's
+    proofs only for their exact origin and targets.
+    """
+
+    def __init__(self, topology, observer_cell, clear_rays):
+        """Share the fixed topology and freeze the selected targets' RE cover degrees."""
+        for name, value in vars(topology).items():
+            object.__setattr__(self, name, value)
+        object.__setattr__(self, "_observer_cell", observer_cell)
+        object.__setattr__(self, "_clear_rays", _freeze(clear_rays))
+
+    def can_see_target(self, cell, senses):
+        """Evaluate the observer's senses only for an in-scope, geometrically clear target."""
+        return cell in self._clear_rays and self.can_see(self._observer_cell, cell, senses)
+
+    def has_line_of_sight(self, a, b):
+        """Reuse proof for a selected ray; other geometry queries use the base rules."""
+        return (a == self._observer_cell and b in self._clear_rays) or super().has_line_of_sight(
+            a, b
+        )
+
+    def cover_between(self, a, b, occupied_cells=()):
+        """Reuse static cover for a selected ray when no creature cover is requested."""
+        if not occupied_cells and a == self._observer_cell and b in self._clear_rays:
+            return self._clear_rays[b]
+        return super().cover_between(a, b, occupied_cells)
 
 
 @dataclass(frozen=True, slots=True)

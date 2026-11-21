@@ -17,7 +17,7 @@ from dnd5e_engine.spatial import GridTopology, _bresenham_cells, canonical_cell_
 from dnd5e_engine.specs import GridScene
 
 from .errors import StateMachineError
-from .grid_maps import PreparedGrid
+from .grid_maps import ObserverTopology, PreparedGrid
 from .instance_data import actor_light_opaque, passage_index
 from .runtime_instances import instance_read
 from .scoped_reads import scoped_read
@@ -531,53 +531,75 @@ class GridService:
     def base_topology(
         self, sid, scene_id, package=None, *, with_extent=False, cells=None, observer_cell=None
     ):
-        """Prepare static or light-overlaid topology for authorized visibility.
-
-        An explicit selection overlays valid targets and the relevant sight rays
-        when a magical-darkness source could intercept them.
-        """
-        scene = self.reader.maps.scene(sid, scene_id, spatial_only=True)
-        if scene is None or scene.grid is None:
-            raise StateMachineError("spatial_unconfigured", "Scene has no fine spatial capability")
-        prepared = scene.grid
-        if package is not None and cells is not None:
-            selected = tuple(
-                cell for cell in dict.fromkeys(cells) if cell_in_bounds(prepared.topology, cell)
-            )
-            if (
-                selected
-                and cell_in_bounds(prepared.topology, observer_cell)
-                and self.h.magic.may_have_darkness(sid, scene_id)
-            ):
-                origin = parse_cell(observer_cell)
-                rays = (
-                    cell
-                    for target in selected
-                    for cell in _bresenham_cells(*origin, *parse_cell(target))
-                )
-                selected = tuple(dict.fromkeys((*selected, *rays)))
-            levels = self.h.objects.lights.current_cells(sid, scene_id, package, selected)
-            lighting = {cell: result.level for cell, result in levels.items()}
-            topology = prepared.topology.with_lighting(
-                lighting,
-                sunlight_overrides={cell: result.sunlight for cell, result in levels.items()},
-                magical_darkness_cells=(
-                    cell for cell, result in levels.items() if result.magical_darkness
-                ),
-            )
-            return (
-                (topology, (prepared.data["width"], prepared.data["height"]))
-                if with_extent
-                else topology
-            )
+        """Read static topology or overlay current light on a whole map or selection."""
+        prepared = self._sight_grid(sid, scene_id)
         topology = prepared.topology
         if package is not None:
-            topology = self.h.objects.lights.current_topology(sid, scene_id, package)
+            if cells is None:
+                topology = self.h.objects.lights.current_topology(sid, scene_id, package)
+            else:
+                selected = tuple(
+                    cell for cell in dict.fromkeys(cells) if cell_in_bounds(topology, cell)
+                )
+                topology = self._sight_lighting(
+                    sid, scene_id, package, topology, selected, observer_cell
+                )
         return (
             (topology, (prepared.data["width"], prepared.data["height"]))
             if with_extent
             else topology
         )
+
+    def _sight_grid(self, sid, scene_id):
+        """Read the active fine-spatial map without predicting uninstantiated facts."""
+        scene = self.reader.maps.scene(sid, scene_id, spatial_only=True)
+        if scene is None or scene.grid is None:
+            raise StateMachineError("spatial_unconfigured", "Scene has no fine spatial capability")
+        return scene.grid
+
+    def _sight_lighting(self, sid, scene_id, package, topology, selected, observer_cell):
+        """Overlay target light and any relevant magical darkness along their sight rays."""
+        if not selected:
+            return topology
+        if cell_in_bounds(topology, observer_cell) and self.h.magic.may_have_darkness(
+            sid, scene_id
+        ):
+            origin = parse_cell(observer_cell)
+            rays = (
+                cell
+                for target in selected
+                for cell in _bresenham_cells(*origin, *parse_cell(target))
+            )
+            selected = tuple(dict.fromkeys((*selected, *rays)))
+        levels = self.h.objects.lights.current_cells(sid, scene_id, package, selected)
+        return topology.with_lighting(
+            {cell: result.level for cell, result in levels.items()},
+            sunlight_overrides={cell: result.sunlight for cell, result in levels.items()},
+            magical_darkness_cells=(
+                cell for cell, result in levels.items() if result.magical_darkness
+            ),
+        )
+
+    @_read
+    @scoped_read
+    def visibility_topology(self, sid, scene_id, package, observer_cell, cells):
+        """Prepare ordinary-sight inputs for valid requested rays with no total cover."""
+        prepared = self._sight_grid(sid, scene_id)
+        topology = prepared.topology
+        clear_rays = {}
+        if cell_in_bounds(topology, observer_cell):
+            for cell in dict.fromkeys(cells):
+                if not cell_in_bounds(topology, cell) or not topology.has_line_of_sight(
+                    observer_cell, cell
+                ):
+                    continue
+                cover = topology.cover_between(observer_cell, cell)
+                if cover != "total":
+                    clear_rays[cell] = cover
+        topology = self._sight_lighting(
+            sid, scene_id, package, topology, tuple(clear_rays), observer_cell
+        )
+        return ObserverTopology(topology, observer_cell, clear_rays)
 
     @_read
     def read_scene(self, sid, scene_id, package):

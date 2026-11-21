@@ -367,7 +367,9 @@ class SessionRuntime:
         """Compare expected and current world versions."""
         return row["world_version"] != command.expected_world_version
 
-    def finish(self, command, context, fingerprint, row, status, version, error):
+    def finish(
+        self, command, context, fingerprint, row, status, version, error, *, pending_choice=None
+    ):
         """The receipt joins the same outer transaction as domain changes/events."""
         from .commands import CommandReceipt
 
@@ -399,6 +401,7 @@ class SessionRuntime:
             version,
             own_seqs,
             error,
+            pending_choice,
         )
         self.record_receipt(command, context, fingerprint, receipt)
         return receipt

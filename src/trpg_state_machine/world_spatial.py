@@ -395,10 +395,10 @@ class ObjectSpatialService:
         return self.project(sid, oid, package).occupied_cells if state.scene_id == scene_id else ()
 
     @scoped_read
-    def _object_visibility(self, sid, position, oid, package):
-        """Read all local target cells and the subset visible from an authorized position."""
+    def _object_visibility(self, sid, actor, position, oid, package):
+        """Read local target cells and the subset visible to the authorized actor."""
         targets = self.target_cells(sid, position.scene_id, oid, package)
-        visibility = self.h._prepare_visibility(sid, position, package, cells=targets)
+        visibility = self.h._prepare_visibility(sid, actor, position, package, cells=targets)
         return targets, tuple(cell for cell in targets if visibility.can_see(cell))
 
     def visible_cells(self, sid, actor, oid, package, *, position=None):
@@ -406,7 +406,7 @@ class ObjectSpatialService:
         with self.h.grid.read_scope():
             if position is None:
                 position = self.h._public_scope(sid, actor, package)
-            _, visible = self._object_visibility(sid, position, oid, package)
+            _, visible = self._object_visibility(sid, actor, position, oid, package)
             return visible
 
     def contact_cell(self, sid, actor, oid, package):
@@ -416,7 +416,7 @@ class ObjectSpatialService:
         tools.
         """
         position = self.h._public_scope(sid, actor, package)
-        targets, visible = self._object_visibility(sid, position, oid, package)
+        targets, visible = self._object_visibility(sid, actor, position, oid, package)
         # Existing manual access permits contact at the actor's own cell even
         # without visual light there (e.g. an owned local emitter switch).
         if position.cell in targets:

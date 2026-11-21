@@ -14,7 +14,7 @@ from dnd5e_srd_data import BundledAssetLoader, MemoryAssetLoader
 from dnd5e_srd_data.schema.common import PassiveEffectChange
 from dnd5e_srd_data.schema.spell import SpellDuration, SpellDurationUnits
 from dnd_support import create, initialize
-from item_support import NPC, A, item_data, item_loader
+from item_support import DAGGER, NPC, A, item_data, item_loader
 from lock_support import CRED
 from spatial_support import submit as submit_world
 from test_hold_effect_candidate import pass_command
@@ -42,6 +42,8 @@ from trpg_state_machine.perception import GameViewContext
 
 PERCEPTION_SPELL = "fixture-keen-perception"
 PERCEPTION_BONUS = "check.skill.perception.bonus"
+SENSE_SPELL = "fixture-extend-darkvision"
+DARKVISION = "system.attributes.senses.darkvision"
 
 
 @pytest.fixture
@@ -70,14 +72,22 @@ def timed_spell_world(tmp_path, context):
         evoker = canonical.get_subclass("evoker")
         ogre = canonical.get_monster("ogre") if attack_after_walk else None
         spell = canonical.get_spell("longstrider")
-        if spell_id == PERCEPTION_SPELL:
+        if spell_id in (PERCEPTION_SPELL, SENSE_SPELL):
             # Reuse the supported activity shape under a distinct fixture-only rule identity.
+            if spell_id == PERCEPTION_SPELL:
+                name = "Fixture Keen Perception"
+                description = "Grants +2 to Perception checks for one minute."
+                change = PassiveEffectChange(key=PERCEPTION_BONUS, mode=2, value="2")
+            else:
+                name = "Fixture Extend Darkvision"
+                description = "Adds 10 feet to Darkvision for one minute."
+                change = PassiveEffectChange(key=DARKVISION, mode=2, value="10")
             passive = spell.passive_effects[0].model_copy(
                 update={
-                    "name": "Fixture Keen Perception",
-                    "description": "Grants +2 to Perception checks for one minute.",
+                    "name": name,
+                    "description": description,
                     "duration": {"seconds": 60},
-                    "changes": [PassiveEffectChange(key=PERCEPTION_BONUS, mode=2, value="2")],
+                    "changes": [change],
                 }
             )
             spell = spell.model_copy(
@@ -499,6 +509,103 @@ def test_public_timed_spell_modifies_only_perception_until_expiry(timed_spell_wo
         assert tuple(expired.payload["identity"]) == identity
         assert check_modifier("perception", "expired") == perception
         assert first_level_balance(sm, command) == 3
+
+
+def test_public_sight_reads_the_observers_timed_sense_until_expiry(timed_spell_world, monkeypatch):
+    """Public sight for a distant dark cell changes only for the spell recipient."""
+    target_cell = "4,1"
+
+    def configure(data):
+        """Place a dark target ten feet beyond each actor's base Darkvision."""
+        data["rule_bindings"].pop("combat_foundation")
+        scene = data["scenes"][0]
+        next(obj for obj in scene["objects"] if obj["object_id"] == DAGGER)["initial_cell"] = (
+            target_cell
+        )
+        targets = {target_cell: "dark"}
+        scene["grid"].update(width=5, lighting=targets)
+        fixed = data["rule_bindings"]["noncombat_foundation"]["snapshot"]
+        fixed["scene_state"]["grid"].update(width=5, lighting=targets)
+        for actor in fixed["character_states"]:
+            actor["senses"]["darkvision"] = 5 if actor["entity_id"] == NPC else 10
+
+    session = timed_spell_world(spell_id=SENSE_SPELL, configure=configure)
+    sm, sid, package, context = session
+    viewer = GameViewContext(context.principal_id, sid, context.player_id, "player")
+
+    with sm:
+        build = sm._fine_scene_disclosure
+        builds = []
+
+        def count_build(session_id, position, actor_id, bound):
+            """Count observer disclosure calculations separately from other public reads."""
+            builds.append(actor_id)
+            return build(session_id, position, actor_id, bound)
+
+        monkeypatch.setattr(sm, "_fine_scene_disclosure", count_build)
+        before = sm.get_scene_view(sid, package, context=viewer)
+        assert before.status == "resolved"
+        assert NPC in before.visible_actor_ids
+        assert DAGGER not in dict(before.visible_objects)
+        assert builds == [before.own_character.actor_id]
+
+        with pytest.raises(StateMachineError, match="Target authorization is unproven"):
+            sm.environment.query_area(
+                sid, NPC, A, EnvironmentArea((target_cell,)), package, context=context
+            )
+        command = cast_command(session, target_id=NPC, spell_id=SENSE_SPELL)
+        cast = sm.submit_command(command, package, context=context)
+        assert cast.status == "committed", cast
+
+        assert DAGGER not in dict(sm.get_scene_view(sid, package, context=viewer).visible_objects)
+        assert builds == [command.actor_id]
+        assert sm.get_object(sid, NPC, DAGGER, package, context=context)["object_id"] == DAGGER
+        assert DAGGER in {
+            obj["object_id"] for obj in sm.list_scene_objects(sid, NPC, package, context=context)
+        }
+        assert DAGGER in {
+            obj[0] for obj in sm.get_spatial_view(sid, NPC, package, context=context).objects
+        }
+        (cell,) = sm.environment.query_area(
+            sid, NPC, A, EnvironmentArea((target_cell,)), package, context=context
+        )
+        assert cell.cell == target_cell
+
+        own_command = cast_command(session, spell_id=SENSE_SPELL, command_id="cast.sense.self")
+
+        def fail_receipt(*_args):
+            """Force full rollback after building disclosure from the candidate senses."""
+            candidate = sm._observer_scene_disclosure(sid, A, command.actor_id, package)
+            assert DAGGER in dict(candidate.objects)
+            raise StateMachineError("storage_error", "injected sense receipt failure")
+
+        with monkeypatch.context() as failure:
+            failure.setattr(sm._session_runtime, "record_receipt", fail_receipt)
+            with pytest.raises(StateMachineError, match="injected sense receipt failure"):
+                sm.submit_command(own_command, package, context=context)
+        assert sm.get_command_receipt(sid, own_command.command_id, package, context=context) is None
+        assert DAGGER not in dict(sm.get_scene_view(sid, package, context=viewer).visible_objects)
+        assert builds == [command.actor_id] * 2
+        builds.clear()
+
+        own_cast = sm.submit_command(own_command, package, context=context)
+        assert own_cast.status == "committed", own_cast
+        active = sm.get_scene_view(sid, package, context=viewer)
+        assert DAGGER in dict(active.visible_objects)
+        assert sm.get_scene_view(sid, package, context=viewer) == active
+        assert builds == [command.actor_id]
+        assert submit(session, AdvanceSessionTime(59), "sense-last-tick").status == "committed"
+        assert DAGGER in dict(sm.get_scene_view(sid, package, context=viewer).visible_objects)
+        assert builds == [command.actor_id]
+        assert submit(session, AdvanceSessionTime(60), "sense-expiry").status == "committed"
+        assert DAGGER not in dict(sm.get_scene_view(sid, package, context=viewer).visible_objects)
+        assert builds == [command.actor_id] * 2
+        with pytest.raises(StateMachineError, match="Target authorization is unproven"):
+            sm.environment.query_area(
+                sid, NPC, A, EnvironmentArea((target_cell,)), package, context=context
+            )
+        assert DAGGER in dict(active.visible_objects)
+        assert DAGGER not in dict(before.visible_objects)
 
 
 @pytest.mark.parametrize(

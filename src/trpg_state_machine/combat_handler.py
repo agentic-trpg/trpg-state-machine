@@ -203,6 +203,7 @@ class CombatHandler:
             raise StateMachineError(
                 "legacy_rules_audit_only", "Old package permits audit reads only"
             )
+        from .choice_models import ChoiceRespondOperationPayload
         from .world_commands import OPENABLE_CHECK_OPERATIONS, CheckMechanism
 
         if type(command.payload) not in (
@@ -211,6 +212,7 @@ class CombatHandler:
             ExplorationItemUsePayload,
             ExplorationEnvironmentalSpellCastPayload,
             ExplorationSpellCastPayload,
+            ChoiceRespondOperationPayload,
             LongRest,
             ShortRest,
             CombatClosePayload,

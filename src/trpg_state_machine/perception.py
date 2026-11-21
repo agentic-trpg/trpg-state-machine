@@ -1,10 +1,13 @@
-"""Event-time projections; no Agent activation, belief, goal, EVA or cognition ACK."""
+"""Authorized current scene views and event-time perception projections."""
 
 import hashlib
 import json
 from dataclasses import asdict, dataclass
+from itertools import chain
+from typing import NamedTuple
 
 from .errors import StateMachineError
+from .grid import cell_in_bounds
 from .models import CharacterState
 from .npc_state import KnownFact
 from .package import AdventurePackage, Signal, canonical_json
@@ -14,6 +17,19 @@ from .perception_conditions import (
     judge_signal,
     signal_environment,
 )
+from .runtime_instances import resolve_field
+
+
+class _SceneDisclosure(NamedTuple):
+    """Retain only immutable current scene members admitted for one observer."""
+
+    status: str
+    actors: tuple[str, ...] = ()
+    objects: tuple[tuple[str, str | None], ...] = ()
+
+    def __deepcopy__(self, memo):
+        """Share the recursively immutable disclosure across fixed reads."""
+        return self
 
 
 @dataclass(frozen=True, slots=True)
@@ -649,9 +665,7 @@ class PerceptionRuntime:
             )
 
     def get_scene_view(self, session_id, package, *, context):
-        """Read an authorized scene view, filtering NPC access through its perception
-        scope.
-        """
+        """Read current scene disclosure for the authenticated role or NPC observer."""
         from .models import TrustedContext
 
         if type(context) is TrustedContext:
@@ -661,46 +675,164 @@ class PerceptionRuntime:
             return self._game_scene_view(session_id, package, context)
         with self._transaction():
             observer_id = self._npc_authorized(session_id, package, context)
-            actor = self._conn.execute(
-                "SELECT current_scene_id FROM actors WHERE session_id=? AND actor_id=?",
-                (session_id, observer_id),
-            ).fetchone()
-            scene_id = actor[0]
-            definition = self._world_facts.instances.actor(session_id, observer_id)
+            scene_id = self._world._actor_position(session_id, observer_id).scene_id
             version = self._conn.execute(
                 "SELECT world_version FROM sessions WHERE session_id=?", (session_id,)
             ).fetchone()[0]
-            clear = self._scene_perception_clear(session_id, scene_id)
-            if definition.senses is None or not clear:
-                return CurrentPerceptualView(observer_id, scene_id, "unresolved", (), (), version)
-            can_see = dict(definition.senses)["visual"]
-            actors = (
-                tuple(
-                    r[0]
-                    for r in self._conn.execute(
-                        "SELECT actor_id FROM actors "
-                        "WHERE session_id=? AND current_scene_id=? ORDER BY actor_id",
-                        (session_id, scene_id),
-                    )
+            disclosure = self._observer_scene_disclosure(
+                session_id, scene_id, observer_id, package, npc=True
+            )
+            return CurrentPerceptualView(observer_id, scene_id, *disclosure, version)
+
+    def _observer_scene_disclosure(self, sid, scene, actor, package, *, npc=False):
+        """Use fine exploration sight where enabled, and preserve legacy scene reads."""
+        mode = self._conn.execute(
+            "SELECT spatial_enabled FROM mechanical_scenes WHERE session_id=? AND scene_id=?",
+            (sid, scene),
+        ).fetchone()
+        if mode and mode[0] and not self._active_combat(sid):
+            if npc:
+                definition = self._world_facts.instances.actor(sid, actor)
+                if definition.senses is not None and not dict(definition.senses)["visual"]:
+                    return _SceneDisclosure("resolved")
+            try:
+                position = self._world._public_scope(sid, actor, package)
+            except StateMachineError as exc:
+                if exc.code not in (
+                    "incomplete_session",
+                    "unsupported_interaction_scope",
+                    "unsupported_target_visibility",
+                ):
+                    raise
+                return _SceneDisclosure("unresolved")
+            if position.scene_id != scene or position.cell is None:
+                return _SceneDisclosure("unresolved")
+            return resolve_field(
+                self._store,
+                "actor",
+                sid,
+                actor,
+                None,
+                "scene_visibility",
+                (position, package.package_digest),
+                lambda: self._fine_scene_disclosure(sid, position, actor, package),
+            )
+        if not self._scene_perception_clear(sid, scene):
+            return _SceneDisclosure("unresolved")
+        if npc:
+            definition = self._world_facts.instances.actor(sid, actor)
+            if definition.senses is None:
+                return _SceneDisclosure("unresolved")
+            if not dict(definition.senses)["visual"]:
+                return _SceneDisclosure("resolved")
+        return self._unfiltered_scene_members(sid, scene)
+
+    def _unfiltered_scene_members(self, sid, scene):
+        """Read the scene membership used by the GM and clear legacy views."""
+        actors = tuple(
+            row[0]
+            for row in self._conn.execute(
+                "SELECT actor_id FROM actors WHERE session_id=? AND current_scene_id=? "
+                "ORDER BY actor_id",
+                (sid, scene),
+            )
+        )
+        objects = tuple(
+            tuple(row)
+            for row in self._conn.execute(
+                "SELECT object_id,state FROM objects WHERE session_id=? AND scene_id=? "
+                "ORDER BY object_id",
+                (sid, scene),
+            )
+        )
+        return _SceneDisclosure("resolved", actors, objects)
+
+    def _sight_conditions_unknown(self, sid, actor):
+        """Use actor-owned condition projections for unsupported sight rules."""
+        return bool(self._characters.condition_names(sid, actor)) or (
+            self._characters.effects.has_linked_conditions(sid, actor, capability="visibility")
+        )
+
+    def _fine_scene_disclosure(self, sid, position, actor, package):
+        """Collect bounded scene sight dependencies in the current Store candidate.
+
+        Scene membership and target cells come from maintained ranges. The
+        observer's current mechanical senses determine which members can be seen.
+        The actor field retains the immutable filtered result independently of
+        the public envelope, authorization and world version.
+
+        Explicit object occlusion and total cover remain unresolved until dynamic
+        sight composition is supported.
+        """
+        if self._sight_conditions_unknown(sid, actor):
+            return _SceneDisclosure("unresolved")
+        scene = position.scene_id
+        actors = dict(
+            tuple(row)
+            for row in self._conn.execute(
+                "SELECT actor_id,cell FROM actors WHERE session_id=? AND current_scene_id=? "
+                "ORDER BY actor_id",
+                (sid, scene),
+            )
+        )
+
+        spatial = self._world.objects.spatial
+        objects = {}
+        for target, cell in self._conn.execute(
+            "SELECT object_id,cell FROM object_spatial_cells WHERE session_id=? AND scene_id=? "
+            "ORDER BY object_id,cell",
+            (sid, scene),
+        ):
+            objects.setdefault(target, []).append(cell)
+        doors = {
+            passage.door_object_id
+            for passage in self._world_facts.instances.passages(sid, scene_id=scene)
+            if passage.door_object_id is not None
+        }
+        for target in chain(objects, sorted(doors - objects.keys())):
+            if target not in objects and self._world_facts.object(sid, target) is None:
+                return _SceneDisclosure("unresolved")
+            if spatial.config(sid, target) is not None:
+                projection = spatial.project(sid, target, package)
+                if projection.vision_occlusion_cells or any(
+                    degree == "total" for _, degree in projection.cover_cells
+                ):
+                    return _SceneDisclosure("unresolved")
+        for target in objects.keys() & doors:
+            objects[target] = spatial.target_cells(sid, scene, target, package)
+        cells = tuple(
+            dict.fromkeys(
+                chain(
+                    (cell for cell in actors.values() if cell is not None),
+                    chain.from_iterable(objects.values()),
                 )
-                if can_see
-                else ()
             )
-            objects = (
-                tuple(
-                    (r[0], r[1])
-                    for r in self._conn.execute(
-                        "SELECT object_id,state FROM objects "
-                        "WHERE session_id=? AND scene_id=? ORDER BY object_id",
-                        (session_id, scene_id),
-                    )
-                )
-                if can_see
-                else ()
+        )
+        sight = self._world._prepare_visibility(sid, actor, position, package, cells=cells)
+        if not cell_in_bounds(sight.topology, position.cell):
+            return _SceneDisclosure("unresolved")
+        visible = frozenset(cell for cell in cells if sight.can_see(cell))
+        status = "resolved"
+        visible_actors = []
+        for target, cell in actors.items():
+            if cell is None:
+                status = "unresolved"
+            elif cell in visible:
+                if target != actor and self._sight_conditions_unknown(sid, target):
+                    status = "unresolved"
+                else:
+                    visible_actors.append(target)
+        visible_objects = tuple(
+            (
+                target,
+                self._conn.execute(
+                    "SELECT state FROM objects WHERE session_id=? AND object_id=?", (sid, target)
+                ).fetchone()[0],
             )
-            return CurrentPerceptualView(
-                observer_id, scene_id, "resolved", actors, objects, version
-            )
+            for target, footprint in objects.items()
+            if not visible.isdisjoint(footprint)
+        )
+        return _SceneDisclosure(status, tuple(visible_actors), visible_objects)
 
     def _scene_perception_clear(self, sid, scene):
         """No mechanical visibility calculation: unsupported environments stay unknown."""
@@ -754,30 +886,10 @@ class PerceptionRuntime:
             self._check_package_pin(row, package)
             gm = context.role == "gm"
             scene = row["current_scene_id"]
-            clear = gm or self._scene_perception_clear(sid, scene)
-            actors = (
-                tuple(
-                    r[0]
-                    for r in self._conn.execute(
-                        "SELECT actor_id FROM actors WHERE session_id=? AND current_scene_id=? "
-                        "ORDER BY actor_id",
-                        (sid, scene),
-                    )
-                )
-                if clear
-                else ()
-            )
-            objects = (
-                tuple(
-                    tuple(r)
-                    for r in self._conn.execute(
-                        "SELECT object_id,state FROM objects WHERE session_id=? AND scene_id=? "
-                        "ORDER BY object_id",
-                        (sid, scene),
-                    )
-                )
-                if clear
-                else ()
+            disclosure = (
+                self._unfiltered_scene_members(sid, scene)
+                if gm
+                else self._observer_scene_disclosure(sid, scene, row["pc_actor_id"], package)
             )
             own = None
             if context.role == "player":
@@ -831,9 +943,7 @@ class PerceptionRuntime:
                 sid,
                 scene,
                 row["world_version"],
-                "resolved" if clear else "unresolved",
-                actors,
-                objects,
+                *disclosure,
                 own,
                 facts,
                 flags,

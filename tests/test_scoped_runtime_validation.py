@@ -395,6 +395,86 @@ def test_object_list_reuses_light_and_does_not_materialize_remote_objects(
         }
 
 
+def test_player_scene_view_work_stays_local_with_remote_growth(tmp_path, context, monkeypatch):
+    from trpg_state_machine import SetLightEnabled
+    from trpg_state_machine.perception import GameViewContext
+
+    samples = []
+    for growth in (0, 24):
+        directory = tmp_path / str(growth)
+        directory.mkdir()
+        writer, sid, package, database = setup(directory, context, lighting_data())
+        with writer:
+            receipt = submit(
+                writer, sid, package, context, SetLightEnabled(A, CRED, "0,0", True), "on"
+            )
+            assert receipt.status == "committed"
+            if growth:
+                grow(writer, sid, growth)
+                remote = writer._conn.execute(
+                    "SELECT scene_id FROM scene_instances WHERE session_id=? AND scene_id<>?",
+                    (sid, A),
+                ).fetchone()[0]
+                with writer._transaction(write=True):
+                    writer._conn.execute(
+                        "UPDATE objects SET scene_id=? WHERE session_id=? AND scene_id=? "
+                        "AND object_id LIKE 'object.unrelated_%'",
+                        (remote, sid, A),
+                    )
+                grow_scenes(writer, sid, growth)
+            loader = writer._rules.loader
+        with StateMachine(database, dnd_loader=loader) as sm, monkeypatch.context() as patch:
+            work = Counter()
+            observe(patch, sm._world, "_prepare_visibility", work, "preparations")
+            viewer = GameViewContext(context.principal_id, sid, context.player_id, "player")
+            memory = sm._store.memory.stats
+            snapshots = memory["snapshot_builds"]
+            with measure(sm) as (cold, _):
+                initial = sm.get_scene_view(sid, package, context=viewer)
+            assert initial.status == "resolved"
+            assert BOX in dict(initial.visible_objects)
+            assert not any(
+                oid.startswith("object.unrelated_") for oid, _ in initial.visible_objects
+            )
+            assert work["preparations"] == 1
+            with measure(sm) as (warm, _):
+                assert sm.get_scene_view(sid, package, context=viewer) == initial
+            assert work["preparations"] == 1
+            assert memory["snapshot_builds"] == snapshots
+            samples.append(
+                (cold["sql_selects"], cold["sql_rows"], warm["sql_selects"], warm["sql_rows"])
+            )
+
+    assert samples[0] == samples[1]
+
+
+def test_player_scene_view_old_read_cannot_publish_stale_disclosure(tmp_path, context, monkeypatch):
+    from trpg_state_machine import SetLightEnabled
+    from trpg_state_machine.perception import GameViewContext
+
+    writer, sid, package, database = setup(tmp_path, context, lighting_data())
+    with writer, StateMachine(database, dnd_loader=writer._rules.loader) as reader:
+        viewer = GameViewContext(context.principal_id, sid, context.player_id, "player")
+        prepare = reader._world._prepare_visibility
+
+        def commit_during_read(*args, **kwargs):
+            """Change the active lamp after the reader has opened its scope."""
+            monkeypatch.setattr(reader._world, "_prepare_visibility", prepare)
+            receipt = submit(
+                writer, sid, package, context, SetLightEnabled(A, CRED, "0,0", True), "on"
+            )
+            assert receipt.status == "committed"
+            return prepare(*args, **kwargs)
+
+        monkeypatch.setattr(reader._world, "_prepare_visibility", commit_during_read)
+        old = reader.get_scene_view(sid, package, context=viewer)
+        current = reader.get_scene_view(sid, package, context=viewer)
+        assert old.view_world_version < current.view_world_version
+        assert BOX not in dict(old.visible_objects)
+        assert BOX in dict(current.visible_objects)
+        assert reader.get_scene_view(sid, package, context=viewer) == current
+
+
 def test_savepoint_and_old_reader_keep_spatial_index_transactional(tmp_path, context):
     sm, sid, package, db = setup(tmp_path, context, oriented_data())
     with sm, StateMachine(db, dnd_loader=sm._rules.loader) as reader:

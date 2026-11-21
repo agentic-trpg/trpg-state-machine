@@ -6,8 +6,8 @@ manifest:
   entry_scene_id: scene.platform
   ruleset_binding:
     ruleset_id: dnd-2024-srd-5.2.1
-    data_revision: sha256:d499e13ab58b79d98e1381b3b9f28061474d1770eff94ce193e26295dec9fc09
-    evaluator_version: dnd5e-evaluation/54
+    data_revision: sha256:4ebef0ce4f73ae93a2307b41f170b592baa970d3d449a2d7566cc97ec224be37
+    evaluator_version: dnd5e-evaluation/56
   player_setup:
     player_count: 1
     pc_count: 1

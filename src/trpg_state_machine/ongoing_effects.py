@@ -22,6 +22,7 @@ from dnd5e_engine.types.conditions import ActiveCondition
 
 from .errors import StateMachineError
 from .package import canonical_json
+from .runtime_instances import instance_read
 from .scoped_reads import scoped_read
 from .spatial_light_effects import SpatialLightEffects
 
@@ -571,9 +572,13 @@ class OngoingEffects:
                     seen.add(key)
         return names
 
-    @scoped_read
+    @instance_read("actor", None, "linked_conditions", capacity=3, maintained="linked_conditions")
     def has_linked_conditions(self, sid, target_id, *, capability=None):
-        """Find linked statuses that require more rules for the requested capability."""
+        """Find linked statuses that require more rules for the requested capability.
+
+        Reuse the actor's result across noncondition effect changes. Condition links
+        and their qualifying lineage are versioned by SessionMemory.
+        """
         preserves = {
             "movement": region_conditions_preserve_movement,
             "visibility": region_conditions_preserve_visibility,

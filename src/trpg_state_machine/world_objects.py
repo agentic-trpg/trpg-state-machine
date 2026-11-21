@@ -703,7 +703,7 @@ class WorldObjectService:
                 cells = tuple(
                     dict.fromkeys(cell for footprint in targets.values() for cell in footprint)
                 )
-                sight = h._prepare_visibility(sid, position, package, cells=cells)
+                sight = h._prepare_visibility(sid, actor_id, position, package, cells=cells)
                 visible = frozenset(cell for cell in cells if sight.can_see(cell))
             for obj in candidates:
                 try:

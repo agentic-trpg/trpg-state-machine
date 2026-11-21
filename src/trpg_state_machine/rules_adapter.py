@@ -27,6 +27,7 @@ from dnd5e_engine.evaluation_contracts import (
     RuleError,
     RuleEvaluationRequest,
     RuleEvaluationResult,
+    SpellWillingnessChoice,
 )
 from dnd5e_engine.evaluation_haste import has_haste_effects, haste_speed
 from dnd5e_engine.evaluation_movement import timed_walk_bonus, walk_speed
@@ -1275,7 +1276,10 @@ def validate_dnd_result(request, result, *, loader=None):
     if result.read_set != required:
         _invalid("Expected the pinned Engine's complete whole-session read fence")
     if result.status == "needs_choice":
-        _invalid("Unexpected choice after explicit command capability admission")
+        # verify_request already binds the typed choice to this cast and target.
+        if type(result.choice) is not SpellWillingnessChoice:
+            _invalid("Unexpected choice after explicit command capability admission")
+        return result, ()
     actors = {a.entity_id for a in request.state_snapshot.character_states}
     for event in result.proposed_events:
         for field in ("actor_id", "target_id", "source_actor_id", "attacker_id", "killer_id"):

@@ -347,7 +347,7 @@ class EquipmentBinding:
 
 @dataclass(frozen=True)
 class CharacterRuntime:
-    """Own bounded actor inventory, equipment and ordered spell relationships."""
+    """Own bounded actor inventory, equipment, spells, senses and scene disclosure."""
 
     session_id: str
     actor_id: str
@@ -355,6 +355,9 @@ class CharacterRuntime:
     equipment: tuple = ()
     all_spells: tuple = ()
     prepared_spells: tuple = ()
+    effective_senses: tuple = ()
+    linked_conditions: tuple = ()
+    scene_visibility: tuple = ()
 
 
 @dataclass(frozen=True)

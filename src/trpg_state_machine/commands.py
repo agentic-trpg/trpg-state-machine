@@ -31,6 +31,7 @@ from ._operations import (
     TraversePassage,
     UnlockDoor,
 )
+from .choice_models import ChoiceRespondOperationPayload, PendingChoice
 from .combat import InitializeCombat
 from .environment_commands import (
     ENVIRONMENT_COMMANDS,
@@ -104,6 +105,7 @@ OPERATIONS = {
     "combat.item": ItemUsePayload,
     "world.use_item": ExplorationItemUsePayload,
     "world.cast_spell": ExplorationSpellCastPayload,
+    "choice.respond": ChoiceRespondOperationPayload,
     "world.drop_concentration": DropWorldConcentration,
     "combat.initialize": InitializeCombat,
     "rule_operation": RuleOperation,
@@ -177,6 +179,7 @@ class TypedCommand:
         | ExplorationItemUsePayload
         | ExplorationEnvironmentalSpellCastPayload
         | ExplorationSpellCastPayload
+        | ChoiceRespondOperationPayload
         | LongRest
         | ShortRest
         | CombatClosePayload
@@ -211,12 +214,17 @@ class CommandReceipt:
     world_version: int
     event_seqs: tuple[int, ...]
     error_code: str | None = None
+    pending_choice: PendingChoice | None = None
 
 
 def receipt_from_json(raw: str) -> CommandReceipt:
     """Decode a durable JSON receipt and restore event sequences as tuples."""
     data = json.loads(raw)
     data["event_seqs"] = tuple(data["event_seqs"])
+    if data.get("pending_choice") is not None:
+        fields = data["pending_choice"]
+        fields["allowed_options"] = tuple(fields["allowed_options"])
+        data["pending_choice"] = PendingChoice(**fields)
     return CommandReceipt(**data)
 
 
@@ -247,6 +255,7 @@ def validate_command(command: TypedCommand) -> None:
             ExplorationItemUsePayload,
             ExplorationEnvironmentalSpellCastPayload,
             ExplorationSpellCastPayload,
+            ChoiceRespondOperationPayload,
             LongRest,
             ShortRest,
         ):
@@ -296,6 +305,17 @@ def validate_command(command: TypedCommand) -> None:
         operation_type = ExplorationEnvironmentalSpellCastPayload
     if operation_type is None or type(command.payload) is not operation_type:
         raise StateMachineError("unsupported_operation", "Unknown command or payload type")
+    if operation_type is ChoiceRespondOperationPayload:
+        payload = command.payload
+        if (
+            type(payload.pending_operation_id) is not str
+            or not payload.pending_operation_id.strip()
+            or len(payload.pending_operation_id) > 256
+            or type(payload.selected_option_id) is not str
+            or payload.selected_option_id not in ("accept", "decline")
+        ):
+            raise StateMachineError("invalid_operation", "Expected a bounded choice ID and option")
+        return
     if operation_type is LongRest:
         return
     if operation_type is DropWorldConcentration:
@@ -468,6 +488,7 @@ class CommandRuntime:
             ExplorationItemUsePayload,
             ExplorationEnvironmentalSpellCastPayload,
             ExplorationSpellCastPayload,
+            ChoiceRespondOperationPayload,
             LongRest,
             ShortRest,
             CombatClosePayload,
@@ -626,6 +647,7 @@ def world_command_from_data(data):
         "world.drop_item",
         "world.use_item",
         "world.cast_spell",
+        "choice.respond",
         "world.drop_concentration",
         "enter_scene",
         "move_actor",

@@ -510,6 +510,7 @@ class SessionMemory:
             "inventory",
             "container_members",
             "passage_index",
+            "linked_conditions",
         ):
             raise ValueError("Unknown maintained field protocol")
         dependency = self.dependency(f"{domain}:{identity!r}", sid)
@@ -625,6 +626,26 @@ class SessionMemory:
                 self.stats[
                     "weight_invalidations" if domain == "weight" else "mechanism_invalidations"
                 ] += 1
+
+    def _linked_condition_changes(self, old, new):
+        """Invalidate only the owners of changed effect-linked condition evidence."""
+        rows = tuple(
+            row for row in (old, new) if row is not None and row["conditions_json"] is not None
+        )
+        columns = (
+            "session_id",
+            "target_id",
+            "effect_id",
+            "origin",
+            "conditions_json",
+            "concentration_id",
+            "lifecycle_json",
+            "expires_tick",
+        )
+        if len(rows) == 2 and all(old[column] == new[column] for column in columns):
+            return
+        for sid, actor in {(row["session_id"], row["target_id"]) for row in rows}:
+            self._advance_field("linked_conditions", sid, actor)
 
     def _light_profile(self, row, config=None, hp=...):
         """Compare one object's ground geometry and effective shared-door closure."""
@@ -1399,6 +1420,8 @@ class SessionMemory:
             self._association_changes(table, old, new)
             self._light_candidate_changes(table, old, new)
             self._inventory_changes(table, old, new)
+            if table == "ongoing_effects":
+                self._linked_condition_changes(old, new)
         finally:
             self.collectors = collectors
             self._change_objects = previous_objects

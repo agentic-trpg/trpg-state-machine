@@ -937,17 +937,20 @@ class EnvironmentService:
             position = self.h._spatial_reader(sid, actor_id, package, context)
             if position.scene_id != scene_id:
                 raise StateMachineError("unauthorized", "Only Actor's current Scene is authorized")
-            visibility = self.h._prepare_visible_targets(
-                sid, actor_id, package, cells=area.cells if area.cells else None
-            )
             cells = area.cells
-            if not cells:
-                width, height = visibility[2]
+            if cells:
+                visibility = self.h._prepare_visible_targets(sid, actor_id, package, cells=cells)
+            else:
+                position = self.h._public_scope(sid, actor_id, package)
+                _, (width, height) = self.h.grid.base_topology(sid, scene_id, with_extent=True)
                 if width * height > MAX_CELLS:
                     invalid("Whole Scene query exceeds 256 cells; choose a bounded area")
                 cells = tuple(f"{x},{y}" for x in range(width) for y in range(height))
+                visibility = self.h._prepare_visibility(
+                    sid, actor_id, position, package, cells=cells
+                )
             for cell in cells:
-                if not cell_in_bounds(visibility[1], cell):
+                if not cell_in_bounds(visibility.topology, cell):
                     raise StateMachineError("invalid_cell", "Environment area exceeds Scene bounds")
                 self.h._visible_target(sid, actor_id, cell, package, prepared=visibility)
             return self._area_cells(

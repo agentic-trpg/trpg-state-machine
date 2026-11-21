@@ -9,11 +9,14 @@ import json
 from collections import defaultdict, deque
 from uuid import uuid4
 
+from dnd5e_engine.activities.passive_stats import CombatantSenses, interpret_passive_stats
 from dnd5e_engine.evaluation_casting import CastingState
 from dnd5e_engine.evaluation_effects import EffectState
 from dnd5e_engine.evaluation_resources import ResourceState
 from dnd5e_engine.evaluation_state import InventoryState
+from dnd5e_engine.rules.effects import effective_effects
 from dnd5e_engine.types.conditions import ActiveCondition
+from dnd5e_srd_data.schema.common import PassiveEffectChange
 from pydantic import TypeAdapter
 
 from .errors import StateMachineError
@@ -32,6 +35,8 @@ from .scoped_reads import scoped_read
 from .time_binding import deadline_after_seconds
 
 _EFFECTS = TypeAdapter(tuple[EffectState, ...])
+_SENSE_KEY_PREFIX = "system.attributes.senses."
+_PASSIVE_SENSE_MODES = {"add": 2, "upgrade": 4}
 _EQUIPMENT_MIRRORS = ("worn_armor", "shield_equipped", "other_hand_occupied")
 _EQUIPMENT_METADATA = (
     *(field for _, field in EQUIPMENT_SLOTS),
@@ -840,16 +845,71 @@ class CharacterFacts:
             data["weapon_proficiencies"] = None
         return data
 
-    def senses(self, sid, actor_id):
-        """Read only one actor's four typed mechanical senses for event evidence."""
-        row = self._conn.execute(
+    def _sense_attributes(self, sid, actor_id):
+        """Locate the four base mechanical sense fields for one actor."""
+        return self._conn.execute(
             "SELECT darkvision,blindsight,tremorsense,truesight FROM character_attributes "
             "WHERE session_id=? AND actor_id=?",
             (sid, actor_id),
         ).fetchone()
+
+    def senses(self, sid, actor_id):
+        """Read one actor's four persisted base senses for event evidence."""
+        row = self._sense_attributes(sid, actor_id)
         if row is None:
             raise StateMachineError("invalid_mechanical_state", "Actor attributes are missing")
         return {field: row[field] for field in self.SENSE_FIELDS}
+
+    @instance_read("actor", None, "effective_senses")
+    def effective_senses(self, sid, actor_id) -> CombatantSenses:
+        """Project current special-sense ranges in feet from base and active effects.
+
+        The actor field depends on the projected attributes and the actor's exact
+        effect range in this read scope. Nonmechanical actors have ordinary sight
+        when authorized by the caller. Effect lifetime and precedence remain with
+        the Effects owner and the pinned rules engine.
+        """
+        row = self._sense_attributes(sid, actor_id)
+        if row is None:
+            if self._conn.execute(
+                "SELECT actor_id FROM mechanical_actors WHERE session_id=? AND actor_id=?",
+                (sid, actor_id),
+            ).fetchone():
+                raise StateMachineError("invalid_mechanical_state", "Actor attributes are missing")
+            return CombatantSenses()
+        base = {field: row[field] for field in self.SENSE_FIELDS}
+        states = self.effects.for_targets(sid, (actor_id,))
+        if not states:
+            return CombatantSenses(**base)
+        effects = self.store.memory.model_json(_EFFECTS, canonical_json(states))
+        changes = [
+            PassiveEffectChange(
+                key=change.key,
+                mode=_PASSIVE_SENSE_MODES[change.mode],
+                value=str(change.value),
+                priority=change.priority,
+            )
+            for effect in effective_effects(effects)
+            if not effect.disabled
+            for change in effect.changes
+            if change.key.startswith(_SENSE_KEY_PREFIX) and change.mode in _PASSIVE_SENSE_MODES
+        ]
+        if not changes:
+            return CombatantSenses(**base)
+        # The interpreter merges species values after applying ADD. Seed the
+        # persisted base as initial changes so ADD applies to that base.
+        initial = [
+            PassiveEffectChange(
+                key=f"{_SENSE_KEY_PREFIX}{field}",
+                mode=_PASSIVE_SENSE_MODES["upgrade"],
+                value=str(value),
+            )
+            for field, value in base.items()
+            if value is not None
+        ]
+        return interpret_passive_stats(
+            changes=(*initial, *changes), trait_grants=(), species_senses=None
+        ).senses
 
     def equipment(self, sid, actor_id):
         """Read the actor's equipment references in a current or fixed scope."""

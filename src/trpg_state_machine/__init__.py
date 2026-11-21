@@ -15,6 +15,7 @@ from ._operations import (
     TraversePassage,
     UnlockDoor,
 )
+from .choice_models import ChoiceRespondOperationPayload, PendingChoice
 from .combat import InitializeCombat
 from .commands import CheckWorldEffects, CommandReceipt, TypedCommand, world_command_from_data
 from .environment import EnvironmentService
@@ -157,6 +158,8 @@ __all__ = [
     "pump_navigation",
     "AdvanceGameTime",
     "CheckWorldEffects",
+    "ChoiceRespondOperationPayload",
+    "PendingChoice",
     "InitializeCombat",
     "CommandReceipt",
     "TypedCommand",

@@ -18,6 +18,7 @@ from trpg_state_machine import (
     ActivateMechanism,
     AdvanceSessionTime,
     DropWorldConcentration,
+    EnvironmentArea,
     ObjectState,
     PickupItem,
     PutItem,
@@ -207,6 +208,104 @@ def test_darkness_dispels_a_paid_overlap_and_releases_its_own_concentration(magi
         assert dropped.status == "committed", dropped
         assert sources(magic_world) == ()
         assert sm._conn.execute("SELECT count(*) FROM effect_concentrations").fetchone()[0] == 0
+
+
+def test_observer_cannot_see_lit_cell_across_committed_magical_darkness(magic_world):
+    sm, sid, package, context = magic_world
+    with sm:
+        pc = sm.read_session(sid, package, context=context).pc_actor_id
+        target = "9,0"
+
+        def observe():
+            return sm.environment.query_area(
+                sid, pc, A, EnvironmentArea((target,)), package, context=context
+            )
+
+        assert observe()[0].cell == target
+        _, darkness = cast(
+            magic_world, "intercept", "darkness", 2, {"kind": "point", "cell_id": "5,0"}
+        )
+        assert darkness.status == "committed", darkness
+        (light,) = sm.get_illumination_area(sid, pc, (target,), package, context=context)
+        assert light["illumination"] == "bright"
+        assert "magical_darkness" not in light
+        with pytest.raises(StateMachineError) as hidden:
+            observe()
+        assert hidden.value.code == "unsupported_target_visibility"
+
+        dropped = submit_world(sm, sid, package, context, DropWorldConcentration(), "drop")
+        assert dropped.status == "committed", dropped
+        assert observe()[0].cell == target
+
+
+def test_public_views_apply_darkness_to_each_observers_actual_sight_line(timed_spell_world):
+    from test_object_spatial_service import changed_grid
+
+    from trpg_state_machine.perception import GameViewContext
+
+    marker = "object.darkness_view_marker"
+
+    def configure(data):
+        """Place an ordinary visible marker beyond the spell and near the NPC."""
+        changed_grid(data, width=14, default_lighting="bright")
+        data["manifest"]["schema_version"] = "state-machine-foundation/6"
+        data["lockable_doors"] = []
+        next(actor for actor in data["actors"] if actor["actor_id"] == NPC)["initial_cell"] = "11,2"
+        data["scenes"][0]["objects"].append(
+            {
+                "object_id": marker,
+                "state": None,
+                "movable": False,
+                "blocks_passage": False,
+                "initial_cell": "9,0",
+            }
+        )
+        data.setdefault("world_objects", []).append(
+            {
+                "object_id": marker,
+                "definition_ref": "definition.darkness_view_marker",
+                "display_name": "Stone marker",
+                "description_ref": None,
+                "material": None,
+                "size_category": "small",
+                "weight_lb": 1,
+                "capabilities": [],
+            }
+        )
+
+    session = timed_spell_world(additional_spells=("darkness",), configure=configure)
+    sm, sid, package, context = session
+    with sm:
+        viewer = GameViewContext(context.principal_id, sid, context.player_id, "player")
+
+        def current_player_view():
+            """Read the player's authorized scene projection."""
+            return sm.get_scene_view(sid, package, context=viewer)
+
+        def npc_sees_marker():
+            """Read the other actor's public spatial view under its control grant."""
+            return marker in {
+                obj[0] for obj in sm.get_spatial_view(sid, NPC, package, context=context).objects
+            }
+
+        before = current_player_view()
+        assert marker in dict(before.visible_objects)
+        assert current_player_view() == before and npc_sees_marker()
+
+        _, receipt = cast(
+            session, "darkness-view", "darkness", 2, {"kind": "point", "cell_id": "5,0"}
+        )
+        assert receipt.status == "committed", receipt
+        covered = current_player_view()
+        assert covered.view_world_version > before.view_world_version
+        assert marker not in dict(covered.visible_objects) and npc_sees_marker()
+        assert current_player_view() == covered and marker in dict(before.visible_objects)
+
+        receipt = submit_world(sm, sid, package, context, DropWorldConcentration(), "restore-view")
+        assert receipt.status == "committed", receipt
+        restored = current_player_view()
+        assert restored.view_world_version > covered.view_world_version
+        assert marker in dict(restored.visible_objects) and npc_sees_marker()
 
 
 def test_owned_item_target_and_failed_adoption_preserve_state(magic_world, monkeypatch):

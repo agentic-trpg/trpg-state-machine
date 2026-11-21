@@ -19,9 +19,11 @@ from dnd5e_engine.evaluation_speed_effects import spell_attack_has_speed_effect
 from pydantic import ValidationError
 
 from ._execution import _WorldEffectKind, _WorldEffectOrigin
+from .choice_models import ChoiceRespondOperationPayload
 from .combat import process_id
 from .dnd_checks import world_effects_ready
 from .errors import StateMachineError
+from .pending_spell_choices import PendingSpellChoices
 from .rest_activity import LongRest, ShortRest, advance_rest, prepare_rest
 from .rules_adapter import UnsupportedEffectConsequence, validate_dnd_result
 from .spell_adoption import UnsupportedSpellConsequence
@@ -43,14 +45,17 @@ class RuleExecution:
         self.effects = owner.effects
         self.persistence = owner.persistence
         self.activities = owner.activities
+        self.spell_choices = PendingSpellChoices(
+            self.store, self.runtime, self.sessions, self.world.facts
+        )
 
     @property
     def _conn(self):
         """Return the shared rule-execution connection."""
         return self.store.connection
 
-    def _spell_positions(self, row, command):
-        """Read only the named participants and require placement in the current scene."""
+    def _spell_positions(self, row, command, *, willing_target_id=None):
+        """Project current participant placement and any authenticated affirmative response."""
         source_id, target_id = command.actor_id, command.payload.target_id
         ids = tuple(dict.fromkeys((source_id, target_id)))
         placements = [self.world.facts.carrier_position(row["session_id"], actor) for actor in ids]
@@ -61,7 +66,10 @@ class RuleExecution:
         source, target = placements
         if source[1] is None or target[1] is None:
             return "spell.target", ids, None
-        return None, ids, ExplorationSpellPositions(source_cell=source[1], target_cell=target[1])
+        positions = ExplorationSpellPositions(
+            source_cell=source[1], target_cell=target[1], willing_target_id=willing_target_id
+        )
+        return None, ids, positions
 
     async def submit(self, command, package, context, fingerprint):
         """Evaluate fixed rules inputs, then revalidate and adopt their guarded result.
@@ -73,7 +81,25 @@ class RuleExecution:
         scope. Domain failure uses the effects savepoint; transaction/publication
         failures remain governed by the Store rather than being converted to an ordinary
         rules rejection. Exploration items and spells use the committed exploration tick.
+        A willingness answer resumes the original spell with fresh facts and commits
+        its own receipt together with the single adopted cast and prompt outcome.
         """
+        response = None
+        if type(command.payload) is ChoiceRespondOperationPayload:
+            response = command
+            with self.store.transaction(write=True):
+                row = self.sessions._session(response.session_id, package, context)
+                replay, pending, error = self.spell_choices.check(
+                    response, fingerprint, row, context
+                )
+                if replay is not None:
+                    return replay
+                if error is not None or response.payload.selected_option_id == "decline":
+                    return self._finish_choice_without_cast(
+                        response, context, fingerprint, row, error
+                    )
+                command = self.spell_choices.resume(pending, response, row, context)
+        willing_target_id = response.actor_id if response is not None else None
         exploration_item = type(command.payload) is ExplorationItemUsePayload
         environmental_spell = type(command.payload) is ExplorationEnvironmentalSpellCastPayload
         exploration_spell = (
@@ -142,9 +168,10 @@ class RuleExecution:
             row = self.sessions._session(command.session_id, package, context)
             self.sessions._authorize_command(row, command.actor_id, command.payload, context)
             self.runtime.authorize_time_wait_reply(row, package, command, context)
-            self.sessions._npc_handoff_command_guard(command)
-            if replay := self.runtime._command_replay(command, fingerprint):
-                return replay
+            if response is None:
+                self.sessions._npc_handoff_command_guard(command)
+                if replay := self.runtime._command_replay(command, fingerprint):
+                    return replay
             self.sessions._npc_combat_location_guard(command)
             if row["evaluator_version"] != EVALUATOR_VERSION:
                 raise StateMachineError(
@@ -180,7 +207,7 @@ class RuleExecution:
                     prepare_error = "spell.target"
             elif exploration_spell and prepare_error is None:
                 prepare_error, spell_actor_ids, spell_positions = self._spell_positions(
-                    row, command
+                    row, command, willing_target_id=willing_target_id
                 )
             snapshot = None if prepare_error else build_snapshot(row)
             if domain_check:
@@ -310,16 +337,27 @@ class RuleExecution:
                 except UnsupportedEffectConsequence:
                     capability = "effect.capability"
             self.rules._verify_dnd_binding(package, row)
+        choice_requested = result is not None and result.status == "needs_choice"
         with self.store.transaction(write=True):
             row = self.sessions._session(command.session_id, package, context)
+            if response is not None:
+                replay, _, error = self.spell_choices.check(response, fingerprint, row, context)
+                if replay is not None:
+                    return replay
+                if error is not None:
+                    return self._finish_choice_without_cast(
+                        response, context, fingerprint, row, error
+                    )
             self.sessions._authorize_command(row, command.actor_id, command.payload, context)
             self.runtime.authorize_time_wait_reply(row, package, command, context)
-            self.sessions._npc_handoff_command_guard(command)
-            if replay := self.runtime._command_replay(command, fingerprint):
-                return replay
+            if response is None:
+                self.sessions._npc_handoff_command_guard(command)
+                if replay := self.runtime._command_replay(command, fingerprint):
+                    return replay
             self.sessions._npc_combat_location_guard(command)
             version = row["world_version"]
             status, error = "committed", None
+            pending_choice = None
             current_exploration_error = exploration_error(row) if exploration_rule else None
             changed_rest_plan = rest and prepare_rest(
                 row, command.actor_id, self.world, self.activities, command.payload
@@ -332,6 +370,12 @@ class RuleExecution:
                     environmental_spell
                     and prepare_error is None
                     and self.world.magic.cast_positions(row, package, command) != spell_positions
+                )
+                or (
+                    (response is not None or choice_requested)
+                    and prepare_error is None
+                    and self._spell_positions(row, command, willing_target_id=willing_target_id)
+                    != (prepare_error, spell_actor_ids, spell_positions)
                 )
                 or (snapshot is not None and build_snapshot(row) != snapshot)
                 or self.rules._rng_context(row) != rng
@@ -352,6 +396,9 @@ class RuleExecution:
                     status, error = "rejected", exc.code
             elif not world_effects_ready(self.world, row, command):
                 status, error = "rejected", "world_precondition_failed"
+            elif choice_requested:
+                pending_choice, error = self.spell_choices.create(command)
+                status = "pending_choice" if pending_choice is not None else "rejected"
             elif result.status != "accepted":
                 status, error = "rejected", result.error.code
             else:
@@ -605,8 +652,32 @@ class RuleExecution:
                     events = self.runtime.finish_time_wait_reply(row, package, command)
                     events = self.effects._expand_events(row, package, events, command.command_id)
                     version = self.runtime.stage_outcome(command, row, package, events)
+            if response is not None and status != "conflict":
+                self.spell_choices.close(
+                    response, "accepted" if status == "committed" else "rejected"
+                )
             receipt = self.runtime.finish(
-                command, context, fingerprint, row, status, version, error
+                response if response is not None else command,
+                context,
+                fingerprint,
+                row,
+                status,
+                version,
+                error,
+                pending_choice=pending_choice,
             )
         self.runtime.refresh_time_drivers()
         return receipt
+
+    def _finish_choice_without_cast(self, response, context, fingerprint, row, error):
+        """Commit refusal or decline without evaluating or modifying the world."""
+        status = "committed"
+        if error == "version_conflict":
+            status = "conflict"
+        elif error is not None:
+            status = "rejected"
+        if error in (None, "choice_expired"):
+            self.spell_choices.close(response, "declined" if error is None else "expired")
+        return self.runtime.finish(
+            response, context, fingerprint, row, status, row["world_version"], error
+        )

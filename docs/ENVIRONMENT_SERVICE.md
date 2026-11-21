@@ -125,9 +125,10 @@ query_area／query_height_range／query_unit 与 project_area／project_height_r
 统一使用此入口。区域读取先取有效的单格缓存，再一次准备需要计算的格子的来源。查一格可
 传入 `EnvironmentArea((cell,))`。内部 project 自动加入或建立同一读取事务，继续由可信
 调用方负责权限及 Package pin。read_facts 是 GM 明确读取权威事实的审计接口。
-区域可见性每批只准备一次带当前 Light 的 topology，并复用其范围枚举整图；每格仍检查
-can_see，任一失败整批拒绝。公开命中仍重查当前权限、Actor Scene 与可见性；这项授权所需
-的 Grid／Light 准备仍保留，环境校验不额外再准备地图。没有新增 Light 跨查询 Snapshot。
+公开区域视图先核对 Actor 的权限与场景。整图请求先按地图尺寸检查 256 格上限。区域内
+由 Grid 准备一批观察者视线，排除地图遮挡或全掩护确定挡住的目标，再为剩余目标和必要
+视线格准备当前 Light。每个请求格仍须通过可见性校验，任一失败则整批拒绝。环境结果
+缓存命中时同样执行这些检查。
 
 ### 正式提供方、时间与第三方限制
 
@@ -350,7 +351,7 @@ query_area、query_height_range、query_unit 共用该策略，不因隐藏范�
 公开查询每次在一个只读事务内核对两版，未命中才读取事实／当前提供方／OSS；不建库表、不初始化场景、
 不发事件、不推进版本或 RNG。数据库生命周期迁移只发生在 SqliteStore 打开阶段。
 命中最终结果仍执行本次控制权限、Package pin、Actor 当前 Scene、public scope 及可见性。
-`query_area` 的 `_prepare_visible_targets` 一次准备观察者、带 Light 的 base_topology；
+`query_area` 一次准备观察者的候选目标、几何筛选和所需的 Light；
 每格 `_visible_target(prepared=...)` 仍执行位置边界与 can_see。任一失败不进入结果合成，
 不返回区域子集。公开与可信结果按请求模式隔离；公开命中复用已经掩蔽、去除来源的结果，
 披露输入改变会推进来源版并重新过滤。当前授权仍每次检查。降水保护来源一并移除；

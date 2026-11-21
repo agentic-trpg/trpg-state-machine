@@ -7,20 +7,153 @@ from dataclasses import asdict, replace
 
 import pytest
 from dnd_support import create
+from lock_support import CRED, NPC, TWIN, A, B
 from test_migrations import stored_rows
 from test_npc_evaluation_tasks import evaluation_package as evaluation_package
 from test_npc_evaluation_tasks import prepare
 from test_npc_state import enter
+from test_object_spatial_service import OBSTACLE, oriented_data
 from test_perception import perception_package as perception_package
 from test_perception import prepare as perception_prepare
 from test_perception import project_prefix
+from test_world_lights import lighting_data
+from world_support import setup, submit
 
-from trpg_state_machine import StateMachine, StateMachineError
+from trpg_state_machine import SetLightEnabled, StateMachine, StateMachineError
 from trpg_state_machine.perception import GameViewContext, NPCContext
 
 
 def viewer(context, sid, role):
     return GameViewContext(context.principal_id, sid, context.player_id, role)
+
+
+def test_fine_scene_views_filter_current_members_and_reuse_observer_disclosure(
+    tmp_path, context, monkeypatch
+):
+    data = lighting_data()
+    wall = [{"x1": 1, "y1": 1, "x2": 4, "y2": 1}]
+    for grid in (
+        data["scenes"][0]["grid"],
+        data["rule_bindings"]["noncombat_foundation"]["snapshot"]["scene_state"]["grid"],
+    ):
+        grid["wall_segments"] = wall
+    sm, sid, package, _ = setup(tmp_path, context, data)
+    with sm:
+        sm.grant_npc_access(sid, NPC, "agent:caretaker", package, context=context)
+        npc = NPCContext("agent:caretaker", sid, NPC)
+        player, narrator, gm = (viewer(context, sid, role) for role in ("player", "narrator", "gm"))
+
+        def read(ctx):
+            return sm.get_scene_view(sid, package, context=ctx)
+
+        prepared = []
+        prepare = sm._world._prepare_visibility
+
+        def counted(session, actor, position, bound, *, cells=None):
+            prepared.append((position.scene_id, position.cell, cells))
+            return prepare(session, actor, position, bound, cells=cells)
+
+        monkeypatch.setattr(sm._world, "_prepare_visibility", counted)
+        before_pc, before_npc = read(player), read(npc)
+        target = (TWIN, None)
+        assert before_pc.status == before_npc.status == "resolved"
+        assert target not in before_pc.visible_objects and target not in before_npc.visible_objects
+        assert target in read(gm).visible_objects
+        assert [(scene, cell) for scene, cell, _ in prepared] == [(A, "0,0"), (A, "2,2")]
+        assert all("2,0" in cells and "4,4" not in cells for _, _, cells in prepared)
+        assert read(player) == before_pc and read(npc) == before_npc
+        assert read(narrator).visible_objects == before_pc.visible_objects
+        assert len(prepared) == 2
+
+        receipt = submit(sm, sid, package, context, SetLightEnabled(A, CRED, "0,0", True), "on")
+        assert receipt.status == "committed", receipt
+        prepared.clear()
+        lit_pc, lit_npc = read(player), read(npc)
+        assert lit_pc.view_world_version > before_pc.view_world_version
+        assert target in lit_pc.visible_objects and target not in lit_npc.visible_objects
+        assert NPC not in lit_pc.visible_actor_ids
+        assert target in read(narrator).visible_objects and read(narrator).own_character is None
+        assert target not in before_pc.visible_objects
+        assert len(prepared) == 2
+
+        with sm._transaction(write=True):
+            sm._characters.award_xp(sid, lit_pc.own_character.actor_id, 1)
+        now = read(player)
+        assert now.visible_objects == lit_pc.visible_objects
+        assert now.own_character.xp == lit_pc.own_character.xp + 1
+        assert len(prepared) == 2
+
+        with sm._transaction(write=True):
+            flags = sm._world_facts.scene_flags(sid, B)
+            flag = next(iter(flags))
+            sm._world_facts.set_scene_flags(sid, B, {**flags, flag: not flags[flag]})
+        assert sm._world_facts.scene_flags(sid, B)[flag] != flags[flag]
+        assert read(player).visible_objects == lit_pc.visible_objects
+        assert read(npc) == lit_npc
+        assert len(prepared) == 2
+
+        with (
+            sm._transaction(write=True),
+            pytest.raises(RuntimeError, match="rollback"),
+            sm._store.savepoint(),
+        ):
+            sm._world_facts.set_light_state(sid, CRED, False, "normal")
+            candidate = sm._observer_scene_disclosure(sid, A, now.own_character.actor_id, package)
+            assert target not in candidate.objects
+            raise RuntimeError("rollback")
+        assert len(prepared) == 3
+        assert read(player) == now and target not in candidate.objects
+        assert len(prepared) == 3
+
+        sm.grant_npc_access(sid, NPC, "replacement", package, context=context)
+        with pytest.raises(StateMachineError) as denied:
+            read(npc)
+        assert denied.value.code == "unauthorized" and len(prepared) == 3
+
+
+def test_fine_scene_view_keeps_an_unsupported_target_identity_private(tmp_path, context):
+    data = lighting_data()
+    data["actors"][0]["initial_cell"] = "2,0"
+    sm, sid, package, _ = setup(tmp_path, context, data)
+    with sm:
+        sm.grant_npc_access(sid, NPC, "agent:caretaker", package, context=context)
+        player = viewer(context, sid, "player")
+        npc = NPCContext("agent:caretaker", sid, NPC)
+        receipt = submit(sm, sid, package, context, SetLightEnabled(A, CRED, "0,0", True), "on")
+        assert receipt.status == "committed", receipt
+        before = sm.get_scene_view(sid, package, context=player)
+        assert before.status == "resolved" and NPC in before.visible_actor_ids
+
+        with sm._transaction(write=True):
+            sm._characters.add_condition(
+                sid,
+                NPC,
+                {
+                    "condition": "invisible",
+                    "source_entity_id": "implied:condition",
+                    "scope": "session",
+                },
+            )
+        view = sm.get_scene_view(sid, package, context=player)
+        assert view.status == "unresolved" and NPC not in view.visible_actor_ids
+        assert view.visible_objects == before.visible_objects
+        observer = sm.get_scene_view(sid, package, context=npc)
+        assert observer.status == "unresolved" and observer.visible_actor_ids == ()
+        assert observer.visible_objects == ()
+        gm = sm.get_scene_view(sid, package, context=viewer(context, sid, "gm"))
+        assert gm.status == "resolved" and NPC in gm.visible_actor_ids
+
+
+def test_fine_scene_view_stays_unresolved_with_unsupported_dynamic_occlusion(tmp_path, context):
+    data = oriented_data(blocking=False)
+    data["world_objects"][-1]["capabilities"][0]["closed_properties"] = {"vision_occlusion": True}
+    sm, sid, package, _ = setup(tmp_path, context, data)
+    with sm:
+        assert OBSTACLE in dict(
+            sm.get_scene_view(sid, package, context=viewer(context, sid, "gm")).visible_objects
+        )
+        view = sm.get_scene_view(sid, package, context=viewer(context, sid, "player"))
+        assert view.status == "unresolved" and view.visible_actor_ids == view.visible_objects == ()
 
 
 @pytest.mark.parametrize("role", ["gm", "player", "narrator"])

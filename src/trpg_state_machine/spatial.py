@@ -7,6 +7,7 @@ must never be passed to the Engine or perception as a mechanical Grid.
 from dataclasses import dataclass, replace
 from typing import NamedTuple
 
+from dnd5e_engine.activities.passive_stats import CombatantSenses
 from dnd5e_engine.evaluation_state import InventoryEntry
 
 from ._execution import _execution_data
@@ -29,7 +30,7 @@ from .environment_commands import ENVIRONMENT_OPERATIONS
 from .errors import StateMachineError
 from .game_time import AdvanceGameTime
 from .grid import GridService, cell_in_bounds
-from .grid_maps import ReadOnlyTopology
+from .grid_maps import ObserverTopology
 from .models import TrustedContext
 from .package import AdventurePackage
 from .scoped_reads import scoped_read
@@ -45,15 +46,15 @@ class SpatialPosition:
 
 
 class ObserverVisibility(NamedTuple):
-    """Prepare ordinary sight from one observer's position and target-cell lighting."""
+    """Hold one observer's sight rays, environmental inputs and effective senses."""
 
     position: SpatialPosition
-    topology: ReadOnlyTopology
-    extent: tuple[int, int]
+    topology: ObserverTopology
+    senses: CombatantSenses
 
     def can_see(self, cell: str | None) -> bool:
-        """Check a target cell using the existing topology and ordinary sight."""
-        return self.topology.can_see(self.position.cell, cell)
+        """Check ordinary sight for a target in the prepared scope."""
+        return self.topology.can_see_target(cell, self.senses)
 
 
 @dataclass(frozen=True, slots=True)
@@ -272,22 +273,19 @@ class WorldHandler:
             )
         return position
 
-    def _prepare_visible_targets(self, sid, actor_id, package, *, cells=None):
+    def _prepare_visible_targets(self, sid, actor_id, package, *, cells):
         """Check public scope and prepare sight once for the requested targets."""
         position = self._public_scope(sid, actor_id, package)
-        return self._prepare_visibility(sid, position, package, cells=cells)
+        return self._prepare_visibility(sid, actor_id, position, package, cells=cells)
 
-    def _prepare_visibility(self, sid, position, package, *, cells=None):
-        """Prepare ordinary sight for an authorized position in the current read scope."""
-        topology, extent = self.grid.base_topology(
-            sid,
-            position.scene_id,
-            package,
-            with_extent=True,
-            cells=cells,
-            observer_cell=position.cell,
+    def _prepare_visibility(self, sid, actor_id, position, package, *, cells):
+        """Prepare sight from the authorized actor's position and current special senses."""
+        topology = self.grid.visibility_topology(
+            sid, position.scene_id, package, position.cell, cells
         )
-        return ObserverVisibility(position, topology, extent)
+        return ObserverVisibility(
+            position, topology, self.characters.effective_senses(sid, actor_id)
+        )
 
     def _visible_target(self, sid, actor_id, cell, package, *, prepared=None):
         """Check target cell bounds and actual visibility."""
@@ -575,7 +573,7 @@ class WorldHandler:
         ports = self._door_ports(position.scene_id, operation.object_id, package, sid=sid)
         if ports:
             sight = self._prepare_visibility(
-                sid, position, package, cells=tuple(e.threshold_cell for _, e in ports)
+                sid, actor_id, position, package, cells=tuple(e.threshold_cell for _, e in ports)
             )
             visible = [(p, e) for p, e in ports if sight.can_see(e.threshold_cell)]
             if not visible:
@@ -805,7 +803,7 @@ class WorldHandler:
             return WorldActionAvailability("available", "available", row["world_version"])
 
     def get_spatial_view(self, session_id, actor_id, package, *, context):
-        """Read authorized objects, exits and doors at one version using target-cell light."""
+        """Read objects, exits and doors visible to the authorized actor at one version."""
         with self._transaction():
             self._spatial_reader(session_id, actor_id, package, context)
             if self._active_combat(session_id):
@@ -835,7 +833,7 @@ class WorldHandler:
             cells = [obj[1] for obj in object_rows if obj[1] is not None]
             cells.extend(e.standing_cell for _, _, e in exit_targets)
             cells.extend(e.threshold_cell for _, e in door_targets)
-            sight = self._prepare_visibility(session_id, position, package, cells=cells)
+            sight = self._prepare_visibility(session_id, actor_id, position, package, cells=cells)
             visible = frozenset(cell for cell in dict.fromkeys(cells) if sight.can_see(cell))
             objects = []
             for obj in object_rows:
