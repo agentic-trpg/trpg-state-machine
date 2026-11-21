@@ -57,6 +57,7 @@ from .service import StateMachine
 from .time_binding import LegacyTimeBinding, TimeBinding, time_binding_from_data
 from .world_commands import (
     ActivateMechanism,
+    AimLight,
     BarObject,
     CheckMechanism,
     ClearJam,
@@ -121,6 +122,7 @@ __all__ = [
     "CheckMechanism",
     "SetLightEnabled",
     "SwitchLightMode",
+    "AimLight",
     "RepositionObject",
     "PutItem",
     "TakeItem",

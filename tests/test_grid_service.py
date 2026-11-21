@@ -332,9 +332,9 @@ def test_npc_spatial_view_projects_only_visibility_targets(tmp_path, context, mo
         selected.append(sorted(cells))
         return filter_sources(topology, sources, cells)
 
-    def count_cell(topology, uncertain_geometry, candidates, sources, cell):
+    def count_cell(topology, uncertain_geometry, candidates, sources, cell, **kwargs):
         evaluated.append(cell)
-        return illuminate_cell(topology, uncertain_geometry, candidates, sources, cell)
+        return illuminate_cell(topology, uncertain_geometry, candidates, sources, cell, **kwargs)
 
     with sm:
         sm.grant_npc_access(sid, NPC, "agent:spatial", package, context=context)

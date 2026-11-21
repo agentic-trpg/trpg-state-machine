@@ -1,27 +1,49 @@
-"""Ordinary scenario emitters; no fuel, magic, sunlight or effect lifecycle."""
+"""Compose objective light sources in the requested scene region."""
 
 from dataclasses import asdict, dataclass
 from itertools import chain
 from math import ceil, floor
-from typing import NamedTuple
+from typing import NamedTuple, NotRequired, TypedDict
 
 from dnd5e_engine.spatial import cell_id, parse_cell
 
 from ._execution import _execution_data
 from .errors import StateMachineError
+from .light_fuel import LightFuel
 from .light_geometry import (
     Point,
     Polygon,
     Segment,
     clip_to_bounds,
+    clip_to_cone,
     lit_polygons,
     shadow_intersects_interior,
 )
-from .runtime_instances import instance_read, resolve_field_batch
+from .runtime_instances import instance_read, resolve_field, resolve_field_batch
 from .world_commands import SetLightEnabled
+from .world_daylight import SceneAmbientSource, scene_ambient_source
+from .world_package import LightMode
 
 _RANK = {"dark": 0, "dim": 1, "bright": 2}
 _MAX_QUERY_CELLS = 256
+
+
+class _EmitterSource(TypedDict):
+    """Retain the current position, range and transmission of a point emitter."""
+
+    object_id: str
+    cell: str | None
+    mode: LightMode
+    transmission: str
+    direction: NotRequired[str]
+
+
+@dataclass(frozen=True, slots=True)
+class _SceneLightSources:
+    """Share prepared emitters and area-wide sources between light projections."""
+
+    emitters: tuple[_EmitterSource, ...]
+    ambient: SceneAmbientSource | None
 
 
 class CellLight(NamedTuple):
@@ -33,11 +55,12 @@ class CellLight(NamedTuple):
     base: str = "dark"
     dim: tuple[Polygon, ...] = ()
     bright: tuple[Polygon, ...] = ()
+    sunlight: bool = False
 
     @classmethod
-    def ambient(cls, level):
+    def ambient(cls, level, *, sunlight=False):
         """Use the map's base grade when no local source contributes."""
-        return cls(level, base=level)
+        return cls(level, base=level, sunlight=sunlight)
 
     def __deepcopy__(self, memo):
         """Share fixed lighting data, including immutable polygon vertices."""
@@ -151,7 +174,7 @@ class LightService:
         return d.capability("light") if d else None
 
     @instance_read("scene", "lighting", "sources", maintained="light_sources")
-    def sources(self, sid, scene, package):
+    def sources(self, sid, scene, package) -> list[_EmitterSource]:
         """Resolve actual scene lights, accounting for mode, damage and enclosing-container
         transmission.
         """
@@ -183,42 +206,100 @@ class LightService:
             if transmission == "block":
                 continue
             mode = next(m for m in c.modes if m.mode_id == light["mode"])
-            result.append(
-                {
-                    "object_id": oid,
-                    "cell": location["cell"],
-                    "transmission": transmission,
-                    "mode": mode,
-                }
-            )
+            source: _EmitterSource = {
+                "object_id": oid,
+                "cell": location["cell"],
+                "transmission": transmission,
+                "mode": mode,
+            }
+            if c.emission_shape == "grid_cone_static_los":
+                source["direction"] = self.h.facts.object(sid, oid)["orientation"]
+            result.append(source)
         return result
 
-    @instance_read("scene", "lighting", "projection", maintained="light_result")
-    def current_project(self, sid, scene, package):
-        """Build the effective current grid, storing dynamic light only within source reach."""
-        raw = self.h.grid.reader.current_grid(sid, scene, package)
-        return self.project(sid, scene, package, raw)
+    def _scene_sources(self, sid, scene, package, ambient):
+        """Read the effective World light sources for one scene version."""
+        return _SceneLightSources(tuple(self.sources(sid, scene, package)), ambient)
 
-    @instance_read("scene", "lighting", "topology", maintained="light_result")
+    @staticmethod
+    def _projection_key(package, ambient):
+        """Fix the effective phase for light caches that otherwise depend on scene facts."""
+        return (("package", package.package_digest), ambient.phase if ambient else None)
+
+    def current_project(self, sid, scene, package):
+        """Build the current grid projection using the current phase and scene facts."""
+        with self.h.grid.read_scope():
+            prepared = self.h.grid.reader.current_grid(sid, scene, package)
+            ambient = scene_ambient_source(self.h, sid, scene, prepared)
+            return self._cached_projection(sid, scene, package, prepared, ambient)
+
+    def _cached_projection(self, sid, scene, package, prepared, ambient):
+        """Use the same fixed projection for map and topology consumers."""
+        return resolve_field(
+            self.h.store,
+            "scene",
+            sid,
+            scene,
+            "lighting",
+            "projection",
+            self._projection_key(package, ambient),
+            lambda: self._project_grid(sid, scene, package, prepared, ambient),
+            maintained="light_result",
+        )
+
     def current_topology(self, sid, scene, package):
         """Reuse base topology with current illumination overlaid."""
+        with self.h.grid.read_scope():
+            return self._current_topology(sid, scene, package)
+
+    def _current_topology(self, sid, scene, package):
+        """Resolve topology and its current ambient phase inside one scope."""
         prepared = self.h.grid.reader.current_grid(sid, scene, package)
-        if not self.sources(sid, scene, package):
-            return prepared.topology
-        grid, _, _ = self.current_project(sid, scene, package)
-        return prepared.topology.with_lighting(grid["lighting"])
+        ambient = scene_ambient_source(self.h, sid, scene, prepared)
+
+        def overlay():
+            """Preserve the fixed topology and set its effective base grade."""
+            if ambient is None and not self.sources(sid, scene, package):
+                return prepared.topology
+            grid, _, _ = self._cached_projection(sid, scene, package, prepared, ambient)
+            return prepared.topology.with_lighting(
+                grid["lighting"], default_lighting=grid["default_lighting"]
+            )
+
+        return resolve_field(
+            self.h.store,
+            "scene",
+            sid,
+            scene,
+            "lighting",
+            "topology",
+            self._projection_key(package, ambient),
+            overlay,
+            maintained="light_result",
+        )
 
     def current_cells(self, sid, scene, package, cells):
         """Resolve trusted in-bounds cells through the Scene's maintained per-cell field.
 
         Reuse available cells and prepare one source selection and geometry for the misses.
         """
-        package_key = ("package", package.package_digest)
-        parameters = {cell: ((package_key, cell), ()) for cell in cells}
+        selected = tuple(dict.fromkeys(cells))
+        if not selected:
+            return {}
+        with self.h.grid.read_scope():
+            return self._current_cells(sid, scene, package, selected)
+
+    def _current_cells(self, sid, scene, package, selected):
+        """Keep phase, grid and cached light in the same read or mutation stage."""
+        prepared = self.h.grid.reader.current_grid(sid, scene, package)
+        ambient = scene_ambient_source(self.h, sid, scene, prepared)
+        key = self._projection_key(package, ambient)
+        parameters = {cell: ((key, cell), ()) for cell in selected}
 
         def compute_missing(missing):
             """Build only the scalar entries that were absent or invalidated."""
-            levels = self._compute_cells(sid, scene, package, tuple(key[0][1] for key in missing))
+            cells = tuple(point[0][1] for point in missing)
+            levels = self._compute_cells(sid, scene, package, cells, prepared, ambient)
             return {key: levels[key[0][1]] for key in missing}
 
         values = resolve_field_batch(
@@ -235,24 +316,37 @@ class LightService:
         )
         return {cell: values[key] for cell, key in parameters.items()}
 
-    def _compute_cells(self, sid, scene, package, cells):
+    def _compute_cells(self, sid, scene, package, cells, prepared, ambient):
         """Use current map facts and compute only missing cell light results."""
-        prepared = self.h.grid.reader.current_grid(sid, scene, package)
-        sources = self.sources(sid, scene, package)
+        sources = self._scene_sources(sid, scene, package, ambient)
         return self._evaluate_cells(sid, scene, package, prepared, sources, cells)
+
+    @staticmethod
+    def _ambient_cell(grid, ambient, cell):
+        """Resolve dynamic outdoor light relative to fixed map overrides."""
+        if ambient is not None and ambient.covers(cell) and cell not in grid.data["lighting"]:
+            return CellLight.ambient(ambient.level, sunlight=ambient.sunlight)
+        return CellLight.ambient(grid.topology.light_on_cell(cell), sunlight=grid.data["sunlight"])
 
     def _evaluate_cells(self, sid, scene, package, grid, sources, cells):
         """Share one regional blocker read and one geometric result per relevant source."""
         topology = grid.topology
-        if not sources:
-            return {cell: CellLight.ambient(topology.light_on_cell(cell)) for cell in cells}
-        by_cell = self._sources_for_cells(topology, sources, cells)
+        if not sources.emitters:
+            return {cell: self._ambient_cell(grid, sources.ambient, cell) for cell in cells}
+        by_cell = self._sources_for_cells(topology, sources.emitters, cells)
         coverage, uncertain = self._coverage(sid, scene, package, grid, by_cell)
         return {
             cell: (
-                self._illuminate_cell(topology, coverage, uncertain, applicable, cell)
+                self._illuminate_cell(
+                    topology,
+                    coverage,
+                    uncertain,
+                    applicable,
+                    cell,
+                    base_light=self._ambient_cell(grid, sources.ambient, cell),
+                )
                 if applicable
-                else CellLight.ambient(topology.light_on_cell(cell))
+                else self._ambient_cell(grid, sources.ambient, cell)
             )
             for cell, applicable in by_cell.items()
         }
@@ -338,8 +432,7 @@ class LightService:
                     candidates.append(source)
                 continue
             x, y = parse_cell(origin)
-            # Match GridTopology's Chebyshev radius, including its outer boundary.
-            radius = source["mode"].dim_outer_radius_ft // topology.cell_size_ft
+            radius = LightService._candidate_radius(source, topology.cell_size_ft)
             if not (left - radius <= x <= right + radius and top - radius <= y <= bottom + radius):
                 continue
             for cell, (col, row) in coordinates.items():
@@ -348,9 +441,15 @@ class LightService:
         return by_cell
 
     @staticmethod
-    def _illuminate_cell(topology, coverage, uncertain_cells, sources, cell):
+    def _candidate_radius(source, cell_size):
+        """Select cells in the grid radius or a conservative cone envelope."""
+        outer = source["mode"].dim_outer_radius_ft
+        return ceil(outer / cell_size) if source.get("direction") else outer // cell_size
+
+    @staticmethod
+    def _illuminate_cell(topology, coverage, uncertain_cells, sources, cell, *, base_light):
         """Compose scalar levels and drawing pieces from the same local geometry."""
-        base = level = topology.light_on_cell(cell)
+        base = level = base_light.level
         contributions, unknown = [], False
         dim, bright = [], []
         x, y = parse_cell(cell)
@@ -362,6 +461,19 @@ class LightService:
                 continue
             visible = coverage[oid]
             pieces = clip_to_bounds(visible.lit, bounds)
+            mode = source["mode"]
+            if direction := source.get("direction"):
+                bright_length = (mode.bright_radius_ft or 0) / topology.cell_size_ft
+                dim_length = mode.dim_outer_radius_ft / topology.cell_size_ft
+                bright_pieces = clip_to_cone(pieces, visible.origin, direction, bright_length)
+                dim_pieces = clip_to_cone(
+                    pieces, visible.origin, direction, dim_length, start=bright_length
+                )
+                pieces = (*bright_pieces, *dim_pieces)
+            else:
+                distance = topology.distance_ft(source["cell"], cell)
+                is_bright = mode.bright_radius_ft is not None and distance <= mode.bright_radius_ft
+                bright_pieces, dim_pieces = (pieces, ()) if is_bright else ((), pieces)
             if not pieces:
                 continue
             if (
@@ -371,19 +483,38 @@ class LightService:
             ):
                 unknown = True
                 continue
-            mode = source["mode"]
-            distance = topology.distance_ft(source["cell"], cell)
-            value = (
-                "bright"
-                if mode.bright_radius_ft is not None and distance <= mode.bright_radius_ft
-                else "dim"
-            )
+            value = "bright" if bright_pieces else "dim"
             if _RANK[value] > _RANK[level]:
                 level = value
-            if _RANK[value] > _RANK[base]:
-                (bright if value == "bright" else dim).extend(pieces)
+            if base != "bright":
+                bright.extend(bright_pieces)
+            if base == "dark":
+                dim.extend(dim_pieces)
             contributions.append(oid)
-        return CellLight(level, unknown, tuple(contributions), base, tuple(dim), tuple(bright))
+        return CellLight(
+            level,
+            unknown,
+            tuple(contributions),
+            base,
+            tuple(dim),
+            tuple(bright),
+            sunlight=base_light.sunlight,
+        )
+
+    @staticmethod
+    def _apply_ambient(grid, ambient):
+        """Represent base light in a mechanical or event grid without a full-map expansion."""
+        if ambient is None:
+            return
+        overrides = grid["lighting"]
+        if ambient.cells is None:
+            grid["default_lighting"] = ambient.level
+            grid["sunlight"] = ambient.sunlight and not overrides
+        else:
+            base = grid["default_lighting"]
+            if ambient.level != base:
+                for cell in ambient.cells:
+                    overrides.setdefault(cell, ambient.level)
 
     def project(self, sid, scene, package, raw, *, cells=None):
         """Project current sources on a supplied fixed map.
@@ -394,32 +525,42 @@ class LightService:
         from .grid_maps import PreparedGrid
 
         supplied = raw if isinstance(raw, PreparedGrid) else PreparedGrid.build(raw)
+        with self.h.grid.read_scope():
+            ambient = scene_ambient_source(self.h, sid, scene, supplied)
+            return self._project_grid(sid, scene, package, supplied, ambient, cells=cells)
+
+    def _project_grid(self, sid, scene, package, supplied, ambient, *, cells=None):
+        """Compose explicit full-map or selected-cell output from the shared light sources."""
         grid = supplied.copy_data()
-        sources = self.sources(sid, scene, package)
-        if not sources:
+        sources = self._scene_sources(sid, scene, package, ambient)
+        self._apply_ambient(grid, sources.ambient)
+        if not sources.emitters:
             return grid, (), {}
         selected = (
             cells
             if cells is not None
-            else self._affected_light_cells(supplied.topology, supplied.data, sources)
+            else self._affected_light_cells(supplied.topology, supplied.data, sources.emitters)
         )
         uncertain, evidence = self._project_cells(
             sid, scene, package, supplied, sources, selected, grid["lighting"]
         )
         return grid, uncertain, evidence
 
-    def event_overlay(self, sid, scene, package, *, fixed_grid=None):
+    def event_overlay(self, sid, scene, package, *, fixed_grid=None, output_grid=None):
         """Capture stage-local light levels, uncertainty and sources for event evidence.
 
         Levels overlay the base grid's explicit lighting and default. Keep all cells
         in each source's reach, including cells whose light level equals the base.
         A source without an in-bounds origin can make any cell uncertain.
         """
-        sources = self.sources(sid, scene, package)
-        if not sources:
-            return {}, (), {}
         grid = fixed_grid or self.h.grid.reader.current_grid(sid, scene, package)
-        cells = self._affected_light_cells(grid.topology, grid.data, sources)
+        ambient = scene_ambient_source(self.h, sid, scene, grid)
+        sources = self._scene_sources(sid, scene, package, ambient)
+        if output_grid is not None:
+            self._apply_ambient(output_grid, sources.ambient)
+        if not sources.emitters:
+            return {}, (), {}
+        cells = self._affected_light_cells(grid.topology, grid.data, sources.emitters)
         levels = {}
         uncertain, evidence = self._project_cells(sid, scene, package, grid, sources, cells, levels)
         return levels, uncertain, evidence
@@ -439,8 +580,7 @@ class LightService:
         row_ranges = {}
         for source, origin in zip(sources, origins, strict=True):
             x, y = parse_cell(origin)
-            # The pinned GridTopology uses Chebyshev distance in feet.
-            radius = source["mode"].dim_outer_radius_ft // topology.cell_size_ft
+            radius = LightService._candidate_radius(source, topology.cell_size_ft)
             columns = (max(0, x - radius), min(width, x + radius + 1))
             for row in range(max(0, y - radius), min(height, y + radius + 1)):
                 row_ranges.setdefault(row, []).append(columns)
@@ -459,30 +599,55 @@ class LightService:
                 evidence[cell] = list(result.sources)
         return tuple(uncertain), evidence
 
-    def validate(self, row, actor, op, package):
-        """Validate actor, placement and capability for manual light operations."""
+    def validate_target(self, row, actor, op, package):
+        """Admit the reachable emitter and return its current object and light facts."""
         h, sid = self.h, row["session_id"]
         h._world_operation_capability(row, op)
         h._world_actor_ready(sid, actor)
         position = h._public_scope(sid, actor, package)
         if (position.scene_id, position.cell) != (op.scene_id, op.expected_cell):
             raise StateMachineError("position_conflict", "Actor position changed")
-        h.objects.containers.reachable(sid, actor, op.object_id, package)
-        c = self.config(row["session_id"], op.object_id)
+        obj = h.objects.containers.reachable(sid, actor, op.object_id, package)
+        c = self.config(sid, op.object_id)
         if c is None:
             raise StateMachineError(
                 "unsupported_object_capability", "Object has no light capability"
             )
         if h.facts.object_hp(sid, op.object_id) == 0:
             raise StateMachineError("object_destroyed", "Destroyed emitter is unusable")
+        return obj, c
+
+    def validate(self, row, actor, op, package):
+        """Validate the requested state change and calculate a pending fuel transition."""
+        _, c = self.validate_target(row, actor, op, package)
         if type(op) is not SetLightEnabled and op.mode not in {m.mode_id for m in c.modes}:
             raise StateMachineError("unsupported_light_mode", "Undeclared light mode")
+        if type(op) is SetLightEnabled and c.fuel_seconds is not None:
+            return self._plan_fuel(row["session_id"], op.object_id, op.enabled)
+        return None
+
+    def _plan_fuel(self, sid, oid, enabled):
+        """Plan pausing or resuming a metered lamp's remaining fuel."""
+        fuel = self.h.facts.light_fuel(sid, oid)
+        if fuel.expires_tick is not None:
+            if enabled:
+                return None
+            tick = self.h.facts.time_state(sid)[1]
+            return LightFuel(remaining_seconds=max(0, fuel.expires_tick - tick))
+        if fuel.remaining_seconds is None:
+            raise StateMachineError("incomplete_session", "Metered light is missing its fuel")
+        if not enabled:
+            return None
+        if fuel.remaining_seconds == 0:
+            raise StateMachineError("light_fuel_exhausted", "Light has no fuel remaining")
+        return LightFuel(expires_tick=self.h.time.seconds_deadline(sid, fuel.remaining_seconds))
 
     def operate(self, row, actor, op, package, *, origin=None):
         """Apply admitted light enabled/mode changes and capture their events."""
         h, sid = self.h, row["session_id"]
+        fuel = None
         if origin is None:
-            self.validate(row, actor, op, package)
+            fuel = self.validate(row, actor, op, package)
         else:
             h.objects.mechanisms.qualify_link(
                 sid, origin, op.object_id, "set_light_enabled", op.enabled, package
@@ -497,6 +662,8 @@ class LightService:
             raise StateMachineError("unsupported_light_mode", "Undeclared light mode")
         if old == {"enabled": enabled, "mode": mode}:
             return []
+        if origin is not None and c.fuel_seconds is not None:
+            fuel = self._plan_fuel(sid, op.object_id, enabled)
         payload = {
             **asdict(op),
             "actor_id": actor,
@@ -504,28 +671,32 @@ class LightService:
             "mode": mode,
             **({"execution": _execution_data(None, origin)} if origin else {}),
         }
-        events = [
-            h._capture_event(
-                sid,
-                package,
-                "object.light_changed",
-                payload,
-                phase="world.before_light_update",
-                source_actor_id=op.object_id,
-            )
-        ]
-        h.facts.set_light_state(sid, op.object_id, enabled, mode)
-        events.append(
-            h._capture_event(
-                sid,
-                package,
-                "object.light_changed",
-                payload,
-                phase="world.after_light_update",
-                source_actor_id=op.object_id,
-            )
+        return self._write_light_change(sid, package, "object.light_changed", payload, fuel)
+
+    def expire(self, sid, package, oid, mode, deadline):
+        """Extinguish the due emitter while applying the world-time boundary."""
+        payload = {
+            "scene_id": self.h.facts.placement(sid, oid)["scene_id"],
+            "object_id": oid,
+            "enabled": False,
+            "mode": mode,
+            "boundary_tick": deadline,
+        }
+        return self._write_light_change(
+            sid, package, "object.light_expired", payload, LightFuel(remaining_seconds=0)
         )
-        return events
+
+    def _write_light_change(self, sid, package, event, payload, fuel):
+        """Capture both stages around the shared object light mutation."""
+        h, oid = self.h, payload["object_id"]
+        before = h._capture_event(
+            sid, package, event, payload, phase="world.before_light_update", source_actor_id=oid
+        )
+        h.facts.set_light_state(sid, oid, payload["enabled"], payload["mode"], fuel=fuel)
+        after = h._capture_event(
+            sid, package, event, payload, phase="world.after_light_update", source_actor_id=oid
+        )
+        return [before, after]
 
     def query_area(self, sid, actor, cells, package, *, context, include_geometry=False):
         """Return illumination records in caller order after authorizing every cell.
@@ -575,7 +746,7 @@ class LightService:
                     "illumination": None if result.unknown else result.level,
                     "status": "unknown" if result.unknown else "known",
                     "contributing_sources": tuple(visible),
-                    "sunlight": prepared.data["sunlight"],
+                    "sunlight": result.sunlight,
                 }
                 if include_geometry:
                     record["geometry"] = (

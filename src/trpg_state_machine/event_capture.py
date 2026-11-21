@@ -58,6 +58,8 @@ class EventCapture:
             "mechanism.activated": "Someone activates a mechanism.",
             "mechanism.spent": "A mechanism completes its operation.",
             "object.light_changed": "Someone operates a light source.",
+            "object.light_expired": "A light goes out.",
+            "object.light_aimed": "Someone aims a light source.",
             "object.bar_changed": "Someone operates an object bar.",
             "object.jam_cleared": "Someone frees a stuck object.",
             "object.durability_changed": "An object is damaged.",
@@ -209,7 +211,7 @@ class EventCapture:
             if grid is not None and has_light_evidence:
                 fixed = self.world.maps.scene(sid, scene_id).grid if active else None
                 lighting, uncertainty, light_sources = self.lights.event_overlay(
-                    sid, scene_id, package, fixed_grid=fixed
+                    sid, scene_id, package, fixed_grid=fixed, output_grid=grid
                 )
                 grid["lighting"].update(lighting)
             topologies[scene_id] = topology

@@ -16,6 +16,7 @@ from .scoped_reads import scoped_read
 from .world_commands import (
     OPENABLE_CHECK_OPERATIONS,
     ActivateMechanism,
+    AimLight,
     BarObject,
     CheckMechanism,
     EquipArmor,
@@ -70,6 +71,8 @@ class WorldObjectService:
         if type(operation) in (SetLightEnabled, SwitchLightMode):
             self.lights.validate(row, actor_id, operation, package)
             return
+        if type(operation) is AimLight:
+            return self._light_aim_plan(row, actor_id, operation, package)
         if type(operation) is RepositionObject:
             self.spatial.validate_placement(row, actor_id, operation, package)
             return
@@ -135,6 +138,8 @@ class WorldObjectService:
             return self.mechanisms.operate(row, actor_id, operation, package, source_command_id)
         if type(operation) in (SetLightEnabled, SwitchLightMode):
             return self.lights.operate(row, actor_id, operation, package)
+        if type(operation) is AimLight:
+            return self._aim_light(row, actor_id, operation, package)
         if type(operation) is RepositionObject:
             return self.spatial.operate(row, actor_id, operation, package)
         if type(operation) in (PutItem, TakeItem):
@@ -198,6 +203,61 @@ class WorldObjectService:
         if type(operation) in (LockObject, UnlockObject):
             return self.openable.operate_lock(row, actor_id, operation, package)
         return self.openable.operate_bar(row, actor_id, operation, package)
+
+    def _light_aim_plan(self, row, actor, op, package):
+        """Admit an aimed light without bypassing placement of a spatial footprint."""
+        obj, light = self.lights.validate_target(row, actor, op, package)
+        if not light.directional:
+            raise StateMachineError(
+                "unsupported_object_capability", "The emitter has no aiming direction"
+            )
+        if obj["container_id"] is not None:
+            raise StateMachineError(
+                "invalid_target", "Remove the emitter from its container to aim"
+            )
+        spatial = self.spatial.config(row["session_id"], op.object_id)
+        if spatial is not None:
+            if obj["carrier_id"] is None:
+                raise StateMachineError(
+                    "unsupported_object_capability",
+                    "Use authorized placement to turn its footprint",
+                )
+            if op.direction not in spatial.allowed_orientations:
+                raise StateMachineError(
+                    "unsupported_object_orientation", "Direction is not allowed"
+                )
+        if obj["orientation"] != op.expected_direction:
+            raise StateMachineError("orientation_conflict", "Light direction changed")
+
+    def _aim_light(self, row, actor, op, package):
+        """Capture both sides of an admitted turn in the original World write scope."""
+        self._light_aim_plan(row, actor, op, package)
+        if op.direction == op.expected_direction:
+            return []
+        h, sid = self.handler, row["session_id"]
+        payload = {**asdict(op), "actor_id": actor}
+        events = [
+            h._capture_event(
+                sid,
+                package,
+                "object.light_aimed",
+                payload,
+                phase="world.before_light_aim",
+                source_actor_id=op.object_id,
+            )
+        ]
+        self.facts.orient(sid, op.object_id, op.direction)
+        events.append(
+            h._capture_event(
+                sid,
+                package,
+                "object.light_aimed",
+                payload,
+                phase="world.after_light_aim",
+                source_actor_id=op.object_id,
+            )
+        )
+        return events
 
     def _weapon_plan(self, row, actor_id, operation, package):
         """Plan the selected weapon and automatic grip from current hand occupancy."""

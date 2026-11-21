@@ -18,6 +18,7 @@ from pydantic import TypeAdapter
 
 from .errors import StateMachineError
 from .item_units import core_item_id, item_unit_from_row, valid_item_unit
+from .light_fuel import LightFuel
 from .package import canonical_json
 from .runtime_instances import (
     EQUIPMENT_SLOTS,
@@ -28,6 +29,7 @@ from .runtime_instances import (
     instance_read,
 )
 from .scoped_reads import scoped_read
+from .time_binding import deadline_after_seconds
 
 _EFFECTS = TypeAdapter(tuple[EffectState, ...])
 _EQUIPMENT_MIRRORS = ("worn_armor", "shield_equipped", "other_hand_occupied")
@@ -2072,10 +2074,23 @@ class WorldFacts:
                     (sid, d.object_id, "broken" if broken else c.initial_status, c.max_uses),
                 )
             if c := d.capability("light"):
+                fuel = LightFuel(remaining_seconds=c.fuel_seconds)
+                if c.initial_enabled and c.fuel_seconds is not None:
+                    fuel = LightFuel(
+                        expires_tick=deadline_after_seconds(*self.time_state(sid), c.fuel_seconds),
+                    )
                 self._conn.execute(
-                    "INSERT INTO object_lights VALUES (?,?,?,?) "
+                    "INSERT INTO object_lights(session_id,object_id,enabled,mode,"
+                    "fuel_remaining_seconds,fuel_expires_tick) VALUES (?,?,?,?,?,?) "
                     "ON CONFLICT(session_id,object_id) DO NOTHING",
-                    (sid, d.object_id, int(c.initial_enabled), c.initial_mode),
+                    (
+                        sid,
+                        d.object_id,
+                        int(c.initial_enabled),
+                        c.initial_mode,
+                        fuel.remaining_seconds,
+                        fuel.expires_tick,
+                    ),
                 )
             if c := d.capability("openable"):
                 self._conn.execute(
@@ -2143,15 +2158,49 @@ class WorldFacts:
         ).fetchone()
         return {"enabled": bool(row[0]), "mode": row[1]} if row else None
 
-    def set_light_state(self, sid, oid, enabled, mode):
-        """Validate and update the light switch or mode."""
-        self.store.require_write()
-        if self.light_state(sid, oid) is None or type(enabled) is not bool or type(mode) is not str:
+    @scoped_read
+    def light_fuel(self, sid, oid):
+        """Read paused fuel or the active deadline from the light's own row."""
+        row = self._conn.execute(
+            "SELECT fuel_remaining_seconds,fuel_expires_tick FROM object_lights "
+            "WHERE session_id=? AND object_id=?",
+            (sid, oid),
+        ).fetchone()
+        if row is None:
             raise StateMachineError("unsupported_object_capability", "No valid emitter state")
-        self._conn.execute(
-            "UPDATE object_lights SET enabled=?,mode=? WHERE session_id=? AND object_id=?",
-            (int(enabled), mode, sid, oid),
-        )
+        return LightFuel(*row)
+
+    def next_light_expiry(self, sid):
+        """Read the earliest active deadline via the Session's fuel index."""
+        return self._conn.execute(
+            "SELECT min(fuel_expires_tick) FROM object_lights "
+            "WHERE session_id=? AND fuel_expires_tick IS NOT NULL",
+            (sid,),
+        ).fetchone()[0]
+
+    def due_light(self, sid, tick):
+        """Read one due object identity and mode in stable deadline order."""
+        return self._conn.execute(
+            "SELECT object_id,mode,fuel_expires_tick FROM object_lights "
+            "WHERE session_id=? AND fuel_expires_tick<=? "
+            "ORDER BY fuel_expires_tick,object_id LIMIT 1",
+            (sid, tick),
+        ).fetchone()
+
+    def set_light_state(self, sid, oid, enabled, mode, *, fuel=None):
+        """Update light switch, mode and any fuel transition in the caller's write."""
+        self.store.require_write()
+        if type(enabled) is not bool or type(mode) is not str:
+            raise StateMachineError("unsupported_object_capability", "No valid emitter state")
+        fields, values = "enabled=?,mode=?", (int(enabled), mode)
+        if fuel is not None:
+            fields += ",fuel_remaining_seconds=?,fuel_expires_tick=?"
+            values += (fuel.remaining_seconds, fuel.expires_tick)
+        if not self._conn.execute(
+            f"UPDATE object_lights SET {fields} WHERE session_id=? AND object_id=?",
+            (*values, sid, oid),
+        ).rowcount:
+            raise StateMachineError("unsupported_object_capability", "No valid emitter state")
 
     def openable_state(self, sid, oid):
         """Read the object's jam and bar state."""
@@ -2231,6 +2280,14 @@ class WorldFacts:
             "UPDATE objects SET cell=?,orientation=COALESCE(?,orientation) "
             "WHERE session_id=? AND object_id=?",
             (cell, orientation, sid, object_id),
+        )
+
+    def orient(self, sid, object_id, orientation):
+        """Persist a validated direction without changing placement or ownership."""
+        self.store.require_write()
+        self._conn.execute(
+            "UPDATE objects SET orientation=? WHERE session_id=? AND object_id=?",
+            (orientation, sid, object_id),
         )
 
     def switch(self, sid, object_id, state, *, jam_policy="prevent_transitions"):

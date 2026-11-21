@@ -55,6 +55,7 @@ from .world_commands import (
     OPENABLE_CHECK_OPERATIONS,
     WORLD_CAPABILITY_COMMANDS,
     ActivateMechanism,
+    AimLight,
     BarObject,
     CheckMechanism,
     ClearJam,
@@ -144,6 +145,7 @@ class TypedCommand:
         | CheckMechanism
         | SetLightEnabled
         | SwitchLightMode
+        | AimLight
         | RepositionObject
         | PutItem
         | TakeItem
@@ -388,6 +390,9 @@ def validate_command(command: TypedCommand) -> None:
         ):
             if value is not None and value not in ("north", "east", "south", "west"):
                 raise StateMachineError("invalid_operation", "Invalid object orientation")
+        elif type(command.payload) is AimLight and key in ("expected_direction", "direction"):
+            if value not in ("north", "east", "south", "west"):
+                raise StateMachineError("invalid_operation", "Invalid light direction")
         elif key in ("value", "enabled"):
             if type(value) is not bool:
                 raise StateMachineError("invalid_operation", "Flag must be boolean")

@@ -5,6 +5,7 @@ from enum import StrEnum
 
 from .world_commands import (
     ActivateMechanism,
+    AimLight,
     BarObject,
     CheckMechanism,
     ClearJam,
@@ -151,6 +152,7 @@ type FoundationOperation = (
     | RepositionObject
     | SetLightEnabled
     | SwitchLightMode
+    | AimLight
     | EnterScene
     | SetSceneFlag
     | SetObjectState

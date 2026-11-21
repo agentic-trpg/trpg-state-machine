@@ -4,7 +4,7 @@ from dataclasses import dataclass
 from fractions import Fraction
 
 from .errors import StateMachineError
-from .time_binding import LegacyTimeBinding, TimeBinding, integer
+from .time_binding import LegacyTimeBinding, TimeBinding, deadline_after_seconds, integer
 
 
 @dataclass(frozen=True, slots=True)
@@ -167,11 +167,7 @@ class WorldTimeService:
 
     def seconds_deadline(self, session_id, seconds):
         """Internal consistent-snapshot conversion; caller owns admission/transaction."""
-        integer(seconds, "seconds", minimum=1)
-        binding, tick = self.facts.time_state(session_id)
-        if type(binding) is not TimeBinding:
-            raise StateMachineError("unsupported_time_protocol", "Seconds need world-time/1")
-        return integer(tick + seconds, "deadline")
+        return deadline_after_seconds(*self.facts.time_state(session_id), seconds)
 
     def boundaries(
         self, session_id, start_tick, end_tick, package, *, context, limit=100, after_tick=None

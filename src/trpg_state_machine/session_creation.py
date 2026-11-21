@@ -145,6 +145,11 @@ class SessionCreation:
             )
         if replay is not None:
             return replay
+        if selected_time is None and any(
+            (light := definition.capability("light")) is not None and light.fuel_seconds is not None
+            for definition in package.world_objects
+        ):
+            raise StateMachineError("unsupported_time_protocol", "Metered lights need world-time/1")
         if any(scene.daylight is not None for scene in package.scenes) and (
             selected_time is None or selected_time.cycle != "alternating"
         ):

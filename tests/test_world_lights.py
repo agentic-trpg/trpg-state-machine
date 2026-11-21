@@ -124,9 +124,9 @@ def test_illumination_area_filters_only_misses_and_keeps_source_disclosure(
             filtered.append((cells, len(sources)))
             return select(topology, sources, cells)
 
-        def count_compose(topology, uncertain, candidates, sources, cell):
+        def count_compose(topology, uncertain, candidates, sources, cell, **kwargs):
             composed.append((cell, tuple(source["object_id"] for source in sources)))
-            return illuminate(topology, uncertain, candidates, sources, cell)
+            return illuminate(topology, uncertain, candidates, sources, cell, **kwargs)
 
         monkeypatch.setattr(lights, "_sources_for_cells", count_filter)
         monkeypatch.setattr(lights, "_illuminate_cell", count_compose)
@@ -307,9 +307,9 @@ def test_carried_light_event_work_and_evidence_depend_on_radius(
     evaluated = []
     illuminate_cell = LightService._illuminate_cell
 
-    def count_cell(topology, uncertain_geometry, candidates, sources, cell):
+    def count_cell(topology, uncertain_geometry, candidates, sources, cell, **kwargs):
         evaluated.append(cell)
-        return illuminate_cell(topology, uncertain_geometry, candidates, sources, cell)
+        return illuminate_cell(topology, uncertain_geometry, candidates, sources, cell, **kwargs)
 
     initial_cells = [f"{x},{y}" for y in range(3) for x in range(3)]
     moved_cells = [f"{x},{y}" for y in range(3) for x in range(4)]

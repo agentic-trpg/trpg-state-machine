@@ -15,6 +15,13 @@ type Segment = tuple[Point, Point]
 type Bounds = tuple[float, float, float, float]
 type Polygon = tuple[Point, ...]
 
+_CARDINAL_VECTORS: dict[str, Point] = {
+    "north": (0, -1),
+    "east": (1, 0),
+    "south": (0, 1),
+    "west": (-1, 0),
+}
+
 
 @dataclass(frozen=True, slots=True)
 class _HalfPlane:
@@ -163,6 +170,36 @@ def clip_to_bounds(polygons: Iterable[Polygon], bounds: Bounds) -> tuple[Polygon
         clipped
         for polygon in polygons
         if polygon and _has_area(clipped := _clip_polygon(polygon, bounds))
+    )
+
+
+def clip_to_cone(
+    polygons: Iterable[Polygon],
+    origin: Point,
+    direction: str,
+    length: float,
+    *,
+    start: float = 0.0,
+) -> tuple[Polygon, ...]:
+    """Clip visible pieces to a cardinal cone band in continuous grid units.
+
+    Width equals the axial distance from the apex. The axial limits are measured
+    from that same apex. Merely touching a boundary does not illuminate an area.
+    """
+    if length <= start:
+        return ()
+    x, y = origin
+    dx, dy = _CARDINAL_VECTORS[direction]
+    planes = (
+        _HalfPlane(origin, (dx + 2 * dy, dy - 2 * dx)),
+        _HalfPlane(origin, (dx - 2 * dy, dy + 2 * dx)),
+        _HalfPlane((x + start * dx, y + start * dy), (dx, dy)),
+        _HalfPlane((x + length * dx, y + length * dy), (-dx, -dy)),
+    )
+    return tuple(
+        clipped
+        for polygon in polygons
+        if polygon and _has_area(clipped := _clip_to_planes(polygon, planes))
     )
 
 

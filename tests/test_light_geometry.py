@@ -4,6 +4,7 @@ import pytest
 
 from trpg_state_machine.light_geometry import (
     clip_to_bounds,
+    clip_to_cone,
     lit_polygons,
     shadow_intersects_interior,
 )
@@ -114,3 +115,40 @@ def test_possible_shadow_distinguishes_tiny_intersection_from_tangency():
     assert not shadow_intersects_interior(origin, polygons, (tangent,))
     assert shadow_intersects_interior(origin, polygons, (tangent, tiny))
     assert not shadow_intersects_interior(origin, lit_polygons(origin, bounds, (tiny,)), (tiny,))
+
+
+@pytest.mark.parametrize(
+    ("direction", "ahead", "behind"),
+    [
+        ("north", (0, -2), (0, 2)),
+        ("east", (2, 0), (-2, 0)),
+        ("south", (0, 2), (0, -2)),
+        ("west", (-2, 0), (2, 0)),
+    ],
+)
+def test_cone_rotates_with_facing_and_uses_disjoint_axial_bands(direction, ahead, behind):
+    origin = (0.5, 0.5)
+    visible = lit_polygons(origin, (-5, -5, 6, 6), ())
+
+    bright = clip_to_cone(visible, origin, direction, 2.5)
+    dim = clip_to_cone(visible, origin, direction, 4.5, start=2.5)
+    assert coverage_area(bright) == pytest.approx(0.5 * 2.5**2)
+    assert coverage_area(dim) == pytest.approx(0.5 * (4.5**2 - 2.5**2))
+    assert overlaps_cell(bright, *ahead)
+    assert not overlaps_cell(dim, *ahead)
+    assert not overlaps_cell(bright, *behind)
+    assert not overlaps_cell(dim, *behind)
+    assert clip_to_cone(visible, origin, direction, 2.5, start=2.5) == ()
+
+
+def test_cone_clips_existing_wall_shadows_and_ignores_edge_contact():
+    origin, bounds = (0.5, 0.5), (-1, -3, 5, 4)
+    wall = ((1.5, -0.1), (1.5, 0.6))
+    visible = lit_polygons(origin, bounds, (wall,))
+
+    cone = clip_to_cone(visible, origin, "east", 3.5)
+    assert not overlaps_cell(cone, 3, -1)
+    assert overlaps_cell(cone, 3, 1)
+    assert not overlaps_cell(cone, 4, 0)
+    assert not overlaps_cell(cone, -1, 0)
+    assert not overlaps_cell(cone, 1, 2)

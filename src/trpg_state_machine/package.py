@@ -940,13 +940,21 @@ def _validate(data: dict, *, allow_legacy_audit=False) -> AdventurePackage:
         if world_enabled
         else ()
     )
-    spatial_definitions = {d.object_id for d in world_objects if d.capability("spatial")}
+    oriented_objects = {
+        d.object_id
+        for d in world_objects
+        if d.capability("spatial") or ((light := d.capability("light")) and light.directional)
+    }
     if any(
-        o.initial_orientation != "north" and o.object_id not in spatial_definitions
+        o.initial_orientation != "north" and o.object_id not in oriented_objects
         for s in scenes
         for o in s.objects
     ):
-        _fail("invalid_reference", "scenes.objects", "Orientation requires spatial capability")
+        _fail(
+            "invalid_reference",
+            "scenes.objects",
+            "Orientation requires spatial or directional light capability",
+        )
     return AdventurePackage(
         adventure_id,
         version,

@@ -1,5 +1,17 @@
 # Session 时间协调实施记录
 
+## 2026-11-21 RUO-7 候选：普通灯具燃料
+
+`world_time_metered` 灯具声明正数 `fuel_seconds`，火把样例声明 3,600 秒。
+该配置只适用于 `world-time/1`。WorldObject 持有关闭时的剩余秒数或点亮时的绝对到期
+tick。开启和熄灭共用原灯具操作；关闭期间不耗油，到期后余额为零。场景首次实例化时，
+已点亮的灯具从当前 tick 开始消耗。未计量的场景灯具照常工作。
+
+Schema56 的部分索引按 Session 和到期 tick 查找燃烧的灯具，由 SessionTime 经已有
+WorldTime 在同一事务内熄灭。区域光照、灯具状态及到期前后事件证据随写入一起提交，
+保存后重开从实例事实恢复。没有配置专用同刻策略时，燃料在共同的确切到期 tick
+先结算，其他领域之间仍使用既有选择规则。
+
 ## 2026-11-16 EFFECT-01 候选：同一 game_tick 的持续效果期限
 
 Schema54 为 `ongoing_effects` 增加按 Session、到期 tick 和完整效果身份排序的索引。

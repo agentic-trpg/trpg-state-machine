@@ -113,10 +113,12 @@ class SessionTime:
         self.runtime, self.world, self.effects = runtime, world, effects
         self.store = runtime.store
         from .effect_time import EffectTimeConsumer
+        from .light_fuel import LightFuelTimeConsumer
 
         self.consumers = {
             "mechanisms": world.objects.mechanisms,
             "effects": EffectTimeConsumer(runtime, world),
+            "light_fuel": LightFuelTimeConsumer(world),
         }
         self.drivers = {}
         self.waits = TimeWaits(self)
@@ -209,6 +211,7 @@ class SessionTime:
             next_tick = target if nearest is None else min(target, max(current, nearest))
             staged_row = dict(row)
             staged_row["event_seq"] += len(events)
+            clock_events = self.world.time.advance(row, AdvanceGameTime(current, next_tick))
             events.extend(
                 self.effects._expand_events(
                     staged_row,
@@ -217,28 +220,38 @@ class SessionTime:
                         self.world._capture_event(
                             sid, package, kind, payload, phase="clock.after_advance"
                         )
-                        for kind, payload in self.world.time.advance(
-                            row, AdvanceGameTime(current, next_tick)
-                        )
+                        for kind, payload in clock_events
                     ],
                     command_id,
                 )
             )
             current = next_tick
-            due = [name for name, tick in boundaries if tick <= current]
+            due = {name: tick for name, tick in boundaries if tick <= current}
+            # Clock consequences may already have switched off the selected lamp.
+            if clock_events and "light_fuel" in due:
+                latest = self.consumers["light_fuel"].next_boundary(sid, package)
+                if latest is None or latest > current:
+                    del due["light_fuel"]
+                else:
+                    due["light_fuel"] = latest
             if not due:
+                if current < target:
+                    continue  # A cancelled boundary was an intermediate step.
                 break
-            if len(due) > 1:
-                chosen = (
-                    self.resolve_simultaneous(sid, tuple(due))
-                    if self.resolve_simultaneous
-                    else None
-                )
+            if len(due) == 1:
+                chosen = next(iter(due))
+            else:
+                if self.resolve_simultaneous is not None:
+                    chosen = self.resolve_simultaneous(sid, tuple(due))
+                elif "light_fuel" in due and min(due.values()) == current:
+                    # Mechanical fuel exhaustion settles at the shared exact tick.
+                    # Choices between any remaining domains keep their prior policy.
+                    chosen = "light_fuel"
+                else:
+                    chosen = None
                 if chosen not in due:
                     status, reason = "waiting", "simultaneous_time_choice"
                     break
-            else:
-                chosen = due[0]
             staged_row = dict(row)
             staged_row["event_seq"] += len(events)
             result = self.consumers[chosen].settle_one(staged_row, package, command_id)

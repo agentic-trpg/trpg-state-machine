@@ -5,6 +5,7 @@ from typing import Literal
 
 from .mechanism_models import Mechanism, MechanismAction, parse_mechanism
 from .package import _fail, _identifier, _list, _mapping, _reference, _text, _unique
+from .time_binding import MAX_TICK
 
 
 @dataclass(frozen=True, slots=True)
@@ -116,7 +117,7 @@ class SpatialObject:
 
 @dataclass(frozen=True, slots=True)
 class LightMode:
-    """Define one configured illumination mode."""
+    """Define bright and outer dim distance in feet, measured along a cone's axis."""
 
     mode_id: str
     bright_radius_ft: int | None
@@ -125,7 +126,7 @@ class LightMode:
 
 @dataclass(frozen=True, slots=True)
 class LightEmitter:
-    """Define a light instance's modes and enabled-state policy."""
+    """Define a light instance's modes, geometry and fuel policy."""
 
     modes: tuple[LightMode, ...]
     initial_enabled: bool
@@ -135,6 +136,12 @@ class LightEmitter:
     sunlight: bool
     fuel_policy: str
     kind: str = "light"
+    fuel_seconds: int | None = None
+
+    @property
+    def directional(self) -> bool:
+        """Whether the emission range follows the object's cardinal direction."""
+        return self.emission_shape == "grid_cone_static_los"
 
 
 @dataclass(frozen=True, slots=True)
@@ -266,23 +273,25 @@ def validate_world_objects(
                 continue
             if config.get("kind") == "light":
                 c = _mapping(
-                    config,
+                    {"fuel_seconds": None, **config},
                     "kind modes initial_enabled initial_mode emission_shape "
-                    "source_kind sunlight fuel_policy",
+                    "source_kind sunlight fuel_policy fuel_seconds",
                     p,
                 )
                 if (
-                    c["emission_shape"] != "grid_radius_static_los"
+                    c["emission_shape"] not in ("grid_radius_static_los", "grid_cone_static_los")
                     or c["source_kind"] != "scenario"
-                    or c["fuel_policy"] != "scenario_unmetered"
+                    or c["fuel_policy"] not in ("scenario_unmetered", "world_time_metered")
                     or c["sunlight"] is not False
                     or type(c["initial_enabled"]) is not bool
                 ):
-                    _fail(
-                        "unsupported_mechanism",
-                        p,
-                        "Only explicit ordinary unmetered scenario lights",
-                    )
+                    _fail("unsupported_mechanism", p, "Only explicit ordinary scenario lights")
+                fuel = c["fuel_seconds"]
+                if c["fuel_policy"] == "world_time_metered":
+                    if type(fuel) is not int or not 0 < fuel <= MAX_TICK:
+                        _fail("schema_error", p, "Metered fuel requires positive integer seconds")
+                elif fuel is not None:
+                    _fail("schema_error", p, "Unmetered lights cannot declare fuel seconds")
                 modes = []
                 for value in _list(c["modes"], p, nonempty=True):
                     mode = _mapping(value, "mode_id bright_radius_ft dim_outer_radius_ft", p)
@@ -617,8 +626,6 @@ def validate_world_objects(
         ):
             _fail("invalid_reference", p, "Locks require an openable capability")
         spatial = next((c for c in capabilities if c.kind == "spatial"), None)
-        if not spatial and objects[d["object_id"]].initial_orientation != "north":
-            _fail("invalid_reference", p, "Orientation requires spatial capability")
         if (
             spatial
             and d["object_id"] in {p.door_object_id for p in passages}

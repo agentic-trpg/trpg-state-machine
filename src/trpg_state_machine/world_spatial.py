@@ -179,10 +179,15 @@ class ObjectSpatialService:
         """Compute the complete object footprint from anchor and facing."""
         if sid is None:
             d = self.h.facts.template_object_definition(package, oid)
-            c = d.capability("spatial") if d else None
         else:
-            c = self.config(sid, oid)
-        if orientation not in (c.allowed_orientations if c else ("north",)):
+            d = self.h.facts.object_definition(sid, oid)
+        c = d.capability("spatial") if d else None
+        if c is not None:
+            allowed = c.allowed_orientations
+        else:
+            light = d.capability("light") if d else None
+            allowed = ORIENTATIONS if light and light.directional else ("north",)
+        if orientation not in allowed:
             raise StateMachineError("invalid_spatial_state", "Object orientation is not allowed")
         if anchor is None:
             return ()
