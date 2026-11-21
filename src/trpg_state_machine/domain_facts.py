@@ -2973,6 +2973,7 @@ class WorldFacts:
 
     def _replace_item_charge(self, sid, before, balance, due):
         """Compare and replace one instance's balance and pending dawn together."""
+        self.store.require_write()
         cursor = self._conn.execute(
             "UPDATE objects SET item_charges=?,item_recharge_due_tick=? "
             "WHERE session_id=? AND object_id=? AND item_slug=? AND item_charges=? "
