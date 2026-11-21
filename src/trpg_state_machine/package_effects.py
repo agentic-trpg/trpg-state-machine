@@ -49,6 +49,9 @@ class PackageEffects:
             event_type, payload = queue[index].event_type, queue[index].payload
             index += 1
             queue.extend(
+                self.world.magic.reconcile_world_event(row["session_id"], package, queue[index - 1])
+            )
+            queue.extend(
                 self.world.objects.mechanisms.automatic(
                     row,
                     package,

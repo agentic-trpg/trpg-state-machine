@@ -5,6 +5,7 @@ from dataclasses import asdict, replace
 
 from dnd5e_engine.evaluation_contracts import (
     CheckPayload,
+    ExplorationEnvironmentalSpellCastPayload,
     ExplorationItemUsePayload,
     ExplorationSpellCastPayload,
     ExplorationSpellPositions,
@@ -74,7 +75,10 @@ class RuleExecution:
         rules rejection. Exploration items and spells use the committed exploration tick.
         """
         exploration_item = type(command.payload) is ExplorationItemUsePayload
-        exploration_spell = type(command.payload) is ExplorationSpellCastPayload
+        environmental_spell = type(command.payload) is ExplorationEnvironmentalSpellCastPayload
+        exploration_spell = (
+            environmental_spell or type(command.payload) is ExplorationSpellCastPayload
+        )
         exploration_rule = exploration_item or exploration_spell
         rest = type(command.payload) in (LongRest, ShortRest)
         long_rest = type(command.payload) is LongRest
@@ -169,7 +173,12 @@ class RuleExecution:
                             ),
                         ),
                     )
-            if exploration_spell and prepare_error is None:
+            if environmental_spell and prepare_error is None:
+                spell_actor_ids = (command.actor_id,)
+                spell_positions = self.world.magic.cast_positions(row, package, command)
+                if spell_positions is None:
+                    prepare_error = "spell.target"
+            elif exploration_spell and prepare_error is None:
                 prepare_error, spell_actor_ids, spell_positions = self._spell_positions(
                     row, command
                 )
@@ -319,6 +328,11 @@ class RuleExecution:
                 self.runtime.version_conflict(row, command)
                 or changed_rest_plan
                 or (exploration_rule and current_exploration_error != initial_exploration_error)
+                or (
+                    environmental_spell
+                    and prepare_error is None
+                    and self.world.magic.cast_positions(row, package, command) != spell_positions
+                )
                 or (snapshot is not None and build_snapshot(row) != snapshot)
                 or self.rules._rng_context(row) != rng
             ):
@@ -388,6 +402,12 @@ class RuleExecution:
                                 sid, command.actor_id, place[0], command.command_id, start, target
                             )
                     self.rules._apply_dnd_changes(row, changes, command_id=command.command_id)
+                    spatial_effect_id, effects_events = None, []
+                    if environmental_spell:
+                        proposal = result.state_delta.operations[-1].value
+                        spatial_effect_id, effects_events = self.world.magic.apply(
+                            row, package, command.command_id, proposal
+                        )
                     # Failure consequences and automatic hooks both consume the
                     # original rule result's candidate RNG successor. Never
                     # overwrite a mechanism successor with this earlier state.
@@ -439,7 +459,14 @@ class RuleExecution:
                                     if type(command.payload) is CheckPayload or domain_check
                                     else {"item_instance_id": command.payload.instance_id}
                                     if exploration_item
-                                    else {"spell_id": command.payload.spell_id}
+                                    else {
+                                        "spell_id": command.payload.spell_id,
+                                        **(
+                                            {"effect_id": spatial_effect_id}
+                                            if environmental_spell
+                                            else {}
+                                        ),
+                                    }
                                     if exploration_spell
                                     else {
                                         "actor_id": command.actor_id,
@@ -464,6 +491,7 @@ class RuleExecution:
                         )
                         for event in result.proposed_events
                     ]
+                    events.extend(effects_events)
                     if mechanism_check:
                         events.extend(
                             self.world.objects.mechanisms.service(

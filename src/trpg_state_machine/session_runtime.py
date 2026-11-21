@@ -11,6 +11,7 @@ from dnd5e_engine.evaluation_contracts import (
     CheckPayload,
     CombatClosePayload,
     CombatIntentPayload,
+    ExplorationEnvironmentalSpellCastPayload,
     ExplorationItemUsePayload,
     ExplorationSpellCastPayload,
     ItemUsePayload,
@@ -49,6 +50,7 @@ def _fingerprint(command, digest, binding, context):
         CheckPayload,
         ItemUsePayload,
         ExplorationItemUsePayload,
+        ExplorationEnvironmentalSpellCastPayload,
         ExplorationSpellCastPayload,
     ):
         data["payload"] = command.payload.model_dump(mode="json")

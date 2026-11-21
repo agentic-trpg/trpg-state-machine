@@ -2,6 +2,7 @@
 
 from ._operations import (
     DropItem,
+    DropWorldConcentration,
     EnterScene,
     LockDoor,
     MoveActor,
@@ -57,6 +58,7 @@ from .service import StateMachine
 from .time_binding import LegacyTimeBinding, TimeBinding, time_binding_from_data
 from .world_commands import (
     ActivateMechanism,
+    AimLight,
     BarObject,
     CheckMechanism,
     ClearJam,
@@ -121,6 +123,7 @@ __all__ = [
     "CheckMechanism",
     "SetLightEnabled",
     "SwitchLightMode",
+    "AimLight",
     "RepositionObject",
     "PutItem",
     "TakeItem",
@@ -142,6 +145,7 @@ __all__ = [
     "UnlockDoor",
     "LockDoor",
     "DropItem",
+    "DropWorldConcentration",
     "PickupItem",
     "StartNavigation",
     "AdvanceNavigation",

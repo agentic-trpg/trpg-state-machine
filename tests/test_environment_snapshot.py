@@ -130,7 +130,9 @@ def test_a_projection_serves_b_without_claiming_same_environment(tmp_path, conte
         before = stored_rows(db)
 
         def query(cell):
-            return sm.environment.query_cell(sid, pc, A, cell, p, context=context)
+            return sm.environment.query_area(
+                sid, pc, A, EnvironmentArea((cell,)), p, context=context
+            )[0]
 
         a = query("3,3")
         assert query("3,3") == a
@@ -274,7 +276,10 @@ def test_open_damage_and_failed_damage_follow_current_provider_inputs(tmp_path, 
         with pytest.raises(RuntimeError), sm._transaction(write=True):
             sm._world.facts.apply_object_hp(sid, OBSTACLE, 10, 0)
             assert (
-                sm.environment.project_cell(sid, A, "1,0", p).ground_precipitation.status != "none"
+                sm.environment.project_area(sid, A, EnvironmentArea(("1,0",)), p)[
+                    0
+                ].ground_precipitation.status
+                != "none"
             )
             raise RuntimeError("failed adoption")
         assert project(sm, sid, p, "1,0").ground_precipitation.status == "none"
@@ -397,7 +402,7 @@ def test_command_candidate_queries_cannot_publish_on_failure(
         sizes = len(sm.environment._cells), len(sm.environment._projections)
 
         def fail(*a, **k):
-            candidate = sm.environment.project_cell(sid, A, "3,3", p)
+            candidate = sm.environment.project_area(sid, A, EnvironmentArea(("3,3",)), p)[0]
             assert value(candidate.temperature) == Temperature(-10)
             assert (len(sm.environment._cells), len(sm.environment._projections)) == sizes
             raise StateMachineError(failure, "injected after uncommitted projection")
@@ -420,7 +425,7 @@ def test_read_rollback_commit_failure_and_clear_cancel_publication(tmp_path, con
         seed(sm, sid, p, context)
         env = sm.environment
         with pytest.raises(RuntimeError), sm._transaction():
-            env.project_cell(sid, A, "3,3", p)
+            env.project_area(sid, A, EnvironmentArea(("3,3",)), p)[0]
             assert len(env._cells) == len(env._projections) == 0
             raise RuntimeError("aborted read")
         assert len(env._cells) == len(env._projections) == 0
@@ -436,12 +441,12 @@ def test_read_rollback_commit_failure_and_clear_cancel_publication(tmp_path, con
         sm._store._conn = FailCommit()
         try:
             with pytest.raises(StateMachineError), sm._transaction():
-                env.project_cell(sid, A, "3,3", p)
+                env.project_area(sid, A, EnvironmentArea(("3,3",)), p)[0]
         finally:
             sm._store._conn = connection
         assert len(env._cells) == len(env._projections) == 0
         with sm._transaction():
-            env.project_cell(sid, A, "3,3", p)
+            env.project_area(sid, A, EnvironmentArea(("3,3",)), p)[0]
             env.clear_snapshots()
         assert len(env._cells) == len(env._projections) == 0
         assert project(sm, sid, p, "3,3").ground_precipitation.status == "none"
@@ -462,9 +467,9 @@ def test_old_reader_cannot_replace_current_content_identity(tmp_path, context):
                 SetEnvironmentBase(A, Conditions(Temperature(-20))),
                 "new",
             )
-            assert value(sm.environment.project_cell(sid, A, "3,3", p).temperature) == Temperature(
-                8
-            )
+            assert value(
+                sm.environment.project_area(sid, A, EnvironmentArea(("3,3",)), p)[0].temperature
+            ) == Temperature(8)
         assert value(project(sm, sid, p, "3,3").temperature) == Temperature(-20)
         assert value(project(sm, sid, p, "3,3").temperature) == Temperature(-20)
 

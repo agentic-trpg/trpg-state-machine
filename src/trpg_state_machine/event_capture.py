@@ -58,6 +58,8 @@ class EventCapture:
             "mechanism.activated": "Someone activates a mechanism.",
             "mechanism.spent": "A mechanism completes its operation.",
             "object.light_changed": "Someone operates a light source.",
+            "object.light_expired": "A light goes out.",
+            "object.light_aimed": "Someone aims a light source.",
             "object.bar_changed": "Someone operates an object bar.",
             "object.jam_cleared": "Someone frees a stuck object.",
             "object.durability_changed": "An object is damaged.",
@@ -146,7 +148,7 @@ class EventCapture:
         return _StagedEvent(event_type, payload, signals, canonical_json(evidence), phase)
 
     def _event_perception_evidence(self, sid, package, signals, evidence):
-        """Signal-scoped capture at the calling producer's actual stage."""
+        """Capture signal-scoped evidence and stage-local illumination overrides."""
         scene_ids = {s.scope.scene_id for s in signals}
         if any(s.scope.kind != "scene" for s in signals):
             evidence["discovery"]["reason"] = "unsupported_scope"
@@ -201,23 +203,17 @@ class EventCapture:
         ).fetchone()
         state = self.store.memory.json(combat["state_json"]) if combat else None
         active = state is not None and not state["ended"]
+        has_light_evidence = evidence["schema"] == "event-evidence/6"
         topologies = {}
         for scene_id in sorted(scene_ids):
             grid, topology = self._perception_geometry(sid, scene_id)
             uncertainty, light_sources = (), {}
-            if (
-                grid is not None
-                and self.world.instances.session_value(sid, "evidence_schema") == "event-evidence/6"
-            ):
-                if active:
-                    grid, uncertainty, light_sources = self.lights.project(
-                        sid, scene_id, package, self.world.maps.scene(sid, scene_id).grid
-                    )
-                else:
-                    grid, uncertainty, light_sources = self.lights.current_project(
-                        sid, scene_id, package
-                    )
-                topology = topology.with_lighting(grid["lighting"])
+            if grid is not None and has_light_evidence:
+                fixed = self.world.maps.scene(sid, scene_id).grid if active else None
+                lighting, uncertainty, light_sources = self.lights.event_overlay(
+                    sid, scene_id, package, fixed_grid=fixed, output_grid=grid
+                )
+                grid["lighting"].update(lighting)
             topologies[scene_id] = topology
             evidence["scenes"][scene_id] = {
                 "grid": grid,
@@ -230,7 +226,7 @@ class EventCapture:
                     )
                 ),
             }
-            if self.world.instances.session_value(sid, "evidence_schema") == "event-evidence/6":
+            if has_light_evidence:
                 evidence["scenes"][scene_id]["light_uncertain_cells"] = list(uncertainty)
                 evidence["scenes"][scene_id]["lighting_sources"] = light_sources
         for actor in [*actors, *evidence["source_actors"]]:

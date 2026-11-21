@@ -64,6 +64,16 @@ def decode(value):
     return value
 
 
+def actor_light_opaque(store, sid, actor_id):
+    """Read the authored opacity flag from this Actor instance, if configured."""
+    row = store.connection.execute(
+        "SELECT config_json FROM instance_configs "
+        "WHERE session_id=? AND domain='actor' AND instance_id=?",
+        (sid, actor_id),
+    ).fetchone()
+    return row is not None and store.memory.json(row[0]).get("light_opaque") is True
+
+
 def passage_index(store, sid):
     """Shared World association; config mutations maintain its one validity stamp."""
 
@@ -212,7 +222,7 @@ class InstanceData:
             else value
         )
 
-    def initialize_world(self, sid, package):
+    def initialize_world(self, sid, package, *, spatial_light_evidence=False):
         """Materialize world creation references as Session instance configuration."""
         self.put(
             sid,
@@ -223,7 +233,9 @@ class InstanceData:
                 "passages": package.passages,
                 "navigation": package.navigation,
                 "evidence_schema": "event-evidence/6"
-                if any(d.capability("light") for d in package.world_objects)
+                if spatial_light_evidence
+                or any(d.capability("light") for d in package.world_objects)
+                or any(s.daylight is not None for s in package.scenes)
                 else "event-evidence/5"
                 if any(
                     s.grid_json or any(o.state is None for o in s.objects) for s in package.scenes
@@ -264,6 +276,7 @@ class InstanceData:
                     "exit_passages": scene.exit_passages,
                     "public_interactions": scene.public_interactions,
                     "grid_json": scene.grid_json,
+                    "daylight": scene.daylight,
                 },
             )
 
@@ -308,6 +321,7 @@ class InstanceData:
                     {
                         "actor_id": actor.actor_id,
                         "senses": actor.senses,
+                        "light_opaque": actor.light_opaque,
                     },
                 )
 
@@ -447,6 +461,25 @@ class InstanceData:
         """Construct a configuration view for the selected scene."""
         return SceneConfig(self, sid, dict(self._scene_data(sid, scene_id)))
 
+    @instance_read("scene", "lighting", "ambient_scope")
+    def scene_daylight(self, sid, scene_id):
+        """Load the selected scene's outdoor scope into its immutable runtime field."""
+        from .world_daylight import OutdoorLightScope
+
+        row = self.conn.execute(
+            "SELECT json_extract(config_json,'$.daylight') FROM instance_configs "
+            "WHERE session_id=? AND domain='scene' AND instance_id=?",
+            (sid, scene_id),
+        ).fetchone()
+        if row is None:
+            raise StateMachineError("incomplete_instance_config", "Missing scene configuration")
+        scope = row[0]
+        if scope is None:
+            return None
+        if scope == "scene":
+            return OutdoorLightScope(None)
+        return OutdoorLightScope(frozenset(decode(json.loads(scope))))
+
     @scoped_read
     def _scene_data(self, sid, scene_id):
         """Read core scene configuration, distinguishing unknown scenes from incomplete
@@ -454,7 +487,8 @@ class InstanceData:
         """
         row = self.conn.execute(
             "SELECT json_remove(config_json,'$.object_ids','$.actor_ids','$.actor_initial_ids',"
-            "'$.pending_objects','$.pending_actors','$.pending_definitions') FROM instance_configs "
+            "'$.pending_objects','$.pending_actors','$.pending_definitions','$.daylight') "
+            "FROM instance_configs "
             "WHERE session_id=? AND domain='scene' AND instance_id=?",
             (sid, scene_id),
         ).fetchone()

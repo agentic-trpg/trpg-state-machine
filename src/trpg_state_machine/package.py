@@ -30,6 +30,7 @@ OPENABLE_SCHEMA_VERSION = "state-machine-foundation/7"
 OBJECT_SPATIAL_SCHEMA_VERSION = "state-machine-foundation/8"
 MECHANISM_SCHEMA_VERSION = "state-machine-foundation/10"
 MAX_PACKAGE_BYTES = 1_048_576
+_MAX_SCENE_GRID_CELLS = 40_000
 _ID = re.compile(r"[a-z][a-z0-9_]*(?:\.[a-z][a-z0-9_]*)+")
 
 
@@ -104,6 +105,7 @@ class SceneDefinition:
     exit_passages: tuple[tuple[str, str], ...] = ()
     public_interactions: bool = False
     grid_json: str | None = None
+    daylight: str | tuple[str, ...] | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -117,6 +119,7 @@ class ActorDefinition:
     controller_kind: str = "scripted_event"
     npc_state: "NPCInitialState | None" = None
     initial_cell: str | None = None
+    light_opaque: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -130,6 +133,7 @@ class PCTemplate:
     resources: tuple[tuple[str, int], ...] = ()
     inventory: tuple[str, ...] = ()
     initial_cell: str | None = None
+    light_opaque: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -559,7 +563,9 @@ def _validate(data: dict, *, allow_legacy_audit=False) -> AdventurePackage:
         s = _mapping(
             value,
             "scene_id location_id description exits initial_state actor_ids objects "
-            "event_definition_ids access_policy" + (" grid" if interactions else ""),
+            "event_definition_ids access_policy"
+            + (" grid" if interactions else "")
+            + (" daylight" if isinstance(value, dict) and "daylight" in value else ""),
             path,
         )
         key = _identifier(s["scene_id"], path + ".scene_id", "scene")
@@ -576,6 +582,7 @@ def _validate(data: dict, *, allow_legacy_audit=False) -> AdventurePackage:
         _list(s["event_definition_ids"], path + ".event_definition_ids")
         initial = _mapping(s["initial_state"], "local_flags", path + ".initial_state")
         grid_json = _grid_config(s["grid"], path + ".grid") if interactions else None
+        daylight = _daylight_scope(s["daylight"], grid_json, path) if "daylight" in s else None
         exits, exit_passages = [], []
         for j, value in enumerate(_list(s["exits"], path + ".exits")):
             ex = _mapping(
@@ -643,6 +650,7 @@ def _validate(data: dict, *, allow_legacy_audit=False) -> AdventurePackage:
                 tuple(exit_passages),
                 s["access_policy"] == "public_interactions",
                 grid_json,
+                daylight,
             )
         )
     scene_ids = {s.scene_id for s in scenes}
@@ -694,6 +702,8 @@ def _validate(data: dict, *, allow_legacy_audit=False) -> AdventurePackage:
             fields += " npc_state"
         if interactions:
             fields += " initial_cell"
+            if isinstance(value, dict) and "light_opaque" in value:
+                fields += " light_opaque"
         a = _mapping(value, fields, path)
         key = _identifier(a["actor_id"], path + ".actor_id", "npc")
         initial_scene = _identifier(a["initial_scene_id"], path + ".initial_scene_id", "scene")
@@ -727,6 +737,7 @@ def _validate(data: dict, *, allow_legacy_audit=False) -> AdventurePackage:
                     next(s for s in scenes if s.scene_id == initial_scene).grid_json,
                     path,
                 ),
+                light_opaque=_actor_light_opaque(a, path),
             )
         )
     _unique([a.actor_id for a in actors], "actors")
@@ -753,9 +764,12 @@ def _validate(data: dict, *, allow_legacy_audit=False) -> AdventurePackage:
     templates = []
     for i, value in enumerate(_list(root["pc_templates"], "pc_templates", nonempty=True)):
         path = f"pc_templates[{i}]"
-        pc = _mapping(
-            value, "pc_template_id name character" + (" initial_cell" if interactions else ""), path
-        )
+        fields = "pc_template_id name character"
+        if interactions:
+            fields += " initial_cell"
+            if isinstance(value, dict) and "light_opaque" in value:
+                fields += " light_opaque"
+        pc = _mapping(value, fields, path)
         key = _identifier(pc["pc_template_id"], path + ".pc_template_id", "pc_template")
         char = _mapping(pc["character"], "hp resources inventory", path + ".character")
         hp = _mapping(char["hp"], "current max", path + ".character.hp")
@@ -801,6 +815,7 @@ def _validate(data: dict, *, allow_legacy_audit=False) -> AdventurePackage:
                     next(s for s in scenes if s.scene_id == entry).grid_json,
                     path,
                 ),
+                light_opaque=_actor_light_opaque(pc, path),
             )
         )
     _unique([pc.pc_template_id for pc in templates], "pc_templates")
@@ -934,13 +949,21 @@ def _validate(data: dict, *, allow_legacy_audit=False) -> AdventurePackage:
         if world_enabled
         else ()
     )
-    spatial_definitions = {d.object_id for d in world_objects if d.capability("spatial")}
+    oriented_objects = {
+        d.object_id
+        for d in world_objects
+        if d.capability("spatial") or ((light := d.capability("light")) and light.directional)
+    }
     if any(
-        o.initial_orientation != "north" and o.object_id not in spatial_definitions
+        o.initial_orientation != "north" and o.object_id not in oriented_objects
         for s in scenes
         for o in s.objects
     ):
-        _fail("invalid_reference", "scenes.objects", "Orientation requires spatial capability")
+        _fail(
+            "invalid_reference",
+            "scenes.objects",
+            "Orientation requires spatial or directional light capability",
+        )
     return AdventurePackage(
         adventure_id,
         version,
@@ -966,7 +989,7 @@ def _validate(data: dict, *, allow_legacy_audit=False) -> AdventurePackage:
 
 
 def _grid_config(raw, path):
-    """Validate and normalize mechanical grid configuration."""
+    """Validate and normalize a GC-1 grid of up to 40,000 cells per Scene."""
     if raw is None:
         return None
     from dnd5e_engine.evaluation_state import MechanicalGrid
@@ -977,11 +1000,41 @@ def _grid_config(raw, path):
         # Closed upstream schema plus its canonical geometry validation.
         grid = MechanicalGrid.model_validate_json(canonical_json(raw))
         GridScene(**grid.model_dump())
-        if grid.width * grid.height > 4096:
-            _fail("unsupported_mechanism", path, "GC-1 supports at most 4096 cells per Scene")
+        if grid.width * grid.height > _MAX_SCENE_GRID_CELLS:
+            _fail(
+                "unsupported_mechanism",
+                path,
+                f"GC-1 supports at most {_MAX_SCENE_GRID_CELLS:,} cells per Scene",
+            )
         return grid.model_dump_json()
     except (ValidationError, ValueError, TypeError) as exc:
         _fail("schema_error", path, f"Invalid mechanical grid: {type(exc).__name__}")
+
+
+def _daylight_scope(raw, grid_json, path):
+    """Validate authored outdoor cells against the scene's normalized mechanical grid."""
+    from dnd5e_engine.spatial import canonical_cell_id, parse_cell
+
+    path += ".daylight"
+    if grid_json is None:
+        _fail("invalid_reference", path, "Daylight requires a mechanical grid")
+    grid = json.loads(grid_json)
+    if grid["sunlight"]:
+        _fail("schema_error", path, "Daylight requires grid.sunlight=false")
+    if raw == "scene":
+        return raw
+    cells = _list(raw, path, nonempty=True)
+    for cell in cells:
+        try:
+            if type(cell) is not str or canonical_cell_id(cell) != cell:
+                raise ValueError("Noncanonical cell")
+            x, y = parse_cell(cell)
+            if not (0 <= x < grid["width"] and 0 <= y < grid["height"]):
+                raise ValueError("Cell outside grid")
+        except (ValueError, TypeError):
+            _fail("invalid_reference", path, "Expected canonical cells in the scene grid")
+    _unique(cells, path)
+    return tuple(cells)
 
 
 def _initial_cell(cell, grid_json, path, *, standing=True):
@@ -1005,6 +1058,14 @@ def _initial_cell(cell, grid_json, path, *, standing=True):
     except (ValueError, TypeError):
         _fail("invalid_reference", path, "Expected a canonical cell in this Scene's grid")
     return cell
+
+
+def _actor_light_opaque(definition, path):
+    """Read the opt-in opacity of an actor's existing occupied cell."""
+    opaque = definition.get("light_opaque", False)
+    if type(opaque) is not bool:
+        _fail("schema_error", path + ".light_opaque", "Light opacity must be a boolean")
+    return opaque
 
 
 def _spatial_initial_consistency(scenes, actors, templates, entry):

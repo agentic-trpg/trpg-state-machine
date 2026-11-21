@@ -150,6 +150,17 @@ class SwitchLightMode:
 
 
 @dataclass(frozen=True, slots=True)
+class AimLight:
+    """Turn a directional light using the actor's position and current aiming direction."""
+
+    scene_id: str
+    object_id: str
+    expected_cell: str
+    expected_direction: str
+    direction: str
+
+
+@dataclass(frozen=True, slots=True)
 class ActivateMechanism:
     """Request a configured manual mechanism operation."""
 
@@ -220,6 +231,7 @@ WORLD_CAPABILITY_COMMANDS = {
     "world.check_mechanism": CheckMechanism,
     "world.set_light_enabled": SetLightEnabled,
     "world.switch_light_mode": SwitchLightMode,
+    "world.aim_light": AimLight,
     "world.reposition_object": RepositionObject,
     "world.put_item": PutItem,
     "world.take_item": TakeItem,
@@ -253,6 +265,7 @@ WORLD_CAPABILITY_OPERATIONS = (
     RepositionObject,
     SetLightEnabled,
     SwitchLightMode,
+    AimLight,
     ActivateMechanism,
     ServiceMechanism,
     CheckMechanism,

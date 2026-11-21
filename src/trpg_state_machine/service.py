@@ -461,10 +461,12 @@ class StateMachine(
         """Delegate reading the actor's own position."""
         return self._world.read_actor_position(session_id, actor_id, package, context=context)
 
-    def get_illumination(self, session_id, actor_id, cell, package, *, context):
-        """Delegate authorized cell illumination querying to the light service."""
-        return self._objects.lights.query_illumination(
-            session_id, actor_id, cell, package, context=context
+    def get_illumination_area(
+        self, session_id, actor_id, cells, package, *, context, include_geometry=False
+    ):
+        """Read 1–256 authorized cells in order, optionally including lit polygons."""
+        return self._objects.lights.query_area(
+            session_id, actor_id, cells, package, context=context, include_geometry=include_geometry
         )
 
     def get_object(self, session_id, actor_id, object_id, package, *, context):

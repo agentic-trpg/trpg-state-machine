@@ -5,12 +5,14 @@ must never be passed to the Engine or perception as a mechanical Grid.
 """
 
 from dataclasses import dataclass, replace
+from typing import NamedTuple
 
 from dnd5e_engine.evaluation_state import InventoryEntry
 
 from ._execution import _execution_data
 from ._operations import (
     DropItem,
+    DropWorldConcentration,
     EnterScene,
     FoundationOperation,
     LockDoor,
@@ -27,6 +29,7 @@ from .environment_commands import ENVIRONMENT_OPERATIONS
 from .errors import StateMachineError
 from .game_time import AdvanceGameTime
 from .grid import GridService, cell_in_bounds
+from .grid_maps import ReadOnlyTopology
 from .models import TrustedContext
 from .package import AdventurePackage
 from .scoped_reads import scoped_read
@@ -39,6 +42,18 @@ class SpatialPosition:
 
     scene_id: str
     cell: str | None
+
+
+class ObserverVisibility(NamedTuple):
+    """Prepare ordinary sight from one observer's position and target-cell lighting."""
+
+    position: SpatialPosition
+    topology: ReadOnlyTopology
+    extent: tuple[int, int]
+
+    def can_see(self, cell: str | None) -> bool:
+        """Check a target cell using the existing topology and ordinary sight."""
+        return self.topology.can_see(self.position.cell, cell)
 
 
 @dataclass(frozen=True, slots=True)
@@ -133,8 +148,10 @@ class WorldHandler:
         )
 
         from .environment import EnvironmentService
+        from .world_magic import WorldMagic
 
         self.environment = EnvironmentService(self)
+        self.magic = WorldMagic(self)
         self.capture.lights = self.objects.lights
 
     @property
@@ -196,7 +213,7 @@ class WorldHandler:
                 or self.characters.effects.has_linked_conditions(
                     sid, actor_id, capability="movement" if movement else None
                 )
-                or self.characters.effects.has_concentration(sid, actor_id)
+                or self.characters.effects.has_concentration(sid, actor_id, actor_effect_only=True)
             )
         ):
             raise StateMachineError(
@@ -256,27 +273,35 @@ class WorldHandler:
         return position
 
     def _prepare_visible_targets(self, sid, actor_id, package, *, cells=None):
-        """Prepare actor position, topology and dimensions once for target visibility
-        checks.
-        """
+        """Check public scope and prepare sight once for the requested targets."""
         position = self._public_scope(sid, actor_id, package)
+        return self._prepare_visibility(sid, position, package, cells=cells)
+
+    def _prepare_visibility(self, sid, position, package, *, cells=None):
+        """Prepare ordinary sight for an authorized position in the current read scope."""
         topology, extent = self.grid.base_topology(
-            sid, position.scene_id, package, with_extent=True, cells=cells
+            sid,
+            position.scene_id,
+            package,
+            with_extent=True,
+            cells=cells,
+            observer_cell=position.cell,
         )
-        return position, topology, extent
+        return ObserverVisibility(position, topology, extent)
 
     def _visible_target(self, sid, actor_id, cell, package, *, prepared=None):
         """Check target cell bounds and actual visibility."""
-        position, topology = (
+        visibility = (
             self._prepare_visible_targets(sid, actor_id, package, cells=(cell,))
             if prepared is None
             else prepared
-        )[:2]
+        )
+        position, topology = visibility.position, visibility.topology
         if not cell_in_bounds(topology, cell) or not cell_in_bounds(topology, position.cell):
             raise StateMachineError(
                 "invalid_spatial_state", "Position is missing or outside its map"
             )
-        if not topology.can_see(position.cell, cell):
+        if not visibility.can_see(cell):
             raise StateMachineError(
                 "unsupported_target_visibility", "Target authorization is unproven"
             )
@@ -531,7 +556,7 @@ class WorldHandler:
         )
 
     def _manual_object_target(self, sid, actor_id, operation, package, *, navigation_scope=None):
-        """A shared door is addressed at this actor's port, never at a foreign Cell."""
+        """Return the target's scene/state/cell and any admitted local door passage."""
         position = self._actor_position(sid, actor_id)
         if operation.scene_id != position.scene_id:
             raise StateMachineError("invalid_target", "Interaction must be in the actor's scene")
@@ -540,22 +565,19 @@ class WorldHandler:
         if fine:
             self._world_actor_ready(sid, actor_id, navigation_scope=navigation_scope)
             self._public_scope(sid, actor_id, package)
-        obj = self._conn.execute(
-            "SELECT scene_id,state,cell FROM objects WHERE session_id=? AND object_id=?",
-            (sid, operation.object_id),
-        ).fetchone()
+        obj = self.facts.object(sid, operation.object_id)
         if obj is None:
             raise StateMachineError("invalid_target", "No authorized local object")
-        full = self.facts.object(sid, operation.object_id)
-        if full["container_id"] is not None or full["carrier_id"] is not None:
+        target = (obj["scene_id"], obj["state"], obj["cell"])
+        if obj["container_id"] is not None or obj["carrier_id"] is not None:
             self.objects.containers.reachable(sid, actor_id, operation.object_id, package)
-            return obj, None
+            return target, None
         ports = self._door_ports(position.scene_id, operation.object_id, package, sid=sid)
         if ports:
-            base = self.grid.base_topology(
-                sid, position.scene_id, package, cells=tuple(e.threshold_cell for _, e in ports)
+            sight = self._prepare_visibility(
+                sid, position, package, cells=tuple(e.threshold_cell for _, e in ports)
             )
-            visible = [(p, e) for p, e in ports if base.can_see(position.cell, e.threshold_cell)]
+            visible = [(p, e) for p, e in ports if sight.can_see(e.threshold_cell)]
             if not visible:
                 raise StateMachineError("invalid_target", "No authorized local door")
             matches = [(p, e) for p, e in visible if e.standing_cell == position.cell]
@@ -576,16 +598,16 @@ class WorldHandler:
                     handled_thresholds=handled,
                 )
                 if topology.edge_distance(position.cell, endpoint.threshold_cell) is not None:
-                    return obj, passage
+                    return target, passage
             raise StateMachineError("object_out_of_reach", "Door requires clear adjacent reach")
         actor = self._conn.execute(
             "SELECT kind FROM actors WHERE session_id=? AND actor_id=?", (sid, actor_id)
         ).fetchone()
-        if (actor[0] != "pc" and definition is None) or obj[0] != position.scene_id:
+        if (actor[0] != "pc" and definition is None) or obj["scene_id"] != position.scene_id:
             raise StateMachineError("invalid_target", "No authorized local switch")
         if fine:
             self._validate_switch_range(sid, actor_id, operation, package)
-        return obj, None
+        return target, None
 
     def _validate_switch_range(self, sid, actor_id, operation, package):
         """Check actor readiness and touching cells for the switch target."""
@@ -783,7 +805,7 @@ class WorldHandler:
             return WorldActionAvailability("available", "available", row["world_version"])
 
     def get_spatial_view(self, session_id, actor_id, package, *, context):
-        """Authorize and construct the current spatial view, objects and exits."""
+        """Read authorized objects, exits and doors at one version using target-cell light."""
         with self._transaction():
             self._spatial_reader(session_id, actor_id, package, context)
             if self._active_combat(session_id):
@@ -791,14 +813,33 @@ class WorldHandler:
                     "unsupported_spatial_view", "Active combat needs its perception adapter"
                 )
             position = self._public_scope(session_id, actor_id, package)
-            topology = self.grid.base_topology(session_id, position.scene_id, package)
-            objects = []
-            for obj in self._conn.execute(
+            scene_id = position.scene_id
+            object_rows = self._conn.execute(
                 "SELECT object_id,cell FROM objects WHERE session_id=? AND scene_id=? "
                 "ORDER BY object_id",
-                (session_id, position.scene_id),
-            ):
-                if topology.can_see(position.cell, obj[1]):
+                (session_id, scene_id),
+            ).fetchall()
+            passages = self.facts.instances.passages(session_id, scene_id=scene_id)
+            endpoints = {
+                p.passage_id: tuple(e for e in p.endpoints if e.scene_id == scene_id)
+                for p in passages
+            }
+            exit_targets = tuple(
+                (target, pid, e)
+                for target, pid in self.facts.instances.scene(session_id, scene_id).exit_passages
+                for e in endpoints.get(pid, ())
+            )
+            door_targets = tuple(
+                (p, e) for p in passages if p.door_object_id for e in endpoints[p.passage_id]
+            )
+            cells = [obj[1] for obj in object_rows if obj[1] is not None]
+            cells.extend(e.standing_cell for _, _, e in exit_targets)
+            cells.extend(e.threshold_cell for _, e in door_targets)
+            sight = self._prepare_visibility(session_id, position, package, cells=cells)
+            visible = frozenset(cell for cell in dict.fromkeys(cells) if sight.can_see(cell))
+            objects = []
+            for obj in object_rows:
+                if obj[1] in visible:
                     definition = self.facts.instances.legacy_object(session_id, obj[0])
                     blocking = self.objects.spatial.blocks(session_id, obj[0], package)
                     objects.append(
@@ -811,14 +852,8 @@ class WorldHandler:
                     )
             exits = tuple(
                 (target, pid, e.standing_cell, e.threshold_cell)
-                for target, pid in self.facts.instances.scene(
-                    session_id, position.scene_id
-                ).exit_passages
-                for p in self.facts.instances.passages(session_id, scene_id=position.scene_id)
-                if p.passage_id == pid
-                for e in p.endpoints
-                if e.scene_id == position.scene_id
-                and topology.can_see(position.cell, e.standing_cell)
+                for target, pid, e in exit_targets
+                if e.standing_cell in visible
             )
             doors = tuple(
                 SpatialDoor(
@@ -832,11 +867,8 @@ class WorldHandler:
                     e.threshold_cell,
                     self.objects.openable.lock_status(session_id, p.door_object_id, package),
                 )
-                for p in self.facts.instances.passages(session_id, scene_id=position.scene_id)
-                if p.door_object_id
-                for e in p.endpoints
-                if e.scene_id == position.scene_id
-                and topology.can_see(position.cell, e.threshold_cell)
+                for p, e in door_targets
+                if e.threshold_cell in visible
             )
             version = self._conn.execute(
                 "SELECT world_version FROM sessions WHERE session_id=?", (session_id,)
@@ -904,8 +936,23 @@ class WorldHandler:
 
     def _spatial_combat_guard(self, sid, scene_id, package):
         """Check whether current spatial state supports entering combat."""
+        if self.magic.has_other_scene_concentration(sid):
+            raise StateMachineError(
+                "unsupported_combat_dynamic_lighting",
+                "Active exploration concentration needs combat integration",
+            )
         if self._spatial_scene(sid, scene_id) is None:
             return
+        if self.facts.instances.scene_daylight(sid, scene_id) is not None:
+            raise StateMachineError(
+                "unsupported_combat_dynamic_lighting",
+                "Outdoor daylight needs combat integration",
+            )
+        if self.magic.has_scene_effects(sid, scene_id):
+            raise StateMachineError(
+                "unsupported_combat_dynamic_lighting",
+                "Active exploration light effects need combat integration",
+            )
         if self.objects.lights.sources(sid, scene_id, package):
             raise StateMachineError(
                 "unsupported_combat_dynamic_lighting",
@@ -1043,6 +1090,8 @@ class WorldHandler:
         # Container transfers check world capability in their shared validator.
         if type(operation) not in (PutItem, TakeItem):
             self._world_operation_capability(row, operation)
+        if type(operation) is DropWorldConcentration:
+            return self.magic.drop_concentration(row["session_id"], actor_id, package)
         if type(operation) in ENVIRONMENT_OPERATIONS:
             return self.environment.operate(row, operation, package)
         if type(operation) in WORLD_CAPABILITY_OPERATIONS:

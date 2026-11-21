@@ -75,7 +75,9 @@ def gm(context):
 
 def project(sm, sid, package, cell="2,1", *, scene=A, height=None):
     with sm._transaction():
-        return sm.environment.project_cell(sid, scene, cell, package, height_ft=height)
+        return sm.environment.project_area(
+            sid, scene, EnvironmentArea((cell,)), package, height_ft=height
+        )[0]
 
 
 def value(field):
@@ -102,7 +104,9 @@ def test_controlled_initialization_public_queries_and_no_writes(tmp_path, contex
         pc = sm.read_session(sid, p, context=context).pc_actor_id
         sm._conn.execute("PRAGMA query_only=ON")
         try:
-            result = sm.environment.query_cell(sid, pc, A, "2,1", p, context=context)
+            result = sm.environment.query_area(
+                sid, pc, A, EnvironmentArea(("2,1",)), p, context=context
+            )[0]
             assert result.temperature.status == result.wind.status == "unconfigured"
             assert sm.environment.read_facts(sid, B, p, context=gm(context)) is None
             assert sm.environment.query_unit(sid, pc, p, context=context).status == "missing_input"
@@ -118,7 +122,9 @@ def test_controlled_initialization_public_queries_and_no_writes(tmp_path, contex
         before, count = stored_rows(db), sm._conn.total_changes
         sm._conn.execute("PRAGMA query_only=ON")
         try:
-            result = sm.environment.query_cell(sid, pc, A, "2,1", p, context=context, height_ft=3)
+            result = sm.environment.query_area(
+                sid, pc, A, EnvironmentArea(("2,1",)), p, context=context, height_ft=3
+            )[0]
             assert value(result.temperature) == Temperature(8)
             assert value(result.precipitation) == RAIN
             assert result.ground_precipitation.status == "unknown"  # shelter unconfigured
@@ -647,7 +653,7 @@ def test_visibility_and_query_budgets_reject_without_writes(tmp_path, context):
         pc = sm.read_session(sid, p, context=context).pc_actor_id
         before = stored_rows(db)
         with pytest.raises(StateMachineError):
-            sm.environment.query_cell(sid, pc, A, "2,1", p, context=context)
+            sm.environment.query_area(sid, pc, A, EnvironmentArea(("2,1",)), p, context=context)[0]
         with pytest.raises(StateMachineError) as bounded:
             sm.environment.query_area(sid, pc, A, EnvironmentArea(), p, context=context)
         assert bounded.value.code == "invalid_environment"
@@ -670,7 +676,9 @@ def test_hidden_vertical_source_cannot_disclose_height_boundaries(tmp_path, cont
         )
         assert tuple(segment.heights for segment in hidden_range) == (HeightInterval(0, 6),)
         assert all(segment.environment.temperature.status == "unknown" for segment in hidden_range)
-        public = sm.environment.query_cell(sid, pc, A, "0,0", p, context=context, height_ft=3)
+        public = sm.environment.query_area(
+            sid, pc, A, EnvironmentArea(("0,0",)), p, context=context, height_ft=3
+        )[0]
         assert public.temperature.status == "unknown" and public.temperature.contributions == ()
         assert "script.secret" not in repr(public)
         assert stored_rows(db) == before
@@ -789,7 +797,9 @@ def test_effect_fixture_moves_ends_and_preserves_natural_fog_without_persistence
         result = project(sm, sid, p)
         assert {c.value.density for c in result.obscurant.contributions} == {"thin", "dense"}
         pc = sm.read_session(sid, p, context=context).pc_actor_id
-        public = sm.environment.query_cell(sid, pc, A, "2,1", p, context=context)
+        public = sm.environment.query_area(
+            sid, pc, A, EnvironmentArea(("2,1",)), p, context=context
+        )[0]
         assert public.obscurant.status == "unknown" and public.obscurant.contributions == ()
         assert "spell.secret" not in repr(public)
         provider.current = (
@@ -819,13 +829,17 @@ def test_public_authorization_scope_visibility_height_and_package_pin(tmp_path, 
             (pc, A, replace(context, player_id="other")),
         ):
             with pytest.raises(StateMachineError):
-                sm.environment.query_cell(sid, actor, scene, "2,1", p, context=ctx)
+                sm.environment.query_area(
+                    sid, actor, scene, EnvironmentArea(("2,1",)), p, context=ctx
+                )[0]
         with pytest.raises(StateMachineError):
             sm.environment.read_facts(sid, A, p, context=context)
         changed = large_data()
         changed["manifest"]["title"] += " changed"
         with pytest.raises(StateMachineError) as pin:
-            sm.environment.query_cell(sid, pc, A, "2,1", _validate(changed), context=context)
+            sm.environment.query_area(
+                sid, pc, A, EnvironmentArea(("2,1",)), _validate(changed), context=context
+            )[0]
         assert pin.value.code == "package_digest_mismatch"
         with pytest.raises(StateMachineError):
             sm.environment.query_area(sid, pc, A, EnvironmentArea(("99,99",)), p, context=context)

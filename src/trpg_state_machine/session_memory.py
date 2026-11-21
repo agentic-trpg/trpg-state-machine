@@ -626,8 +626,8 @@ class SessionMemory:
                     "weight_invalidations" if domain == "weight" else "mechanism_invalidations"
                 ] += 1
 
-    def _light_profile(self, row, config=None, hp=None):
-        """Only the changed object's static inputs, never a Scene catalogue."""
+    def _light_profile(self, row, config=None, hp=...):
+        """Compare one object's ground geometry and effective shared-door closure."""
         if row is None:
             return None, None
         sid, oid = row["session_id"], row["object_id"]
@@ -644,30 +644,36 @@ class SessionMemory:
             for c in (definition["fields"]["capabilities"]["tuple"] if definition else ())
         }
         spatial = capabilities.get("SpatialObject")
-        blocked = row["state"] == "closed"
-        if spatial is not None:
-            if hp is None:
-                durability = self.select(
+        durability = capabilities.get("Durability")
+        destroyed = False
+        if durability and durability["destruction_policy_ref"] == "disable_spatial_policy":
+            if hp is ...:
+                persisted = self.select(
                     "SELECT current_hp FROM object_durability WHERE session_id=? AND object_id=?",
                     (sid, oid),
                 ).fetchone()
-                hp = durability[0] if durability else None
-            destroyed = hp == 0 and any(
-                c.get("destruction_policy_ref") == "disable_spatial_policy"
-                for c in capabilities.values()
-            )
+                hp = persisted[0] if persisted else None
+            destroyed = hp == 0
+        closed_door = row["state"] == "closed" and not destroyed
+        declared, blocks = None, False
+        if spatial is not None:
             state = "destroyed" if destroyed else "open" if row["state"] == "open" else "closed"
-            blocked = spatial[state + "_blocks_movement"]
+            props = spatial.get(state + "_properties", {}).get("fields", {})
+            declared = props.get("light_opaque")
+            blocks = spatial[state + "_blocks_movement"]
         ground = None
-        if row["scene_id"] is not None and (config.get("blocks_passage") or spatial and blocked):
-            footprint = spatial["footprint"] if spatial and blocked else None
-            ground = (
-                row["scene_id"],
-                row["cell"],
-                row["orientation"] if footprint else None,
-                footprint,
-            )
-        return ground, blocked
+        if row["scene_id"] is not None and row["cell"] is not None:
+            if declared or (declared is None and blocks):
+                ground = (
+                    row["scene_id"],
+                    row["cell"],
+                    row["orientation"],
+                    spatial["footprint"],
+                    "opaque" if declared else "uncertain",
+                )
+            elif declared is None and config.get("blocks_passage"):
+                ground = (row["scene_id"], row["cell"], None, None, "uncertain")
+        return ground, closed_door
 
     def _light_source_config(self, config):
         """Select configuration fields affecting light-source contributions."""
@@ -709,13 +715,19 @@ class SessionMemory:
             "SELECT object_id FROM object_lights WHERE session_id=? AND object_id=?", (sid, oid)
         ).fetchone():
             return True
+        tables = ("object_lights",)
+        if "magic_light_anchors" in self.columns:
+            tables = (*tables, "magic_light_anchors")
+            if self.select(
+                "SELECT object_id FROM magic_light_anchors WHERE session_id=? AND object_id=?",
+                (sid, oid),
+            ).fetchone():
+                return True
         if not self.select(
             "SELECT object_id FROM objects WHERE session_id=? AND container_id=?", (sid, oid)
         ).fetchone():
             return False
-        return bool(
-            self._subtree_capabilities(sid, oid, tables=("object_lights",))["object_lights"]
-        )
+        return any(self._subtree_capabilities(sid, oid, tables=tables).values())
 
     def _light_door_scenes(self, sid, oid):
         """Read door scenes from the shared passage reverse index, including a valid empty
@@ -747,7 +759,7 @@ class SessionMemory:
         """Mutation-maintained source and geometry stamps, in the existing UoW.
 
         Sources follow moved subtrees/carriers and shading ancestors. Geometry
-        follows actual ground blockers and both shared-door endpoints. No read
+        follows ground blockers, opt-in Actor positions and both shared-door endpoints. No read
         validates the collected source/config leaves again.
         """
         if table in ("mechanical_scenes", "scene_instances"):
@@ -776,6 +788,14 @@ class SessionMemory:
                     if scene is not None:
                         self._advance_field("light_sources", sid, scene)
             return
+        if table == "spatial_light_effects":
+            self._spatial_light_changes(row for row in (old, new) if row is not None)
+            return
+        if table == "magic_light_anchors":
+            for row in (old, new):
+                if row is not None and row["scene_id"] is not None:
+                    self._advance_field("light_sources", row["session_id"], row["scene_id"])
+            return
         if table == "actors":
             columns = ("session_id", "actor_id", "current_scene_id", "cell")
             if old is not None and new is not None and all(old[c] == new[c] for c in columns):
@@ -783,6 +803,7 @@ class SessionMemory:
             row = new if new is not None else old
             sid = row["session_id"]
             scenes = {r["current_scene_id"] for r in (old, new) if r is not None}
+            self._light_actor_moved(sid, row["actor_id"], old, new)
             if not any(
                 (f"light_sources:{s!r}", sid) in self.store._scope.memory_versions for s in scenes
             ):
@@ -796,7 +817,7 @@ class SessionMemory:
                         self._advance_field("light_sources", sid, scene)
             return
         configs = (None, None)
-        hp = (None, None)
+        hp = (..., ...)
         if table == "objects":
             columns = (
                 "session_id",
@@ -838,6 +859,9 @@ class SessionMemory:
                             ):
                                 self.store._scope.memory_versions[dep] += 1
             row = new if new is not None else old
+            if row["domain"] == "actor":
+                self._light_actor_config_changed(row["session_id"], row["instance_id"], old, new)
+                return
             if row["domain"] != "object":
                 return
             obj = self._object(row["session_id"], row["instance_id"])
@@ -872,6 +896,46 @@ class SessionMemory:
             }:
                 for scene in self._light_door_scenes(sid, oid):
                     self._advance_field("light_candidates", sid, scene)
+
+    def _light_actor_moved(self, sid, actor_id, old, new):
+        """Dirty occupied scenes when an explicitly opaque actor moves or disappears."""
+        scenes = {
+            row["current_scene_id"]
+            for row in (old, new)
+            if row is not None and row["cell"] is not None
+        }
+        versions = self.store._scope.memory_versions
+        observed = {scene for scene in scenes if (f"light_candidates:{scene!r}", sid) in versions}
+        if not observed:
+            return
+        from .instance_data import actor_light_opaque
+
+        if actor_light_opaque(self.store, sid, actor_id):
+            for scene in observed:
+                self._advance_field("light_candidates", sid, scene)
+
+    def _light_actor_config_changed(self, sid, actor_id, old, new):
+        """Dirty the actual occupied scene when its Actor opacity is configured or removed."""
+        before, after = (
+            row is not None and self.json(row["config_json"]).get("light_opaque") is True
+            for row in (old, new)
+        )
+        if before == after:
+            return
+        position = self.select(
+            "SELECT current_scene_id,cell FROM actors WHERE session_id=? AND actor_id=?",
+            (sid, actor_id),
+        ).fetchone()
+        if position is not None and position["cell"] is not None:
+            self._advance_field("light_candidates", sid, position["current_scene_id"])
+
+    def _spatial_light_changes(self, rows):
+        """Advance the light version specifically where an application changes or expires."""
+        for row in rows:
+            sid, oid = row["session_id"], row["object_id"]
+            scene = row["fixed_scene_id"] or self._scene_for(self._object(sid, oid))
+            if scene is not None:
+                self._advance_field("light_sources", sid, scene)
 
     def _object(self, sid, oid):
         """Reuse an object row within one captured change."""

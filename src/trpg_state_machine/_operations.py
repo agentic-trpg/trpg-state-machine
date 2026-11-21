@@ -5,6 +5,7 @@ from enum import StrEnum
 
 from .world_commands import (
     ActivateMechanism,
+    AimLight,
     BarObject,
     CheckMechanism,
     ClearJam,
@@ -60,6 +61,11 @@ class MoveActor:
 
     actor_id: str
     to_scene_id: str
+
+
+@dataclass(frozen=True, slots=True)
+class DropWorldConcentration:
+    """Request voluntary release of the selected actor's spatial concentration."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -151,10 +157,12 @@ type FoundationOperation = (
     | RepositionObject
     | SetLightEnabled
     | SwitchLightMode
+    | AimLight
     | EnterScene
     | SetSceneFlag
     | SetObjectState
     | MoveActor
+    | DropWorldConcentration
     | PlaceObject
     | StepActor
     | TraversePassage

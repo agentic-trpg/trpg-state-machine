@@ -10,7 +10,8 @@ No LLM is called; these are composable execution primitives for a later runtime.
 Position is `(session_id, scene_id, canonical_cell_id)`. Cell uses the installed
 RE's `"col,row"` encoding, zero-based local Grid coordinates and `cell_size_ft`.
 The reference frame is fixed to the Scene, independent of PC location or viewport.
-One fine Scene has one Grid (at most 4096 cells); a Scene may contain several rooms.
+One fine Scene has one Grid and may contain several rooms. The Package accepts up
+to 40,000 cells per Scene, measured as grid width × height.
 Bare cells from different Scenes never enter a shared distance/path calculation.
 
 | Fact | Single authoritative source | Consumer |

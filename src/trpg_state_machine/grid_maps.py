@@ -200,14 +200,36 @@ class ReadOnlyTopology(GridTopology):
         """Share the immutable topology during deep copying."""
         return self
 
-    def with_lighting(self, lighting):
-        """Immutable query overlay; share parsed geometry without rebuilding a map."""
+    def with_lighting(
+        self,
+        lighting,
+        *,
+        default_lighting=None,
+        sunlight=None,
+        sunlight_overrides=None,
+        magical_darkness_cells=None,
+    ):
+        """Share geometry and attach either a local or a fixed full-map light projection."""
         result = object.__new__(type(self))
         for name, value in vars(self).items():
             object.__setattr__(result, name, value)
         object.__setattr__(
             result, "_lighting", MappingProxyType(ChainMap(_freeze(lighting), self._lighting))
         )
+        if default_lighting is not None:
+            object.__setattr__(result, "_default_lighting", default_lighting)
+        if sunlight is not None:
+            object.__setattr__(result, "_sunlight", sunlight)
+        if sunlight_overrides is not None:
+            overrides = _freeze(sunlight_overrides)
+            if sunlight is None:
+                overrides = MappingProxyType(ChainMap(overrides, self._sunlight_overrides))
+            object.__setattr__(result, "_sunlight_overrides", overrides)
+        if magical_darkness_cells is not None:
+            darkness = frozenset(magical_darkness_cells)
+            if sunlight is None:
+                darkness = _BlockedOverlay(self._magical_darkness_cells, darkness)
+            object.__setattr__(result, "_magical_darkness_cells", darkness)
         return result
 
     def with_blocked(self, cells):
@@ -260,6 +282,36 @@ class ReadOnlyTopology(GridTopology):
         if not self._in_bounds(a) or not self._in_bounds(b):
             return False
         return GridTopology.has_line_of_sight(self._ray_topology(a, b), a, b)
+
+    def light_walls(self, cells):
+        """Find wall segments touching selected cell bounds in grid units.
+
+        Horizontal runs avoid repeated searches over adjacent selected cells.
+        The inclusive index retains shared-corner and fractional wall candidates.
+        """
+        if not cells or self._wall_index is None:
+            return ()
+        rows = sorted((y, x) for x, y in (map(int, cell.split(",")) for cell in cells))
+        candidates = {}
+        row, start = rows[0]
+        end = start
+        for y, x in rows[1:]:
+            if row != y or x > end + 1:
+                candidates.update(
+                    dict.fromkeys(self._wall_index.query((start, row, end + 1, row + 1)))
+                )
+                row, start = y, x
+            end = x
+        candidates.update(dict.fromkeys(self._wall_index.query((start, row, end + 1, row + 1))))
+        return tuple((wall.x1, wall.y1, wall.x2, wall.y2) for wall in candidates)
+
+    def light_solid_cells(self, cells):
+        """Find selected full-cell static barriers by direct membership."""
+        return {
+            cell
+            for cell in cells
+            if cell in self._blocked or self._cover_cells.get(cell) == "total"
+        }
 
 
 @dataclass(frozen=True, slots=True)

@@ -145,6 +145,17 @@ class SessionCreation:
             )
         if replay is not None:
             return replay
+        if selected_time is None and any(
+            (light := definition.capability("light")) is not None and light.fuel_seconds is not None
+            for definition in package.world_objects
+        ):
+            raise StateMachineError("unsupported_time_protocol", "Metered lights need world-time/1")
+        if any(scene.daylight is not None for scene in package.scenes) and (
+            selected_time is None or selected_time.cycle != "alternating"
+        ):
+            raise StateMachineError(
+                "invalid_time_binding", "Scene daylight requires an alternating time binding"
+            )
         if selected_time is not None and any(a.npc_state is not None for a in package.actors):
             raise StateMachineError(
                 "unsupported_time_consumer",
@@ -179,7 +190,17 @@ class SessionCreation:
             if replay := self._replay(context, request.command_id, fingerprint):
                 return replay
             self.runtime.initialize(session_id, package, context, pc, pc_actor_id, rng_ref)
-            self.world.facts.initialize_world(session_id, package)
+            spatial_light_evidence = (
+                selected_time is not None
+                and package.noncombat_foundation_json is not None
+                and json.loads(package.noncombat_foundation_json)["snapshot"][
+                    "snapshot_schema_version"
+                ]
+                == "engine-snapshot/20"
+            )
+            self.world.facts.initialize_world(
+                session_id, package, spatial_light_evidence=spatial_light_evidence
+            )
             self.world.time.initialize(session_id, selected_time)
             self.runtime.time.initialize(session_id)
             self.world.scenes.initialize_session(session_id, pc_actor_id, pc, package)

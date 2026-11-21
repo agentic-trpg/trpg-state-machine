@@ -15,11 +15,12 @@ PASSAGE = "passage.station"
 def spatial_data(base):
     data = deepcopy(base)
     data["manifest"].update(schema_version="state-machine-foundation/2", package_version="gc1.1")
-    grid = GridScene(width=5, height=5).model_dump(mode="json")
-    # MechanicalGrid intentionally has a smaller closed schema than GridScene.
+    # Restrict the dump to the smaller mechanical schema while honoring omitted defaults.
     from dnd5e_engine.evaluation_state import MechanicalGrid
 
-    grid = {k: grid[k] for k in MechanicalGrid.model_fields}
+    grid = GridScene(width=5, height=5).model_dump(
+        mode="json", include=set(MechanicalGrid.model_fields)
+    )
     for scene in data["scenes"]:
         scene.update(grid=deepcopy(grid), access_policy="public_interactions")
         for ex in scene["exits"]:

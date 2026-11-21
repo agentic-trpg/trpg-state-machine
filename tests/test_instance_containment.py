@@ -111,7 +111,7 @@ def test_capability_paths_use_instance_configs(tmp_path, context, monkeypatch):
             sm.get_object(sid, actor, LEVER, package, context=context)["mechanism_status"]
             == "spent"
         )
-        sm.get_illumination(sid, actor, "0,0", package, context=context)
+        sm.get_illumination_area(sid, actor, ("0,0",), package, context=context)[0]
         sm.save_session(sid, package, context=context)
 
 

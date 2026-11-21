@@ -152,15 +152,42 @@ class ObjectSpatialService:
             return "destroyed"
         return "open" if state.open_state == "open" else "closed"
 
+    def light_occlusion(self, sid, oid, package):
+        """Return declared opacity and any supplemental legacy anchor.
+
+        Callers use the indexed footprint's movement bit only for compatibility
+        uncertainty when a state has no declaration. Without a spatial policy the
+        index already carries the object's legacy blocking flag at its only cell.
+        """
+        config = self.config(sid, oid)
+        if config is None:
+            return None, None
+        state = self.state(sid, oid, package)
+        properties = getattr(config, self._property_state(sid, oid, state) + "_properties")
+        if properties.light_opaque is not None:
+            return properties.light_opaque, None
+        legacy_anchor = state.anchor if self._legacy(sid, oid).blocks_passage else None
+        return None, legacy_anchor
+
+    def light_door_closed(self, sid, oid, package):
+        """Determine a shared door's opacity from closure and supported destruction."""
+        state = self.state(sid, oid, package)
+        return state.open_state == "closed" and self._property_state(sid, oid, state) != "destroyed"
+
     def cells(self, package, oid, anchor, orientation="north", *, sid=None):
         # Compatibility for explicitly static geometry callers. Runtime supplies sid.
         """Compute the complete object footprint from anchor and facing."""
         if sid is None:
             d = self.h.facts.template_object_definition(package, oid)
-            c = d.capability("spatial") if d else None
         else:
-            c = self.config(sid, oid)
-        if orientation not in (c.allowed_orientations if c else ("north",)):
+            d = self.h.facts.object_definition(sid, oid)
+        c = d.capability("spatial") if d else None
+        if c is not None:
+            allowed = c.allowed_orientations
+        else:
+            light = d.capability("light") if d else None
+            allowed = ORIENTATIONS if light and light.directional else ("north",)
+        if orientation not in allowed:
             raise StateMachineError("invalid_spatial_state", "Object orientation is not allowed")
         if anchor is None:
             return ()
@@ -368,24 +395,31 @@ class ObjectSpatialService:
         return self.project(sid, oid, package).occupied_cells if state.scene_id == scene_id else ()
 
     @scoped_read
-    def visible_cells(self, sid, actor, oid, package):
-        """Filter object target cells by the actor's current visibility."""
-        position = self.h._public_scope(sid, actor, package)
+    def _object_visibility(self, sid, position, oid, package):
+        """Read all local target cells and the subset visible from an authorized position."""
         targets = self.target_cells(sid, position.scene_id, oid, package)
-        base = self.h.grid.base_topology(sid, position.scene_id, package, cells=targets)
-        return tuple(cell for cell in targets if base.can_see(position.cell, cell))
+        visibility = self.h._prepare_visibility(sid, position, package, cells=targets)
+        return targets, tuple(cell for cell in targets if visibility.can_see(cell))
+
+    def visible_cells(self, sid, actor, oid, package, *, position=None):
+        """Filter target cells using the actor's authorized position in the current read scope."""
+        with self.h.grid.read_scope():
+            if position is None:
+                position = self.h._public_scope(sid, actor, package)
+            _, visible = self._object_visibility(sid, position, oid, package)
+            return visible
 
     def contact_cell(self, sid, actor, oid, package):
         """Nearest visible legal adjacent contact, excluding only the target itself.
 
-        Business authorization (door standing ports, container access, tools, etc.)
-        belongs to callers. This helper does not authorize an operation.
+        Callers own operation authorization, including door standing ports, container access and
+        tools.
         """
         position = self.h._public_scope(sid, actor, package)
-        visible = self.visible_cells(sid, actor, oid, package)
+        targets, visible = self._object_visibility(sid, position, oid, package)
         # Existing manual access permits contact at the actor's own cell even
         # without visual light there (e.g. an owned local emitter switch).
-        if position.cell in self.target_cells(sid, position.scene_id, oid, package):
+        if position.cell in targets:
             visible = tuple(dict.fromkeys((*visible, position.cell)))
         if not visible:
             raise StateMachineError("invalid_target", "No authorized local object")

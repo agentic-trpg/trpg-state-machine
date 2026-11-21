@@ -156,7 +156,8 @@ uv run --locked python examples/world_station.py
 当前 RE pin 没有可用的物体 HP 结算链，因此**玩家攻击物体与修复仍 unsupported**；
 内部合成结果测试只验证耐久应用。战斗世界互动、撬锁、有限燃料、动态视觉遮挡/Cover、
 自动称重压力板与新操作的 NPC Evaluation 意图转换均未宣称支持。
-`get_object`、`list_scene_objects`、`get_illumination` 沿用受权范围；封闭容器内容被过滤。
+`get_object`、`list_scene_objects`、`get_illumination_area` 沿用授权范围，过滤封闭容器内容。
+光照查询显式选择 1–256 格并按传入顺序返回结果，单格传入 `(cell,)`。
 容器取放仅校验移动子树及原／目标祖先，统一最多两个容器层级，普通物品不计层数；
 内容访问复用 Openable 的只读接口。实际修复、必要数据与未完成事项见
 [ContainerService 专项记录](docs/CONTAINER_SERVICE_PROGRESS.md)。

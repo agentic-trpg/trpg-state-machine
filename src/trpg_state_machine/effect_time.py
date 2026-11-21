@@ -69,12 +69,14 @@ class EffectTimeConsumer:
         self.owner.add_world_effect(sid, proposal, expires_tick=deadline)
 
     def next_boundary(self, session_id, package):
-        """Find the next world-time effect deadline by the Session deadline index."""
-        return self.db.execute(
+        """Find the next indexed deadline over both actor and spatial Effects."""
+        actor = self.db.execute(
             "SELECT min(expires_tick) FROM ongoing_effects "
             "WHERE session_id=? AND expires_tick IS NOT NULL",
             (session_id,),
         ).fetchone()[0]
+        spatial = self.owner.spatial_lights.next_deadline(session_id)
+        return min((value for value in (actor, spatial) if value is not None), default=None)
 
     def settle_one(self, row, package, command_id):
         """Consume one due exact identity and return its event in the shared write."""
@@ -89,6 +91,10 @@ class EffectTimeConsumer:
             "ORDER BY expires_tick,target_id,effect_id,origin LIMIT 1",
             (sid, tick),
         ).fetchone()
+        spatial = self.owner.spatial_lights.due(sid, tick)
+        if spatial is not None and (due is None or spatial["expires_tick"] < due["expires_tick"]):
+            event = self.world.magic.end_event(sid, package, spatial, "duration")
+            return DueResult((event,))
         if due is None:
             raise StateMachineError("invalid_time_consumer", "Missing due effect boundary")
         identity = (due["target_id"], due["effect_id"], due["origin"])

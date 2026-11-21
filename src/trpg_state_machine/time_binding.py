@@ -71,6 +71,14 @@ class TimeBinding:
         raise StateMachineError("invalid_time_binding", message, path=path)
 
 
+def deadline_after_seconds(binding, tick, seconds):
+    """Convert a positive duration from the sole clock under world-time/1."""
+    integer(seconds, "seconds", minimum=1)
+    if type(binding) is not TimeBinding:
+        raise StateMachineError("unsupported_time_protocol", "Seconds need world-time/1")
+    return integer(tick + seconds, "deadline")
+
+
 def time_binding_from_data(data):
     """Restore and validate a time binding from its closed field representation."""
     if type(data) is not dict or set(data) != set(asdict(TimeBinding())):

@@ -1,5 +1,6 @@
 """Scene environment business and read-only derived queries over shared WorldFacts."""
 
+from collections import defaultdict
 from collections.abc import Mapping
 from dataclasses import asdict, dataclass, replace
 from types import MappingProxyType
@@ -303,10 +304,11 @@ class EnvironmentService:
                 raise StateMachineError("invalid_cell", "Environment area exceeds Scene bounds")
             return area.cells
         if query:
-            raw = self.h.grid.reader.scene_grid(sid, scene_id, package)
-            if raw["width"] * raw["height"] > MAX_CELLS:
+            grid = self.h.grid.reader.prepared_scene(sid, scene_id, package)
+            width, height = grid.data["width"], grid.data["height"]
+            if width * height > MAX_CELLS:
                 invalid("Whole Scene query exceeds 256 cells; choose a bounded area")
-            return tuple(f"{x},{y}" for x in range(raw["width"]) for y in range(raw["height"]))
+            return tuple(f"{x},{y}" for x in range(width) for y in range(height))
         return ()
 
     def _validate_facts(self, sid, scene, facts, package):
@@ -515,125 +517,148 @@ class EnvironmentService:
         return facts, effects, status
 
     @staticmethod
-    def _conditions(facts, effects, cell, height):
-        """Collect and prioritize conditions at the requested cell and height."""
+    def _sources_by_cell(facts, effects, cells):
+        """Bucket scene and Effects sources by their overlap with requested cache misses."""
+        targets = set(cells)
+        by_cell = {cell: [] for cell in cells}
+        for prefix, sources in (("fact:", facts.sources), ("effect:", effects)):
+            for source in sources:
+                covered = targets.intersection(source.area.cells) if source.area.cells else cells
+                entry = (prefix + source.source_id, source)
+                for cell in covered:
+                    by_cell[cell].append(entry)
+        return by_cell
+
+    @staticmethod
+    def _conditions(base, sources, height):
+        """Prioritize the sources already matched to a cell at the requested height."""
         candidates = {k: [] for k in CONDITION_TYPES}
-        if facts.base is not None:
+        if base is not None:
             for k in candidates:
-                value = getattr(facts.base, k)
+                value = getattr(base, k)
                 if value is not None:
                     candidates[k].append(
                         (-1001, ConditionContribution("base", value, "outdoor", True))
                     )
-        for prefix, sources in (("fact:", facts.sources), ("effect:", effects)):
-            for source in sources:
-                area = source.area
-                if area.cells and cell not in area.cells:
+        for ref, source in sources:
+            heights = source.area.heights
+            if (
+                heights
+                and height is not None
+                and not (heights.lower_ft <= height < heights.upper_ft)
+            ):
+                continue
+            for k, cls in CONDITION_TYPES.items():
+                value = getattr(source.conditions, k)
+                if value is None:
                     continue
-                if (
-                    area.heights
-                    and height is not None
-                    and not (area.heights.lower_ft <= height < area.heights.upper_ft)
-                ):
-                    continue
-                for k, cls in CONDITION_TYPES.items():
-                    value = getattr(source.conditions, k)
-                    if value is None:
-                        continue
-                    if area.heights and height is None:
-                        value = cls()  # Applicable vertical scope is unknown, never guessed.
-                    candidates[k].append(
-                        (
-                            source.priority,
-                            ConditionContribution(
-                                prefix + source.source_id, value, source.exposure, source.observable
-                            ),
-                        )
+                if heights and height is None:
+                    value = cls()  # Applicable vertical scope is unknown, never guessed.
+                candidates[k].append(
+                    (
+                        source.priority,
+                        ConditionContribution(ref, value, source.exposure, source.observable),
                     )
+                )
         return {k: _resolve(v, layers=k == "obscurant") for k, v in candidates.items()}
 
-    def _protection(self, sid, scene, cell, package, facts, direction, cache):
-        # A placeholder cardinal direction selects ONLY rain when actual wind is unknown.
-        """Combine wind/precipitation protection while preserving unknown provider state."""
-        key = direction or "north"
-        if "identity" not in cache:
-            cache.update(self._query_cache(sid, scene, package))
-        if key not in cache:
-            cache[key] = self._projections.resolve(
+    def _direction_projection(self, sid, scene, package, direction, cache):
+        """Reuse the scene's protection projection for one incoming wind direction."""
+        if direction not in cache:
+            cache[direction] = self._projections.resolve(
                 cache["scope"],
-                (cache["identity"], (cache["versions"][1],), key),
+                (cache["identity"], (cache["versions"][1],), direction),
                 lambda: self.h.objects.spatial.scene_protection_contributions(
                     sid,
                     scene,
                     package,
-                    wind_from=key,
+                    wind_from=direction,
                     prepared=self._prepared_protection(sid, scene, package, cache),
                 ),
                 validator=cache["protection_valid"],
             )
-        oss = cache[key]
-        bands = [
-            ProtectionBand("static", w.heights)
-            for w in facts.protection.wind or ()
-            if w.cell == cell and w.wind_from == direction
-        ]
-        if direction is not None:
-            bands += [
-                ProtectionBand(
-                    "object:" + o.object_id, HeightInterval(c.lower_height_ft, c.upper_height_ft)
-                )
-                for o in oss.objects
-                for c in o.wind_cells
-                if c.cell == cell
-            ]
-        if len(bands) > 4096:
-            invalid("Protection query exceeds 4096 source bands")
+        return cache[direction]
 
-        def completeness(static, statuses):
-            """Classify protection input completeness as known or unknown."""
-            if static is None or any(s != "none" and s != "ready" for s in statuses):
-                return "unknown"
-            return "none"
+    def _protection_by_cell(self, sid, scene, package, static, cells_by_direction, cache):
+        """Bucket projected coverage by target cell and retain scene-wide completeness.
 
-        precipitation = []
-        for kind in PRECIPITATION_KINDS:
-            refs = (
-                ["static"]
-                if (
-                    kind == "rain"
-                    and cell in (facts.protection.rain_cells or ())
-                    or any(
-                        cell in p.cells and kind in p.kinds
-                        for p in facts.protection.precipitation or ()
-                    )
-                )
-                else []
+        Object coverage can reach targets from anchors outside the requested area.
+        Unknown provider inputs still apply to every target without known coverage.
+        """
+        cells = {
+            cell: direction for direction, group in cells_by_direction.items() for cell in group
+        }
+        refs = defaultdict(set)
+        bands = {cell: [] for cell in cells}
+        for cell in static.rain_cells or ():
+            if cell in cells:
+                refs[cell, "rain"].add("static")
+        for contribution in static.precipitation or ():
+            for cell in contribution.cells:
+                if cell in cells:
+                    for kind in contribution.kinds:
+                        refs[cell, kind].add("static")
+        for band in static.wind or ():
+            if cells.get(band.cell) == band.wind_from:
+                bands[band.cell].append(ProtectionBand("static", band.heights))
+
+        # Unknown and north share a projection, but only known wind uses its wind bands.
+        by_projection = defaultdict(set)
+        for direction, targets in cells_by_direction.items():
+            by_projection[direction or "north"].update(targets)
+        result = {}
+        for key, targets in by_projection.items():
+            objects = self._direction_projection(sid, scene, package, key, cache).objects
+            has_wind = key in cells_by_direction
+            incomplete = (
+                set(PRECIPITATION_KINDS)
+                if static.rain_cells is None and static.precipitation is None
+                else set()
             )
-            refs += [
-                "object:" + o.object_id
-                for o in oss.objects
-                if (
-                    any(c.cell == cell for c in o.rain_cells)
-                    if kind == "rain"
-                    else any(c.cell == cell and c.kind == kind for c in o.precipitation_cells)
+            wind_complete = static.wind is not None
+            for obj in objects:
+                ref = "object:" + obj.object_id
+                for c in obj.rain_cells:
+                    if c.cell in targets:
+                        refs[c.cell, "rain"].add(ref)
+                for c in obj.precipitation_cells:
+                    if c.cell in targets and c.kind != "rain":
+                        refs[c.cell, c.kind].add(ref)
+                if has_wind:
+                    for c in obj.wind_cells:
+                        if cells.get(c.cell) == key:
+                            bands[c.cell].append(
+                                ProtectionBand(
+                                    ref, HeightInterval(c.lower_height_ft, c.upper_height_ft)
+                                )
+                            )
+                    wind_complete = wind_complete and obj.wind_status in ("none", "ready")
+                incomplete.update(
+                    kind
+                    for kind in PRECIPITATION_KINDS
+                    if kind not in incomplete
+                    and obj.precipitation_status(kind) not in ("none", "ready")
                 )
-            ]
-            static = facts.protection.precipitation
-            if static is None:
-                static = facts.protection.rain_cells
-            status = (
-                "protected"
-                if refs
-                else completeness(static, (o.precipitation_status(kind) for o in oss.objects))
-            )
-            precipitation.append((kind, status, tuple(sorted(set(refs)))))
-        _, rain_status, rain = precipitation[0]
-        wind_status = (
-            completeness(facts.protection.wind, (o.wind_status for o in oss.objects))
-            if direction is not None
-            else "missing_input"
-        )
-        return CellProtection(rain_status, rain, wind_status, tuple(bands), tuple(precipitation))
+            for cell in targets:
+                if len(bands[cell]) > 4096:
+                    invalid("Protection query exceeds 4096 source bands")
+                precipitation = []
+                for kind in PRECIPITATION_KINDS:
+                    sources = tuple(sorted(refs.get((cell, kind), ())))
+                    status = "protected" if sources else "unknown" if kind in incomplete else "none"
+                    precipitation.append((kind, status, sources))
+                _, rain_status, rain = precipitation[0]
+                wind_status = (
+                    "missing_input"
+                    if cells[cell] is None
+                    else "none"
+                    if wind_complete
+                    else "unknown"
+                )
+                result[cell] = CellProtection(
+                    rain_status, rain, wind_status, tuple(bands[cell]), tuple(precipitation)
+                )
+        return result
 
     @staticmethod
     def _exposure(condition, protection_status, covered, *, wind=False, protection=None):
@@ -659,57 +684,76 @@ class EnvironmentService:
         # Keep both; selecting one would invent a combination rule.
         return _resolve([(0, c) for c in result])
 
-    def _cell(
-        self, sid, scene, cell, package, height, inputs, cache, *, public=False, validated=False
-    ):
-        """Reuse environment composition for the scene, cell and height in a consistent
-        scope.
-        """
-        if "identity" not in cache:
-            cache.update(self._query_cache(sid, scene, package))
+    def _area_cells(self, sid, scene, cells, package, height, *, public, validated=False):
+        """Reuse valid cell results, preparing contributions only for misses in this scope."""
+        cache = self._query_cache(sid, scene, package)
+        parameters = tuple(("cell", public, cell, height) for cell in cells)
 
-        def compute():
-            """Validate the area, obtain inputs and compose the appropriately disclosed
-            cell result.
-            """
+        def compute_missing(missing):
+            """Resolve the missed cells with one shared source and shelter preparation."""
+            targets = tuple(parameter[2] for parameter in missing)
             if not validated:
-                self._area(sid, scene, EnvironmentArea((cell,)), package)
-            current, hidden = self._environment_inputs(sid, scene, package, cache, public)
-            result = self._compose_cell(sid, scene, cell, package, height, current, cache)
-            return self._public(result, hidden) if public else result
+                self._area(sid, scene, EnvironmentArea(targets), package)
+            (facts, effects, effects_status), hidden = self._environment_inputs(
+                sid, scene, package, cache, public
+            )
+            sources = self._sources_by_cell(facts, effects, targets)
+            conditions = {
+                cell: self._conditions(facts.base, sources[cell], height) for cell in targets
+            }
+            cells_by_direction = defaultdict(list)
+            for cell in targets:
+                cells_by_direction[self._wind_direction(conditions[cell])].append(cell)
+            protection = self._protection_by_cell(
+                sid, scene, package, facts.protection, cells_by_direction, cache
+            )
+            results = {}
+            for parameter, cell in zip(missing, targets, strict=True):
+                # Ground exposure is evaluated without the requested ambient altitude.
+                ground = (
+                    conditions[cell]["precipitation"]
+                    if height is None
+                    else self._conditions(facts.base, sources[cell], None)["precipitation"]
+                )
+                result = self._compose_cell(
+                    scene, cell, height, conditions[cell], ground, protection[cell], effects_status
+                )
+                results[parameter] = self._public(result, hidden) if public else result
+            return results
 
-        return self._cells.resolve(
+        results = self._cells.resolve_cells(
             cache["scope"],
-            (cache["identity"], cache["versions"], ("cell", public, cell, height)),
-            compute,
-            validator=cache["valid"],
+            cache["identity"],
+            cache["versions"],
+            parameters,
+            compute_missing,
         )
+        return tuple(results[parameter] for parameter in parameters)
 
-    def _compose_cell(self, sid, scene, cell, package, height, inputs, cache):
-        """Compose one cell's conditions, precipitation and wind exposure."""
-        facts, effects, effects_status = inputs
-        conditions = self._conditions(facts, effects, cell, height)
+    @staticmethod
+    def _wind_direction(conditions):
+        """Return the incoming wind direction if the condition resolved as ready."""
         wind = conditions["wind"]
-        direction = wind.contributions[0].value.wind_from if wind.status == "ready" else None
-        protection = self._protection(sid, scene, cell, package, facts, direction, cache)
+        return wind.contributions[0].value.wind_from if wind.status == "ready" else None
+
+    def _compose_cell(self, scene, cell, height, conditions, ground, protection, effects_status):
+        """Combine prepared conditions and coverage into one cell's exposure result."""
         covered = height is not None and any(
             b.heights.lower_ft <= height < b.heights.upper_ft for b in protection.wind_bands
         )
-        # Height applies to wind/ambient conditions. Rain exposure is a separate ground model.
-        ground_conditions = self._conditions(facts, effects, cell, None)["precipitation"]
         return CellEnvironment(
             scene,
             cell,
             height,
             **conditions,
             ground_precipitation=self._exposure(
-                ground_conditions,
+                ground,
                 protection.rain_status,
                 bool(protection.rain_sources),
                 protection=protection,
             ),
             wind_exposure=self._exposure(
-                wind,
+                conditions["wind"],
                 protection.wind_status if height is not None else "missing_input",
                 covered,
                 wind=True,
@@ -718,39 +762,58 @@ class EnvironmentService:
             effects_status=effects_status,
         )
 
-    def project_cell(self, sid, scene_id, cell, package, *, height_ft=None):
-        """INTERNAL trusted composition: caller checks binding/grants and owns read scope."""
+    def project_area(self, sid, scene_id, area, package, *, height_ft=None):
+        """Compose trusted point results in one read scope. Caller checks binding and grants."""
         if height_ft is not None:
             finite(height_ft)
-        EnvironmentArea((cell,))
+        if type(area) is not EnvironmentArea or area.heights is not None:
+            invalid("Area point query takes separate explicit height_ft")
         with self.h.grid.reader.read_scope():
-            return self._cell(sid, scene_id, cell, package, height_ft, None, {})
+            cells = area.cells or self._area(sid, scene_id, area, package, query=True)
+            return self._area_cells(
+                sid, scene_id, cells, package, height_ft, public=False, validated=not area.cells
+            )
 
     def _range(self, sid, scene, cell, package, heights, inputs, cache):
         """Split the height range at source boundaries and compose each interval."""
         if type(heights) is not HeightInterval:
             invalid("Expected scene-datum height interval")
         self._area(sid, scene, EnvironmentArea((cell,)), package)
-        facts, effects, _ = inputs
+        facts, effects, effects_status = inputs
+        sources = self._sources_by_cell(facts, effects, (cell,))[cell]
         points = {heights.lower_ft, heights.upper_ft}
-        for source in (*facts.sources, *effects):
-            if source.area.heights and (not source.area.cells or cell in source.area.cells):
+        for _, source in sources:
+            if source.area.heights:
                 points.update((source.area.heights.lower_ft, source.area.heights.upper_ft))
         # Wind may change with height. Collect all four directions, retaining every gap.
+        projections = {}
         for direction in ("north", "east", "south", "west"):
-            projection = self._protection(sid, scene, cell, package, facts, direction, cache)
+            projection = self._protection_by_cell(
+                sid, scene, package, facts.protection, {direction: (cell,)}, cache
+            )[cell]
+            projections[direction] = projection
             for band in projection.wind_bands:
                 points.update((band.heights.lower_ft, band.heights.upper_ft))
         points = sorted(p for p in points if heights.lower_ft <= p <= heights.upper_ft)
         if len(points) > 512:
             invalid("Height query exceeds 512 boundaries")
-        return tuple(
-            EnvironmentHeightSegment(
-                HeightInterval(a, b),
-                self._compose_cell(sid, scene, cell, package, a, inputs, cache),
+        ground = self._conditions(facts.base, sources, None)["precipitation"]
+        segments = []
+        for a, b in zip(points, points[1:], strict=False):
+            conditions = self._conditions(facts.base, sources, a)
+            direction = self._wind_direction(conditions)
+            if direction not in projections:
+                north = projections["north"]
+                projections[direction] = replace(north, wind_status="missing_input", wind_bands=())
+            segments.append(
+                EnvironmentHeightSegment(
+                    HeightInterval(a, b),
+                    self._compose_cell(
+                        scene, cell, a, conditions, ground, projections[direction], effects_status
+                    ),
+                )
             )
-            for a, b in zip(points, points[1:], strict=False)
-        )
+        return tuple(segments)
 
     def _cached_range(self, sid, scene, cell, heights, package, *, public=False):
         """Reuse height-segmented environment by versions, interval and public/private
@@ -887,33 +950,9 @@ class EnvironmentService:
                 if not cell_in_bounds(visibility[1], cell):
                     raise StateMachineError("invalid_cell", "Environment area exceeds Scene bounds")
                 self.h._visible_target(sid, actor_id, cell, package, prepared=visibility)
-            cache = self._query_cache(sid, scene_id, package)
-            return tuple(
-                self._cell(
-                    sid,
-                    scene_id,
-                    cell,
-                    package,
-                    height_ft,
-                    None,
-                    cache,
-                    public=True,
-                    validated=True,
-                )
-                for cell in cells
+            return self._area_cells(
+                sid, scene_id, cells, package, height_ft, public=True, validated=True
             )
-
-    def query_cell(self, sid, actor_id, scene_id, cell, package, *, context, height_ft=None):
-        """Delegate a one-cell public query to the area query and return its first result."""
-        return self.query_area(
-            sid,
-            actor_id,
-            scene_id,
-            EnvironmentArea((cell,)),
-            package,
-            context=context,
-            height_ft=height_ft,
-        )[0]
 
     def query_height_range(self, sid, actor_id, scene_id, cell, heights, package, *, context):
         """Authorize position/visibility before reading public environment over a height

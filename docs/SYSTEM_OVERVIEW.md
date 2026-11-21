@@ -118,7 +118,20 @@ SM 推进一小时，并与 RE 返回的所选生命骰支付、治疗和适用�
 常用入口：`StateMachine.create_session`、`read_session`、`save_session`、
 `resume_session`、`unload_session`、`close`；规则命令另有 `submit_command_async`。
 局部查询包括 `query_world_action`、`get_object`、`read_carried_items`、
-`get_spatial_view`、`get_illumination` 及 `environment` 的授权查询。
+`get_spatial_view`、`get_illumination_area` 及 `environment` 的授权查询。
+对象详情、场景对象列表及空间视图在同一读取版本内准备观察者位置和所需格子的照明，
+并复用既有的场景缓存。光照和环境的区域入口也接受只含一个格子的请求。
+
+光照区域查询只为缓存缺失的格子筛选有效光源。Grid 按光源到目标格之间的范围查找墙、
+物体占地和共享门。物体可在空间属性中声明 `light_opaque`，PC 模板和 NPC 也可显式声明
+其已有占格遮光。灯具和物品上的 Light 法术共用连续投影，格子等级和受照多边形来自
+同一份结果。遮挡事实变化沿既有场景光照版本失效。
+
+定向灯具沿物体朝向照射，燃料由世界时间到期处理。场景配置和世界时钟确定室外基础光。
+Effects 持有探索施法产生的发光和魔法黑暗。施法可达性、魔法黑暗遮罩和效果驱散继续沿用
+RE 的规则范围。区域查询、整图规则输入和事件投影共用有效光源，并携带阳光和魔法黑暗标记。
+当前战斗准入拒绝依赖动态昼夜、物品发光或探索光照效果
+的场景。接口职责见 Module Contracts C09.1。
 `read_session` 是显式完整 SessionSnapshot 读取，普通局部操作不必先构造它。
 
 ## 3. 代表性处理流程

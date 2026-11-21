@@ -87,14 +87,26 @@ def work(sm, monkeypatch):
                     key, _ = args[0]
                     if key == "character_conditions":
                         counts["condition_checks"] += 1
+                    if key == "magic_light_anchors":
+                        counts["unscoped_magic_anchor_checks"] += 1
+                    if key.startswith("instance_configs#"):
+                        predicates = literal_eval(key.removeprefix("instance_configs#"))
+                        counts[("instance_config_range", predicates)] += 1
                     table, _, projection = key.partition("@")
                     if projection and table in ("scene_environments", "ongoing_effects"):
                         predicates, _ = literal_eval(projection)
                         counts[f"{table}_checks"] += 1
                         counts[(table, predicates)] += 1
-                    for domain in ("weight", "mechanism_index", "light_candidates"):
+                    for domain in (
+                        "weight",
+                        "mechanism_index",
+                        "light_candidates",
+                        "light_result",
+                        "light_sources",
+                    ):
                         if key.startswith(domain + ":"):
                             counts[domain + "_checks"] += 1
+                            counts[(domain, key.removeprefix(domain + ":"))] += 1
                 return result
 
             patch.setattr(obj, name, counted)
@@ -253,12 +265,31 @@ def test_nonmatching_mechanism_records(tmp_path, context, monkeypatch, n, family
             == counts[("ongoing_effects", (("session_id", sid), ("target_id", motion.actor_id)))]
             == 5
         )
+        # Movement evidence reuses this Scene's lamp collection, spell records,
+        # and resolved spell anchors. It does not validate a cached projection.
+        assert counts["unscoped_magic_anchor_checks"] == 0
+        assert counts["light_result_checks"] == 0
+        source_checks = counts["light_sources_checks"]
+        assert source_checks == counts[("light_sources", repr(A))] == 3
+        # Only the two spell facts are additional to the existing emitter stamp.
+        spell_source_checks = source_checks - 1
+        # A cold cache can recheck this same Session configuration point at
+        # separate stages. Bound it independently of the mechanism budget.
+        session_config_checks = counts[
+            (
+                "instance_config_range",
+                (("domain", "session"), ("instance_id", sid), ("session_id", sid)),
+            )
+        ]
+        assert 5 <= session_config_checks <= 7
         assert (
             counts["dependency_checks"]
             - counts["condition_checks"]
             - scene_environment_checks
             - actor_effect_checks
-            <= 114
+            - spell_source_checks
+            - session_config_checks
+            <= 109
         )
         # Admission reads the PC once; event evidence reads the PC and one NPC.
         # Keep their new narrow-row cost separate from the preexisting scope.
@@ -454,7 +485,9 @@ def test_capability_subtree_shading_carrier_move_and_rollback(tmp_path, context,
                 == "committed"
             )
             assert (
-                sm.get_illumination(sid, actor, "1,0", package, context=context)["illumination"]
+                sm.get_illumination_area(sid, actor, ("1,0",), package, context=context)[0][
+                    "illumination"
+                ]
                 == "dark"
             )
             assert (
@@ -464,7 +497,9 @@ def test_capability_subtree_shading_carrier_move_and_rollback(tmp_path, context,
                 == "committed"
             )
             assert (
-                sm.get_illumination(sid, actor, "1,0", package, context=context)["illumination"]
+                sm.get_illumination_area(sid, actor, ("1,0",), package, context=context)[0][
+                    "illumination"
+                ]
                 == "bright"
             )
             assert (

@@ -3,25 +3,31 @@
 from dataclasses import FrozenInstanceError, replace
 
 import pytest
-from lock_support import DOOR, NPC, A, B, lock_loader
+from lock_support import CRED, DOOR, NPC, OTHER_CRED, PASSAGE, TWIN, A, B, lock_loader
 from spatial_support import create
 from test_domain_runtime import components
 from test_migrations import stored_rows
 from test_object_spatial_service import changed_grid, oriented_data
+from test_world_containers import BAG, BOX
+from test_world_lights import lighting_data
 from test_world_spatial import OBSTACLE, spatial_world_data
 from world_support import command, setup, submit, world_data
 
 from trpg_state_machine import (
     ObjectState,
     RepositionObject,
+    SetLightEnabled,
     SetObjectState,
     StartNavigation,
     StateMachine,
     StateMachineError,
     StepActor,
+    SwitchLightMode,
 )
 from trpg_state_machine.package import _validate
-from trpg_state_machine.spatial import SpatialPosition
+from trpg_state_machine.perception import NPCContext
+from trpg_state_machine.spatial import SpatialDoor, SpatialPosition
+from trpg_state_machine.world_lights import LightService
 
 
 def test_coordinates_occupancy_distance_neighbors_and_templates(tmp_path, context):
@@ -309,6 +315,64 @@ def test_authorized_views_hide_dark_objects_and_navigation_requires_map_grants(t
             sm.get_object(sid, actor, OBSTACLE, p, context=context)
         receipt = submit(sm, sid, p, context, StartNavigation("activity.secret", B, "0,0"), "plan")
         assert receipt.error_code == "navigation_knowledge_unavailable"
+
+
+@pytest.mark.parametrize("size", [12, 92])
+def test_npc_spatial_view_projects_only_visibility_targets(tmp_path, context, monkeypatch, size):
+    data = lighting_data()
+    changed_grid(data, width=size, height=size)
+    data["scenes"][0]["objects"][0]["initial_cell"] = "4,4"
+    data["passages"][0]["endpoints"][0].update(standing_cell="1,1", threshold_cell="1,2")
+    sm, sid, package, _ = setup(tmp_path, context, data)
+    selected, evaluated = [], []
+    filter_sources = LightService._sources_for_cells
+    illuminate_cell = LightService._illuminate_cell
+
+    def count_selection(topology, sources, cells):
+        selected.append(sorted(cells))
+        return filter_sources(topology, sources, cells)
+
+    def count_cell(topology, uncertain_geometry, candidates, sources, cell, **kwargs):
+        evaluated.append(cell)
+        return illuminate_cell(topology, uncertain_geometry, candidates, sources, cell, **kwargs)
+
+    with sm:
+        sm.grant_npc_access(sid, NPC, "agent:spatial", package, context=context)
+        npc_context = NPCContext("agent:spatial", sid, NPC)
+        enabled = submit(sm, sid, package, context, SetLightEnabled(A, CRED, "0,0", True), "light")
+        assert enabled.status == "committed"
+        monkeypatch.setattr(LightService, "_sources_for_cells", staticmethod(count_selection))
+        monkeypatch.setattr(LightService, "_illuminate_cell", staticmethod(count_cell))
+
+        targets = ["1,0", "1,1", "1,2", "2,0", "4,4"]
+        view = sm.get_spatial_view(sid, NPC, package, context=npc_context)
+        assert selected == [targets]
+        assert sorted(evaluated) == ["1,0", "1,1", "1,2", "2,0"]
+        assert view.actor_position == SpatialPosition(A, "2,2")
+        assert view.world_version == sm.read_session(sid, package, context=context).world_version
+        assert [o[0] for o in view.objects] == [TWIN, OTHER_CRED, BOX, BAG]
+        assert view.exits == ((B, PASSAGE, "1,1", "1,2"),)
+        assert view.doors == (SpatialDoor(PASSAGE, DOOR, "open", "1,1", "1,2"),)
+
+        selected.clear()
+        evaluated.clear()
+        assert sm.get_spatial_view(sid, NPC, package, context=npc_context) == view
+        assert selected == evaluated == []
+
+        hooded = submit(
+            sm, sid, package, context, SwitchLightMode(A, CRED, "0,0", "hooded"), "hood"
+        )
+        assert hooded.status == "committed"
+        selected.clear()
+        evaluated.clear()
+        current = sm.get_spatial_view(sid, NPC, package, context=npc_context)
+        assert selected == [targets]
+        assert sorted(evaluated) == ["1,0", "1,1"]
+        assert current.world_version > view.world_version
+        assert [o[0] for o in current.objects] == [BOX, BAG]
+        assert current.exits == view.exits
+        assert current.doors == ()
+        assert view.doors == (SpatialDoor(PASSAGE, DOOR, "open", "1,1", "1,2"),)
 
 
 def test_cover_sources_combine_without_movement_or_vision_inference(tmp_path, context):

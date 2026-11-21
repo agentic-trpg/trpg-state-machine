@@ -121,9 +121,10 @@ None 高度与 0 分离。公开与可信内部结果不能互相替代。
 - 防护版变化：按需读取当前物体／属性／Grid，重新投影并合成；不逐版追算。
 - 同版而 B 格尚无结果：合成 B，复用 A 已产生的场景投影，不把屋顶覆盖等同完整环境相同。
 
-query_cell／query_area／query_height_range／query_unit 与 project_cell／project_height_range
-统一使用此入口。内部 project 自动加入或建立同一读取事务，继续由可信调用方负责权限及
-Package pin。read_facts 是 GM 明确读取权威事实的审计接口，按请求读取事实，不是派生缓存。
+query_area／query_height_range／query_unit 与 project_area／project_height_range
+统一使用此入口。区域读取先取有效的单格缓存，再一次准备需要计算的格子的来源。查一格可
+传入 `EnvironmentArea((cell,))`。内部 project 自动加入或建立同一读取事务，继续由可信
+调用方负责权限及 Package pin。read_facts 是 GM 明确读取权威事实的审计接口。
 区域可见性每批只准备一次带当前 Light 的 topology，并复用其范围枚举整图；每格仍检查
 can_see，任一失败整批拒绝。公开命中仍重查当前权限、Actor Scene 与可见性；这项授权所需
 的 Grid／Light 准备仍保留，环境校验不额外再准备地图。没有新增 Light 跨查询 Snapshot。
@@ -319,11 +320,10 @@ unsupported 来源仍保留未知完整性，只有明确覆盖才证明有防�
 |---|---|
 | `initialize(sid, seeds, package, *, command_id, expected_world_version, context)` | seeds 是 InitializeEnvironment 元组；真实受控批量导入，返回 CommandReceipt |
 | `read_facts(sid, scene_id, package, *, context)` | GM 管理权限读取完整事实；无行返回 None，不初始化 |
-| `query_cell(sid, actor_id, scene_id, cell, package, *, context, height_ft=None)` | 授权本场景可见 Cell 点查询 |
-| `query_area(..., area, package, *, context, height_ft=None)` | 每格独立结果元组；保留差异，整批授权失败就不返回部分区域 |
+| `query_area(..., area, package, *, context, height_ft=None)` | 读取本场景一个或多个获准格子，按请求顺序返回每格结果。整批授权失败就不返回部分区域 |
 | `query_height_range(..., cell, heights, package, *, context)` | 分段结果，保持空隙和局部环境高度边界 |
 | `query_unit(sid, actor_id, package, *, context)` | 通过角色实际位置和 UnitHeightProvider 读实际高度；缺输入为 missing_input |
-| `project_cell(..., height_ft=None)` / `project_height_range(...)` | 可信组件内部组合，自动加入／建立读取事务；调用方负责 Package pin、权限和结果披露 |
+| `project_area(..., height_ft=None)` / `project_height_range(...)` | 可信组件内部组合，自动加入／建立读取事务；调用方负责 Package pin、权限和结果披露 |
 | `bind_providers(sid, package, *, context)` | 受环境管理权限保护，在写事务中登记正式 provider 依赖；默认空 provider 与相同登记为空操作 |
 
 公开查询复用 `_spatial_reader`、`_public_scope`、`_visible_target` 的 Actor 控制、场景
@@ -335,11 +335,11 @@ unsupported 来源仍保留未知完整性，只有明确覆盖才证明有防�
 同时屏蔽 ground_precipitation 与挡雨状态；防护来源／几何元组始终不对外披露。
 同一策略下仅改变隐藏来源的身份、数值、水平范围或垂直范围，不改变这些公开输出。
 
-query_cell、query_area、query_height_range、query_unit 共用该策略，不因隐藏范围返回
+query_area、query_height_range、query_unit 共用该策略，不因隐藏范围返回
 不同的 ready／unknown／拒绝。公开高度分段只使用可披露来源及 OSS 的独立几何构造，
 再屏蔽上述字段并合并公开结果相同的相邻段，隐藏范围不会成为端点或分段规模错误来源。
 被屏蔽字段不返回基础天气冒充有效结果；不受隐藏贡献影响的字段仍按原授权提供。
-内部 project_cell／project_height_range 不过滤，继续返回全部真实条件、来源和高度段。
+内部 project_area／project_height_range 不过滤，继续返回全部真实条件、来源和高度段。
 
 这是有意保守的场景字段级披露策略，不是完整 Perception 实现，不保证隐藏贡献的存在、
 移出整个 Scene、字段集合或 observable 权限变更本身不可见；这些改变披露策略适用范围。
@@ -405,6 +405,7 @@ idempotency_conflict，保留原回执与已提交事实，可通过 get_command
 ```python
 from dataclasses import replace
 from trpg_state_machine import (
+    EnvironmentArea,
     EnvironmentConditions,
     EnvironmentSceneFacts,
     InitializeEnvironment,
@@ -435,15 +436,15 @@ receipt = sm.environment.initialize(
 )
 # 在有 Grid 的场景，查询实际角色位置或获准可见 Cell。
 position = sm.read_actor_position(sid, view.pc_actor_id, package, context=context)
-local = sm.environment.query_cell(
+local = sm.environment.query_area(
     sid,
     view.pc_actor_id,
     position.scene_id,
-    position.cell,
+    EnvironmentArea((position.cell,)),
     package,
     context=context,
     height_ft=3,
-)
+)[0]
 ```
 
 ## 生产接入与边界

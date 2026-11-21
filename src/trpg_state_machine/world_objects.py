@@ -16,6 +16,7 @@ from .scoped_reads import scoped_read
 from .world_commands import (
     OPENABLE_CHECK_OPERATIONS,
     ActivateMechanism,
+    AimLight,
     BarObject,
     CheckMechanism,
     EquipArmor,
@@ -70,6 +71,8 @@ class WorldObjectService:
         if type(operation) in (SetLightEnabled, SwitchLightMode):
             self.lights.validate(row, actor_id, operation, package)
             return
+        if type(operation) is AimLight:
+            return self._light_aim_plan(row, actor_id, operation, package)
         if type(operation) is RepositionObject:
             self.spatial.validate_placement(row, actor_id, operation, package)
             return
@@ -135,6 +138,8 @@ class WorldObjectService:
             return self.mechanisms.operate(row, actor_id, operation, package, source_command_id)
         if type(operation) in (SetLightEnabled, SwitchLightMode):
             return self.lights.operate(row, actor_id, operation, package)
+        if type(operation) is AimLight:
+            return self._aim_light(row, actor_id, operation, package)
         if type(operation) is RepositionObject:
             return self.spatial.operate(row, actor_id, operation, package)
         if type(operation) in (PutItem, TakeItem):
@@ -198,6 +203,61 @@ class WorldObjectService:
         if type(operation) in (LockObject, UnlockObject):
             return self.openable.operate_lock(row, actor_id, operation, package)
         return self.openable.operate_bar(row, actor_id, operation, package)
+
+    def _light_aim_plan(self, row, actor, op, package):
+        """Admit an aimed light without bypassing placement of a spatial footprint."""
+        obj, light = self.lights.validate_target(row, actor, op, package)
+        if not light.directional:
+            raise StateMachineError(
+                "unsupported_object_capability", "The emitter has no aiming direction"
+            )
+        if obj["container_id"] is not None:
+            raise StateMachineError(
+                "invalid_target", "Remove the emitter from its container to aim"
+            )
+        spatial = self.spatial.config(row["session_id"], op.object_id)
+        if spatial is not None:
+            if obj["carrier_id"] is None:
+                raise StateMachineError(
+                    "unsupported_object_capability",
+                    "Use authorized placement to turn its footprint",
+                )
+            if op.direction not in spatial.allowed_orientations:
+                raise StateMachineError(
+                    "unsupported_object_orientation", "Direction is not allowed"
+                )
+        if obj["orientation"] != op.expected_direction:
+            raise StateMachineError("orientation_conflict", "Light direction changed")
+
+    def _aim_light(self, row, actor, op, package):
+        """Capture both sides of an admitted turn in the original World write scope."""
+        self._light_aim_plan(row, actor, op, package)
+        if op.direction == op.expected_direction:
+            return []
+        h, sid = self.handler, row["session_id"]
+        payload = {**asdict(op), "actor_id": actor}
+        events = [
+            h._capture_event(
+                sid,
+                package,
+                "object.light_aimed",
+                payload,
+                phase="world.before_light_aim",
+                source_actor_id=op.object_id,
+            )
+        ]
+        self.facts.orient(sid, op.object_id, op.direction)
+        events.append(
+            h._capture_event(
+                sid,
+                package,
+                "object.light_aimed",
+                payload,
+                phase="world.after_light_aim",
+                source_actor_id=op.object_id,
+            )
+        )
+        return events
 
     def _weapon_plan(self, row, actor_id, operation, package):
         """Plan the selected weapon and automatic grip from current hand occupancy."""
@@ -471,13 +531,19 @@ class WorldObjectService:
             raise StateMachineError("item_charges_exhausted", "No item charges remain")
         return item
 
-    def _visible(self, sid, actor_id, oid, package):
-        """Check actual object placement and visible/touchable eligibility."""
-        h = self.handler
-        h._public_scope(sid, actor_id, package)
+    def _visible(self, sid, actor_id, oid, package, *, position=None):
+        """Check local object disclosure for an already authorized caller."""
+        if position is None:
+            position = self.handler._public_scope(sid, actor_id, package)
         obj = self.facts.object(sid, oid)
         if obj is None:
             raise StateMachineError("invalid_target", "No authorized local object")
+        self._require_visible(sid, actor_id, position, obj, package)
+        return obj
+
+    def _require_visible(self, sid, actor_id, position, obj, package, *, visible=None):
+        """Admit a selected row by visual contact or the existing inventory access rules."""
+        oid = obj["object_id"]
         if obj["item_slug"] is not None and not self.facts.instances.is_portable(sid, oid):
             raise StateMachineError("invalid_target", "No authorized local object")
         if obj["container_id"] is not None:
@@ -485,25 +551,26 @@ class WorldObjectService:
                 self.containers.reachable(sid, actor_id, oid, package)
             except StateMachineError as exc:
                 raise StateMachineError("invalid_target", "No authorized local object") from exc
-            return obj
+            return
         if obj["carrier_id"] == actor_id:
-            return obj
-        if not self.spatial.visible_cells(sid, actor_id, oid, package):
+            return
+        if visible is None:
+            visible = bool(
+                self.spatial.visible_cells(sid, actor_id, oid, package, position=position)
+            )
+        if not visible:
             raise StateMachineError("invalid_target", "No authorized local object")
-        return obj
 
     @scoped_read
-    def _view_inputs(self, sid, actor_id):
-        """Prepare actor position and world version once for object views."""
-        return self.handler._actor_position(sid, actor_id), self.handler._conn.execute(
+    def _view_session(self, sid):
+        """Share the current Session capability inputs among object views in this read."""
+        return self.handler._conn.execute(
             "SELECT * FROM sessions WHERE session_id=?", (sid,)
         ).fetchone()
 
-    def view(self, sid, actor_id, oid, package, *, containment=None):
-        """Combine instance capabilities/current state into an authorized contents-aware
-        object view.
-        """
-        obj = self._visible(sid, actor_id, oid, package)
+    def _view(self, sid, actor_id, position, obj, package):
+        """Build the contents-aware view of a row already admitted for this observer."""
+        oid = obj["object_id"]
         definition = self.facts.object_definition(sid, oid)
         config = (
             asdict(definition)
@@ -530,7 +597,7 @@ class WorldObjectService:
         projection = self.spatial.project(sid, oid, package)
         from ._operations import ObjectState, SetObjectState
 
-        position, row = self._view_inputs(sid, actor_id)
+        row = self._view_session(sid)
         available = {}
         for name, op in (
             ("can_activate", ActivateMechanism(position.scene_id, oid, position.cell)),
@@ -590,7 +657,7 @@ class WorldObjectService:
             "capabilities": declared,
             "effective_capabilities": () if destroyed else declared,
             "open_state": obj["state"],
-            "location": self.facts.object_position(sid, oid),
+            "location": self.facts.object_position(sid, oid, row=obj),
         }
 
     def get_object(self, sid, actor_id, oid, package, *, context):
@@ -600,7 +667,9 @@ class WorldObjectService:
         h = self.handler
         with h._transaction():
             h._spatial_reader(sid, actor_id, package, context)
-            return self.view(sid, actor_id, oid, package)
+            position = h._public_scope(sid, actor_id, package)
+            obj = self._visible(sid, actor_id, oid, package, position=position)
+            return self._view(sid, actor_id, position, obj, package)
 
     def list_objects(self, sid, actor_id, package, *, context):
         """List actual visible scene/door-associated objects using shared read inputs."""
@@ -617,9 +686,37 @@ class WorldObjectService:
             candidates = self.facts.scene_object_rows(
                 sid, position.scene_id, carrier_id=actor_id, extra=doors
             )
+            targets = {
+                obj["object_id"]: self.spatial.target_cells(
+                    sid, position.scene_id, obj["object_id"], package
+                )
+                for obj in candidates
+                if obj["container_id"] is None
+                and obj["carrier_id"] != actor_id
+                and (
+                    obj["item_slug"] is None
+                    or self.facts.instances.is_portable(sid, obj["object_id"])
+                )
+            }
+            visible = frozenset()
+            if targets:
+                cells = tuple(
+                    dict.fromkeys(cell for footprint in targets.values() for cell in footprint)
+                )
+                sight = h._prepare_visibility(sid, position, package, cells=cells)
+                visible = frozenset(cell for cell in cells if sight.can_see(cell))
             for obj in candidates:
                 try:
-                    result.append(self.view(sid, actor_id, obj["object_id"], package))
+                    cells = targets.get(obj["object_id"])
+                    self._require_visible(
+                        sid,
+                        actor_id,
+                        position,
+                        obj,
+                        package,
+                        visible=None if cells is None else not visible.isdisjoint(cells),
+                    )
+                    result.append(self._view(sid, actor_id, position, obj, package))
                 except StateMachineError as exc:
                     if exc.code != "invalid_target":
                         raise

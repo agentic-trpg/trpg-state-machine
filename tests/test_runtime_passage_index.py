@@ -216,11 +216,18 @@ def test_shared_door_multiple_passages_and_scene_light_maintenance(tmp_path, con
             submit(sm, sid, package, context, SetLightEnabled(A, CRED, "0,0", True), "on").status
             == "committed"
         )
-        lights = sm._objects.lights
-        before = {s: lights.geometry(sid, s, package) for s in (A, B, C)}
+        by_scene = {
+            scene: {e.threshold_cell for p in shared for e in p.endpoints if e.scene_id == scene}
+            for scene in (A, B, C)
+        }
+
+        def geometry(scene):
+            return sm._world.grid.light_occluders(sid, scene, package, by_scene[scene])
+
+        before = {s: geometry(s) for s in by_scene}
         actor = sm.read_session(sid, package, context=context).pc_actor_id
         cell = next(e.threshold_cell for e in shared[0].endpoints if e.scene_id == A)
-        old_light = sm.get_illumination(sid, actor, cell, package, context=context)
+        old_light = sm.get_illumination_area(sid, actor, (cell,), package, context=context)[0]
         assert (
             submit(
                 sm, sid, package, context, SetObjectState(A, DOOR, ObjectState.CLOSED), "close"
@@ -228,13 +235,12 @@ def test_shared_door_multiple_passages_and_scene_light_maintenance(tmp_path, con
             == "committed"
         )
         for scene in (A, B, C):
-            thresholds = {
-                e.threshold_cell for p in shared for e in p.endpoints if e.scene_id == scene
-            }
-            assert thresholds <= lights.geometry(sid, scene, package).candidates
-            assert not thresholds.intersection(before[scene].candidates)
-        closed_light = sm.get_illumination(sid, actor, cell, package, context=context)
-        assert old_light["status"] == "known" and closed_light["status"] == "unknown"
+            assert by_scene[scene] <= geometry(scene).opaque_cells
+            assert not by_scene[scene].intersection(before[scene].opaque_cells)
+        closed_light = sm.get_illumination_area(sid, actor, (cell,), package, context=context)[0]
+        assert old_light["status"] == closed_light["status"] == "known"
+        assert CRED in old_light["contributing_sources"]
+        assert CRED not in closed_light["contributing_sources"]
         assert (
             submit(
                 sm, sid, package, context, SetObjectState(A, DOOR, ObjectState.OPEN), "open"
@@ -242,8 +248,10 @@ def test_shared_door_multiple_passages_and_scene_light_maintenance(tmp_path, con
             == "committed"
         )
         for scene in (A, B, C):
-            assert lights.geometry(sid, scene, package).candidates == before[scene].candidates
-        assert sm.get_illumination(sid, actor, cell, package, context=context)["status"] == "known"
+            assert geometry(scene) == before[scene]
+        assert (
+            sm.get_illumination_area(sid, actor, (cell,), package, context=context)[0] == old_light
+        )
         assert old.door_scenes[DOOR] == (A, B) and old.by_door[OTHER_DOOR]
 
 

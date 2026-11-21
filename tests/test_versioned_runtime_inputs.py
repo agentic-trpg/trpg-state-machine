@@ -109,7 +109,7 @@ def test_warm_managed_readers(tmp_path, context, monkeypatch, n, reader):
                     sid, A, package, ("0,0", cell), exclude_actor=actor
                 ).edge_distance("0,0", cell)
             if reader == "light":
-                return sm.get_illumination(sid, actor, cell, package, context=context)
+                return sm.get_illumination_area(sid, actor, (cell,), package, context=context)[0]
             if reader == "inventory":
                 return sm.read_carried_items(sid, actor, package, context=context)
             with sm._transaction():
