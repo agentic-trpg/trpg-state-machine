@@ -103,6 +103,7 @@ def work(sm, monkeypatch):
                         "light_candidates",
                         "light_result",
                         "light_sources",
+                        "linked_conditions",
                     ):
                         if key.startswith(domain + ":"):
                             counts[domain + "_checks"] += 1
@@ -258,13 +259,17 @@ def test_nonmatching_mechanism_records(tmp_path, context, monkeypatch, n, family
             == counts[("scene_environments", (("scene_id", A), ("session_id", sid)))]
             == 3
         )
-        # Movement and visibility have distinct predicates over the mover's linked effects.
+        # Movement and visibility evaluate distinct predicates over one shared point read.
+        assert counts["compute:None.linked_conditions"] == 2
         actor_effect_checks = counts["ongoing_effects_checks"]
         assert (
             actor_effect_checks
             == counts[("ongoing_effects", (("session_id", sid), ("target_id", motion.actor_id)))]
-            == 5
+            == 1
         )
+        # Count the maintained version separately from the underlying effect read.
+        linked_condition_checks = counts["linked_conditions_checks"]
+        assert linked_condition_checks == counts[("linked_conditions", repr(motion.actor_id))] == 4
         # Movement evidence reuses this Scene's lamp collection, spell records,
         # and resolved spell anchors. It does not validate a cached projection.
         assert counts["unscoped_magic_anchor_checks"] == 0
@@ -287,6 +292,7 @@ def test_nonmatching_mechanism_records(tmp_path, context, monkeypatch, n, family
             - counts["condition_checks"]
             - scene_environment_checks
             - actor_effect_checks
+            - linked_condition_checks
             - spell_source_checks
             - session_config_checks
             <= 109
