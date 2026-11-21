@@ -270,8 +270,10 @@ def test_nonmatching_mechanism_records(tmp_path, context, monkeypatch, n, family
         assert counts["unscoped_magic_anchor_checks"] == 0
         light_checks = counts["light_result_checks"]
         assert light_checks == counts[("light_result", repr(A))] == 1
-        spell_record_checks = counts["light_sources_checks"]
-        assert spell_record_checks == counts[("light_sources", repr(A))] == 1
+        source_checks = counts["light_sources_checks"]
+        assert source_checks == counts[("light_sources", repr(A))] == 2
+        # One stamp belongs to the existing emitter collection.
+        spell_record_checks = source_checks - 1
         # A cold cache can recheck this same Session configuration point at
         # separate stages. Bound it independently of the mechanism budget.
         session_config_checks = counts[
