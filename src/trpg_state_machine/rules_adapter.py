@@ -1407,29 +1407,26 @@ def validate_dnd_result(request, result, *, loader=None):
             is not None
         ):
             _invalid("Shield result requires the bound Shield profile")
-        adopted = shield_changes(
+        adopted, retained_owner = shield_changes(
             request,
             result,
             lambda combat, actor, turn, events: _turn_handoff(
                 combat, actor, turn, [event for event in events if event.type in _TURN_EVENTS]
             ),
         )
-        owner = next(
-            (
-                identity
-                for component, identity, _, graph in adopted
-                if component == "shield_graph"
-                and graph.expected is None
-                and graph.value is not None
-            ),
-            None,
-        )
-        if owner is not None and any(
-            type(op) is delta.HPDelta and op.target_id == owner and op.resulting_hp == 0
-            for op in result.state_delta.operations
+        if (
+            request.payload.intent_type == "attack"
+            and retained_owner is not None
+            and request.payload.target_id == retained_owner
+            and any(
+                type(op) is delta.HPDelta
+                and op.target_id == retained_owner
+                and op.resulting_hp == 0
+                for op in result.state_delta.operations
+            )
         ):
             defender = next(
-                a for a in request.state_snapshot.character_states if a.entity_id == owner
+                a for a in request.state_snapshot.character_states if a.entity_id == retained_owner
             )
             if not _supports_dying_pass_roster(request.state_snapshot, defender):
                 raise UnsupportedShieldKnockout

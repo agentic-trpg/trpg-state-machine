@@ -25,6 +25,7 @@ from trpg_state_machine.npc_results import NPCCombatIntent, NPCEvaluationResult
 from trpg_state_machine.perception import NPCContext
 
 LATER_NPC = "npc.later"
+FALLEN_NPC = "npc.fallen"
 
 
 def _prepare(
@@ -32,6 +33,7 @@ def _prepare(
     *,
     immediate_expiry=False,
     extra_before_owner=False,
+    consecutive_ogres=False,
     legacy_clock=False,
     hp=None,
     **options,
@@ -57,13 +59,23 @@ def _prepare(
         if legacy_clock:
             data.pop("time_binding")
             data["actors"][0]["npc_state"] = item_data()["actors"][0]["npc_state"]
-        if extra_before_owner:
+        if consecutive_ogres:
+            data["actors"][1]["initial_cell"] = "0,1"
+            combat["actor_zone"][OTHER_ENEMY] = "0,1"
+            combat["monster_slug_by_entity"][OTHER_ENEMY] = combat["monster_slug_by_entity"][NPC]
+        for identity, cell in (
+            ((LATER_NPC, "3,1"), (FALLEN_NPC, "4,1"))
+            if consecutive_ogres
+            else ((LATER_NPC, "3,1"),)
+            if extra_before_owner
+            else ()
+        ):
             other = deepcopy(data["actors"][1])
-            other.update(actor_id=LATER_NPC, name="Later NPC", initial_cell="3,1")
+            other.update(actor_id=identity, name=identity, initial_cell=cell)
             data["actors"].append(other)
-            data["scenes"][0]["actor_ids"].append(LATER_NPC)
+            data["scenes"][0]["actor_ids"].append(identity)
             data["navigation"]["actor_grants"].append(
-                {"actor_id": LATER_NPC, "region_ids": ["region.public"]}
+                {"actor_id": identity, "region_ids": ["region.public"]}
             )
             for foundation in data["rule_bindings"].values():
                 snapshot = foundation["snapshot"]
@@ -71,18 +83,24 @@ def _prepare(
                     a for a in snapshot["character_states"] if a["entity_id"] == OTHER_ENEMY
                 )
                 snapshot["character_states"].append(
-                    {**deepcopy(state), "entity_id": LATER_NPC, "name": "Later NPC"}
+                    {**deepcopy(state), "entity_id": identity, "name": identity}
                 )
                 if "combat_state" in snapshot:
-                    combat["initiative_ids"].insert(2, LATER_NPC)
-                    combat["encounter_ids"].append(LATER_NPC)
-                    combat["actor_zone"][LATER_NPC] = "3,1"
-                    combat["movement_ledgers"][LATER_NPC] = deepcopy(
+                    combat["initiative_ids"].insert(2, identity)
+                    combat["encounter_ids"].append(identity)
+                    combat["actor_zone"][identity] = cell
+                    combat["movement_ledgers"][identity] = deepcopy(
                         combat["movement_ledgers"][OTHER_ENEMY]
                     )
-                    combat["xp_value_by_entity"][LATER_NPC] = 0
+                    combat["xp_value_by_entity"][identity] = 0
                 else:
-                    foundation["xp"][LATER_NPC] = 0
+                    foundation["xp"][identity] = 0
+        if consecutive_ogres:
+            for foundation in data["rule_bindings"].values():
+                actors = foundation["snapshot"]["character_states"]
+                first = next(a for a in actors if a["entity_id"] == NPC)
+                second = next(a for a in actors if a["entity_id"] == OTHER_ENEMY)
+                second.update({**deepcopy(first), "entity_id": OTHER_ENEMY, "name": "Attendant"})
 
     return timed_spell_world(
         walking=True,
@@ -488,6 +506,30 @@ def test_unsupported_terminal_shield_accept_keeps_decline_available(timed_spell_
         assert first_level_balance(sm, cast) == 4
 
 
+def _record_prior_npc_death(session, victim, killer):
+    """Set up a previously committed death without consuming the attack fixture's RNG."""
+    sm, sid, package, context = session
+    initial = sm.read_combat_snapshot(sid, package, context=context)
+    previous_victim = next(a for a in initial.character_states if a.entity_id == victim)
+    with sm._transaction(write=True):
+        sm._characters.set_hp(sid, victim, 0)
+        sm._characters.update_rule_metadata(sid, victim, "is_alive", False)
+        sm._combat_records.update_rule_state(sid, "dead_ids", [victim])
+        sm._combat_records.update_rule_state(
+            sid,
+            "deaths_recorded",
+            [
+                {
+                    "target_id": victim,
+                    "target_kind": previous_victim.entity_type.lower(),
+                    "location_id": initial.scene_state.scene_id,
+                    "reason": "damage",
+                    "killer_id": killer,
+                }
+            ],
+        )
+
+
 def test_shield_knockout_with_prior_npc_death_keeps_decline_available(timed_spell_world):
     """A prior terminal NPC record still restricts the existing dying Pass profile."""
     session = _prepare(timed_spell_world, seed=5, hp=(1, 100), extra_before_owner=True)
@@ -495,26 +537,7 @@ def test_shield_knockout_with_prior_npc_death_keeps_decline_available(timed_spel
     with sm:
         assert initialize(sm, sid, package, context).status == "committed"
         attack = _shield_attack(session)
-        initial = sm.read_combat_snapshot(sid, package, context=context)
-        previous_victim = next(a for a in initial.character_states if a.entity_id == LATER_NPC)
-        # Set up the persisted facts from a prior NPC death without advancing Attack RNG.
-        with sm._transaction(write=True):
-            sm._characters.set_hp(sid, LATER_NPC, 0)
-            sm._characters.update_rule_metadata(sid, LATER_NPC, "is_alive", False)
-            sm._combat_records.update_rule_state(sid, "dead_ids", [LATER_NPC])
-            sm._combat_records.update_rule_state(
-                sid,
-                "deaths_recorded",
-                [
-                    {
-                        "target_id": LATER_NPC,
-                        "target_kind": previous_victim.entity_type.lower(),
-                        "location_id": initial.scene_state.scene_id,
-                        "reason": "damage",
-                        "killer_id": attack.payload.target_id,
-                    }
-                ],
-            )
+        _record_prior_npc_death(session, LATER_NPC, attack.payload.target_id)
         pending = sm.submit_command(attack, package, context=context)
         assert pending.status == "pending_choice", pending
         before = sm.read_combat_snapshot(sid, package, context=context)
@@ -534,3 +557,58 @@ def test_shield_knockout_with_prior_npc_death_keeps_decline_available(timed_spel
         after = sm.read_combat_snapshot(sid, package, context=context)
         owner = next(a for a in after.character_states if a.entity_id == attack.payload.target_id)
         assert owner.hp_current == 0 and owner.is_alive and not after.effect_states
+
+
+def test_active_shield_rejects_later_knockout_with_prior_npc_death(timed_spell_world):
+    """A later ordinary hit must not strand the living Shield owner at zero HP."""
+    session = _prepare(timed_spell_world, seed=3, hp=(1, 100), consecutive_ogres=True)
+    sm, sid, package, context = session
+    with sm:
+        assert initialize(sm, sid, package, context).status == "committed"
+        attack = _shield_attack(session)
+        _record_prior_npc_death(session, FALLEN_NPC, attack.payload.target_id)
+        pending = sm.submit_command(attack, package, context=context)
+        accepted = sm.submit_command(_shield_answer(attack, pending), package, context=context)
+        assert accepted.status == "committed", accepted
+        before = sm.read_combat_snapshot(sid, package, context=context)
+        rng = sm.read_rng_context(sid, package, context=context)
+        events = sm.read_events(sid, package, context=context)
+        owner = next(
+            actor
+            for actor in before.character_states
+            if actor.entity_id == attack.payload.target_id
+        )
+        assert owner.hp_current == 1 and owner.is_alive and before.effect_states
+        assert first_level_balance(sm, cast_command(session)) == 3
+        later = replace(
+            attack,
+            command_id="second-npc-attack",
+            actor_id=OTHER_ENEMY,
+            expected_world_version=before.world_version,
+        )
+        refused = sm.submit_command(later, package, context=context)
+        assert (refused.status, refused.error_code) == (
+            "rejected",
+            "combat.shield_knockout_unsupported",
+        )
+        assert sm.submit_command(later, package, context=context) == refused
+        assert sm.read_combat_snapshot(sid, package, context=context) == before
+        assert sm.read_rng_context(sid, package, context=context) == rng
+        assert sm.read_events(sid, package, context=context) == events
+        assert first_level_balance(sm, cast_command(session)) == 3
+        handoff = replace(
+            later, command_id="second-npc-pass", payload=CombatIntentPayload(intent_type="pass")
+        )
+        turn = sm.submit_command(handoff, package, context=context)
+        assert turn.status == "committed", turn
+        before_expiry = sm.read_combat_snapshot(sid, package, context=context)
+        expiry = replace(
+            handoff,
+            actor_id=LATER_NPC,
+            command_id="expiry-pass",
+            expected_world_version=before_expiry.world_version,
+        )
+        controller = replace(context, controlled_npc_ids=(*context.controlled_npc_ids, LATER_NPC))
+        turn = sm.submit_command(expiry, package, context=controller)
+        assert turn.status == "committed", turn
+        assert not sm.read_combat_snapshot(sid, package, context=context).effect_states

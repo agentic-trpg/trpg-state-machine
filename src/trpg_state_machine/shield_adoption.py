@@ -117,7 +117,7 @@ def _verify_owner_turn_start(request, operations, events, start, turn_handoff):
 
 
 def shield_changes(request, result, turn_handoff):
-    """Bind one exact temporary declaration and the active graph to this result."""
+    """Return guarded adoption edits and the owner whose Shield survives this result."""
     snapshot = request.state_snapshot
     combat = snapshot.combat_state
     old = shield_graph(snapshot)
@@ -231,6 +231,7 @@ def shield_changes(request, result, turn_handoff):
     died = _owner_died(owner, operations, events)
     if died and not graphs and owner not in starts:
         _invalid("Shield owner death must remove the retained response")
+    successor = old
     if graphs:
         graph = graphs[0]
         if (
@@ -251,4 +252,5 @@ def shield_changes(request, result, turn_handoff):
         if graph.value is not None and graph.value.owner_dead:
             raise UnsupportedShieldTerminal
         adopted.append(("shield_graph", owner, "update", graph))
-    return tuple(adopted)
+        successor = graph.value
+    return tuple(adopted), successor.expiry_owner_id if successor is not None else None
