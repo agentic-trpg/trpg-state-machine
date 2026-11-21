@@ -659,14 +659,11 @@ class OngoingEffects:
 
     def has_round_concentration(self, sid, caster_id):
         """Identify a combat-clock group that ordinary World actions cannot interpret."""
-        return (
-            self._conn.execute(
-                "SELECT 1 FROM effect_concentrations WHERE session_id=? AND caster_id=? "
-                "AND rounds_remaining>0",
-                (sid, caster_id),
-            ).fetchone()
-            is not None
-        )
+        group = self._conn.execute(
+            "SELECT rounds_remaining FROM effect_concentrations WHERE session_id=? AND caster_id=?",
+            (sid, caster_id),
+        ).fetchone()
+        return group is not None and group[0] > 0
 
     @scoped_read
     def combat_fields(self, sid, target_ids):

@@ -19,6 +19,9 @@ def current_window(connection, session_id):
 
 def guard_shield_window(connection, session):
     """Preserve the decision boundary while the process still owns its input version."""
+    # Only the admitted /20 combat input can produce a Shield window.
+    if session["mechanical_schema_version"] != "engine-snapshot/20":
+        return
     pending = current_window(connection, session["session_id"])
     if (
         pending is not None
