@@ -1,6 +1,7 @@
 """Public exploration casting with the selected slot and material instance."""
 
 from dataclasses import replace
+from functools import partial
 
 import pytest
 from dnd5e_engine.evaluation_contracts import ExplorationSpellCastPayload
@@ -31,8 +32,8 @@ def _spell_balances(snapshot, actor_id):
     }
 
 
-def _warlock_slots(data):
-    """Replace fixture balances with the bound level-three Warlock profile."""
+def _warlock_slots(data, *, level, pact_level):
+    """Use the bound Warlock class and subclass grants at the authored level."""
     del data["rule_bindings"]["combat_foundation"]
     canonical = BundledAssetLoader()
     definitions = canonical.get_class("warlock"), canonical.get_subclass("fiend")
@@ -41,27 +42,27 @@ def _warlock_slots(data):
             grant.slug
             for definition in definitions
             for grant in definition.granted_features
-            if grant.ref_type == "feature" and grant.level <= 3
+            if grant.ref_type == "feature" and grant.level <= level
         }
     )
     for binding in data["rule_bindings"].values():
         snapshot = binding["snapshot"]
         actor = snapshot["character_states"][0]
         actor.update(
-            classes={"warlock": 3},
-            character_level=3,
+            classes={"warlock": level},
+            character_level=level,
             granted_features=grants,
             spell_slots={},
-            pact_slots={2: 2},
+            pact_slots={pact_level: 2},
         )
         snapshot["resource_state"]["pools"] = [
             {
                 "kind": "pact_slot",
                 "owner_id": actor["entity_id"],
-                "pool_id": "pact:2",
+                "pool_id": f"pact:{pact_level}",
                 "current": 2,
                 "maximum": 2,
-                "level": 2,
+                "level": pact_level,
             }
         ]
 
@@ -139,12 +140,13 @@ def test_public_longstrider_pays_the_requested_higher_slot(timed_spell_world):
         assert _snapshot(session) == after
 
 
-def test_public_darkness_pays_the_warlocks_pact_slot(timed_spell_world):
+@pytest.mark.parametrize(("level", "pact_level"), [(3, 2), (5, 3)], ids=["warlock-3", "warlock-5"])
+def test_public_darkness_pays_the_warlocks_pact_slot(timed_spell_world, level, pact_level):
     session = timed_spell_world(
         caster_class="warlock",
         caster_subclass="fiend",
         additional_spells=("darkness",),
-        configure=_warlock_slots,
+        configure=partial(_warlock_slots, level=level, pact_level=pact_level),
     )
     sm, sid, package, context = session
     with sm:
@@ -161,19 +163,28 @@ def test_public_darkness_pays_the_warlocks_pact_slot(timed_spell_world):
                     "kind": "world.cast_spell",
                     "spell_id": "darkness",
                     "spell_source_id": "class:warlock",
-                    "slot_level": 2,
+                    "slot_level": pact_level,
                     "target": {"kind": "point", "cell_id": "2,0"},
                 },
             }
         )
         before = _snapshot(session)
-        assert _spell_balances(before, command.actor_id) == {"pact:2": 2}
+        assert _spell_balances(before, command.actor_id) == {f"pact:{pact_level}": 2}
         assert not GridTopology(before.scene_state.grid).magical_darkness_on_cell("2,0")
         receipt = sm.submit_command(command, package, context=context)
         assert receipt.status == "committed", receipt
         after = _snapshot(session)
-        assert _spell_balances(after, command.actor_id) == {"pact:2": 1}
+        assert _spell_balances(after, command.actor_id) == {f"pact:{pact_level}": 1}
         assert GridTopology(after.scene_state.grid).magical_darkness_on_cell("2,0")
+        (cast_event,) = [
+            event.payload
+            for event in sm.read_events(sid, package, context=context)
+            if event.source_command_id == command.command_id
+            and event.event_type == "world.spell_cast"
+            and event.payload["engine_event"]["type"] == "spell_cast"
+        ]
+        assert cast_event["effect_id"] == "spatial:cast.pact-darkness"
+        assert cast_event["engine_event"]["slot_level"] == pact_level
         assert sm.submit_command(command, package, context=context) == receipt
         assert _snapshot(session) == after
 
