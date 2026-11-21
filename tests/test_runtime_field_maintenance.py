@@ -265,15 +265,14 @@ def test_nonmatching_mechanism_records(tmp_path, context, monkeypatch, n, family
             == counts[("ongoing_effects", (("session_id", sid), ("target_id", motion.actor_id)))]
             == 5
         )
-        # Movement evidence resolves this Scene's spell-light contribution.
-        # Keep its maintained stamp separate from the preexisting budget.
+        # Movement evidence reuses this Scene's lamp collection, spell records,
+        # and resolved spell anchors. It does not validate a cached projection.
         assert counts["unscoped_magic_anchor_checks"] == 0
-        light_checks = counts["light_result_checks"]
-        assert light_checks == counts[("light_result", repr(A))] == 1
+        assert counts["light_result_checks"] == 0
         source_checks = counts["light_sources_checks"]
-        assert source_checks == counts[("light_sources", repr(A))] == 2
-        # One stamp belongs to the existing emitter collection.
-        spell_record_checks = source_checks - 1
+        assert source_checks == counts[("light_sources", repr(A))] == 3
+        # Only the two spell facts are additional to the existing emitter stamp.
+        spell_source_checks = source_checks - 1
         # A cold cache can recheck this same Session configuration point at
         # separate stages. Bound it independently of the mechanism budget.
         session_config_checks = counts[
@@ -288,8 +287,7 @@ def test_nonmatching_mechanism_records(tmp_path, context, monkeypatch, n, family
             - counts["condition_checks"]
             - scene_environment_checks
             - actor_effect_checks
-            - light_checks
-            - spell_record_checks
+            - spell_source_checks
             - session_config_checks
             <= 109
         )
