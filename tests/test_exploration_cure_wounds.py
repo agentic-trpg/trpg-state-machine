@@ -4,8 +4,12 @@ from dataclasses import replace
 from random import Random
 
 import pytest
+from dnd5e_engine.activities.effects import passive_effect_to_active_effect
 from dnd5e_engine.evaluation_contracts import ExplorationSpellCastPayload
+from dnd5e_engine.evaluation_effects import EffectChangeState, effect_state
 from dnd5e_engine.evaluation_rng import RNGState
+from dnd5e_engine.types.effects import ActiveEffectDuration
+from dnd5e_srd_data import BundledAssetLoader
 from item_support import NPC
 from test_cure_wounds import SOURCE, SPELL, actor, cure_world, pool
 
@@ -102,6 +106,55 @@ def test_full_hp_keeps_life_unchanged_and_pays_cast(tmp_path, context):
         assert actor(after, NPC) == actor(before, NPC)
         assert pool(after).current == pool(before).current - 1
         assert sm.read_rng_context(sid, package, context=context).version == rng.version + 1
+
+
+@pytest.mark.parametrize("unknown_modifier", [False, True])
+def test_exploration_heal_checks_only_reviewed_elapsed_effects(tmp_path, context, unknown_modifier):
+    """Use the public command with an existing walking bonus or an unknown heal effect."""
+    spell = BundledAssetLoader().get_spell("longstrider")
+    bonus = passive_effect_to_active_effect(
+        spell.passive_effects[0], target_id=NPC, caster_id="npc.prior_caster"
+    )
+    effect = effect_state(bonus.model_copy(update={"duration": ActiveEffectDuration(seconds=3600)}))
+    if unknown_modifier:
+        unreviewed = EffectChangeState(
+            key="healing.received.multiplier", mode="multiply", value=2, priority=20
+        )
+        effect = effect.model_copy(update={"changes": [*effect.changes, unreviewed]})
+    sm, sid, package, loader, db = cure_world(tmp_path, context, exploration=True, target_hp=2)
+    with sm:
+        # Model a prior cast from another actor using the existing Effects owner.
+        with sm._store.transaction(write=True):
+            sm._characters.effects.add_effect(
+                sid, effect.model_dump(mode="json"), expires_tick=3600
+            )
+        command = cast_command(sm, sid, package, context, NPC)
+        before = sm.read_noncombat_snapshot(sid, package, context=context)
+        rng = sm.read_rng_context(sid, package, context=context)
+        events = sm.read_events(sid, package, context=context)
+        receipt = sm.submit_command(command, package, context=context)
+        after = sm.read_noncombat_snapshot(sid, package, context=context)
+        after_rng = sm.read_rng_context(sid, package, context=context)
+        assert before.effect_states == after.effect_states == (effect,)
+        if unknown_modifier:
+            assert (receipt.status, receipt.error_code) == ("rejected", "healing.dependencies")
+            assert after == before
+            assert after_rng == rng
+            assert sm.read_events(sid, package, context=context) == events
+        else:
+            assert receipt.status == "committed", receipt
+            assert pool(after).current == pool(before).current - 1
+            assert actor(after, NPC) == actor(before, NPC).model_copy(update={"hp_current": 19})
+            assert actor(after, command.actor_id) == actor(before, command.actor_id).model_copy(
+                update={"spell_slots": {1: 1}}
+            )
+            assert after_rng.version == rng.version + 1
+        assert sm.submit_command(command, package, context=context) == receipt
+        assert sm.read_noncombat_snapshot(sid, package, context=context) == after
+        assert sm.read_rng_context(sid, package, context=context) == after_rng
+    with StateMachine(db, dnd_loader=loader) as reopened:
+        assert reopened.read_noncombat_snapshot(sid, package, context=context) == after
+        assert reopened.read_rng_context(sid, package, context=context) == after_rng
 
 
 @pytest.mark.parametrize(
