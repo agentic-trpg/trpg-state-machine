@@ -1,7 +1,6 @@
 """Domain-owned facts, consistent Session RAM reads and durable publication."""
 
 import json
-from collections import Counter
 from pathlib import Path
 from uuid import uuid4
 
@@ -484,14 +483,11 @@ class StateMachine(
     def read_character_ac(self, session_id, actor_id, package, *, context) -> CharacterAC:
         """Read a controlled actor's current numeric AC without changing RE's base input.
 
-        Cover is attack-specific and excluded. Only active scalar effect AC bonuses
-        can be displayed; unsupported formulas fail this narrow read alone.
+        Cover is attack-specific and excluded. RE folds active scalar AC bonuses and
+        minimums. Unsupported formulas fail this narrow read alone.
         """
         from dnd5e_engine.evaluation_effects import EffectState
-        from dnd5e_engine.reaction_effect_rules import (
-            effect_ac_changes,
-            scalar_ac_change_delta,
-        )
+        from dnd5e_engine.reaction_effect_rules import effective_armor_class
 
         with self._transaction():
             self._world._spatial_reader(session_id, actor_id, package, context)
@@ -504,12 +500,12 @@ class StateMachine(
             ]
             active = [effect for effect in effects if not effect.disabled]
             try:
-                bonus = scalar_ac_change_delta(Counter(), effect_ac_changes(active))
+                effective = effective_armor_class(base, active)
             except (TypeError, ValueError) as exc:
                 raise StateMachineError(
                     "unsupported_armor_class", "Active AC effect has no scalar value"
                 ) from exc
-            return CharacterAC(base, bonus, base + bonus)
+            return CharacterAC(base, effective - base, effective)
 
     def _assert_spatial_consistency(self, sid, package):
         """Delegate an explicit complete spatial consistency audit."""

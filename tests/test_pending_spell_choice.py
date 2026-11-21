@@ -308,6 +308,101 @@ def test_longstrider_on_another_actor_does_not_require_reply(timed_spell_world):
         assert tuple(effect.target_id for effect in effects) == (NPC,)
 
 
+@pytest.fixture
+def barkskin_world(timed_spell_world):
+    """Bind canonical Barkskin to an eligible druid and a controlled NPC."""
+
+    def open_world(base_ac):
+        def configure(data):
+            bindings = data["rule_bindings"]
+            bindings.pop("combat_foundation")
+            snapshot = bindings["noncombat_foundation"]["snapshot"]
+            target = next(
+                actor for actor in snapshot["character_states"] if actor["entity_id"] == NPC
+            )
+            target["ac"] = base_ac
+
+        return timed_spell_world(
+            caster_class="druid",
+            caster_subclass="land",
+            additional_spells=("barkskin",),
+            configure=configure,
+        )
+
+    return open_world
+
+
+@pytest.mark.parametrize(("base_ac", "effective_ac"), [(14, 17), (19, 19)])
+def test_barkskin_after_consent_applies_an_ac_floor_until_expiry(
+    barkskin_world, base_ac, effective_ac
+):
+    session = barkskin_world(base_ac)
+    sm, sid, package, context = session
+    with sm:
+        start = submit_world(sm, sid, package, context, AdvanceSessionTime(11), "before-cast")
+        assert start.status == "committed", start
+        before = current_state(session)
+        initial_ac = sm.read_character_ac(sid, NPC, package, context=context)
+        assert (initial_ac.base, initial_ac.effects, initial_ac.effective) == (base_ac, 0, base_ac)
+        command = cast_command(
+            session, spell_id="barkskin", source_id="class:druid", slot_level=2, target_id=NPC
+        )
+        pending = sm.submit_command(command, package, context=context)
+        assert pending.status == "pending_choice", pending
+        assert pending.pending_choice.authorized_responder == NPC
+        assert current_state(session) == before
+        assert sm.read_character_ac(sid, NPC, package, context=context) == initial_ac
+        caster_ac = sm.read_character_ac(sid, command.actor_id, package, context=context)
+
+        waiting = submit_world(sm, sid, package, context, AdvanceSessionTime(31), "still-pending")
+        assert waiting.status == "committed", waiting
+        assert current_state(session)[1:] == before[1:]
+        answer = reply(session, pending)
+        accepted = sm.submit_command(answer, package, context=context)
+        assert accepted.status == "committed", accepted
+        version, slots, rng, effects = current_state(session)
+        assert (slots, rng) == (before[1] - 1, before[2])
+        (effect,) = effects
+        assert effect.target_id == NPC
+        assert effect.duration.seconds == 3600
+        assert effect.lifecycle is None and not effect.flags.get("concentration")
+        active = sm.read_character_ac(sid, NPC, package, context=context)
+        assert (active.base, active.effects, active.effective) == (
+            base_ac,
+            effective_ac - base_ac,
+            effective_ac,
+        )
+        assert sm.read_character_ac(sid, command.actor_id, package, context=context) == caster_ac
+        assert sm.submit_command(answer, package, context=context) == accepted
+        assert current_state(session) == (version, slots, rng, effects)
+
+        for tick, expected in ((3630, active), (3631, initial_ac)):
+            advance = submit_world(
+                sm, sid, package, context, AdvanceSessionTime(tick), f"tick-{tick}"
+            )
+            assert advance.status == "committed", advance
+            assert sm.read_character_ac(sid, NPC, package, context=context) == expected
+        assert current_state(session)[1:] == (slots, rng, ())
+
+
+def test_declined_barkskin_has_no_ac_effect_or_slot_cost(barkskin_world):
+    session = barkskin_world(14)
+    sm, sid, package, context = session
+    with sm:
+        initial = current_state(session)
+        initial_ac = sm.read_character_ac(sid, NPC, package, context=context)
+        command = cast_command(
+            session, spell_id="barkskin", source_id="class:druid", slot_level=2, target_id=NPC
+        )
+        pending = sm.submit_command(command, package, context=context)
+        assert pending.status == "pending_choice", pending
+        declined = sm.submit_command(reply(session, pending, "decline"), package, context=context)
+        assert declined.status == "committed", declined
+        assert declined.event_seqs == ()
+        assert current_state(session) == initial
+        assert sm.read_character_ac(sid, NPC, package, context=context) == initial_ac
+
+
 def test_public_spell_payload_cannot_claim_willingness():
     with pytest.raises(ValidationError) as error:
         evaluation_contracts.ExplorationSpellCastPayload.model_validate(

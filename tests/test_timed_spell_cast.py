@@ -48,7 +48,7 @@ DARKVISION = "system.attributes.senses.darkvision"
 
 @pytest.fixture
 def timed_spell_world(tmp_path, context):
-    """Create a second-scale exploration Session with authored wizard facts."""
+    """Create a second-scale exploration Session with an authored spellcasting class."""
 
     def open_world(
         *,
@@ -64,12 +64,15 @@ def timed_spell_world(tmp_path, context):
         target_first=False,
         proficiency_override=None,
         additional_spells=(),
+        caster_class="wizard",
+        caster_subclass="evoker",
         configure=None,
     ):
         canonical = BundledAssetLoader()
         base = item_loader()
-        wizard = canonical.get_class("wizard")
-        evoker = canonical.get_subclass("evoker")
+        spellcaster = canonical.get_class(caster_class)
+        subclass = canonical.get_subclass(caster_subclass)
+        ability = spellcaster.spellcasting.ability
         ogre = canonical.get_monster("ogre") if attack_after_walk else None
         spell = canonical.get_spell("longstrider")
         if spell_id in (PERCEPTION_SPELL, SENSE_SPELL):
@@ -103,7 +106,7 @@ def timed_spell_world(tmp_path, context):
         features = sorted(
             {
                 grant.slug
-                for definition in (wizard, evoker)
+                for definition in (spellcaster, subclass)
                 for grant in definition.granted_features
                 if grant.ref_type == "feature" and grant.level <= 5
             }
@@ -111,8 +114,8 @@ def timed_spell_world(tmp_path, context):
         loader = MemoryAssetLoader(
             items=[*base._items.values(), canonical.get_item("component-pouch")],
             monsters=[ogre] if ogre else list(base._monsters.values()),
-            classes=[wizard],
-            subclasses=[evoker],
+            classes=[spellcaster],
+            subclasses=[subclass],
             features=[canonical.get_feature(slug) for slug in features],
             spells=[
                 spell,
@@ -177,7 +180,7 @@ def timed_spell_world(tmp_path, context):
                     "policy": "ordinary_public",
                 }
             )
-        proficiency = proficiency_grants([(wizard, 5, "primary")])
+        proficiency = proficiency_grants([(spellcaster, 5, "primary")])
         for foundation in data["rule_bindings"].values():
             foundation["rng_state"] = RNGState.capture(random.Random(seed)).model_dump(mode="json")
             fixed = foundation["snapshot"]
@@ -209,15 +212,19 @@ def timed_spell_world(tmp_path, context):
                 else:
                     foundation["xp"][OTHER_ENEMY] = 0
             pc.update(
-                class_slug="wizard",
-                classes={"wizard": 5},
+                class_slug=caster_class,
+                classes={caster_class: 5},
                 character_level=5,
-                subclass_slug="evoker",
+                subclass_slug=caster_subclass,
                 granted_features=features,
                 intelligence=18,
-                spellcasting_ability="int",
+                spellcasting_ability=ability,
                 spell_slots={1: first_level_slots, 2: 3, 3: 2},
-                custom_counters={"feature_use:arcane-recovery": {"spent": 0}},
+                custom_counters=(
+                    {"feature_use:arcane-recovery": {"spent": 0}}
+                    if caster_class == "wizard"
+                    else {}
+                ),
                 save_proficiencies=sorted(proficiency.saves),
                 weapon_proficiencies=sorted(proficiency.weapons),
                 carried_item_slugs=template["character"]["inventory"],
@@ -279,16 +286,20 @@ def timed_spell_world(tmp_path, context):
                     }
                     for level, current, maximum in ((1, first_level_slots, 4), (2, 3, 3), (3, 2, 2))
                 ]
-                + [
-                    {
-                        "kind": "feature_uses",
-                        "owner_id": pc["entity_id"],
-                        "pool_id": "arcane-recovery",
-                        "feature_slug": "arcane-recovery",
-                        "current": 1,
-                        "maximum": 1,
-                    }
-                ]
+                + (
+                    [
+                        {
+                            "kind": "feature_uses",
+                            "owner_id": pc["entity_id"],
+                            "pool_id": "arcane-recovery",
+                            "feature_slug": "arcane-recovery",
+                            "current": 1,
+                            "maximum": 1,
+                        }
+                    ]
+                    if caster_class == "wizard"
+                    else []
+                )
             }
             prepared = {"spell_id": spell.slug, "prepared_order": 0, "material": None}
             if material:
@@ -303,9 +314,9 @@ def timed_spell_world(tmp_path, context):
                         "verbal_available": True,
                         "sources": [
                             {
-                                "source_id": "class:wizard",
-                                "class_slug": "wizard",
-                                "ability": "int",
+                                "source_id": f"class:{caster_class}",
+                                "class_slug": caster_class,
+                                "ability": ability,
                                 "spells": [
                                     prepared,
                                     *(
@@ -346,7 +357,15 @@ def timed_spell_world(tmp_path, context):
     return open_world
 
 
-def cast_command(session, *, target_id=None, spell_id="longstrider", command_id=None):
+def cast_command(
+    session,
+    *,
+    target_id=None,
+    spell_id="longstrider",
+    command_id=None,
+    source_id="class:wizard",
+    slot_level=1,
+):
     """Submit the bound source, prepared spell, target, and exact slot level."""
     sm, sid, package, context = session
     state = sm.read_session(sid, package, context=context)
@@ -358,9 +377,9 @@ def cast_command(session, *, target_id=None, spell_id="longstrider", command_id=
         ExplorationSpellCastPayload(
             kind="world.cast_spell",
             spell_id=spell_id,
-            spell_source_id="class:wizard",
+            spell_source_id=source_id,
             target_id=target_id or state.pc_actor_id,
-            slot_level=1,
+            slot_level=slot_level,
         ),
         state.world_version,
     )
