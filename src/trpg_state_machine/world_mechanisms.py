@@ -306,7 +306,7 @@ class MechanismService:
                 _WorldEffectKind.MECHANISM, oid, activation, activation + "." + str(index)
             )
             if action.kind == "rule_effect":
-                audit = self.effects.apply(
+                audit, effect_events = self.effects.apply(
                     row,
                     package,
                     oid,
@@ -318,6 +318,7 @@ class MechanismService:
                     action,
                 )
                 payload.setdefault("rule_results", []).append(audit)
+                events.extend(effect_events)
                 continue
             self._invocation = (sid, origin, action.target_object_id, action.kind, action.value)
             try:

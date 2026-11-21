@@ -4,6 +4,8 @@ This component records adopted facts only. Rule creation, expiry, and progressio
 remain with the bound Rule Engine; every mutation uses the caller's UnitOfWork.
 """
 
+from dataclasses import dataclass
+
 from dnd5e_engine.effect_lifecycle import conditions_after_effect_application
 from dnd5e_engine.evaluation_effects import EffectState
 from dnd5e_engine.evaluation_region_effect import (
@@ -29,6 +31,18 @@ def _fixed_region_effect(row, statuses):
     return matches_region_effect_statuses(row["effect_id"], row["origin"], statuses) and all(
         row[key] is None for key in ("concentration_id", "lifecycle_json", "expires_tick")
     )
+
+
+@dataclass(frozen=True)
+class ConcentrationGroup:
+    """Fix one caster's durable group and the identities of its actual members."""
+
+    concentration_id: str
+    caster_id: str
+    effect_id: str
+    rounds_remaining: int
+    actor_members: tuple[tuple[str, str, str], ...]
+    spatial_member: dict | None
 
 
 class OngoingEffects:
@@ -451,6 +465,56 @@ class OngoingEffects:
         return frozenset(identities)
 
     @scoped_read
+    def concentration_group(self, sid, caster_id):
+        """Fix the exact group and one supported member representation by indexed identity."""
+        row = self._conn.execute(
+            "SELECT concentration_id,effect_id,rounds_remaining FROM effect_concentrations "
+            "WHERE session_id=? AND caster_id=?",
+            (sid, caster_id),
+        ).fetchone()
+        if row is None:
+            return None
+        group_id, effect_id, rounds = row
+        spatial = self.spatial_lights.for_concentration(sid, group_id)
+        members = tuple(
+            tuple(member)
+            for member in self._conn.execute(
+                "SELECT target_id,effect_id,origin FROM ongoing_effects WHERE session_id=? "
+                "AND concentration_id=? ORDER BY chain_ordinal",
+                (sid, group_id),
+            )
+        )
+        if spatial is None:
+            if not members:
+                raise StateMachineError("invalid_mechanical_state", "Empty concentration")
+        elif members or (spatial["caster_id"], spatial["concentration_id"], effect_id, rounds) != (
+            caster_id,
+            group_id,
+            spatial["effect_id"],
+            0,
+        ):
+            raise StateMachineError("invalid_mechanical_state", "Spatial concentration differs")
+        return ConcentrationGroup(
+            group_id, caster_id, effect_id, rounds, members, dict(spatial) if spatial else None
+        )
+
+    def apply_damage_concentration(self, sid, group, resolution, *, end_spatial):
+        """Adopt the verified outcome while its exact member set still matches."""
+        self.store.require_write()
+        if resolution.target_id != group.caster_id or group != self.concentration_group(
+            sid, group.caster_id
+        ):
+            raise StateMachineError("version_conflict", "Concentration dependencies changed")
+        if resolution.outcome == "retained":
+            return ()
+        if resolution.outcome not in {"broken", "ended"}:
+            raise StateMachineError("invalid_rule_result", "Unknown concentration outcome")
+        if group.spatial_member is not None:
+            return (end_spatial(group.spatial_member),)
+        self.remove_concentration(sid, group.concentration_id)
+        return ()
+
+    @scoped_read
     def concentration_reference(self, sid, caster_id):
         """Return the stable caster wire token while its group exists."""
         row = self._conn.execute(
@@ -460,7 +524,7 @@ class OngoingEffects:
         ).fetchone()
         if row is None:
             return None
-        if self.spatial_lights.get(sid, row["concentration_id"]) is not None:
+        if self.spatial_lights.for_concentration(sid, row["concentration_id"]) is not None:
             # The actor effect wire field only accepts actor-target concentration chains.
             return None
         if (
@@ -533,7 +597,7 @@ class OngoingEffects:
             (sid, caster_id),
         ).fetchone()
         return group is not None and (
-            not actor_effect_only or self.spatial_lights.get(sid, group[0]) is None
+            not actor_effect_only or self.spatial_lights.for_concentration(sid, group[0]) is None
         )
 
     @scoped_read

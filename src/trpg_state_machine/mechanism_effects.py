@@ -1,13 +1,17 @@
-"""SM-owned mechanism-effect/1 port. This is NOT the pinned RE /24 ABI.
+"""SM-owned mechanism-effect/1 port and adoption of bounded damage.
 
-No rules, random draws, effect clocks or synthetic actor identities live here.
-The production port refuses all evaluation until RE implements world sources.
+The default port refuses effect evaluation. When a port provides completed damage,
+the bound Rule Engine computes any concentration save and Effects owns termination.
 """
 
 import copy
 import hashlib
 from typing import Annotated, Literal, Protocol
 
+from dnd5e_engine.evaluation_concentration import (
+    ConcentrationDamageCheckRequest,
+    evaluate_concentration_damage_check,
+)
 from dnd5e_engine.evaluation_contracts import ReadVersion, RuleError
 from dnd5e_engine.evaluation_delta import DeathStateUpdate, HPDelta, TempHPSet
 from dnd5e_engine.evaluation_rng import RNGContext, RNGTransition
@@ -361,8 +365,8 @@ class UnsupportedMechanismEffects:
         )
 
 
-def validate_mechanism_result(request, value, *, spatial_concentration_ids=frozenset()):
-    """Reuse RE DTO invariants, complete read fence and closed owner adoption.
+def validate_mechanism_result(request, value, *, groups=()):
+    """Guard the port's response and reconstruct the candidate and damage packets.
 
     The attack validator cannot be reused unchanged: its authorization and
     attribution require a character attacker. This path never fabricates one.
@@ -375,7 +379,7 @@ def validate_mechanism_result(request, value, *, spatial_concentration_ids=froze
         if any(getattr(result, k) != v for k, v in expected.items()):
             _invalid("Mechanism result correlation/source/version/read fence differs")
         if result.status != "accepted":
-            return result, ()
+            return result, (), ()
         result.rng_transition.verify_input(request.rng_context)
         if any(e.target_id not in request.target_ids for e in result.proposed_events):
             _invalid("Mechanism audit target exceeds approved scope")
@@ -388,11 +392,23 @@ def validate_mechanism_result(request, value, *, spatial_concentration_ids=froze
                 "unsupported_mechanism_effect_lifecycle",
                 "Effects requires world-source lifecycle support",
             )
-        actors = {
-            a.entity_id: a.model_dump(mode="json") for a in request.state_snapshot.character_states
+        data = request.state_snapshot.model_dump(mode="json")
+        actors = {actor["entity_id"]: actor for actor in data["character_states"]}
+        concentrators = {group.caster_id for group in groups}
+        allowed_effects = {member for group in groups for member in group.actor_members}
+        effects = {
+            (effect.target_id, effect.id, effect.origin): effect
+            for effect in request.state_snapshot.effect_states
         }
-        if request.state_snapshot.effect_states or any(
-            actors[t]["conditions"] or not actors[t]["is_alive"] for t in request.target_ids
+        if (
+            effects.keys() != allowed_effects
+            or any(
+                effect.target_id in request.target_ids
+                or effect.end_effects
+                or (effect.lifecycle is not None and effect.lifecycle.spec.on_end)
+                for effect in effects.values()
+            )
+            or any(actors[t]["conditions"] or not actors[t]["is_alive"] for t in request.target_ids)
         ):
             raise StateMachineError(
                 "unsupported_mechanism_effect_delta",
@@ -430,31 +446,27 @@ def validate_mechanism_result(request, value, *, spatial_concentration_ids=froze
                     "unsupported_mechanism_effect_delta",
                     "Death adoption needs the corresponding conditions/Effects packet",
                 )
-        if any(
-            event.target_id in spatial_concentration_ids
-            and event.kind == "damage"
-            and event.amount > 0
-            for event in result.proposed_events
-        ) or any(
-            op.target_id in spatial_concentration_ids
-            and (
-                type(op) is HPDelta
-                and op.amount < 0
-                or type(op) is TempHPSet
-                and op.temp_hp < op.expected_temp_hp
+        damage = {}
+        for event in result.proposed_events:
+            if event.kind == "damage" and event.target_id in concentrators:
+                if event.target_id in damage:
+                    _invalid("Mechanism effect has multiple damage packets for one target")
+                damage[event.target_id] = event.amount
+        for actor in request.state_snapshot.character_states:
+            target = actor.entity_id
+            if target not in concentrators:
+                continue
+            loss = (
+                actor.hp_current
+                + actor.temp_hp
+                - (actors[target]["hp_current"] + actors[target]["temp_hp"])
             )
-            for op in result.state_delta
-        ):
-            raise StateMachineError(
-                "unsupported_mechanism_effect_lifecycle",
-                "Mechanism damage cannot yet resolve a spatial concentration save",
-            )
-        data = request.state_snapshot.model_dump(mode="json")
-        data["character_states"] = [
-            actors[a.entity_id] for a in request.state_snapshot.character_states
-        ]
-        NonCombatSnapshot.model_validate_json(canonical_json(data))
-        return result, tuple(changes)
+            if loss != damage.get(target, 0):
+                _invalid("Mechanism damage audit disagrees with HP and temporary HP changes")
+        candidate = NonCombatSnapshot.model_validate_json(canonical_json(data))
+        targets = {a.entity_id: a for a in candidate.character_states}
+        packets = tuple((targets[target], amount) for target, amount in damage.items() if amount)
+        return result, tuple(changes), packets
     except (ValidationError, ValueError, TypeError, KeyError, AttributeError) as exc:
         raise StateMachineError(
             "invalid_rule_result", "Malformed mechanism result/delta/RNG"
@@ -475,6 +487,55 @@ class MechanismEffectRunner:
         # No test evaluator is selected by any public command or Package field.
         """Return whether an actual mechanism rules port is installed."""
         return not isinstance(self.port, UnsupportedMechanismEffects)
+
+    def concentration_groups(self, request):
+        """Read only active groups of targets approved for this damage consequence."""
+        if request.effect.damage is None:
+            return {}
+        effects = self.h.characters.effects
+        return {
+            target: group
+            for target in request.target_ids
+            if (group := effects.concentration_group(request.session_id, target)) is not None
+        }
+
+    def check_damage_concentration(self, request, result, packets, groups, loader):
+        """Run bound checks in packet order on the port's successor RNG state."""
+        if not packets:
+            return (), result.rng_transition
+        rng = request.rng_context
+        state = result.rng_transition.next_state
+        checks = []
+        for target, amount in packets:
+            group = groups[target.entity_id]
+            check_request = ConcentrationDamageCheckRequest(
+                target=target,
+                amount=amount,
+                damage_instance_id=f"{request.source.consequence_id}:{target.entity_id}",
+                ruleset_binding=request.ruleset_binding,
+                rng_context=RNGContext(stream_id=rng.stream_id, version=rng.version, state=state),
+            )
+            try:
+                resolution = evaluate_concentration_damage_check(check_request, loader=loader)
+                resolution.verify_request(check_request)
+            except (TypeError, ValueError) as exc:
+                raise StateMachineError(
+                    "invalid_rule_result", "Invalid concentration check"
+                ) from exc
+            if resolution.outcome == "unsupported":
+                raise StateMachineError(
+                    "unsupported_mechanism_effect_lifecycle", resolution.error.reason
+                )
+            checks.append((group, resolution))
+            state = resolution.rng_transition.next_state
+        transition = RNGTransition(
+            stream_id=rng.stream_id,
+            input_version=rng.version,
+            input_state=rng.state,
+            next_state=state,
+            state_changed=state != rng.state,
+        )
+        return checks, transition
 
     def request(
         self, row, package, oid, actor, activation, consequence, source_seq, command_id, action
@@ -574,28 +635,18 @@ class MechanismEffectRunner:
     def apply(
         self, row, package, oid, actor, activation, consequence, source_seq, command_id, action
     ):
-        """Evaluate and validate the effect response before applying allowed changes in the
-        original transaction.
-        """
+        """Return the audit and terminal Effects events from the original transaction."""
         request = self.request(
             row, package, oid, actor, activation, consequence, source_seq, command_id, action
         )
+        groups = self.concentration_groups(request)
         try:
             value = self.port.evaluate(copy.deepcopy(request))
         except Exception as exc:
             raise StateMachineError(
                 "rule_evaluation_failed", "Mechanism evaluator fault; retry original command"
             ) from exc
-        spatial_lights = self.h.characters.effects.spatial_lights
-        spatial_concentration_ids = frozenset(
-            target_id
-            for target_id in request.target_ids
-            if request.effect.damage is not None
-            and spatial_lights.concentration(row["session_id"], target_id) is not None
-        )
-        result, changes = validate_mechanism_result(
-            request, value, spatial_concentration_ids=spatial_concentration_ids
-        )
+        result, changes, packets = validate_mechanism_result(request, value, groups=groups.values())
         if result.status != "accepted":
             code = {
                 "unsupported": "unsupported_mechanism_effect",
@@ -618,11 +669,35 @@ class MechanismEffectRunner:
             command_id,
             action,
         )
-        if current != request:
+        if current != request or self.concentration_groups(current) != groups:
             raise StateMachineError("version_conflict", "Mechanism effect dependencies changed")
-        rules._apply_dnd_changes(row, changes)
-        self.h.runtime.advance_rule_rng(
-            row["session_id"], result.rng_transition, request.rng_context
+        checks, transition = self.check_damage_concentration(
+            request, result, packets, groups, rules.loader
         )
+        rules._apply_dnd_changes(row, changes)
         # Audit is nested under the activation, never an extra sensory/LLM route.
-        return result.model_dump(mode="json")
+        audit = result.model_dump(mode="json")
+        sid = row["session_id"]
+        events = []
+        for group, resolution in checks:
+            events.extend(
+                self.h.characters.effects.apply_damage_concentration(
+                    sid,
+                    group,
+                    resolution,
+                    end_spatial=lambda member: self.h.magic.end_event(
+                        sid, package, member, "concentration_ended"
+                    ),
+                )
+            )
+        if checks:
+            audit["adopted_rng_transition"] = transition.model_dump(mode="json")
+            audit["concentration_checks"] = [
+                {
+                    **resolution.model_dump(mode="json", exclude={"rng_transition"}),
+                    "concentration_id": group.concentration_id,
+                }
+                for group, resolution in checks
+            ]
+        self.h.runtime.advance_rule_rng(sid, transition, request.rng_context)
+        return audit, events

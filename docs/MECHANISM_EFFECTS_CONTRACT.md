@@ -27,6 +27,11 @@ installed explicitly by tests; they are not real RE effect integration.
 This is SM's local versioned proposal for RE adaptation. It does not freeze the
 architecture's OPEN world-source ABI across repositories.
 
+The supported adoption path now sends completed mechanism damage to the shared RE
+concentration check. The configured mechanism effect still needs an installed
+evaluation port. Public command regressions install a fixed damage fixture and
+exercise the real RE concentration decision and Effects adoption.
+
 ## Configuration
 
 Package /10 admits mechanism/3 alongside compatible /1-/2 definitions. /3 adds
@@ -108,7 +113,7 @@ fields and JSON round trips are tested.
 | session_id / command_id | Original admitted command, including automatic and failed-check consequences |
 | source | kind=mechanism; actual object_id/definition_ref, scene/cell, activation/consequence identity, source_event_seq, package_digest |
 | effect / selector / target_ids | Typed resolved immutable definition, selector and trusted candidate targets |
-| state_snapshot | Complete existing NonCombatSnapshot /17 with inventory/resource/casting/effects and known projected lighting |
+| state_snapshot | Complete current NonCombatSnapshot with inventory/resource/casting/effects and known projected lighting |
 | world_dependencies | Actual owner-provided actor poses and current per-object OSS contributions |
 | ruleset_binding | Session-fixed Package binding verified against actual evaluator/data |
 | rng_context | Current authoritative stream/version/state, including prior consequences |
@@ -138,9 +143,9 @@ audit events. No partial continuation is represented.
 
 Closed Delta wire variants reuse RE HPDelta, TempHPSet and DeathStateUpdate DTOs;
 adoption currently permits **only bounded nonzero-HP damage/TempHP reduction**.
-Death packets, zero-HP settlement, targets with conditions, existing effect
-dependencies and status/lifecycle adoption explicitly refuse as unsupported owner
-capabilities. Parsability does not imply adoption support. Unknown kinds, arbitrary
+Death packets, zero-HP settlement, targets with conditions, unreviewed effect
+dependencies and status application refuse as unsupported owner capabilities.
+Unknown kinds, arbitrary
 paths/SQL, healing, TempHP grants, wrong targets/pre-values/arithmetic, duplicate
 fields and malformed candidate state produce invalid_rule_result. RE DTO and
 NonCombatSnapshot validators are reused; the actor-attack authorization validator
@@ -148,11 +153,18 @@ is not called with a fabricated attacker. RulesAdapter._apply_dnd_changes routes
 approved edits to CharacterFacts.
 
 proposed_events are typed audit summaries (attack/save/damage/status), restricted
-to declared requirements and selected targets. They never drive HP writes.
-Accepted results/audits are nested in the existing activation payload; there is
-no new per-consequence WorldEvent, OB, JEV or LLM path. Combat commands/hooks remain
-unsupported. Future combat adoption must aggregate participants by Turn Episode
-and outsiders by Round Episode.
+to declared requirements and selected targets. For each concentrating target, verified
+HP and temporary HP loss must equal the declared completed damage packet. The
+active concentration group is resolved by caster and full member identity. The
+shared RE check consumes the port's successor RNG in packet order. A failed check
+removes the exact group through Effects. Actor members that require follow-up
+effects or modify a damage target remain outside the supported profile. Spatial
+members use the ordinary terminal event and illumination invalidation. The damage
+and concentration roll evidence is nested in the activation payload with both the
+original port transition and the combined adopted RNG transition. The combined
+successor is adopted once with the rest of the consequence. Combat mechanism
+commands/hooks remain unsupported. Future combat adoption must aggregate
+participants by Turn Episode and outsiders by Round Episode.
 
 ## Original-command outcome and transaction
 
@@ -166,11 +178,11 @@ and outsiders by Round Episode.
 | malformed result/binding/evaluator/storage fault | Independent error, rollback, no cached refusal; original command key can retry |
 
 The synchronous port is bounded and pure: no IO, waits or authoritative writes.
-Production never invokes RE. Fixtures use the existing command savepoint; before
-adoption the binding and complete current request are rebuilt/compared. Later
-failure rolls back earlier HP, world operations, RNG, uses/count, activation
-history, events and outbox. Receipt replay/reopen never reruns evaluation. Rule
-results count toward the existing command cascade bound.
+The default production port remains unavailable. Before adoption SM compares the
+complete current request and affected concentration groups. Later failure rolls
+back earlier HP, Effects, illumination changes, world operations, RNG, uses/count,
+activation history, events and outbox. Receipt replay/reopen never reruns evaluation.
+Rule results count toward the existing command cascade bound.
 
 Real ordinary RE checks remain evaluated outside the write transaction. Their
 candidate RNG is adopted inside the savepoint **before** direct failed-check
@@ -182,7 +194,7 @@ overwritten by the earlier check transition; rollback restores both.
 1. Real versioned rules.effect with authenticated mechanism/world source,
    certified effect catalog/parameters and complete dependency semantics.
 2. Source-aware attacks/saves/damage, complete multi-target and zero-HP/death/
-   condition/concentration/effect packets, certified Delta owner adoption.
+   condition/effect packets, certified Delta owner adoption for broader profiles.
 3. Effects source/lifecycle identities, duration clocks, repeat saves and explicit
    end conditions. Reset/re-prepare stays MechanismService-owned. Disarm/destruction
    must not clear effects with unrelated end conditions; no blanket clear/timer

@@ -49,13 +49,21 @@ class SpatialLightEffects:
         ).fetchone()
 
     @scoped_read
+    def for_concentration(self, sid, concentration_id):
+        """Resolve the actual spatial member through the unique group link."""
+        return self.db.execute(
+            "SELECT * FROM spatial_light_effects WHERE session_id=? AND concentration_id=?",
+            (sid, concentration_id),
+        ).fetchone()
+
+    @scoped_read
     def concentration(self, sid, caster):
         """Find a caster's spatial member of the shared concentration group."""
         group = self.db.execute(
             "SELECT concentration_id FROM effect_concentrations WHERE session_id=? AND caster_id=?",
             (sid, caster),
         ).fetchone()
-        return self.get(sid, group[0]) if group else None
+        return self.for_concentration(sid, group[0]) if group else None
 
     @scoped_read
     def spec(self, record):
