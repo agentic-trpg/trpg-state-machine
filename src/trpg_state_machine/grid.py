@@ -18,6 +18,7 @@ from dnd5e_engine.specs import GridScene
 
 from .errors import StateMachineError
 from .grid_maps import PreparedGrid
+from .instance_data import passage_index
 from .runtime_instances import instance_read
 from .scoped_reads import scoped_read
 from .world_spatial import ObjectSpatialProjection
@@ -54,6 +55,20 @@ class GridOccupant:
     kind: str
     entity_id: str
     cells: tuple[str, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class LightOccluders:
+    """Fixed local light geometry in cell units, with unknown legacy occupancy."""
+
+    walls: tuple[tuple[float, float, float, float], ...] = ()
+    opaque_cells: frozenset[str] = frozenset()
+    uncertain_cells: frozenset[str] = frozenset()
+    opaque_objects: tuple[tuple[str, tuple[str, ...]], ...] = ()
+
+    def __deepcopy__(self, memo):
+        """Share immutable geometry across readers and savepoints."""
+        return self
 
 
 class _GridSnapshot:
@@ -447,6 +462,27 @@ class GridReader:
         )
         return actors, objects
 
+    def region_occupants(self, sid, scene_id, cells, *, include_actors=False):
+        """Read selected footprint cells and optionally actor positions in the open scope.
+
+        Return actor (id, cell) rows and object (id, cell, movement flag) rows.
+        Only cells inside the caller's selection are included.
+        """
+        parameters = sid, scene_id, json.dumps(sorted(cells))
+        actors = ()
+        if include_actors:
+            actors = self.store.connection.execute(
+                "SELECT actor_id,cell FROM actors WHERE session_id=? AND current_scene_id=? "
+                "AND cell IN (SELECT value FROM json_each(?))",
+                parameters,
+            )
+        objects = self.store.connection.execute(
+            "SELECT object_id,cell,blocks FROM object_spatial_cells "
+            "WHERE session_id=? AND scene_id=? AND cell IN (SELECT value FROM json_each(?))",
+            parameters,
+        )
+        return actors, objects
+
 
 class GridService:
     """Trusted World composition. Callers retain Session/Package authorization.
@@ -534,6 +570,68 @@ class GridService:
                 "invalid_spatial_state", "Entity placement is missing or out of bounds"
             )
         return GridView(scene_id, row[0], prepared.grid_json, occupants, objects, prepared)
+
+    @_read
+    @scoped_read
+    def light_occluders(self, sid, scene_id, package, cells, *, fixed_grid=None):
+        """Read static and current dynamic blockers touching conservative light corridors.
+
+        The supplied prepared map can be a fixed stage input. Object footprint
+        and door state use the caller's current transaction or candidate scope.
+        """
+        prepared = (
+            self.reader.current_grid(sid, scene_id, package) if fixed_grid is None else fixed_grid
+        )
+        selected = frozenset(cell for cell in cells if cell_in_bounds(prepared.topology, cell))
+        if not selected:
+            return LightOccluders()
+        if len(selected) <= 512:
+            dynamic = self._cached_light_blockers(sid, scene_id, package, selected)
+        else:
+            dynamic = self._dynamic_light_blockers(sid, scene_id, package, selected)
+        return LightOccluders(
+            prepared.topology.light_walls(selected),
+            dynamic.opaque_cells | prepared.topology.light_solid_cells(selected),
+            dynamic.uncertain_cells,
+            dynamic.opaque_objects,
+        )
+
+    @instance_read("scene", "lighting", "candidates", capacity=8, maintained="light_candidates")
+    def _cached_light_blockers(self, sid, scene_id, package, selected):
+        """Keep a small number of regions tied to the Scene's dynamic geometry version."""
+        return self._dynamic_light_blockers(sid, scene_id, package, selected)
+
+    def _dynamic_light_blockers(self, sid, scene_id, package, selected):
+        """Resolve door opacity and local ground contributions in the current scope."""
+        opaque = set()
+        uncertain, opaque_objects = set(), []
+        passages = passage_index(self.h.store, sid)
+        doors = {}
+        for cell in selected:
+            for oid in passages.doors_by_threshold.get((scene_id, cell), ()):
+                doors.setdefault(oid, []).append(cell)
+        spatial = self.h.objects.spatial
+        for oid, thresholds in doors.items():
+            if spatial.light_door_closed(sid, oid, package):
+                opaque.update(thresholds)
+        touching = {}
+        _, occupants = self.reader.region_occupants(sid, scene_id, selected)
+        for oid, cell, blocks in occupants:
+            if oid not in passages.by_door:
+                touching.setdefault(oid, {})[cell] = blocks
+        for oid, footprint in sorted(touching.items()):
+            declared, legacy_anchor = spatial.light_occlusion(sid, oid, package)
+            if declared:
+                opaque_objects.append((oid, tuple(sorted(footprint))))
+            elif declared is None:
+                uncertain.update(
+                    c for c, blocks in footprint.items() if blocks or c == legacy_anchor
+                )
+        return LightOccluders(
+            opaque_cells=frozenset(opaque),
+            uncertain_cells=frozenset(uncertain),
+            opaque_objects=tuple(opaque_objects),
+        )
 
     @_read
     @scoped_read

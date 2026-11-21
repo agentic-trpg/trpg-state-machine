@@ -136,26 +136,38 @@ class PassageIndex:
     by_scene: Mapping
     by_id: Mapping
     door_scenes: Mapping
+    doors_by_threshold: Mapping
 
     @classmethod
     def build(cls, passages):
         """Build shared passage identity, door, scene and endpoint reverse associations."""
-        doors, scenes, ids, door_scenes = {}, {}, {}, {}
+        doors, scenes, ids, door_scenes, thresholds = {}, {}, {}, {}, {}
         for passage in passages:
             ids.setdefault(passage.passage_id, []).append(passage)
             endpoints = dict.fromkeys(e.scene_id for e in passage.endpoints)
             for scene in endpoints:
                 scenes.setdefault(scene, []).append(passage)
-            if passage.door_object_id is not None:
-                door = passage.door_object_id
+            door = passage.door_object_id
+            if door is not None:
                 doors.setdefault(door, []).append(passage)
                 door_scenes.setdefault(door, {}).update(endpoints)
+                for endpoint in passage.endpoints:
+                    thresholds.setdefault((endpoint.scene_id, endpoint.threshold_cell), {})[
+                        door
+                    ] = None
 
         def freeze(buckets):
             """Freeze association buckets as read-only mappings of tuples."""
             return MappingProxyType({key: tuple(value) for key, value in buckets.items()})
 
-        return cls(passages, freeze(doors), freeze(scenes), freeze(ids), freeze(door_scenes))
+        return cls(
+            passages,
+            freeze(doors),
+            freeze(scenes),
+            freeze(ids),
+            freeze(door_scenes),
+            freeze(thresholds),
+        )
 
     def select(self, *, scene_id=None, object_id=None, passage_id=None):
         """Select the passage/door/scene bucket, applying combined filters within that

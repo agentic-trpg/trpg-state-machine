@@ -1,11 +1,22 @@
 """Ordinary scenario emitters; no fuel, magic, sunlight or effect lifecycle."""
 
 from dataclasses import asdict, dataclass
+from itertools import chain
+from math import ceil, floor
+from typing import NamedTuple
 
 from dnd5e_engine.spatial import cell_id, parse_cell
 
 from ._execution import _execution_data
 from .errors import StateMachineError
+from .light_geometry import (
+    Point,
+    Polygon,
+    Segment,
+    clip_to_bounds,
+    lit_polygons,
+    shadow_intersects_interior,
+)
 from .runtime_instances import instance_read, resolve_field_batch
 from .world_commands import SetLightEnabled
 
@@ -13,21 +24,118 @@ _RANK = {"dark": 0, "dim": 1, "bright": 2}
 _MAX_QUERY_CELLS = 256
 
 
-@dataclass(frozen=True, slots=True)
-class LightGeometry:
-    """Share prepared immutable light blockers and uncertain topology inputs."""
+class CellLight(NamedTuple):
+    """Retain a cell's scalar light and clipped drawing shapes in one immutable result."""
 
-    candidates: frozenset
-    topology: object
+    level: str
+    unknown: bool = False
+    sources: tuple[str, ...] = ()
+    base: str = "dark"
+    dim: tuple[Polygon, ...] = ()
+    bright: tuple[Polygon, ...] = ()
 
-    def __iter__(self):
-        """Iterate the immutable light geometry's candidate and topology inputs."""
-        yield self.candidates
-        yield self.topology
+    @classmethod
+    def ambient(cls, level):
+        """Use the map's base grade when no local source contributes."""
+        return cls(level, base=level)
 
     def __deepcopy__(self, memo):
-        """Share immutable light geometry when deep-copied."""
+        """Share fixed lighting data, including immutable polygon vertices."""
         return self
+
+
+@dataclass(frozen=True, slots=True)
+class _SourceCoverage:
+    """Hold local point-light coverage under definite and possible occlusion."""
+
+    origin: Point
+    lit: tuple[Polygon, ...]
+    possible_edges: tuple[Segment, ...]
+
+
+def _cell_edges(cells):
+    """Emit the boundary segments of opaque unit cells."""
+    boundary = set()
+    for cell in cells:
+        x, y = parse_cell(cell)
+        corners = ((x, y), (x + 1, y), (x + 1, y + 1), (x, y + 1))
+        for start, end in zip(corners, (*corners[1:], corners[0]), strict=True):
+            edge = tuple(sorted((start, end)))
+            if edge in boundary:
+                boundary.remove(edge)
+            else:
+                boundary.add(edge)
+    return tuple(sorted(boundary))
+
+
+def _segment_meets_bounds(segment, bounds):
+    """Conservatively select segments that can cross the light path bounds."""
+    (x1, y1), (x2, y2) = segment
+    left, top, right, bottom = bounds
+    return (
+        min(x1, x2) <= right
+        and max(x1, x2) >= left
+        and min(y1, y2) <= bottom
+        and max(y1, y2) >= top
+    )
+
+
+def _corridor_cells(scoped_targets):
+    """Yield a sparse supercover of the source-to-target ground area.
+
+    Merge adjacent targets into horizontal runs. Each run and its source form
+    a convex corridor. Intersecting its outer rays with each grid row gives
+    the candidate columns, without rasterizing the full bounding rectangle.
+    """
+    intervals = {}
+    for origin, targets in scoped_targets:
+        x, y = parse_cell(origin)
+        ox, oy = x + 0.5, y + 0.5
+        targets_by_row = {}
+        for col, row in targets:
+            targets_by_row.setdefault(row, []).append((col, col + 1))
+        for target_row, target_columns in targets_by_row.items():
+            for left, right in _merge_intervals(target_columns):
+                corners = (
+                    (left, target_row),
+                    (right, target_row),
+                    (left, target_row + 1),
+                    (right, target_row + 1),
+                )
+                rays = tuple((ty, (tx - ox) / (ty - oy)) for tx, ty in corners)
+                for row in range(min(y, target_row), max(y, target_row) + 1):
+                    crossings = [
+                        ox + slope * (edge_y - oy)
+                        for ty, slope in rays
+                        for edge_y in (row, row + 1)
+                        if min(oy, ty) <= edge_y <= max(oy, ty)
+                    ]
+                    if row == y:
+                        crossings.append(ox)
+                    if row == target_row:
+                        crossings.extend((left, right))
+                    intervals.setdefault(row, []).append(
+                        (floor(min(crossings)), ceil(max(crossings)))
+                    )
+    return {
+        cell_id(x, y)
+        for y, ranges in intervals.items()
+        for start, stop in _merge_intervals(ranges)
+        for x in range(start, stop)
+    }
+
+
+def _merge_intervals(intervals):
+    """Yield disjoint runs from half-open intervals on one grid axis."""
+    ordered = sorted(intervals)
+    lower, upper = ordered[0]
+    for start, stop in ordered[1:]:
+        if start > upper:
+            yield lower, upper
+            lower, upper = start, stop
+        else:
+            upper = max(upper, stop)
+    yield lower, upper
 
 
 class LightService:
@@ -89,8 +197,7 @@ class LightService:
     def current_project(self, sid, scene, package):
         """Build the effective current grid, storing dynamic light only within source reach."""
         raw = self.h.grid.reader.current_grid(sid, scene, package)
-        geometry = self.geometry(sid, scene, package) if self.sources(sid, scene, package) else None
-        return self.project(sid, scene, package, raw, geometry=geometry)
+        return self.project(sid, scene, package, raw)
 
     @instance_read("scene", "lighting", "topology", maintained="light_result")
     def current_topology(self, sid, scene, package):
@@ -129,25 +236,86 @@ class LightService:
         return {cell: values[key] for cell, key in parameters.items()}
 
     def _compute_cells(self, sid, scene, package, cells):
-        """Prepare the base grid and evaluate candidate light contributions for cache misses."""
+        """Use current map facts and compute only missing cell light results."""
         prepared = self.h.grid.reader.current_grid(sid, scene, package)
         sources = self.sources(sid, scene, package)
+        return self._evaluate_cells(sid, scene, package, prepared, sources, cells)
+
+    def _evaluate_cells(self, sid, scene, package, grid, sources, cells):
+        """Share one regional blocker read and one geometric result per relevant source."""
+        topology = grid.topology
         if not sources:
-            lighting = prepared.data["lighting"]
-            default = prepared.data["default_lighting"]
-            return {cell: (lighting.get(cell, default), False, ()) for cell in cells}
-        by_cell = self._sources_for_cells(prepared.topology, sources, cells)
-        geometry = self.geometry(sid, scene, package) if any(by_cell.values()) else None
+            return {cell: CellLight.ambient(topology.light_on_cell(cell)) for cell in cells}
+        by_cell = self._sources_for_cells(topology, sources, cells)
+        coverage, uncertain = self._coverage(sid, scene, package, grid, by_cell)
         return {
             cell: (
-                self._illuminate_cell(
-                    prepared.topology, geometry.topology, geometry.candidates, by_cell[cell], cell
-                )
-                if by_cell.get(cell)
-                else (prepared.topology.light_on_cell(cell), False, ())
+                self._illuminate_cell(topology, coverage, uncertain, applicable, cell)
+                if applicable
+                else CellLight.ambient(topology.light_on_cell(cell))
             )
-            for cell in cells
+            for cell, applicable in by_cell.items()
         }
+
+    def _coverage(self, sid, scene, package, grid, by_cell):
+        """Prepare visibility pieces over the union of possible source-to-target paths."""
+        coordinates = {}
+        origins = {}
+        for cell, sources in by_cell.items():
+            xy = parse_cell(cell) if sources else None
+            for source in sources:
+                oid = source["object_id"]
+                if oid not in origins:
+                    origin = source["cell"]
+                    origins[oid] = (
+                        origin
+                        if origin is not None
+                        and grid.topology.distance_ft(origin, origin) is not None
+                        else None
+                    )
+                if (origin := origins[oid]) is not None:
+                    if oid not in coordinates:
+                        coordinates[oid] = (origin, [])
+                    coordinates[oid][1].append(xy)
+        if not coordinates:
+            return {}, frozenset()
+
+        scopes = {}
+        for oid, (origin, points) in coordinates.items():
+            columns, rows = zip(*points, strict=True)
+            x, y = parse_cell(origin)
+            target = (min(columns), min(rows), max(columns) + 1, max(rows) + 1)
+            left, top, right, bottom = target
+            scopes[oid] = (
+                origin,
+                target,
+                (min(left, x), min(top, y), max(right, x + 1), max(bottom, y + 1)),
+            )
+        corridor_cells = _corridor_cells(coordinates.values())
+        blockers = self.h.grid.light_occluders(sid, scene, package, corridor_cells, fixed_grid=grid)
+        walls = tuple(((x1, y1), (x2, y2)) for x1, y1, x2, y2 in blockers.walls)
+        opaque_objects = {oid: frozenset(cells) for oid, cells in blockers.opaque_objects}
+        coverage = {}
+        for oid, (origin, target, path) in scopes.items():
+            x, y = parse_cell(origin)
+            point = (x + 0.5, y + 0.5)
+            solids = blockers.opaque_cells - {origin}
+            for other, cells in opaque_objects.items():
+                if other != oid:
+                    solids |= cells
+            definite = tuple(
+                segment
+                for segment in chain(walls, _cell_edges(solids))
+                if _segment_meets_bounds(segment, path)
+            )
+            lit = lit_polygons(point, target, definite)
+            possible_edges = tuple(
+                segment
+                for segment in _cell_edges(blockers.uncertain_cells - {origin})
+                if _segment_meets_bounds(segment, path)
+            )
+            coverage[oid] = _SourceCoverage(point, lit, possible_edges)
+        return coverage, blockers.uncertain_cells
 
     @staticmethod
     def _sources_for_cells(topology, sources, cells):
@@ -157,10 +325,12 @@ class LightService:
         Actual cover, sight lines and transmission are resolved during composition.
         """
         coordinates = {cell: parse_cell(cell) for cell in cells}
+        if not coordinates:
+            return {}
         columns, rows = zip(*coordinates.values(), strict=True)
         left, right = min(columns), max(columns)
         top, bottom = min(rows), max(rows)
-        by_cell = {cell: [] for cell in cells}
+        by_cell = {cell: [] for cell in coordinates}
         for source in sources:
             origin = source["cell"]
             if origin is None or topology.distance_ft(origin, origin) is None:
@@ -178,30 +348,31 @@ class LightService:
         return by_cell
 
     @staticmethod
-    def _illuminate_cell(topology, uncertain_geometry, candidates, sources, cell):
-        """Compose light for a cell using the shared single-cell and map rules."""
-        level = topology.light_on_cell(cell)
+    def _illuminate_cell(topology, coverage, uncertain_cells, sources, cell):
+        """Compose scalar levels and drawing pieces from the same local geometry."""
+        base = level = topology.light_on_cell(cell)
         contributions, unknown = [], False
+        dim, bright = [], []
+        x, y = parse_cell(cell)
+        bounds = (x, y, x + 1, y + 1)
         for source in sources:
-            origin, mode = source["cell"], source["mode"]
-            distance = topology.distance_ft(origin, cell) if origin is not None else None
-            if distance is None:
+            oid = source["object_id"]
+            if oid not in coverage:
                 unknown = True
                 continue
-            if distance > mode.dim_outer_radius_ft:
-                continue
-            if (
-                not topology.has_line_of_sight(origin, cell)
-                or topology.cover_between(origin, cell) == "total"
-            ):
+            visible = coverage[oid]
+            pieces = clip_to_bounds(visible.lit, bounds)
+            if not pieces:
                 continue
             if (
                 source["transmission"] == "unknown"
-                or cell in candidates
-                or not uncertain_geometry.has_line_of_sight(origin, cell)
+                or cell in uncertain_cells
+                or shadow_intersects_interior(visible.origin, pieces, visible.possible_edges)
             ):
                 unknown = True
                 continue
+            mode = source["mode"]
+            distance = topology.distance_ft(source["cell"], cell)
             value = (
                 "bright"
                 if mode.bright_radius_ft is not None and distance <= mode.bright_radius_ft
@@ -209,40 +380,12 @@ class LightService:
             )
             if _RANK[value] > _RANK[level]:
                 level = value
-            contributions.append(source["object_id"])
-        return level, unknown, tuple(contributions)
+            if _RANK[value] > _RANK[base]:
+                (bright if value == "bright" else dim).extend(pieces)
+            contributions.append(oid)
+        return CellLight(level, unknown, tuple(contributions), base, tuple(dim), tuple(bright))
 
-    @instance_read("scene", "lighting", "geometry", maintained="light_candidates")
-    def geometry(self, sid, scene, package):
-        """Prepare light-blocking geometry from the current map."""
-        raw = self.h.grid.reader.current_grid(sid, scene, package)
-        return self._geometry(sid, scene, package, raw)
-
-    @instance_read("scene", "lighting", "candidates", maintained="light_candidates")
-    def _candidates(self, sid, scene, package):
-        """Ground-object uncertainty, maintained separately from source membership."""
-        candidates = self.h.objects.spatial.movement_cells(sid, scene, package)
-        actual = self.h.grid.reader.scene_object_occupants(sid, scene, package)
-        candidates.update(
-            cell
-            for oid, cell in actual
-            if cell is not None and self.h.facts.instances.legacy_object(sid, oid).blocks_passage
-        )
-        return frozenset(candidates)
-
-    def _geometry(self, sid, scene, package, raw):
-        """Combine ground/shared-door blockers into uncertain light geometry topology."""
-        candidates = set(self._candidates(sid, scene, package))
-        for passage in self.h.facts.instances.passages(sid, scene_id=scene):
-            if passage.door_object_id and self.h._door_closed(sid, passage, package):
-                candidates.update(
-                    e.threshold_cell for e in passage.endpoints if e.scene_id == scene
-                )
-        topology = self.h.grid.reader.topology_for_grid(sid, scene, raw)
-        uncertain_geometry = topology.with_blocked(candidates)
-        return LightGeometry(frozenset(candidates), uncertain_geometry)
-
-    def project(self, sid, scene, package, raw, *, cells=None, geometry=None):
+    def project(self, sid, scene, package, raw, *, cells=None):
         """Project current sources on a supplied fixed map.
 
         Keep base overrides and defaults. With no explicit cell selection, add only
@@ -250,21 +393,18 @@ class LightService:
         """
         from .grid_maps import PreparedGrid
 
-        topology = self.h.grid.reader.topology_for_grid(sid, scene, raw)
-        supplied = raw
-        raw = raw.copy_data() if isinstance(raw, PreparedGrid) else raw
-        grid = {**raw, "lighting": dict(raw["lighting"])}
+        supplied = raw if isinstance(raw, PreparedGrid) else PreparedGrid.build(raw)
+        grid = supplied.copy_data()
         sources = self.sources(sid, scene, package)
         if not sources:
             return grid, (), {}
-        candidates, uncertain_geometry = (
-            self._geometry(sid, scene, package, supplied) if geometry is None else geometry
-        )
         selected = (
-            cells if cells is not None else self._affected_light_cells(topology, raw, sources)
+            cells
+            if cells is not None
+            else self._affected_light_cells(supplied.topology, supplied.data, sources)
         )
         uncertain, evidence = self._project_cells(
-            topology, uncertain_geometry, candidates, sources, selected, grid["lighting"]
+            sid, scene, package, supplied, sources, selected, grid["lighting"]
         )
         return grid, uncertain, evidence
 
@@ -278,17 +418,10 @@ class LightService:
         sources = self.sources(sid, scene, package)
         if not sources:
             return {}, (), {}
-        if fixed_grid is None:
-            grid = self.h.grid.reader.current_grid(sid, scene, package)
-            candidates, uncertain_geometry = self.geometry(sid, scene, package)
-        else:
-            grid = fixed_grid
-            candidates, uncertain_geometry = self._geometry(sid, scene, package, grid)
+        grid = fixed_grid or self.h.grid.reader.current_grid(sid, scene, package)
         cells = self._affected_light_cells(grid.topology, grid.data, sources)
         levels = {}
-        uncertain, evidence = self._project_cells(
-            grid.topology, uncertain_geometry, candidates, sources, cells, levels
-        )
+        uncertain, evidence = self._project_cells(sid, scene, package, grid, sources, cells, levels)
         return levels, uncertain, evidence
 
     @staticmethod
@@ -312,23 +445,18 @@ class LightService:
             for row in range(max(0, y - radius), min(height, y + radius + 1)):
                 row_ranges.setdefault(row, []).append(columns)
         for row in sorted(row_ranges):
-            covered_until = 0
-            for start, stop in sorted(row_ranges[row]):
-                yield from (cell_id(col, row) for col in range(max(start, covered_until), stop))
-                covered_until = max(covered_until, stop)
+            for start, stop in _merge_intervals(row_ranges[row]):
+                yield from (cell_id(col, row) for col in range(start, stop))
 
-    def _project_cells(self, topology, uncertain_geometry, candidates, sources, cells, levels):
+    def _project_cells(self, sid, scene, package, grid, sources, cells, levels):
         """Overlay levels and return unknown cells and evidence in the supplied cell order."""
         uncertain, evidence = [], {}
-        for cell in cells:
-            level, unknown, contributions = self._illuminate_cell(
-                topology, uncertain_geometry, candidates, sources, cell
-            )
-            if unknown:
+        for cell, result in self._evaluate_cells(sid, scene, package, grid, sources, cells).items():
+            if result.unknown:
                 uncertain.append(cell)
-            levels[cell] = level
-            if contributions:
-                evidence[cell] = list(contributions)
+            levels[cell] = result.level
+            if result.sources:
+                evidence[cell] = list(result.sources)
         return tuple(uncertain), evidence
 
     def validate(self, row, actor, op, package):
@@ -399,12 +527,17 @@ class LightService:
         )
         return events
 
-    def query_area(self, sid, actor, cells, package, *, context):
+    def query_area(self, sid, actor, cells, package, *, context, include_geometry=False):
         """Return illumination records in caller order after authorizing every cell.
 
         Resolve current values in one read scope. Disclose each source only if the
-        actor can access it under the current object visibility rules.
+        actor can access it under the current object visibility rules. An opt-in
+        geometry field includes cell-clipped bright and dim polygons in grid units,
+        with no source identities. Apply the strongest grade over the base level.
+        Unknown cells have no deterministic geometry.
         """
+        if type(include_geometry) is not bool:
+            raise StateMachineError("invalid_query", "Geometry selection must be boolean")
         if type(cells) not in (list, tuple) or not 1 <= len(cells) <= _MAX_QUERY_CELLS:
             raise StateMachineError("invalid_query", "Select between 1 and 256 grid cells")
         cells = tuple(cells)
@@ -426,9 +559,9 @@ class LightService:
             values = self.current_cells(sid, position.scene_id, package, cells)
             visibility, records = {}, []
             for cell in cells:
-                level, uncertain, sources = values[cell]
+                result = values[cell]
                 visible = []
-                for oid in sources:
+                for oid in result.sources:
                     if oid not in visibility:
                         try:
                             h.objects._visible(sid, actor, oid, package)
@@ -437,13 +570,18 @@ class LightService:
                             visibility[oid] = False
                     if visibility[oid]:
                         visible.append(oid)
-                records.append(
-                    {
-                        "cell": cell,
-                        "illumination": None if uncertain else level,
-                        "status": "unknown" if uncertain else "known",
-                        "contributing_sources": tuple(visible),
-                        "sunlight": prepared.data["sunlight"],
-                    }
-                )
+                record = {
+                    "cell": cell,
+                    "illumination": None if result.unknown else result.level,
+                    "status": "unknown" if result.unknown else "known",
+                    "contributing_sources": tuple(visible),
+                    "sunlight": prepared.data["sunlight"],
+                }
+                if include_geometry:
+                    record["geometry"] = (
+                        None
+                        if result.unknown
+                        else {"base": result.base, "dim": result.dim, "bright": result.bright}
+                    )
+                records.append(record)
             return tuple(records)

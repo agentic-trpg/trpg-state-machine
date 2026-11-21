@@ -86,11 +86,16 @@ class Container:
 
 @dataclass(frozen=True, slots=True)
 class SpatialProperties:
-    """Independent, full-cell contributions; never rule bonuses or inferred senses."""
+    """Independent full-cell contributions.
+
+    Light opacity is explicit when set. None retains legacy light uncertainty
+    for movement-blocking footprints or legacy blockers.
+    """
 
     difficult_terrain: bool = False
     vision_occlusion: bool = False
     cover: str = "none"
+    light_opaque: bool | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -369,15 +374,19 @@ def validate_world_objects(
                                 "difficult_terrain": False,
                                 "vision_occlusion": False,
                                 "cover": "none",
+                                "light_opaque": None,
                                 **raw_props,
                             },
-                            "difficult_terrain vision_occlusion cover",
+                            "difficult_terrain vision_occlusion cover light_opaque",
                             p,
                         )
                         if any(
                             type(props[k]) is not bool
                             for k in ("difficult_terrain", "vision_occlusion")
-                        ) or props["cover"] not in ("none", "half", "three_quarters", "total"):
+                        ) or (
+                            props["cover"] not in ("none", "half", "three_quarters", "total")
+                            or type(props["light_opaque"]) not in (bool, type(None))
+                        ):
                             _fail("unsupported_mechanism", p, "Unsupported full-cell properties")
                         c[field] = SpatialProperties(**props)
                 if c["mobility_policy"] not in ("fixed", "gm_placement") or any(

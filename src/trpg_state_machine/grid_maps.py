@@ -261,6 +261,36 @@ class ReadOnlyTopology(GridTopology):
             return False
         return GridTopology.has_line_of_sight(self._ray_topology(a, b), a, b)
 
+    def light_walls(self, cells):
+        """Find wall segments touching selected cell bounds in grid units.
+
+        Horizontal runs avoid repeated searches over adjacent selected cells.
+        The inclusive index retains shared-corner and fractional wall candidates.
+        """
+        if not cells or self._wall_index is None:
+            return ()
+        rows = sorted((y, x) for x, y in (map(int, cell.split(",")) for cell in cells))
+        candidates = {}
+        row, start = rows[0]
+        end = start
+        for y, x in rows[1:]:
+            if row != y or x > end + 1:
+                candidates.update(
+                    dict.fromkeys(self._wall_index.query((start, row, end + 1, row + 1)))
+                )
+                row, start = y, x
+            end = x
+        candidates.update(dict.fromkeys(self._wall_index.query((start, row, end + 1, row + 1))))
+        return tuple((wall.x1, wall.y1, wall.x2, wall.y2) for wall in candidates)
+
+    def light_solid_cells(self, cells):
+        """Find selected full-cell static barriers by direct membership."""
+        return {
+            cell
+            for cell in cells
+            if cell in self._blocked or self._cover_cells.get(cell) == "total"
+        }
+
 
 @dataclass(frozen=True, slots=True)
 class PreparedGrid:

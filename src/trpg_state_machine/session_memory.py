@@ -626,8 +626,8 @@ class SessionMemory:
                     "weight_invalidations" if domain == "weight" else "mechanism_invalidations"
                 ] += 1
 
-    def _light_profile(self, row, config=None, hp=None):
-        """Only the changed object's static inputs, never a Scene catalogue."""
+    def _light_profile(self, row, config=None, hp=...):
+        """Compare one object's ground geometry and effective shared-door closure."""
         if row is None:
             return None, None
         sid, oid = row["session_id"], row["object_id"]
@@ -644,30 +644,36 @@ class SessionMemory:
             for c in (definition["fields"]["capabilities"]["tuple"] if definition else ())
         }
         spatial = capabilities.get("SpatialObject")
-        blocked = row["state"] == "closed"
-        if spatial is not None:
-            if hp is None:
-                durability = self.select(
+        durability = capabilities.get("Durability")
+        destroyed = False
+        if durability and durability["destruction_policy_ref"] == "disable_spatial_policy":
+            if hp is ...:
+                persisted = self.select(
                     "SELECT current_hp FROM object_durability WHERE session_id=? AND object_id=?",
                     (sid, oid),
                 ).fetchone()
-                hp = durability[0] if durability else None
-            destroyed = hp == 0 and any(
-                c.get("destruction_policy_ref") == "disable_spatial_policy"
-                for c in capabilities.values()
-            )
+                hp = persisted[0] if persisted else None
+            destroyed = hp == 0
+        closed_door = row["state"] == "closed" and not destroyed
+        declared, blocks = None, False
+        if spatial is not None:
             state = "destroyed" if destroyed else "open" if row["state"] == "open" else "closed"
-            blocked = spatial[state + "_blocks_movement"]
+            props = spatial.get(state + "_properties", {}).get("fields", {})
+            declared = props.get("light_opaque")
+            blocks = spatial[state + "_blocks_movement"]
         ground = None
-        if row["scene_id"] is not None and (config.get("blocks_passage") or spatial and blocked):
-            footprint = spatial["footprint"] if spatial and blocked else None
-            ground = (
-                row["scene_id"],
-                row["cell"],
-                row["orientation"] if footprint else None,
-                footprint,
-            )
-        return ground, blocked
+        if row["scene_id"] is not None and row["cell"] is not None:
+            if declared or (declared is None and blocks):
+                ground = (
+                    row["scene_id"],
+                    row["cell"],
+                    row["orientation"],
+                    spatial["footprint"],
+                    "opaque" if declared else "uncertain",
+                )
+            elif declared is None and config.get("blocks_passage"):
+                ground = (row["scene_id"], row["cell"], None, None, "uncertain")
+        return ground, closed_door
 
     def _light_source_config(self, config):
         """Select configuration fields affecting light-source contributions."""
@@ -796,7 +802,7 @@ class SessionMemory:
                         self._advance_field("light_sources", sid, scene)
             return
         configs = (None, None)
-        hp = (None, None)
+        hp = (..., ...)
         if table == "objects":
             columns = (
                 "session_id",

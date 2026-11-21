@@ -132,22 +132,25 @@ def test_light_geometry_only_invalidates_relevant_ground_changes(tmp_path, conte
 def test_shared_door_light_geometry_and_fixed_old_result(tmp_path, context):
     sm, sid, package, _ = setup(tmp_path, context, lighting_data())
     with sm:
-        lights = sm._objects.lights
         with sm._transaction(write=True):
             sm.scene_lifecycle.ensure_scene(sid, B, package)
-        before_a = lights.geometry(sid, A, package)
-        before_b = lights.geometry(sid, B, package)
+
+        def geometry(scene):
+            return sm._world.grid.light_occluders(sid, scene, package, ("0,1", "1,0"))
+
+        before_a = geometry(A)
+        before_b = geometry(B)
         with sm._transaction(write=True):
             sm._conn.execute(
                 "UPDATE objects SET state='closed' WHERE session_id=? AND object_id=?", (sid, DOOR)
             )
-            closed_a = lights.geometry(sid, A, package)
-            closed_b = lights.geometry(sid, B, package)
+            closed_a = geometry(A)
+            closed_b = geometry(B)
             assert closed_a != before_a and closed_b != before_b
-        assert before_a.candidates == frozenset()
-        assert "0,1" not in before_b.candidates
-        assert lights.geometry(sid, A, package) == closed_a
-        assert lights.geometry(sid, B, package) == closed_b
+        assert before_a.opaque_cells == frozenset()
+        assert "0,1" not in before_b.opaque_cells
+        assert geometry(A) == closed_a
+        assert geometry(B) == closed_b
 
 
 @pytest.mark.parametrize("failure", ("savepoint", "transaction"))

@@ -152,6 +152,28 @@ class ObjectSpatialService:
             return "destroyed"
         return "open" if state.open_state == "open" else "closed"
 
+    def light_occlusion(self, sid, oid, package):
+        """Return declared opacity and any supplemental legacy anchor.
+
+        Callers use the indexed footprint's movement bit only for compatibility
+        uncertainty when a state has no declaration. Without a spatial policy the
+        index already carries the object's legacy blocking flag at its only cell.
+        """
+        config = self.config(sid, oid)
+        if config is None:
+            return None, None
+        state = self.state(sid, oid, package)
+        properties = getattr(config, self._property_state(sid, oid, state) + "_properties")
+        if properties.light_opaque is not None:
+            return properties.light_opaque, None
+        legacy_anchor = state.anchor if self._legacy(sid, oid).blocks_passage else None
+        return None, legacy_anchor
+
+    def light_door_closed(self, sid, oid, package):
+        """Determine a shared door's opacity from closure and supported destruction."""
+        state = self.state(sid, oid, package)
+        return state.open_state == "closed" and self._property_state(sid, oid, state) != "destroyed"
+
     def cells(self, package, oid, anchor, orientation="north", *, sid=None):
         # Compatibility for explicitly static geometry callers. Runtime supplies sid.
         """Compute the complete object footprint from anchor and facing."""
