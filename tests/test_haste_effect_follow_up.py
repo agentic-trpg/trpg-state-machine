@@ -1,10 +1,12 @@
 """Haste and Lethargy through the public combat command and character reads."""
 
 from dataclasses import replace
+from random import Random
 
 import pytest
 from dnd5e_engine import evaluation_delta as delta
 from dnd5e_engine.evaluation_contracts import CombatIntentPayload
+from dnd5e_engine.evaluation_rng import RNGState
 from dnd5e_engine.evaluation_ruleset import ruleset_binding
 from dnd5e_engine.events import ConditionApplied
 from dnd5e_engine.rules.character import proficiency_grants
@@ -12,15 +14,17 @@ from dnd5e_srd_data import BundledAssetLoader, MemoryAssetLoader
 from dnd_support import create, initialize
 from item_support import NPC, item_data, item_loader
 from test_hold_effect_atomicity import _effect_counts
-from test_hold_effect_candidate import pass_command
+from test_hold_effect_candidate import hold_attack_command, pass_command
 
 from trpg_state_machine import StateMachine, StateMachineError, TypedCommand
 from trpg_state_machine.package import _validate
 from trpg_state_machine.perception import GameViewContext
 
+HASTE_WEAPON = "object.haste_rapier"
+
 
 @pytest.fixture
-def haste_combat(tmp_path, context):
+def haste_combat(tmp_path, context, request):
     """Initialize combat with a Wizard 5, prepared Haste and its material binding."""
     canonical = BundledAssetLoader()
     base = item_loader()
@@ -36,19 +40,43 @@ def haste_combat(tmp_path, context):
     )
     component = "component-pouch"
     pouch_id = "object.pouch"
+    seed, armed = getattr(request, "param", (0, False))
     assets = MemoryAssetLoader(
         items=[*base._items.values(), canonical.get_item(component)],
         monsters=list(base._monsters.values()),
         classes=[wizard],
         subclasses=[evoker],
         features=[canonical.get_feature(slug) for slug in features],
-        spells=[canonical.get_spell("haste")],
+        spells=[canonical.get_spell("haste"), canonical.get_spell("fire-bolt")],
         conditions=[canonical.get_condition("incapacitated")],
     )
     data = item_data()
     data["manifest"]["ruleset_binding"] = ruleset_binding(assets).model_dump(mode="json")
     template = data["pc_templates"][0]
     template["character"]["inventory"] = [component]
+    if armed:
+        data["scenes"][0]["objects"].append(
+            {
+                "object_id": HASTE_WEAPON,
+                "state": None,
+                "movable": False,
+                "blocks_passage": False,
+                "initial_cell": "2,1",
+            }
+        )
+        data["item_transfers"].append(
+            {
+                "instance_id": HASTE_WEAPON,
+                "item_slug": "rapier",
+                "initial_owner_id": NPC,
+                "quantity": 1,
+                "charges_remaining_per_unit": 0,
+                "policy": "ordinary_public",
+            }
+        )
+    if hasattr(request, "param"):
+        data["actors"][0]["initial_cell"] = "1,0"
+        template["character"]["hp"] = {"current": 30, "max": 30}
     data["scenes"][0]["objects"].append(
         {
             "object_id": pouch_id,
@@ -71,6 +99,7 @@ def haste_combat(tmp_path, context):
     proficiency = proficiency_grants([(wizard, 5, "primary")])
     slots = {1: 4, 2: 3, 3: 2}
     for foundation in data["rule_bindings"].values():
+        foundation["rng_state"] = RNGState.capture(Random(seed)).model_dump(mode="json")
         snapshot = foundation["snapshot"]
         snapshot["snapshot_schema_version"] = "engine-snapshot/20"
         pc, npc = snapshot["character_states"]
@@ -157,6 +186,28 @@ def haste_combat(tmp_path, context):
                 }
             ]
         }
+        if hasattr(request, "param"):
+            pc.update(hp_current=30, hp_max=30)
+        if armed:
+            npc.update(
+                carried_item_slugs=["rapier"],
+                weapon_in_hands="rapier",
+                weapon_grip="one_handed",
+                held_weapon_instance_id=HASTE_WEAPON,
+            )
+            snapshot["inventory_state"]["entries"].append(
+                {
+                    "instance_id": HASTE_WEAPON,
+                    "owner_id": NPC,
+                    "item_slug": "rapier",
+                    "quantity": 1,
+                    "charges_remaining_per_unit": 0,
+                    "accessible": True,
+                }
+            )
+        snapshot["casting_state"]["actors"][0]["sources"][0]["spells"].append(
+            {"spell_id": "fire-bolt", "prepared_order": 1, "material": None}
+        )
     package = _validate(data)
     db = tmp_path / "haste.sqlite"
     with StateMachine(db, dnd_loader=assets) as sm:
@@ -306,6 +357,144 @@ def _assert_next_turn_expiry(sm, sid, package, context, before, target_id, inter
     assert _actor(ended, target_id).conditions == []
     assert ended.resource_state == before.resource_state
     assert _effect_counts(sm, sid) == (0, 0)
+
+
+@pytest.mark.parametrize("haste_combat", [(4, True)], indirect=True)
+def test_haste_grant_funds_exactly_one_attack_after_the_ordinary_attack(haste_combat, context):
+    """Spend only the explicit grant and keep unauthorized requests draw-free."""
+    sm, sid, package, _, _ = haste_combat
+    cast, opening = _cast(sm, sid, package, context, target_id=NPC)
+    caster = cast.actor_id
+    if _active_actor(opening) == caster:
+        opening = _pass(sm, sid, package, context, opening, "haste.grant.opening", caster)
+    (hasted,) = opening.effect_states
+    grant = (hasted.id, hasted.origin)
+    attack = replace(
+        cast,
+        command_id="haste.grant.ordinary",
+        actor_id=NPC,
+        payload=CombatIntentPayload(
+            intent_type="attack", target_id=caster, weapon_instance_id=HASTE_WEAPON
+        ),
+        expected_world_version=opening.world_version,
+    )
+    receipt = sm.submit_command(attack, package, context=context)
+    assert receipt.status == "committed", receipt
+    after = sm.read_combat_snapshot(sid, package, context=context)
+    before_grant = _actor(after, NPC)
+    assert _active_actor(after) == NPC
+    assert not before_grant.action_available and before_grant.attack_rolls_made_this_turn == 1
+    assert not before_grant.action_grants_spent
+    granted = replace(
+        attack,
+        command_id="haste.grant.single",
+        payload=attack.payload.model_copy(update={"action_grant": grant}),
+        expected_world_version=after.world_version,
+    )
+    receipt = sm.submit_command(granted, package, context=context)
+    assert receipt.status == "committed", receipt
+    spent = sm.read_combat_snapshot(sid, package, context=context)
+    assert _active_actor(spent) == NPC
+    after_grant = _actor(spent, NPC)
+    assert after_grant.action_grants_spent == (grant,)
+    assert after_grant.attack_rolls_made_this_turn == 2
+    assert after_grant.action_available == before_grant.action_available
+    assert after_grant.attacks_remaining == before_grant.attacks_remaining
+    assert after_grant.attack_action_attacks_made == before_grant.attack_action_attacks_made
+    assert spent.resource_state == after.resource_state
+    rng = sm.read_rng_context(sid, package, context=context)
+    repeat = replace(
+        granted, command_id="haste.grant.spent", expected_world_version=spent.world_version
+    )
+    denied = sm.submit_command(repeat, package, context=context)
+    assert denied.status == "rejected", denied
+    assert sm.read_combat_snapshot(sid, package, context=context) == spent
+    assert sm.read_rng_context(sid, package, context=context) == rng
+    assert sm.submit_command(granted, package, context=context) == receipt
+    next_caster = _pass(sm, sid, package, context, spent, "haste.grant.end", NPC)
+    next_npc = _pass(sm, sid, package, context, next_caster, "haste.grant.reset", caster)
+    assert not _actor(next_npc, NPC).action_grants_spent
+
+
+def test_haste_grant_cannot_fund_magic(haste_combat, context):
+    """Try to pay for a prepared cantrip with the caster's own active Haste grant."""
+    sm, sid, package, _, _ = haste_combat
+    cast, before = _cast(sm, sid, package, context)
+    if _active_actor(before) == NPC:
+        before = _pass(sm, sid, package, context, before, "haste.magic.opening", NPC)
+    (hasted,) = before.effect_states
+    rng = sm.read_rng_context(sid, package, context=context)
+    magic = replace(
+        cast,
+        command_id="haste.grant.magic",
+        payload=CombatIntentPayload(
+            intent_type="cast_spell",
+            target_id=NPC,
+            spell_id="fire-bolt",
+            spell_source_id="class:wizard",
+            action_grant=(hasted.id, hasted.origin),
+        ),
+        expected_world_version=before.world_version,
+    )
+    assert sm.submit_command(magic, package, context=context).status in {"rejected", "unsupported"}
+    assert sm.read_combat_snapshot(sid, package, context=context) == before
+    assert sm.read_rng_context(sid, package, context=context) == rng
+
+
+@pytest.mark.parametrize(
+    ("haste_combat", "success"),
+    [((27, False), False), ((6, False), True)],
+    indirect=["haste_combat"],
+)
+def test_haste_damage_checks_concentration_and_commits_follow_up_atomically(
+    haste_combat, context, success
+):
+    """Exercise both save outcomes and roll back HP, effect and RNG after failure."""
+    sm, sid, package, assets, db = haste_combat
+    cast, before = _cast(sm, sid, package, context)
+    caster = cast.actor_id
+    if _active_actor(before) == caster:
+        before = _pass(sm, sid, package, context, before, "haste.damage.opening", caster)
+    command = hold_attack_command(sid, caster, before.world_version, command_id="haste.damage")
+    rng = sm.read_rng_context(sid, package, context=context)
+    initial_events = sm.read_events(sid, package, context=context)
+    if not success:
+        sm._conn.execute(
+            "CREATE TEMP TRIGGER fail_haste_damage BEFORE INSERT ON command_receipts "
+            "WHEN NEW.command_id='haste.damage' AND "
+            "NOT EXISTS(SELECT 1 FROM effect_concentrations WHERE session_id=NEW.session_id) AND "
+            "EXISTS(SELECT 1 FROM ongoing_effects WHERE session_id=NEW.session_id "
+            "AND effect_id='effect:lethargy' AND concentration_id IS NULL) "
+            "BEGIN SELECT RAISE(ABORT,'injected Haste damage receipt failure'); END"
+        )
+        with pytest.raises(StateMachineError) as failure:
+            sm.submit_command(command, package, context=context)
+        assert failure.value.code == "storage_error"
+        assert str(failure.value.__cause__) == "injected Haste damage receipt failure"
+        assert sm.read_combat_snapshot(sid, package, context=context) == before
+        assert sm.read_rng_context(sid, package, context=context) == rng
+        assert sm.read_events(sid, package, context=context) == initial_events
+        assert sm.get_command_receipt(sid, command.command_id, package, context=context) is None
+        with StateMachine(db, dnd_loader=assets) as reopened:
+            assert reopened.read_combat_snapshot(sid, package, context=context) == before
+        sm._conn.execute("DROP TRIGGER fail_haste_damage")
+
+    receipt = sm.submit_command(command, package, context=context)
+    assert receipt.status == "committed", receipt
+    after = sm.read_combat_snapshot(sid, package, context=context)
+    assert 0 < _actor(after, caster).hp_current < _actor(before, caster).hp_current
+    assert after.resource_state == before.resource_state
+    assert sm.read_rng_context(sid, package, context=context) != rng
+    assert sm.submit_command(command, package, context=context) == receipt
+    if success:
+        assert after.effect_states == before.effect_states
+        assert after.combat_state.concentration_chain == before.combat_state.concentration_chain
+    else:
+        _lethargy(after, caster)
+        assert _actor(after, caster).movement_remaining == 0
+        assert sm.read_character_ac(sid, caster, package, context=context).effects == 0
+        assert _effect_counts(sm, sid) == (0, 1)
+        _assert_next_turn_expiry(sm, sid, package, context, after, caster, NPC)
 
 
 def test_haste_duration_ends_on_target_turn_and_lethargy_uses_the_following_turn(

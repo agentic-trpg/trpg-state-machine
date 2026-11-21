@@ -221,6 +221,7 @@ class EnvironmentSource:
     region_condition: Literal["poisoned"] | None = None
     region_effect_rule: str | None = None
     region_effect: InitVar[PassiveEffect | dict | None] = _PassiveEffectInput()
+    combat_region: Literal["entry-and-turn-start"] | None = None
     _region_effect_json: _PackedPassiveEffect | None = field(default=None, init=False, repr=False)
 
     def __post_init__(self, region_effect):
@@ -257,6 +258,10 @@ class EnvironmentSource:
             not self.area.cells or self.area.heights is not None or self.exposure != "local"
         ):
             invalid("A fixed-area rule requires local cells without heights")
+        if self.combat_region is not None and (
+            self.combat_region != "entry-and-turn-start" or self.region_condition != "poisoned"
+        ):
+            invalid("Combat region entry and turn start require the fixed Poisoned rule")
 
     @property
     def region_rule_ref(self) -> str | None:

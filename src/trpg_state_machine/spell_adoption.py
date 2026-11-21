@@ -5,10 +5,12 @@ from dnd5e_engine.areas import creature_count
 from dnd5e_engine.attack_rules import can_retain_turn
 from dnd5e_engine.damage_rules import healing_balance
 from dnd5e_engine.evaluation_actor import combatant
+from dnd5e_engine.evaluation_area_spells import point_save_delivery, point_save_event
 from dnd5e_engine.evaluation_speed_effects import speed_cast_support_failure, speed_with_effects
 from dnd5e_engine.evaluation_state import CombatSnapshot, MovementLedgerState
 from dnd5e_engine.movement import project_speeds, speed_for_mode
 from dnd5e_engine.rules.conditions import active_condition_names, exhaustion_level_of
+from dnd5e_engine.spell_delivery import DeliveryPlanningError
 from dnd5e_engine.turn_rules import (
     bonus_action_payment,
     next_turn_index,
@@ -24,6 +26,7 @@ from .damage_adoption import (
     adopt_damage_operation,
     json_value,
     ordinary_damage_target,
+    validate_area_damage,
     validate_damage_result,
 )
 from .errors import StateMachineError
@@ -60,10 +63,13 @@ def ordinary_spell_changes(request, result, mechanism, spell, *, hit_effect=Fals
     spell_id = payload.spell_id
     healing = mechanism == "healing"
     attack = mechanism == "attack_damage"
+    point_save = mechanism == "area_save_damage"
     activity = spell.activities[0]
     bonus = spell.casting_time.unit == CastingTimeUnit.BONUS
     slot_paid = payload.slot_level not in (None, 0)
-    if mechanism not in {"healing", "save_damage", "attack_damage"} or (attack and slot_paid):
+    if mechanism not in {"healing", "save_damage", "attack_damage", "area_save_damage"} or (
+        (attack or point_save) and slot_paid
+    ):
         _invalid("Unsupported ordinary spell mechanism")
     data = snapshot.model_dump(mode="json")
     actors = {actor["entity_id"]: actor for actor in data["character_states"]}
@@ -71,7 +77,7 @@ def ordinary_spell_changes(request, result, mechanism, spell, *, hit_effect=Fals
     combat = data["combat_state"]
     pools = data["resource_state"]["pools"]
     combat_before = snapshot.combat_state
-    if caster not in snapshot.combat_state.party_ids or target not in actors:
+    if caster not in snapshot.combat_state.party_ids or (not point_save and target not in actors):
         _invalid("Spell actor or target is outside the admitted encounter")
     if combat_before.pending_reactions or (
         speed_cast_support_failure(snapshot, target) is not None
@@ -79,7 +85,7 @@ def ordinary_spell_changes(request, result, mechanism, spell, *, hit_effect=Fals
         else bool(snapshot.effect_states)
     ):
         _invalid("Spell result needs unsupported reaction or effect adoption")
-    target_before = before_actors[target]
+    target_before = before_actors.get(target)
     selected = payload.target_ids if payload.target_ids is not None else (target,)
     if healing and (
         not selected
@@ -99,6 +105,7 @@ def ordinary_spell_changes(request, result, mechanism, spell, *, hit_effect=Fals
         _invalid("Spell damage attribution is incomplete")
     if (
         not healing
+        and not point_save
         and not ordinary_damage_target(combat_before, target_before)
         and any(
             type(op)
@@ -122,7 +129,35 @@ def ordinary_spell_changes(request, result, mechanism, spell, *, hit_effect=Fals
     damaged = [event for event in result.proposed_events if event.type == "damage_applied"]
     deaths = [event for event in result.proposed_events if event.type == "death"]
     applied = [event for event in result.proposed_events if event.type == "effect_applied"]
+    areas = [event for event in result.proposed_events if event.type == "area_targeted"]
     creations = [op for op in result.state_delta.operations if type(op) is delta.CombatEffectCreate]
+    if point_save:
+        if target is not None or payload.target_zone_id is None:
+            _invalid("Area cast needs exactly a point of origin")
+        try:
+            area = point_save_delivery(snapshot, spell, caster, payload.target_zone_id)
+        except DeliveryPlanningError:
+            _invalid("Spell area placement differs from the fixed grid")
+        if areas != [point_save_event(area, caster, spell_id)]:
+            _invalid("Spell area evidence differs from the fixed placement and affected creatures")
+        selected = area.target_ids
+        if (
+            tuple(event.target_id for event in saved) != selected
+            or tuple(event.target_id for event in damaged) != selected
+            or any(
+                save.ability != activity.save.ability[0]
+                or save.natural is None
+                or not 1 <= save.natural <= 20
+                or save.modifier is None
+                or save.roll_total != save.natural + save.modifier
+                or save.succeeded != (save.roll_total >= save.dc)
+                or packet.damage_type != activity.damage.parts[0].types[0]
+                or (save.succeeded and activity.damage.on_save == "none" and packet.amount != 0)
+                for save, packet in zip(saved, damaged, strict=True)
+            )
+            or bool(selected) != result.rng_transition.state_changed
+        ):
+            _invalid("Spell area saves and damage differ from the affected creatures and activity")
     if (
         len(submitted) != 1
         or submitted[0].actor_id != caster
@@ -136,8 +171,9 @@ def ordinary_spell_changes(request, result, mechanism, spell, *, hit_effect=Fals
         or tuple(event.target_id for event in healed) != (selected if healing else ())
         or any(event.amount < 0 for event in healed)
         or (healing and bool(damaged or deaths))
-        or len(saved) != int(mechanism == "save_damage")
-        or (saved and (saved[0].target_id != target or len(damaged) != 1))
+        or (not point_save and len(saved) != int(mechanism == "save_damage"))
+        or (not point_save and saved and (saved[0].target_id != target or len(damaged) != 1))
+        or (not point_save and areas)
         or len(rolled) != int(attack)
         or (not hit_effect and (applied or creations))
         or any(
@@ -145,6 +181,7 @@ def ordinary_spell_changes(request, result, mechanism, spell, *, hit_effect=Fals
             not in {
                 "intent_submitted",
                 "spell_cast",
+                "area_targeted",
                 "healing_applied",
                 "save_rolled",
                 "attack_rolled",
@@ -235,6 +272,14 @@ def ordinary_spell_changes(request, result, mechanism, spell, *, hit_effect=Fals
     newly_dead = (
         set()
         if healing
+        else validate_area_damage(
+            request,
+            result,
+            {identity: before_actors[identity] for identity in selected},
+            damaged,
+            source_id=f"spell:{spell_id}:{activity.id}",
+        )
+        if point_save
         else validate_damage_result(
             request,
             result,
@@ -348,18 +393,25 @@ def ordinary_spell_changes(request, result, mechanism, spell, *, hit_effect=Fals
         _invalid("Spell turn handoff events differ from the accepted transition")
     if not turn_advanced and [event.type for event in result.proposed_events] != healing_order:
         _invalid("Retained spell turn has unrelated events")
-    if attack:
+    if attack or point_save:
         event_order: list[str | tuple[str, str | None, int]] = [
             "intent_submitted",
             "spell_cast",
-            "attack_rolled",
         ]
-        if damaged:
-            event_order.append("damage_applied")
-        if deaths:
-            event_order.append("death")
-        if applied:
-            event_order.append("effect_applied")
+        if point_save:
+            event_order.append("area_targeted")
+            for identity in selected:
+                event_order.extend(("save_rolled", "damage_applied"))
+                if identity in newly_dead:
+                    event_order.append("death")
+        else:
+            event_order.append("attack_rolled")
+            if damaged:
+                event_order.append("damage_applied")
+            if deaths:
+                event_order.append("death")
+            if applied:
+                event_order.append("effect_applied")
         next_round = turn_update.value.round_number
         event_order.extend((("turn_end", caster, combat_before.round_number), "turn_ended"))
         if rollover:
@@ -372,7 +424,7 @@ def ordinary_spell_changes(request, result, mechanism, spell, *, hit_effect=Fals
             for event in result.proposed_events
         ]
         if actual_order != event_order:
-            _invalid("Spell attack events differ from the accepted turn order")
+            _invalid("Spell events differ from the accepted action and turn order")
     for op in result.state_delta.operations:
         if type(op) is delta.ResourceUpdate:
             if resource is not None or not slot_paid or op.owner_id != caster or op.amount != -1:
@@ -409,7 +461,17 @@ def ordinary_spell_changes(request, result, mechanism, spell, *, hit_effect=Fals
                 _invalid("Spell HP differs from the healing event")
             edit("actor", op.target_id, "hp_current", op.expected_hp, op.resulting_hp)
         elif not healing and type(op) in DAMAGE_OPERATIONS:
-            adopt_damage_operation(request, target_before.entity_type.lower(), op, edit)
+            if point_save and type(op) is delta.DeathLedgerUpdate:
+                if op.combat_id != combat_before.combat_id:
+                    _invalid("Area death ledger belongs to another combat")
+                edit("combat", op.combat_id, "dead_ids", op.expected_dead_ids, op.dead_ids)
+                edit("combat", op.combat_id, "deaths_recorded", op.expected_records, op.records)
+            elif point_save:
+                adopt_damage_operation(
+                    request, None, op, edit, target_id=getattr(op, "target_id", None)
+                )
+            else:
+                adopt_damage_operation(request, target_before.entity_type.lower(), op, edit)
         elif type(op) is delta.CombatEffectCreate and op is creation:
             data["effect_states"].append(op.effect.model_dump(mode="json"))
             combat["effect_lifecycles"].append(op.lifecycle.model_dump(mode="json"))

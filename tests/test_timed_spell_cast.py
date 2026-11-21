@@ -67,6 +67,7 @@ def timed_spell_world(tmp_path, context):
         caster_class="wizard",
         caster_subclass="evoker",
         configure=None,
+        configure_spell=None,
     ):
         canonical = BundledAssetLoader()
         base = item_loader()
@@ -103,6 +104,8 @@ def timed_spell_world(tmp_path, context):
                     "passive_effects": [passive],
                 }
             )
+        if configure_spell is not None:
+            spell = configure_spell(spell)
         features = sorted(
             {
                 grant.slug

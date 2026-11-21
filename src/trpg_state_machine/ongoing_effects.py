@@ -24,6 +24,7 @@ from .errors import StateMachineError
 from .package import canonical_json
 from .runtime_instances import instance_read
 from .scoped_reads import scoped_read
+from .shield_adoption import is_retained_shield
 from .spatial_light_effects import SpatialLightEffects
 
 
@@ -91,6 +92,7 @@ class OngoingEffects:
                     chain_ordinal=chain_ordinal,
                     conditions=member.get("conditions"),
                     lifecycle=member.get("lifecycle"),
+                    expires_tick=member.get("expires_tick"),
                 )
 
     def add_effect(
@@ -144,8 +146,19 @@ class OngoingEffects:
         )
 
     def add_world_effect(self, sid, proposal, *, expires_tick):
-        """Persist one RE-declared terminal effect and its clock deadline atomically."""
-        self.add_effect(sid, proposal.effect.model_dump(mode="json"), expires_tick=expires_tick)
+        """Persist an elapsed-time effect and its optional one-member concentration."""
+        effect = proposal.effect.model_dump(mode="json")
+        if proposal.concentration:
+            self.create_concentration(
+                sid,
+                f"actor:{proposal.command_id}",
+                proposal.source_id,
+                proposal.effect.id,
+                0,
+                ({"effect": effect, "expires_tick": expires_tick},),
+            )
+        else:
+            self.add_effect(sid, effect, expires_tick=expires_tick)
 
     def apply_combat_creation(self, sid, operation):
         """Insert one verified effect, clock and lineage under the keyed absence guard."""
@@ -165,6 +178,20 @@ class OngoingEffects:
             conditions=operation.lineage.statuses,
             lifecycle=operation.lifecycle.model_dump(mode="json")["state"],
         )
+
+    def apply_shield(self, sid, transition):
+        """Apply the exact guarded Shield effect through the existing target Effects owner."""
+        self.store.require_write()
+        prior, value = transition.expected, transition.value
+        if prior is None:
+            self.add_effect(
+                sid,
+                value.effect.model_dump(mode="json"),
+                conditions=value.lineage.statuses,
+            )
+        elif value is None:
+            self.remove_effect(sid, *prior.expiry_identity)
+        # A retained Shield's response is derived from the owner's adopted life state.
 
     def apply_follow_up(self, sid, operation):
         """Create an independent target effect after its exact parent has been removed."""
@@ -260,16 +287,17 @@ class OngoingEffects:
             self.remove_effect(sid, *identity)
 
     def expire_world_effect(self, sid, identity, expected_tick):
-        """Remove only the exact due effect whose stored deadline still agrees."""
+        """Remove an exact due effect and release its group if it was the last member."""
         self.store.require_write()
         target, effect_id, origin = identity
         deleted = self._conn.execute(
             "DELETE FROM ongoing_effects WHERE session_id=? AND target_id=? "
-            "AND effect_id=? AND origin=? AND expires_tick=? AND concentration_id IS NULL",
+            "AND effect_id=? AND origin=? AND expires_tick=? RETURNING concentration_id",
             (sid, target, effect_id, origin, expected_tick),
-        )
-        if deleted.rowcount != 1:
+        ).fetchone()
+        if deleted is None:
             raise StateMachineError("invalid_effect", "Effect deadline or identity changed")
+        self._remove_empty_concentration(sid, deleted[0])
 
     def remove_effect(self, sid, target_id, effect_id, origin):
         """Remove exactly one target effect, retaining its concentration siblings."""
@@ -288,7 +316,10 @@ class OngoingEffects:
         )
         if result.rowcount != 1:
             raise StateMachineError("invalid_effect", "Target effect is missing")
-        group_id = old[0]
+        self._remove_empty_concentration(sid, old[0])
+
+    def _remove_empty_concentration(self, sid, group_id):
+        """Delete the exact group only after its last actor member is removed."""
         if (
             group_id is not None
             and self._conn.execute(
@@ -443,6 +474,26 @@ class OngoingEffects:
         ]
 
     @scoped_read
+    def visible_for_target(self, sid, target_id):
+        """Project active effects, including the exact shield linked by its reaction."""
+        rows = sorted(self._target_rows(sid, target_id), key=lambda row: row["ordinal"])
+        visible = []
+        for row in rows:
+            effect = {
+                "id": row["effect_id"],
+                "origin": row["origin"],
+                "target_id": row["target_id"],
+                **self.store.memory.json(row["payload_json"]),
+            }
+            if not effect["disabled"] or (
+                effect["id"] == "effect:imperceptible_barrier"
+                and row["conditions_json"] == "[]"
+                and is_retained_shield(EffectState.model_validate_json(canonical_json(effect)))
+            ):
+                visible.append(effect)
+        return visible
+
+    @scoped_read
     def world_passive_identities(self, sid, target_ids):
         """Find roster effects with only a world deadline and passive modifiers.
 
@@ -595,14 +646,26 @@ class OngoingEffects:
                 return True
         return False
 
-    def has_concentration(self, sid, caster_id, *, actor_effect_only=False):
-        """Check the caster's group, optionally excluding the spatial World member."""
-        group = self._conn.execute(
-            "SELECT concentration_id FROM effect_concentrations WHERE session_id=? AND caster_id=?",
-            (sid, caster_id),
-        ).fetchone()
-        return group is not None and (
-            not actor_effect_only or self.spatial_lights.for_concentration(sid, group[0]) is None
+    def has_world_concentration(self, sid, caster_id):
+        """Identify an elapsed-time group that combat currently cannot project."""
+        return (
+            self._conn.execute(
+                "SELECT 1 FROM effect_concentrations WHERE session_id=? AND caster_id=? "
+                "AND rounds_remaining=0",
+                (sid, caster_id),
+            ).fetchone()
+            is not None
+        )
+
+    def has_round_concentration(self, sid, caster_id):
+        """Identify a combat-clock group that ordinary World actions cannot interpret."""
+        return (
+            self._conn.execute(
+                "SELECT 1 FROM effect_concentrations WHERE session_id=? AND caster_id=? "
+                "AND rounds_remaining>0",
+                (sid, caster_id),
+            ).fetchone()
+            is not None
         )
 
     @scoped_read

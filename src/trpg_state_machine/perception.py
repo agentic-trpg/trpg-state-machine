@@ -906,8 +906,7 @@ class PerceptionRuntime:
                     tuple(self._characters.carried_slugs(sid, actor_id)),
                     tuple(
                         {"id": effect["id"], "name": effect["name"]}
-                        for effect in self._characters.effects.for_targets(sid, {actor_id})
-                        if not effect["disabled"]
+                        for effect in self._characters.effects.visible_for_target(sid, actor_id)
                     ),
                     character["xp"],
                 )

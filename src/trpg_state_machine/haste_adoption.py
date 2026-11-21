@@ -1,12 +1,20 @@
-"""Bind typed Haste creation and turn transitions to fixed encounter facts."""
+"""Bind Haste casting, weapon strikes and turn transitions to encounter facts."""
 
+from dnd5e_engine import attack_rules
 from dnd5e_engine import evaluation_delta as delta
+from dnd5e_engine.action_economy_rules import action_economy_gate_failure
+from dnd5e_engine.action_policy import available_grant, grant_payment_for_effect
+from dnd5e_engine.damage_rules import concentration_dc
+from dnd5e_engine.evaluation_actor import combatant
+from dnd5e_engine.evaluation_haste import haste_speed
 from dnd5e_engine.events import (
     ConcentrationDropped,
     ConditionRemoved,
     EffectExpired,
     IntentSubmitted,
 )
+from dnd5e_engine.intents import IntentRejectedError
+from dnd5e_engine.turn_rules import ordinary_action_payment, spend_attack_budget
 
 from .concentration_adoption import (
     _indexed_operations,
@@ -15,6 +23,7 @@ from .concentration_adoption import (
     follow_up_creations,
     require_effect_applied,
 )
+from .damage_adoption import damage_result_balances
 from .errors import StateMachineError
 
 
@@ -54,6 +63,238 @@ def haste_cast_admission(request, result, graph):
     ):
         _invalid("Haste cast events differ from the submitted spell or turn handoff")
     require_effect_applied(events[2], graph.effect)
+
+
+HASTE_LIFECYCLE_OPERATIONS = (
+    delta.EffectLifecycleUpdate,
+    delta.ConcentrationUpdate,
+    delta.EffectFollowUpCreate,
+)
+
+
+def _attack_release(request, result, actors, caster, events, *, ends):
+    """Adopt exactly the active Haste graph's captured Lethargy on a failed save."""
+    snapshot = request.state_snapshot
+    combat = snapshot.combat_state
+    (effect,) = snapshot.effect_states
+    identity = effect_identity(effect)
+    operations = result.state_delta.operations
+    removals = _indexed_operations(operations, delta.EffectLifecycleUpdate, lambda op: op.identity)
+    groups = _indexed_operations(operations, delta.ConcentrationUpdate, lambda op: op.source_id)
+    conditions = _indexed_operations(operations, delta.ConditionsUpdate, lambda op: op.target_id)
+    follow_ups = follow_up_creations(request, result, removals, {identity: effect})
+    if not ends:
+        if removals or groups or conditions or follow_ups or events:
+            _invalid("A retained Haste graph cannot emit a release transition")
+        return (), {}
+
+    (clock,) = combat.effect_lifecycles
+    (link,) = combat.conditions_by_effect
+    if (
+        removals.keys() != {identity}
+        or groups.keys() != {caster}
+        or follow_ups.keys() != {identity}
+    ):
+        _invalid("Failed Haste concentration must end the group and apply its follow-up")
+    removal = removals[identity]
+    group = groups[caster]
+    child = follow_ups[identity]
+    if (
+        removal.combat_id != combat.combat_id
+        or removal.expected_effect != effect
+        or removal.expected_lifecycle != clock
+        or removal.expected_lineage != link
+        or removal.effect is not None
+        or removal.lifecycle is not None
+        or removal.lineage is not None
+        or group.combat_id != combat.combat_id
+        or group.expected_effect_id != actors[caster].concentration_effect_id
+        or group.expected_chain != tuple(combat.concentration_chain[caster])
+        or group.expected_rounds != combat.concentration_rounds_remaining[caster]
+        or (group.effect_id, group.chain, group.rounds) != (None, (), None)
+        or (child.effect,) != effect.end_effects
+    ):
+        _invalid("Attack release differs from the fixed Haste group or captured follow-up")
+    expected, removed_conditions, applied = condition_transition(
+        actors, {identity: effect}, {identity: link}, removals, follow_ups
+    )
+    target = effect.target_id
+    prefix = (
+        ConcentrationDropped(target_id=caster, effect_name=effect.id),
+        EffectExpired(
+            target_id=target, effect_id=effect.id, origin=effect.origin, reason="concentration_drop"
+        ),
+        *(
+            ConditionRemoved(target_id=target, condition=name)
+            for name in sorted(removed_conditions.get(target, ()))
+        ),
+    )
+    if (
+        {target_id: (op.expected, op.value) for target_id, op in conditions.items()} != expected
+        or events[: len(prefix)] != prefix
+        or len(events) <= len(prefix)
+        or tuple(events[len(prefix) + 1 :]) != applied[identity]
+    ):
+        _invalid("Attack release condition and expiry events differ from the effect transition")
+    require_effect_applied(events[len(prefix)], child.effect)
+    after = (
+        actors[target].model_copy(update={"conditions": list(expected[target][1])})
+        if target in expected
+        else actors[target]
+    )
+    ledger = combat.movement_ledgers[target]
+    movement = ledger.remaining(haste_speed(after, (child.effect,), ledger.active_mode))
+    return (
+        ("effect_lifecycle", identity, "update", removal),
+        ("effect_follow_up", effect_identity(child.effect), "create", child),
+        ("hold_concentration", caster, "update", group),
+    ), {target: movement}
+
+
+def _strike_payment(payload, actor, effect):
+    """Return the attacker after applying the exact permitted funding source."""
+    grant = payload.action_grant
+    if grant is not None and (
+        payload.stat_block_action_id is not None
+        or grant != (effect.id, effect.origin)
+        or not available_grant(actor, effect, "attack")
+    ):
+        _invalid("Attack attempted to spend an unauthorized Haste grant")
+    try:
+        failure = action_economy_gate_failure(
+            actor,
+            payload,
+            is_bonus_action=False,
+            is_reaction_cast=False,
+            extra_action=grant is not None,
+        )
+    except IntentRejectedError as exc:
+        raise StateMachineError("invalid_rule_result", "Attack has no permitted action") from exc
+    if failure is not None:
+        _invalid("Attack has no permitted action")
+    if grant is not None:
+        return actor.model_copy(update=grant_payment_for_effect(actor, effect))
+    return spend_attack_budget(
+        actor,
+        new_action=attack_rules.attack_action_is_spent(actor),
+        attacks=1,
+        payment=ordinary_action_payment(actor),
+    )
+
+
+def haste_attack_admission(request, result):
+    """Bind a single positive-HP strike, its payment and any Haste release before adoption."""
+    snapshot = request.state_snapshot
+    combat = snapshot.combat_state
+    actors = {a.entity_id: a for a in snapshot.character_states}
+    payload = request.payload
+    actor_state = actors.get(request.actor_id)
+    target = actors.get(payload.target_id)
+    if (
+        actor_state is None
+        or target is None
+        or not target.is_alive
+        or target.hp_current <= 0
+        or combat.initiative_ids[combat.current_turn_index] != request.actor_id
+        or (request.actor_id in combat.party_ids) == (target.entity_id in combat.party_ids)
+        or len(snapshot.effect_states) != 1
+        or (
+            payload.stat_block_action_id is None
+            and (
+                payload.weapon_instance_id is None
+                or payload.weapon_instance_id != actor_state.held_weapon_instance_id
+            )
+        )
+    ):
+        _invalid("Haste attack requires a fixed target and the admitted single effect graph")
+    actor = combatant(actor_state)
+    (effect,) = snapshot.effect_states
+    events = result.proposed_events
+    rolls = [event for event in events if event.type == "attack_rolled"]
+    packets = [event for event in events if event.type == "damage_applied"]
+    permitted = {
+        delta.HPDelta,
+        delta.TempHPSet,
+        delta.DamageAttributionUpdate,
+        delta.DamageSequenceUpdate,
+        delta.ActionBudgetUpdate,
+        delta.ConditionsUpdate,
+        *HASTE_LIFECYCLE_OPERATIONS,
+    }
+    if (
+        any(type(op) not in permitted for op in result.state_delta.operations)
+        or not events
+        or events[0]
+        != IntentSubmitted(
+            actor_id=actor.entity_id, intent_type="attack", target_id=target.entity_id
+        )
+        or len(rolls) != 1
+        or rolls[0].attacker_id != actor.entity_id
+        or rolls[0].target_id != target.entity_id
+        or rolls[0].is_opportunity_attack
+        or rolls[0].is_hit != bool(packets)
+    ):
+        _invalid("Haste attack evidence differs from the submitted single strike")
+    hp, _, _ = damage_result_balances(
+        request,
+        result,
+        target,
+        source_id=None if payload.stat_block_action_id else actor.weapon_in_hands,
+        is_crit=rolls[0].is_crit,
+    )
+    caster = next(iter(combat.concentration_chain), None)
+    amount = sum(packet.amount for packet in packets)
+    saves = [event for event in events if event.type == "concentration_check"]
+    needs_save = amount > 0 and target.entity_id == caster
+    prefix = (events[0], *rolls, *packets, *saves)
+    if (
+        hp <= 0
+        or len(saves) != int(needs_save)
+        or (
+            needs_save
+            and (
+                saves[0].target_id != caster
+                or saves[0].dc != concentration_dc(amount)
+                or saves[0].succeeded != (saves[0].roll_total >= saves[0].dc)
+            )
+        )
+        or events[: len(prefix)] != prefix
+    ):
+        _invalid("Haste attack exceeds the supported damage or concentration evidence")
+    adopted, movement = _attack_release(
+        request,
+        result,
+        actors,
+        caster,
+        events[len(prefix) :],
+        ends=needs_save and not saves[0].succeeded,
+    )
+    paid = _strike_payment(payload, actor, effect)
+    budgets = {
+        actor.entity_id: {"attack_rolls_made_this_turn": actor.attack_rolls_made_this_turn + 1}
+    }
+    for owner, remaining in movement.items():
+        budgets.setdefault(owner, {})["movement_remaining"] = remaining
+    expected = {}
+    fields = delta.AttackBudgetState.model_fields
+    for owner, changes in budgets.items():
+        before = {field: getattr(actors[owner], field) for field in fields}
+        after = (
+            {field: getattr(paid, field) for field in fields}
+            if owner == actor.entity_id
+            else before
+        )
+        value = {**after, **changes}
+        if value != before:
+            expected[owner] = (before, value)
+    updates = _indexed_operations(
+        result.state_delta.operations, delta.ActionBudgetUpdate, lambda op: op.actor_id
+    )
+    if {
+        owner: (op.expected.model_dump(), op.value.model_dump()) for owner, op in updates.items()
+    } != expected:
+        _invalid("Haste attack budget differs from the selected funding and movement ledger")
+    return adopted, effect.target_id
 
 
 def haste_pass_admission(request, result):

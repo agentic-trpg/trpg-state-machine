@@ -4,15 +4,16 @@ from itertools import pairwise
 
 from dnd5e_engine import evaluation_delta as delta
 from dnd5e_engine.evaluation_effects import EffectState
-from dnd5e_engine.evaluation_movement import timed_walk_bonus, walk_speed
+from dnd5e_engine.evaluation_movement import timed_walk_bonuses, walk_speed
+from dnd5e_engine.evaluation_region_effect import supports_fixed_combat_regions
 from dnd5e_engine.evaluation_speed_effects import (
     has_speed_effects,
     is_bound_attack_speed_effect,
     speed_effect_support_failure,
     speed_with_effects,
-    world_walk_bonus,
 )
 from dnd5e_engine.evaluation_state import CharacterStateV2, MovementLedgerState
+from dnd5e_engine.evaluation_world_spell_modifiers import world_spell_combat_modifiers
 from dnd5e_engine.events import ActorMoved
 
 from .errors import StateMachineError
@@ -29,7 +30,7 @@ def refresh_world_walk_expiry(world, sid, expired):
     if not any(change.key == "system.attributes.movement.walk" for change in expired.changes):
         return
     try:
-        world_walk_bonus(expired)
+        world_spell_combat_modifiers((expired,))
     except ValueError:
         return
     target = expired.target_id
@@ -43,13 +44,17 @@ def refresh_world_walk_expiry(world, sid, expired):
         EffectState.model_validate_json(canonical_json(data))
         for data in world.characters.effects.for_targets(sid, (target,))
     )
-    if len(remaining) > 1 or (
-        remaining and not is_bound_attack_speed_effect(remaining[0], world.loader)
-    ):
-        return
     facts = world.characters.rule_actors(sid, (target,))[target]
     actor = CharacterStateV2.model_validate_json(canonical_json(facts))
-    budget = ledger.remaining(speed_with_effects(actor, remaining, ledger.active_mode))
+    if len(remaining) == 1 and is_bound_attack_speed_effect(remaining[0], world.loader):
+        speed = speed_with_effects(actor, remaining, ledger.active_mode)
+    else:
+        try:
+            bonus, _ = world_spell_combat_modifiers(remaining).get(target, (0, None))
+        except ValueError:
+            return
+        speed = walk_speed(actor, bonus)
+    budget = ledger.remaining(speed)
     if budget != actor.movement_remaining:
         world.characters.update_rule_metadata(sid, target, "movement_remaining", budget)
 
@@ -115,8 +120,12 @@ def ordinary_walk_changes(request, result, *, loader):
                 _invalid("Walking result requires the bound speed effect graph")
             speed = speed_with_effects(actor, snapshot.effect_states)
         else:
-            timed = timed_walk_bonus(snapshot)
-            speed = walk_speed(actor, timed[1] if timed is not None and timed[0] == actor_id else 0)
+            bonus = (
+                0
+                if loader is not None and supports_fixed_combat_regions(snapshot, loader)
+                else timed_walk_bonuses(snapshot).get(actor_id, 0)
+            )
+            speed = walk_speed(actor, bonus)
         expected_ledger = ledger.expected.spend(
             cost_ft=event.movement_cost_ft,
             distance_ft=distance,
@@ -146,7 +155,7 @@ def ordinary_walk_changes(request, result, *, loader):
 
 
 def require_walk_route(world, sid, position):
-    """Validate live path edges and exclude unadopted region transitions before writes.
+    """Validate live path edges and return supported source membership transitions.
 
     The command's OCC and fixed snapshot checks have already matched the current
     map. Reuse its prepared topology and query only the proposed path's cells.
@@ -157,8 +166,19 @@ def require_walk_route(world, sid, position):
     if any(grid.edge_distance(start, end) is None for start, end in pairwise(path)):
         _invalid("Walking route contains an invalid grid edge")
     environment = world.environment
-    initial = environment.region_condition_sources(sid, scene, path[0])
-    if any(
-        environment.region_condition_sources(sid, scene, end) != initial for end in path[1:]
-    ) or world.objects.mechanisms.has_armed_region_entry(sid, scene, path):
+    if world.objects.mechanisms.has_armed_region_entry(sid, scene, path):
         raise StateMachineError("movement.capability", "Route exceeds supported combat movement")
+    memberships = [
+        (
+            set(environment.region_condition_sources(sid, scene, cell)),
+            set(environment.region_condition_sources(sid, scene, cell, combat=True)),
+        )
+        for cell in path
+    ]
+    edges = []
+    for (before, combat_before), (after, combat_after) in pairwise(memberships):
+        if (before - combat_before) != (after - combat_after):
+            raise StateMachineError("movement.capability", "Route crosses an unadopted fixed area")
+        edges.extend((False, source, rule) for source, rule in sorted(combat_before - combat_after))
+        edges.extend((True, source, rule) for source, rule in sorted(combat_after - combat_before))
+    return edges

@@ -214,7 +214,7 @@ class WorldHandler:
                 or self.characters.effects.has_linked_conditions(
                     sid, actor_id, capability="movement" if movement else None
                 )
-                or self.characters.effects.has_concentration(sid, actor_id, actor_effect_only=True)
+                or self.characters.effects.has_round_concentration(sid, actor_id)
             )
         ):
             raise StateMachineError(
@@ -934,7 +934,7 @@ class WorldHandler:
 
     def _spatial_combat_guard(self, sid, scene_id, package):
         """Check whether current spatial state supports entering combat."""
-        if self.magic.has_other_scene_concentration(sid):
+        if self.magic.has_exploration_concentration(sid):
             raise StateMachineError(
                 "unsupported_combat_dynamic_lighting",
                 "Active exploration concentration needs combat integration",

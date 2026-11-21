@@ -126,6 +126,7 @@ class _RegionConditionIndex:
     """Retain immutable source and rule pairs for configured cells of one Scene."""
 
     by_cell: Mapping[str, tuple[tuple[str, str], ...]]
+    combat_by_cell: Mapping[str, tuple[tuple[str, str], ...]]
 
     def __deepcopy__(self, memo):
         """Share the immutable buckets with candidate and fixed read scopes."""
@@ -396,8 +397,10 @@ class EnvironmentService:
                     if before is None:
                         raise StateMachineError("environment_source_not_found", "Source is absent")
                     rule_ref = change.source.region_rule_ref
-                    if before.region_rule_ref != rule_ref or (
-                        rule_ref is not None and before.area != change.source.area
+                    if (
+                        before.combat_region != change.source.combat_region
+                        or before.region_rule_ref != rule_ref
+                        or (rule_ref is not None and before.area != change.source.area)
                     ):
                         invalid("Replace cannot introduce or change a fixed environment region")
                     self._admit_region_rule(row, rule_ref)
@@ -470,22 +473,29 @@ class EnvironmentService:
         """Build cell associations from persisted fixed effects in source ID order."""
         facts = self.h.facts.environment(sid, scene_id)
         by_cell = {}
+        combat_by_cell = {}
         for source in facts.sources if facts is not None else ():
             if (rule_ref := source.region_rule_ref) is not None:
                 reference = (source.source_id, rule_ref)
                 for cell in source.area.cells:
                     by_cell.setdefault(cell, []).append(reference)
+                    if source.combat_region is not None:
+                        combat_by_cell.setdefault(cell, []).append(reference)
         return _RegionConditionIndex(
-            MappingProxyType({cell: tuple(references) for cell, references in by_cell.items()})
+            MappingProxyType({cell: tuple(references) for cell, references in by_cell.items()}),
+            MappingProxyType(
+                {cell: tuple(references) for cell, references in combat_by_cell.items()}
+            ),
         )
 
     def region_condition_sources(
-        self, sid: str, scene_id: str, cell: str | None
+        self, sid: str, scene_id: str, cell: str | None, *, combat: bool = False
     ) -> tuple[tuple[str, str], ...]:
         """Return (source ID, rule reference) pairs for a trusted movement position.
 
         A position without a Grid cell has no regional membership. The bounded Scene
         field shares the authoritative facts' dependency in the candidate or read scope.
+        Combat mode returns only sources whose coverage opts into the combat boundary.
         """
         if cell is None:
             return ()
@@ -499,7 +509,7 @@ class EnvironmentService:
             (),
             lambda: self._region_condition_index(sid, scene_id),
         )
-        return index.by_cell.get(cell, ())
+        return (index.combat_by_cell if combat else index.by_cell).get(cell, ())
 
     def _inputs(self, sid, scene, package):
         """Combine persisted environment facts, Effects sources and provider status."""

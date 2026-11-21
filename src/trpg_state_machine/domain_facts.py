@@ -2904,19 +2904,19 @@ class WorldFacts:
             "SELECT * FROM objects WHERE session_id=? AND object_id=?", (sid, before["object_id"])
         ).fetchone()
 
-    def spend_item_charge(self, sid, before):
-        """Persist a fixed-one spend against the exact candidate item row.
+    def spend_item_charge(self, sid, before, *, amount=1):
+        """Persist an admitted positive charge spend against the exact item row.
 
         The row remains after exhaustion. The outer command scope owns rollback,
         durable receipt, version, event and RAM publication.
         """
         self.store.require_write()
-        if before["item_slug"] is None or before["item_charges"] < 1:
+        if before["item_slug"] is None or not 1 <= amount <= before["item_charges"]:
             raise StateMachineError("item_charges_exhausted", "No item charges remain")
         cursor = self._conn.execute(
-            "UPDATE objects SET item_charges=item_charges-1 "
+            "UPDATE objects SET item_charges=item_charges-? "
             "WHERE session_id=? AND object_id=? AND item_slug=? AND item_charges=?",
-            (sid, before["object_id"], before["item_slug"], before["item_charges"]),
+            (amount, sid, before["object_id"], before["item_slug"], before["item_charges"]),
         )
         if cursor.rowcount != 1:
             raise StateMachineError("version_conflict", "Item balance changed")

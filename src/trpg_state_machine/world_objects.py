@@ -498,21 +498,9 @@ class WorldObjectService:
         }
 
     def _charge_plan(self, row, actor_id, operation, package):
-        """Check exact ownership, access, portable policy, durability and balance."""
-        sid, iid = row["session_id"], operation.instance_id
-        item = self.facts.object(sid, iid)
-        if item is None or item["item_slug"] is None:
-            raise StateMachineError("invalid_target", "No usable owned item")
-        if (
-            self.facts.placement(sid, iid)["carrier_id"] != actor_id
-            or not self.facts.instances.is_portable(sid, iid)
-            or self.facts.instances.get(sid, "object", iid)["portable_policy"]
-            != "charge_exhaust_retain"
-            or not self.facts.require_item_unit(item)["accessible"]
-        ):
-            raise StateMachineError("invalid_target", "No usable owned item")
-        self.containers.reachable(sid, actor_id, iid, package)
-        if not self.facts.item_accessible(sid, iid):
+        """Admit the trusted one-charge command for an item without activities."""
+        item = self.retained_charge_item(row, actor_id, operation.instance_id, package)
+        if item is None:
             raise StateMachineError("invalid_target", "No usable owned item")
         asset = self.handler.loader.get_item(item["item_slug"])
         uses = getattr(asset, "uses", None)
@@ -529,6 +517,30 @@ class WorldObjectService:
             )
         if item["item_charges"] < 1:
             raise StateMachineError("item_charges_exhausted", "No item charges remain")
+        return item
+
+    def retained_charge_item(self, row, actor_id, iid, package):
+        """Return an accessible retained item candidate from the caller's inventory.
+
+        Frozen RE validates the selected activity and charge cost. World guards
+        the concrete instance, containment access and retention policy. Absent,
+        unowned and differently configured items produce no candidate.
+        """
+        sid = row["session_id"]
+        item = self.facts.object(sid, iid)
+        if (
+            item is None
+            or item["item_slug"] is None
+            or self.facts.placement(sid, iid, row=item)["carrier_id"] != actor_id
+            or self.facts.instances.get(sid, "object", iid)["portable_policy"]
+            != "charge_exhaust_retain"
+        ):
+            return None
+        if not self.facts.require_item_unit(item)["accessible"]:
+            raise StateMachineError("invalid_target", "No usable owned item")
+        self.containers.reachable(sid, actor_id, iid, package)
+        if not self.facts.item_accessible(sid, iid, row=item):
+            raise StateMachineError("invalid_target", "No usable owned item")
         return item
 
     def _visible(self, sid, actor_id, oid, package, *, position=None):

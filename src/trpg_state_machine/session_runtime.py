@@ -13,6 +13,7 @@ from dnd5e_engine.evaluation_contracts import (
     CombatIntentPayload,
     ExplorationEnvironmentalSpellCastPayload,
     ExplorationItemUsePayload,
+    ExplorationMultiSpellCastPayload,
     ExplorationSpellCastPayload,
     ItemUsePayload,
 )
@@ -50,6 +51,7 @@ def _fingerprint(command, digest, binding, context):
         CheckPayload,
         ItemUsePayload,
         ExplorationItemUsePayload,
+        ExplorationMultiSpellCastPayload,
         ExplorationEnvironmentalSpellCastPayload,
         ExplorationSpellCastPayload,
     ):
@@ -194,6 +196,8 @@ class SessionRuntime:
         """
         if self.time is None or package.legacy_audit_only:
             return command
+        from .shield_window import guard_shield_window
+
         if command.time_wait is not None:
             with self.store.transaction():
                 row = self.access._session(command.session_id, package, context)
@@ -202,6 +206,7 @@ class SessionRuntime:
                 self.authorize_time_wait_reply(row, package, command, context)
                 if self._command_replay(command, fingerprint):
                     return command
+                guard_shield_window(self._conn, row)
                 self.time.waits.validate(row, package, command)
             return command  # Domain reply executes at the committed boundary.
         from .time_coordination import SetTimeRunning
@@ -232,6 +237,7 @@ class SessionRuntime:
             self.access._npc_handoff_command_guard(command)
             if self._command_replay(command, fingerprint):
                 return command
+            guard_shield_window(self._conn, row)
             admission = self._conn.execute(
                 "SELECT * FROM time_command_admissions WHERE session_id=? AND command_id=?",
                 (sid, command.command_id),
@@ -266,6 +272,7 @@ class SessionRuntime:
             row = self.access._session(sid, package, context)
             self.guard_time_owner(sid)
             self.access._authorize_command(row, command.actor_id, command.payload, context)
+            guard_shield_window(self._conn, row)
             admission = self._conn.execute(
                 "SELECT * FROM time_command_admissions WHERE session_id=? AND command_id=?",
                 (sid, command.command_id),
@@ -296,6 +303,7 @@ class SessionRuntime:
             row = self.access._session(sid, package, context)
             self.access._authorize_command(row, command.actor_id, command.payload, context)
             self.access._npc_handoff_command_guard(command)
+            guard_shield_window(self._conn, row)
             admission = self._conn.execute(
                 "SELECT * FROM time_command_admissions WHERE session_id=? AND command_id=?",
                 (sid, command.command_id),
@@ -347,9 +355,12 @@ class SessionRuntime:
 
     def stage_outcome(self, command, row, package, events):
         """Stage versions/events; Store publishes RAM only after durable COMMIT."""
+        from .shield_window import guard_shield_window
+
         self.store.require_write()
         self.access._check_package_pin(row, package)
         self.guard_time_owner(command.session_id)
+        guard_shield_window(self._conn, row)
         if self.version_conflict(row, command):
             raise StateMachineError("version_conflict", "Command was prepared on another version")
         version = row["world_version"] + 1
@@ -368,7 +379,17 @@ class SessionRuntime:
         return row["world_version"] != command.expected_world_version
 
     def finish(
-        self, command, context, fingerprint, row, status, version, error, *, pending_choice=None
+        self,
+        command,
+        context,
+        fingerprint,
+        row,
+        status,
+        version,
+        error,
+        *,
+        pending_choice=None,
+        pending_choices=None,
     ):
         """The receipt joins the same outer transaction as domain changes/events."""
         from .commands import CommandReceipt
@@ -402,6 +423,7 @@ class SessionRuntime:
             own_seqs,
             error,
             pending_choice,
+            pending_choices,
         )
         self.record_receipt(command, context, fingerprint, receipt)
         return receipt

@@ -7,25 +7,31 @@ from dnd5e_engine.evaluation_contracts import (
     CheckPayload,
     ExplorationEnvironmentalSpellCastPayload,
     ExplorationItemUsePayload,
+    ExplorationMultiSpellCastPayload,
     ExplorationSpellCastPayload,
     ExplorationSpellPositions,
     ItemUsePayload,
     RestPayload,
 )
+from dnd5e_engine.evaluation_delta import TurnUpdate
 from dnd5e_engine.evaluation_openable import OpenableCheckRequest, evaluate_openable
 from dnd5e_engine.evaluation_resources import HitDieSpend
 from dnd5e_engine.evaluation_ruleset import EVALUATOR_VERSION, RulesetBindingError
+from dnd5e_engine.evaluation_shield_window import answer_shield, evaluate_for_shield
 from dnd5e_engine.evaluation_speed_effects import spell_attack_has_speed_effect
 from pydantic import ValidationError
 
 from ._execution import _WorldEffectKind, _WorldEffectOrigin
-from .choice_models import ChoiceRespondOperationPayload
+from .choice_models import ChoiceFinalizeSpellOperationPayload, ChoiceRespondOperationPayload
 from .combat import process_id
 from .dnd_checks import world_effects_ready
 from .errors import StateMachineError
+from .pending_multi_spell_choices import PendingMultiSpellChoices
 from .pending_spell_choices import PendingSpellChoices
 from .rest_activity import LongRest, ShortRest, advance_rest, prepare_rest
 from .rules_adapter import UnsupportedEffectConsequence, validate_dnd_result
+from .shield_adoption import UnsupportedShieldKnockout, UnsupportedShieldTerminal
+from .shield_window import ShieldWindows, guard_shield_window
 from .spell_adoption import UnsupportedSpellConsequence
 from .time_binding import TimeBinding
 from .world_commands import OPENABLE_CHECK_OPERATIONS, CheckMechanism, PickLock
@@ -48,6 +54,10 @@ class RuleExecution:
         self.spell_choices = PendingSpellChoices(
             self.store, self.runtime, self.sessions, self.world.facts
         )
+        self.multi_spell_choices = PendingMultiSpellChoices(
+            self.store, self.runtime, self.sessions, self.world.facts
+        )
+        self.shield_windows = ShieldWindows(self.store, self.runtime, self.sessions)
 
     @property
     def _conn(self):
@@ -83,32 +93,75 @@ class RuleExecution:
         rules rejection. Exploration items and spells use the committed exploration tick.
         A willingness answer resumes the original spell with fresh facts and commits
         its own receipt together with the single adopted cast and prompt outcome.
+        Multi-target replies collect consent, then the caster may confirm a subset.
         """
-        response = None
+        response = shield_prompt = shield_pending = shield_original = None
+        confirmation = None
+        if type(command.payload) is ChoiceFinalizeSpellOperationPayload:
+            confirmation = command
+            with self.store.transaction(write=True):
+                row = self.sessions._session(confirmation.session_id, package, context)
+                replay, pending_cast, error = self.multi_spell_choices.prepare_finalize(
+                    confirmation, fingerprint, row, context
+                )
+                if replay is not None:
+                    return replay
+                guard_shield_window(self._conn, row)
+                if error is not None:
+                    return self.multi_spell_choices.reject_finalize(
+                        confirmation, fingerprint, row, context, error
+                    )
+                command = pending_cast
         if type(command.payload) is ChoiceRespondOperationPayload:
             response = command
             with self.store.transaction(write=True):
                 row = self.sessions._session(response.session_id, package, context)
-                replay, pending, error = self.spell_choices.check(
-                    response, fingerprint, row, context
-                )
-                if replay is not None:
-                    return replay
-                if error is not None or response.payload.selected_option_id == "decline":
-                    return self._finish_choice_without_cast(
-                        response, context, fingerprint, row, error
+                shield_prompt = self.shield_windows.for_response(response)
+                if shield_prompt is not None:
+                    replay, shield_pending, error = self.shield_windows.check(
+                        response, fingerprint, row, context, shield_prompt
                     )
-                command = self.spell_choices.resume(pending, response, row, context)
-        willing_target_id = response.actor_id if response is not None else None
+                    if replay is not None:
+                        return replay
+                    if error is not None:
+                        return self._finish_shield_error(response, context, fingerprint, row, error)
+                    shield_original, command = self.shield_windows.resume(shield_pending, response)
+                    if not self.shield_windows.source_is_authorized(shield_original):
+                        return self._finish_shield_error(
+                            response, context, fingerprint, row, "choice_stale"
+                        )
+                else:
+                    guard_shield_window(self._conn, row)
+                    multi_pending = self.multi_spell_choices.for_response(response)
+                    if multi_pending is not None:
+                        return self.multi_spell_choices.respond(
+                            response, fingerprint, row, context, multi_pending
+                        )
+                    replay, pending, error = self.spell_choices.check(
+                        response, fingerprint, row, context
+                    )
+                    if replay is not None:
+                        return replay
+                    if error is not None or response.payload.selected_option_id == "decline":
+                        return self._finish_choice_without_cast(
+                            response, context, fingerprint, row, error
+                        )
+                    command = self.spell_choices.resume(pending, response, row, context)
+        willing_target_id = (
+            response.actor_id if response is not None and shield_prompt is None else None
+        )
         exploration_item = type(command.payload) is ExplorationItemUsePayload
         environmental_spell = type(command.payload) is ExplorationEnvironmentalSpellCastPayload
+        multi_spell = type(command.payload) is ExplorationMultiSpellCastPayload
         exploration_spell = (
-            environmental_spell or type(command.payload) is ExplorationSpellCastPayload
+            environmental_spell
+            or multi_spell
+            or type(command.payload) is ExplorationSpellCastPayload
         )
         exploration_rule = exploration_item or exploration_spell
         rest = type(command.payload) in (LongRest, ShortRest)
         long_rest = type(command.payload) is LongRest
-        if not (exploration_rule or rest):
+        if not (exploration_rule or rest) and shield_prompt is None:
             command = self.runtime.prepare_timed_command(command, package, context, fingerprint)
         object_check = type(command.payload) in OPENABLE_CHECK_OPERATIONS
         mechanism_check = type(command.payload) is CheckMechanism
@@ -120,6 +173,26 @@ class RuleExecution:
         initial_exploration_error = None
         rest_plan = None
         spell_actor_ids, spell_positions = None, None
+        multi_spell_positions = None
+        charged_item = None
+
+        def project_multi_spell_positions(value):
+            """Project the selected positions and confirmation-specific willingness."""
+            return self.multi_spell_choices.positions(
+                value,
+                command,
+                verified_target_ids=command.payload.target_ids if confirmation is not None else (),
+            )
+
+        def prepare_charged_item(value):
+            """Read the authorized retained item's exact mechanical pre-value."""
+            try:
+                item = self.world.objects.retained_charge_item(
+                    value, command.actor_id, command.payload.instance_id, package
+                )
+            except StateMachineError as exc:
+                return None, exc.code
+            return self.world.facts.item_entry(item) if item is not None else None, None
 
         def exploration_error(value):
             """Check mode and protocol, deferring use while saved time work is unfinished."""
@@ -149,7 +222,7 @@ class RuleExecution:
                 return self.rules._combat_snapshot(value)
             if rest:
                 return self.rules._noncombat_snapshot(value, actor_ids=(command.actor_id,))
-            if exploration_spell:
+            if exploration_spell or charged_item is not None:
                 # Touch delivery depends on explicit placement and the mechanical grid.
                 return self.rules._noncombat_snapshot(value, actor_ids=spell_actor_ids)
             if type(command.payload) is CheckPayload or domain_check or exploration_item:
@@ -166,13 +239,15 @@ class RuleExecution:
 
         with self.store.transaction():
             row = self.sessions._session(command.session_id, package, context)
-            self.sessions._authorize_command(row, command.actor_id, command.payload, context)
+            if shield_prompt is None:
+                self.sessions._authorize_command(row, command.actor_id, command.payload, context)
             self.runtime.authorize_time_wait_reply(row, package, command, context)
-            if response is None:
+            if response is None and confirmation is None:
                 self.sessions._npc_handoff_command_guard(command)
                 if replay := self.runtime._command_replay(command, fingerprint):
                     return replay
-            self.sessions._npc_combat_location_guard(command)
+                guard_shield_window(self._conn, row)
+            self.sessions._npc_combat_location_guard(shield_original or command)
             if row["evaluator_version"] != EVALUATOR_VERSION:
                 raise StateMachineError(
                     "ruleset_binding_mismatch", "Pinned evaluator version is not installed"
@@ -180,6 +255,16 @@ class RuleExecution:
             if exploration_rule:
                 initial_exploration_error = exploration_error(row)
                 prepare_error = initial_exploration_error
+            if exploration_item and prepare_error is None:
+                charged_item, prepare_error = prepare_charged_item(row)
+                if charged_item is not None:
+                    prepare_error, spell_actor_ids, spell_positions = self._spell_positions(
+                        row, command
+                    )
+                elif prepare_error is None and command.payload.target_id != command.actor_id:
+                    raise StateMachineError(
+                        "invalid_target", "Drinking a potion requires self target"
+                    )
             if rest:
                 rest_plan, prepare_error = prepare_rest(
                     row, command.actor_id, self.world, self.activities, command.payload
@@ -205,6 +290,10 @@ class RuleExecution:
                 spell_positions = self.world.magic.cast_positions(row, package, command)
                 if spell_positions is None:
                     prepare_error = "spell.target"
+            elif multi_spell and prepare_error is None:
+                prepare_error, spell_actor_ids, multi_spell_positions = (
+                    project_multi_spell_positions(row)
+                )
             elif exploration_spell and prepare_error is None:
                 prepare_error, spell_actor_ids, spell_positions = self._spell_positions(
                     row, command, willing_target_id=willing_target_id
@@ -249,7 +338,14 @@ class RuleExecution:
             capability = prepare_error
         else:
             request = self.rules.request(
-                rule_command, package, snapshot, rng, row=row, spell_positions=spell_positions
+                shield_original or rule_command,
+                package,
+                snapshot,
+                rng,
+                row=row,
+                spell_positions=spell_positions,
+                multi_spell_positions=multi_spell_positions,
+                exploration_charge=charged_item is not None,
             )
             capability = (
                 None
@@ -302,17 +398,35 @@ class RuleExecution:
         )
         if capability is None and not world_ready:
             capability = "world_precondition_failed"
-        result, changes = None, ()
+        result, changes, shield_token = None, (), None
         input_version = row["world_version"] if snapshot is None else snapshot.world_version
         if input_version == command.expected_world_version:
             self.rules._verify_dnd_binding(package, row)
             if capability is None and not noop:
                 try:
-                    result = (
-                        await evaluate_openable(spec, loader=self.rules.loader)
-                        if object_check
-                        else await self.rules._evaluate_dnd(copy.deepcopy(request))
-                    )
+                    if shield_prompt is not None:
+                        request, result = await answer_shield(
+                            request,
+                            shield_pending["checkpoint_token"],
+                            accept=response.payload.selected_option_id == "accept",
+                            loader=self.rules.loader,
+                        )
+                    elif object_check:
+                        result = await evaluate_openable(spec, loader=self.rules.loader)
+                    elif (
+                        getattr(command.payload, "intent_type", None) == "attack"
+                        and command.payload.stat_block_action_id is not None
+                        and command.time_wait is None
+                    ):
+                        result = await evaluate_for_shield(
+                            copy.deepcopy(request),
+                            loader=self.rules.loader,
+                            ordinary_evaluator=self.rules._evaluate_dnd,
+                        )
+                        if isinstance(result, str):
+                            shield_token, result = result, None
+                    else:
+                        result = await self.rules._evaluate_dnd(copy.deepcopy(request))
                 except RulesetBindingError as exc:
                     raise StateMachineError(
                         "ruleset_binding_mismatch", "Evaluator binding differs"
@@ -326,21 +440,52 @@ class RuleExecution:
                         "rule_evaluation_failed",
                         "Evaluator failed; original command may be retried",
                     ) from exc
-                try:
-                    result, changes = validate_dnd_result(
-                        request,
-                        result,
-                        loader=self.rules.loader,
-                    )
-                except UnsupportedSpellConsequence:
-                    capability = "spell.capability"
-                except UnsupportedEffectConsequence:
-                    capability = "effect.capability"
+                if result is not None:
+                    try:
+                        result, changes = validate_dnd_result(
+                            request,
+                            result,
+                            loader=self.rules.loader,
+                        )
+                    except UnsupportedSpellConsequence:
+                        capability = "spell.capability"
+                    except UnsupportedEffectConsequence:
+                        capability = "effect.capability"
+                    except UnsupportedShieldTerminal:
+                        capability = "combat.shield_terminal_unsupported"
+                    except UnsupportedShieldKnockout:
+                        capability = "combat.shield_knockout_unsupported"
             self.rules._verify_dnd_binding(package, row)
         choice_requested = result is not None and result.status == "needs_choice"
         with self.store.transaction(write=True):
             row = self.sessions._session(command.session_id, package, context)
-            if response is not None:
+            if shield_prompt is not None:
+                replay, pending, error = self.shield_windows.check(
+                    response, fingerprint, row, context, shield_prompt
+                )
+                if replay is not None:
+                    return replay
+                if error is not None:
+                    return self._finish_shield_error(response, context, fingerprint, row, error)
+                if dict(pending) != dict(shield_pending):
+                    raise StateMachineError("version_conflict", "Shield window changed")
+                if not self.shield_windows.source_is_authorized(shield_original):
+                    return self._finish_shield_error(
+                        response, context, fingerprint, row, "choice_stale"
+                    )
+            elif confirmation is not None:
+                replay, pending_cast, error = self.multi_spell_choices.prepare_finalize(
+                    confirmation, fingerprint, row, context
+                )
+                if replay is not None:
+                    return replay
+                guard_shield_window(self._conn, row)
+                if error is not None or pending_cast != command:
+                    return self.multi_spell_choices.reject_finalize(
+                        confirmation, fingerprint, row, context, error or "version_conflict"
+                    )
+            elif response is not None:
+                guard_shield_window(self._conn, row)
                 replay, _, error = self.spell_choices.check(response, fingerprint, row, context)
                 if replay is not None:
                     return replay
@@ -348,16 +493,19 @@ class RuleExecution:
                     return self._finish_choice_without_cast(
                         response, context, fingerprint, row, error
                     )
-            self.sessions._authorize_command(row, command.actor_id, command.payload, context)
+            if shield_prompt is None:
+                self.sessions._authorize_command(row, command.actor_id, command.payload, context)
             self.runtime.authorize_time_wait_reply(row, package, command, context)
-            if response is None:
+            if response is None and confirmation is None:
                 self.sessions._npc_handoff_command_guard(command)
                 if replay := self.runtime._command_replay(command, fingerprint):
                     return replay
-            self.sessions._npc_combat_location_guard(command)
+                guard_shield_window(self._conn, row)
+            self.sessions._npc_combat_location_guard(shield_original or command)
             version = row["world_version"]
             status, error = "committed", None
             pending_choice = None
+            pending_choices = None
             current_exploration_error = exploration_error(row) if exploration_rule else None
             changed_rest_plan = rest and prepare_rest(
                 row, command.actor_id, self.world, self.activities, command.payload
@@ -372,7 +520,23 @@ class RuleExecution:
                     and self.world.magic.cast_positions(row, package, command) != spell_positions
                 )
                 or (
-                    (response is not None or choice_requested)
+                    charged_item is not None
+                    and prepare_error is None
+                    and (
+                        prepare_charged_item(row) != (charged_item, None)
+                        or self._spell_positions(row, command)
+                        != (None, spell_actor_ids, spell_positions)
+                    )
+                )
+                or (
+                    multi_spell
+                    and prepare_error is None
+                    and project_multi_spell_positions(row)
+                    != (None, spell_actor_ids, multi_spell_positions)
+                )
+                or (
+                    not multi_spell
+                    and ((response is not None and shield_prompt is None) or choice_requested)
                     and prepare_error is None
                     and self._spell_positions(row, command, willing_target_id=willing_target_id)
                     != (prepare_error, spell_actor_ids, spell_positions)
@@ -396,6 +560,15 @@ class RuleExecution:
                     status, error = "rejected", exc.code
             elif not world_effects_ready(self.world, row, command):
                 status, error = "rejected", "world_precondition_failed"
+            elif shield_token is not None:
+                self.sessions._npc_combat_target_guard(command, package, snapshot)
+                pending_choice = self.shield_windows.create(command, shield_token)
+                status = "pending_choice"
+            elif choice_requested and multi_spell:
+                pending_choices, error = self.multi_spell_choices.create(
+                    command, result.choice.target_ids
+                )
+                status = "pending_choice" if pending_choices else "rejected"
             elif choice_requested:
                 pending_choice, error = self.spell_choices.create(command)
                 status = "pending_choice" if pending_choice is not None else "rejected"
@@ -403,7 +576,9 @@ class RuleExecution:
                 status, error = "rejected", result.error.code
             else:
                 if not (exploration_spell or rest):
-                    self.sessions._npc_combat_target_guard(command, package, build_snapshot(row))
+                    self.sessions._npc_combat_target_guard(
+                        shield_original or command, package, build_snapshot(row)
+                    )
                 result, changes = validate_dnd_result(
                     request,
                     result,
@@ -448,13 +623,42 @@ class RuleExecution:
                             self.activities.complete_long_rest(
                                 sid, command.actor_id, place[0], command.command_id, start, target
                             )
-                    self.rules._apply_dnd_changes(row, changes, command_id=command.command_id)
                     spatial_effect_id, effects_events = None, []
-                    if environmental_spell:
-                        proposal = result.state_delta.operations[-1].value
-                        spatial_effect_id, effects_events = self.world.magic.apply(
-                            row, package, command.command_id, proposal
+                    spatial_proposal = (
+                        result.state_delta.operations[-1].value if environmental_spell else None
+                    )
+                    if exploration_spell:
+                        proposal = spatial_proposal or next(
+                            (value for part, _, _field, value in changes if part == "world_effect"),
+                            None,
                         )
+                        if proposal is not None and proposal.concentration:
+                            effects_events = self.runtime.time.consumers[
+                                "effects"
+                            ].end_world_concentration(
+                                command.session_id,
+                                package,
+                                command.actor_id,
+                                "concentration_replaced",
+                            )
+                    self.rules._apply_dnd_changes(
+                        row,
+                        changes,
+                        command_id=command.command_id,
+                        snapshot=request.state_snapshot,
+                        turn_starts=tuple(
+                            request.state_snapshot.combat_state.initiative_ids[
+                                operation.value.current_turn_index
+                            ]
+                            for operation in result.state_delta.operations
+                            if type(operation) is TurnUpdate
+                        ),
+                    )
+                    if spatial_proposal is not None:
+                        spatial_effect_id, spatial_events = self.world.magic.apply(
+                            row, package, command.command_id, spatial_proposal
+                        )
+                        effects_events.extend(spatial_events)
                     # Failure consequences and automatic hooks both consume the
                     # original rule result's candidate RNG successor. Never
                     # overwrite a mechanism successor with this earlier state.
@@ -596,6 +800,8 @@ class RuleExecution:
                             row, package, command.command_id, previous_round, len(events)
                         )
                     )
+                    if shield_prompt is not None:
+                        self.shield_windows.close(response)
                     version = self.runtime.stage_outcome(command, row, package, events)
                 except StateMachineError as exc:
                     if exc.code not in {
@@ -610,6 +816,7 @@ class RuleExecution:
                         "object_obstructed",
                         "position_conflict",
                         "movement.capability",
+                        "combat.region_capability",
                         "version_conflict",
                         "mechanism_target_unavailable",
                         "unsupported_mechanism_target",
@@ -652,12 +859,14 @@ class RuleExecution:
                     events = self.runtime.finish_time_wait_reply(row, package, command)
                     events = self.effects._expand_events(row, package, events, command.command_id)
                     version = self.runtime.stage_outcome(command, row, package, events)
-            if response is not None and status != "conflict":
+            if response is not None and shield_prompt is None and status != "conflict":
                 self.spell_choices.close(
                     response, "accepted" if status == "committed" else "rejected"
                 )
+            if confirmation is not None and status == "committed":
+                self.multi_spell_choices.finish_finalize(confirmation, "accepted")
             receipt = self.runtime.finish(
-                response if response is not None else command,
+                confirmation or response or command,
                 context,
                 fingerprint,
                 row,
@@ -665,6 +874,7 @@ class RuleExecution:
                 version,
                 error,
                 pending_choice=pending_choice,
+                pending_choices=pending_choices,
             )
         self.runtime.refresh_time_drivers()
         return receipt
@@ -678,6 +888,15 @@ class RuleExecution:
             status = "rejected"
         if error in (None, "choice_expired"):
             self.spell_choices.close(response, "declined" if error is None else "expired")
+        return self.runtime.finish(
+            response, context, fingerprint, row, status, row["world_version"], error
+        )
+
+    def _finish_shield_error(self, response, context, fingerprint, row, error):
+        """Commit a verified refusal and discard a checkpoint whose input has expired."""
+        if error == "choice_stale":
+            self.shield_windows.close(response)
+        status = "conflict" if error == "version_conflict" else "rejected"
         return self.runtime.finish(
             response, context, fingerprint, row, status, row["world_version"], error
         )

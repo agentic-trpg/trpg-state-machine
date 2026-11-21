@@ -125,7 +125,7 @@ def validate_environment_operation(op):
 def _environment_dict(items):
     """Omit absent rule fields to preserve established facts and command fingerprints."""
     data = dict(items)
-    for key in ("region_condition", "region_effect_rule"):
+    for key in ("region_condition", "region_effect_rule", "combat_region"):
         if data.get(key) is None:
             data.pop(key, None)
     packed_effect = data.pop("_region_effect_json", None)

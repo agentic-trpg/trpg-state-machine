@@ -8,6 +8,7 @@ from dnd5e_engine.evaluation_contracts import (
     CombatIntentPayload,
     ExplorationEnvironmentalSpellCastPayload,
     ExplorationItemUsePayload,
+    ExplorationMultiSpellCastPayload,
     ExplorationSpellCastPayload,
     ItemUsePayload,
 )
@@ -17,6 +18,7 @@ from .combat import (
     process_id,
     validate_noncombat_foundation,
 )
+from .combat_regions import adopt_combat_region_turn_start
 from .commands import validate_command
 from .errors import StateMachineError
 from .package import canonical_json
@@ -160,6 +162,11 @@ class CombatHandler:
             )
         self.runtime.set_mechanical_schema(row["session_id"], snapshot.snapshot_schema_version)
         self.records.initialize(sid, snapshot, spatial=spatial is not None, process_id=process_id())
+        combat = snapshot.combat_state
+        if not combat.ended:
+            adopt_combat_region_turn_start(
+                self.world, row, snapshot, combat.initiative_ids[combat.current_turn_index]
+            )
         self.runtime.select_rule_rng(sid, rng.model_dump_json(), reset_position=True)
         if self.runtime.time:
             self.runtime.time.invalidate(sid)
@@ -203,7 +210,10 @@ class CombatHandler:
             raise StateMachineError(
                 "legacy_rules_audit_only", "Old package permits audit reads only"
             )
-        from .choice_models import ChoiceRespondOperationPayload
+        from .choice_models import (
+            ChoiceFinalizeSpellOperationPayload,
+            ChoiceRespondOperationPayload,
+        )
         from .world_commands import OPENABLE_CHECK_OPERATIONS, CheckMechanism
 
         if type(command.payload) not in (
@@ -212,7 +222,9 @@ class CombatHandler:
             ExplorationItemUsePayload,
             ExplorationEnvironmentalSpellCastPayload,
             ExplorationSpellCastPayload,
+            ExplorationMultiSpellCastPayload,
             ChoiceRespondOperationPayload,
+            ChoiceFinalizeSpellOperationPayload,
             LongRest,
             ShortRest,
             CombatClosePayload,

@@ -65,7 +65,7 @@ class MoveActor:
 
 @dataclass(frozen=True, slots=True)
 class DropWorldConcentration:
-    """Request voluntary release of the selected actor's spatial concentration."""
+    """Request voluntary release of the selected actor's exploration concentration."""
 
 
 @dataclass(frozen=True, slots=True)

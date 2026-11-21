@@ -1,4 +1,4 @@
-"""Schedule RE-declared terminal effect outcomes on the sole Session clock.
+"""Schedule elapsed-time Effects and release their concentration on the Session clock.
 
 The caller admits an application and owns its shared UnitOfWork. This port stores
 only RE's resolved effect and terminal removal policy, not a second rules clock.
@@ -19,7 +19,7 @@ from .package import canonical_json
 
 
 class EffectTimeConsumer:
-    """Apply one reviewed timed effect and settle indexed deadlines one at a time."""
+    """Adopt timed Effects, settle indexed deadlines, and release one caster's group."""
 
     def __init__(self, runtime, world):
         """Use the existing world owner, Store and runtime time coordinator."""
@@ -67,6 +67,35 @@ class EffectTimeConsumer:
             raise StateMachineError("invalid_rule_result", "World effect proposal differs")
         deadline = self.world.time.seconds_deadline(sid, proposal.duration_seconds)
         self.owner.add_world_effect(sid, proposal, expires_tick=deadline)
+
+    def end_world_concentration(self, sid, package, caster_id, reason):
+        """End the caster's current elapsed-time group inside the caller's write scope."""
+        self.store.require_write()
+        group = self.owner.concentration_group(sid, caster_id)
+        if group is None:
+            return []
+        if group.rounds_remaining:
+            raise StateMachineError("spell.concentration", "Combat concentration is active")
+        if group.spatial_member is not None:
+            return [self.world.magic.end_event(sid, package, group.spatial_member, reason)]
+        self.owner.remove_concentration(sid, group.concentration_id)
+        return [
+            self.world._capture_event(
+                sid,
+                package,
+                "effect.concentration_ended",
+                {
+                    "identity": identity,
+                    "actor_id": identity[0],
+                    "source_actor_id": caster_id,
+                    "concentration_id": group.concentration_id,
+                    "reason": reason,
+                    "scene_id": self.world._actor_position(sid, identity[0]).scene_id,
+                },
+                phase="effects.after_concentration_end",
+            )
+            for identity in group.actor_members
+        ]
 
     def next_boundary(self, session_id, package):
         """Find the next indexed deadline over both actor and spatial Effects."""

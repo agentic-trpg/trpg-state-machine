@@ -6,11 +6,13 @@ from copy import deepcopy
 from dataclasses import asdict, dataclass
 
 from dnd5e_engine.evaluation_contracts import (
+    MAX_EXPLORATION_SPELL_TARGETS,
     CheckPayload,
     CombatClosePayload,
     CombatIntentPayload,
     ExplorationEnvironmentalSpellCastPayload,
     ExplorationItemUsePayload,
+    ExplorationMultiSpellCastPayload,
     ExplorationSpellCastPayload,
     ItemUsePayload,
 )
@@ -31,7 +33,11 @@ from ._operations import (
     TraversePassage,
     UnlockDoor,
 )
-from .choice_models import ChoiceRespondOperationPayload, PendingChoice
+from .choice_models import (
+    ChoiceFinalizeSpellOperationPayload,
+    ChoiceRespondOperationPayload,
+    PendingChoice,
+)
 from .combat import InitializeCombat
 from .environment_commands import (
     ENVIRONMENT_COMMANDS,
@@ -105,7 +111,9 @@ OPERATIONS = {
     "combat.item": ItemUsePayload,
     "world.use_item": ExplorationItemUsePayload,
     "world.cast_spell": ExplorationSpellCastPayload,
+    "world.cast_spell_many": ExplorationMultiSpellCastPayload,
     "choice.respond": ChoiceRespondOperationPayload,
+    "choice.finalize_spell": ChoiceFinalizeSpellOperationPayload,
     "world.drop_concentration": DropWorldConcentration,
     "combat.initialize": InitializeCombat,
     "rule_operation": RuleOperation,
@@ -179,7 +187,9 @@ class TypedCommand:
         | ExplorationItemUsePayload
         | ExplorationEnvironmentalSpellCastPayload
         | ExplorationSpellCastPayload
+        | ExplorationMultiSpellCastPayload
         | ChoiceRespondOperationPayload
+        | ChoiceFinalizeSpellOperationPayload
         | LongRest
         | ShortRest
         | CombatClosePayload
@@ -215,17 +225,25 @@ class CommandReceipt:
     event_seqs: tuple[int, ...]
     error_code: str | None = None
     pending_choice: PendingChoice | None = None
+    pending_choices: tuple[PendingChoice, ...] | None = None
 
 
 def receipt_from_json(raw: str) -> CommandReceipt:
     """Decode a durable JSON receipt and restore event sequences as tuples."""
     data = json.loads(raw)
     data["event_seqs"] = tuple(data["event_seqs"])
+    if data.get("pending_choices") is not None:
+        data["pending_choices"] = tuple(
+            _pending_choice_from_json_fields(fields) for fields in data["pending_choices"]
+        )
     if data.get("pending_choice") is not None:
-        fields = data["pending_choice"]
-        fields["allowed_options"] = tuple(fields["allowed_options"])
-        data["pending_choice"] = PendingChoice(**fields)
+        data["pending_choice"] = _pending_choice_from_json_fields(data["pending_choice"])
     return CommandReceipt(**data)
+
+
+def _pending_choice_from_json_fields(fields: dict) -> PendingChoice:
+    """Restore the ordered option IDs of a persisted prompt."""
+    return PendingChoice(**{**fields, "allowed_options": tuple(fields["allowed_options"])})
 
 
 def validate_command(command: TypedCommand) -> None:
@@ -255,7 +273,9 @@ def validate_command(command: TypedCommand) -> None:
             ExplorationItemUsePayload,
             ExplorationEnvironmentalSpellCastPayload,
             ExplorationSpellCastPayload,
+            ExplorationMultiSpellCastPayload,
             ChoiceRespondOperationPayload,
+            ChoiceFinalizeSpellOperationPayload,
             LongRest,
             ShortRest,
         ):
@@ -315,6 +335,24 @@ def validate_command(command: TypedCommand) -> None:
             or payload.selected_option_id not in ("accept", "decline")
         ):
             raise StateMachineError("invalid_operation", "Expected a bounded choice ID and option")
+        return
+    if operation_type is ChoiceFinalizeSpellOperationPayload:
+        payload = command.payload
+        if (
+            type(payload.pending_operation_id) is not str
+            or not payload.pending_operation_id.strip()
+            or len(payload.pending_operation_id) > 256
+            or type(payload.target_ids) is not tuple
+            or not 1 <= len(payload.target_ids) <= MAX_EXPLORATION_SPELL_TARGETS
+            or any(
+                type(value) is not str or not value.strip() or len(value) > 256
+                for value in payload.target_ids
+            )
+            or len(set(payload.target_ids)) != len(payload.target_ids)
+        ):
+            raise StateMachineError(
+                "invalid_operation", "Expected a choice ID and distinct targets"
+            )
         return
     if operation_type is LongRest:
         return
@@ -384,6 +422,7 @@ def validate_command(command: TypedCommand) -> None:
         ExplorationItemUsePayload,
         ExplorationEnvironmentalSpellCastPayload,
         ExplorationSpellCastPayload,
+        ExplorationMultiSpellCastPayload,
     ):
         try:
             type(command.payload).model_validate(deepcopy(command.payload))
@@ -395,7 +434,7 @@ def validate_command(command: TypedCommand) -> None:
         ):
             raise StateMachineError("invalid_actor", "Intent source differs from trusted actor")
         if (
-            isinstance(command.payload, (ItemUsePayload, ExplorationItemUsePayload))
+            type(command.payload) is ItemUsePayload
             and command.payload.target_id != command.actor_id
         ):
             raise StateMachineError("invalid_target", "Drinking a potion requires self target")
@@ -488,7 +527,9 @@ class CommandRuntime:
             ExplorationItemUsePayload,
             ExplorationEnvironmentalSpellCastPayload,
             ExplorationSpellCastPayload,
+            ExplorationMultiSpellCastPayload,
             ChoiceRespondOperationPayload,
+            ChoiceFinalizeSpellOperationPayload,
             LongRest,
             ShortRest,
             CombatClosePayload,
@@ -647,7 +688,9 @@ def world_command_from_data(data):
         "world.drop_item",
         "world.use_item",
         "world.cast_spell",
+        "world.cast_spell_many",
         "choice.respond",
+        "choice.finalize_spell",
         "world.drop_concentration",
         "enter_scene",
         "move_actor",
@@ -666,6 +709,11 @@ def world_command_from_data(data):
         payload = data["payload"]
         if kind == "set_object_state":
             payload = {**payload, "state": ObjectState(payload["state"])}
+        if kind in ("choice.finalize_spell", "world.cast_spell_many"):
+            targets = payload.get("target_ids")
+            if type(targets) not in (list, tuple):
+                raise ValueError("Expected ordered spell targets")
+            payload = {**payload, "target_ids": tuple(targets)}
         if kind == "activity.short_rest" and "hit_dice" in payload:
             selections = payload["hit_dice"]
             if type(selections) not in (list, tuple):

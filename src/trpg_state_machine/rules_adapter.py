@@ -16,13 +16,17 @@ from dnd5e_engine.evaluation_availability import (
     query_action_availability,
 )
 from dnd5e_engine.evaluation_contracts import (
+    CHARGED_ITEM_SCHEMA_VERSION,
     ENVIRONMENTAL_SPELL_SCHEMA_VERSION,
+    MULTI_SPELL_SCHEMA_VERSION,
     CheckPayload,
     CombatClosePayload,
     ExplorationEnvironmentalSpellCastPayload,
     ExplorationItemUsePayload,
+    ExplorationMultiSpellCastPayload,
     ExplorationSpellCastPayload,
     ItemUsePayload,
+    MultiSpellWillingnessChoice,
     ReadVersion,
     RuleError,
     RuleEvaluationRequest,
@@ -30,8 +34,9 @@ from dnd5e_engine.evaluation_contracts import (
     SpellWillingnessChoice,
 )
 from dnd5e_engine.evaluation_haste import has_haste_effects, haste_speed
-from dnd5e_engine.evaluation_movement import timed_walk_bonus, walk_speed
+from dnd5e_engine.evaluation_movement import timed_walk_bonuses, walk_speed
 from dnd5e_engine.evaluation_preflight import template_support_failure
+from dnd5e_engine.evaluation_region_effect import supports_fixed_combat_regions
 from dnd5e_engine.evaluation_rng import RNGState
 from dnd5e_engine.evaluation_ruleset import (
     RulesetBinding,
@@ -39,6 +44,7 @@ from dnd5e_engine.evaluation_ruleset import (
     get_default_ruleset,
     verify_ruleset,
 )
+from dnd5e_engine.evaluation_shield import plain_shield, shield_support_failure
 from dnd5e_engine.evaluation_speed_effects import (
     has_speed_effects,
     speed_cast_support_failure,
@@ -66,6 +72,7 @@ from pydantic import ValidationError
 
 from .combat import DND_RULESET, _remap, process_id, validate_foundation
 from .combat_movement import ordinary_walk_changes, require_walk_route
+from .combat_regions import adopt_combat_region_edges, adopt_combat_region_turn_start
 from .concentration_adoption import (
     concentration_release_changes,
     effect_identity,
@@ -84,12 +91,28 @@ from .damage_adoption import (
 from .dnd_checks import check_changes
 from .dnd_closure import closure_changes
 from .errors import StateMachineError
-from .exploration_spell_adoption import environmental_spell_changes, exploration_spell_changes
-from .haste_adoption import haste_cast_admission, haste_pass_admission
+from .exploration_spell_adoption import (
+    charged_item_changes,
+    environmental_spell_changes,
+    exploration_spell_changes,
+    multi_exploration_spell_changes,
+)
+from .haste_adoption import (
+    HASTE_LIFECYCLE_OPERATIONS,
+    haste_attack_admission,
+    haste_cast_admission,
+    haste_pass_admission,
+)
 from .package import canonical_json
 from .rest_activity import rest_changes
 from .scoped_reads import scoped_read
 from .session_access import _binding
+from .shield_adoption import (
+    SHIELD_OPS,
+    UnsupportedShieldKnockout,
+    shield_changes,
+    shield_combat_fields,
+)
 from .spatial import SpatialPosition
 from .speed_effect_adoption import speed_effect_pass_admission, supports_pass_roster
 from .spell_adoption import ordinary_spell_changes
@@ -149,7 +172,13 @@ def _has_combat_effects(snapshot):
 
 
 def delta_changes(
-    request, result, *, effect_operations=(), effect_targets=(), turn_life_target=None
+    request,
+    result,
+    *,
+    effect_operations=(),
+    effect_targets=(),
+    turn_life_target=None,
+    reviewed_region_damage=False,
 ):
     """Check pre-values and ownership for an attack, turn advance or narrow potion Delta.
 
@@ -187,7 +216,7 @@ def delta_changes(
         getattr(request.payload, "intent_type", None) == "attack"
         and request.actor_id in snapshot.combat_state.party_ids
         and request.payload.stat_block_action_id is None
-        and not _has_combat_effects(snapshot)
+        and (not _has_combat_effects(snapshot) or reviewed_region_damage)
     ):
         target = next(
             (
@@ -492,6 +521,20 @@ def exploration_potion_changes(request, result):
 _TURN_EVENTS = {"turn_phase", "turn_ended", "round_started", "turn_started"}
 
 
+def _supports_dying_pass_roster(snapshot, dying):
+    """Share the existing sole living zero-HP PC limit with Shield admission."""
+    return (
+        dying.entity_type == "Character"
+        and dying.entity_id in snapshot.combat_state.party_ids
+        and dying.is_alive
+        and all(
+            actor.is_alive and actor.hp_current > 0
+            for actor in snapshot.character_states
+            if actor.entity_id != dying.entity_id
+        )
+    )
+
+
 def _dying_pass_actor(snapshot, actor_id):
     """Select the sole dying PC when they own either boundary of a plain Pass."""
     combat = snapshot.combat_state
@@ -504,13 +547,10 @@ def _dying_pass_actor(snapshot, actor_id):
     if handoff is None:
         return None
     next_actor = combat.initiative_ids[handoff[0]]
-    zero_hp = [actor for actor in snapshot.character_states if actor.hp_current == 0]
-    if len(zero_hp) != 1 or any(not actor.is_alive for actor in snapshot.character_states):
-        return None
-    (actor,) = zero_hp
+    actor = next((actor for actor in snapshot.character_states if actor.hp_current == 0), None)
     if (
-        actor.entity_type == "Character"
-        and actor.entity_id in combat.party_ids
+        actor is not None
+        and _supports_dying_pass_roster(snapshot, actor)
         and actor.entity_id in {actor_id, next_actor}
         and next_actor != actor_id
     ):
@@ -1238,11 +1278,7 @@ def hold_effect_changes(request, result, source):
 def haste_effect_changes(request, result):
     """Admit bounded Haste turn effects and the ordinary handoff."""
     adopted, condition_changes, target, final_effects = haste_pass_admission(request, result)
-    effect_operations = (
-        delta.EffectLifecycleUpdate,
-        delta.ConcentrationUpdate,
-        delta.EffectFollowUpCreate,
-    )
+    effect_operations = HASTE_LIFECYCLE_OPERATIONS
     _turn_intent_scope(
         request,
         result,
@@ -1277,7 +1313,7 @@ def validate_dnd_result(request, result, *, loader=None):
         _invalid("Expected the pinned Engine's complete whole-session read fence")
     if result.status == "needs_choice":
         # verify_request already binds the typed choice to this cast and target.
-        if type(result.choice) is not SpellWillingnessChoice:
+        if type(result.choice) not in (SpellWillingnessChoice, MultiSpellWillingnessChoice):
             _invalid("Unexpected choice after explicit command capability admission")
         return result, ()
     actors = {a.entity_id for a in request.state_snapshot.character_states}
@@ -1293,9 +1329,13 @@ def validate_dnd_result(request, result, *, loader=None):
     if request.operation_kind == "rules.rest":
         return result, rest_changes(request, result)
     if type(request.payload) is ExplorationItemUsePayload:
+        if request.schema_version == CHARGED_ITEM_SCHEMA_VERSION:
+            return result, charged_item_changes(request, result, loader)
         return result, exploration_potion_changes(request, result)
     if type(request.payload) is ExplorationEnvironmentalSpellCastPayload:
         return result, environmental_spell_changes(request, result)
+    if type(request.payload) is ExplorationMultiSpellCastPayload:
+        return result, multi_exploration_spell_changes(request, result, loader)
     if type(request.payload) is ExplorationSpellCastPayload:
         return result, exploration_spell_changes(request, result, loader)
     if type(request.payload) is ItemUsePayload:
@@ -1353,6 +1393,72 @@ def validate_dnd_result(request, result, *, loader=None):
         return result, concentration_release_changes(request, result)
     if (
         request.operation_kind == "combat.intent"
+        and request.payload.intent_type in {"attack", "pass"}
+        and (
+            request.state_snapshot.combat_state.reaction_effects_pending_expiry
+            or request.state_snapshot.combat_state.pending_reactions
+        )
+    ):
+        if (
+            loader is None
+            or shield_support_failure(
+                request.state_snapshot, loader, turn=request.payload.intent_type == "pass"
+            )
+            is not None
+        ):
+            _invalid("Shield result requires the bound Shield profile")
+        adopted = shield_changes(
+            request,
+            result,
+            lambda combat, actor, turn, events: _turn_handoff(
+                combat, actor, turn, [event for event in events if event.type in _TURN_EVENTS]
+            ),
+        )
+        owner = next(
+            (
+                identity
+                for component, identity, _, graph in adopted
+                if component == "shield_graph"
+                and graph.expected is None
+                and graph.value is not None
+            ),
+            None,
+        )
+        if owner is not None and any(
+            type(op) is delta.HPDelta and op.target_id == owner and op.resulting_hp == 0
+            for op in result.state_delta.operations
+        ):
+            defender = next(
+                a for a in request.state_snapshot.character_states if a.entity_id == owner
+            )
+            if not _supports_dying_pass_roster(request.state_snapshot, defender):
+                raise UnsupportedShieldKnockout
+        if request.payload.intent_type == "pass":
+            plain = plain_shield(request.state_snapshot)
+            if (dying := _dying_pass_actor(plain, request.actor_id)) is not None:
+                plain_request = request.model_copy(update={"state_snapshot": plain})
+                delta_without_shield = result.state_delta.model_copy(
+                    update={
+                        "operations": tuple(
+                            op for op in result.state_delta.operations if type(op) not in SHIELD_OPS
+                        )
+                    }
+                )
+                plain_result = result.model_copy(
+                    update={
+                        "state_delta": delta_without_shield,
+                        "proposed_events": tuple(
+                            event
+                            for event in result.proposed_events
+                            if event.type != "effect_expired"
+                        ),
+                    }
+                )
+                return result, (*_dying_pass_changes(plain_request, plain_result, dying), *adopted)
+            _turn_intent_scope(request, result, effect_operations=SHIELD_OPS)
+        return result, (*delta_changes(request, result, effect_operations=SHIELD_OPS), *adopted)
+    if (
+        request.operation_kind == "combat.intent"
         and request.payload.intent_type in {"pass", "attack"}
         and (source := _hold_source(request.state_snapshot)) is not None
         and (request.payload.intent_type == "pass" or request.payload.target_id == source)
@@ -1360,6 +1466,21 @@ def validate_dnd_result(request, result, *, loader=None):
         return result, hold_effect_changes(request, result, source)
     if request.operation_kind == "combat.intent" and request.payload.intent_type == "move":
         return result, ordinary_walk_changes(request, result, loader=loader)
+    if (
+        request.operation_kind == "combat.intent"
+        and request.payload.intent_type == "attack"
+        and has_haste_effects(request.state_snapshot)
+    ):
+        adopted, target = haste_attack_admission(request, result)
+        return result, (
+            *delta_changes(
+                request,
+                result,
+                effect_operations=HASTE_LIFECYCLE_OPERATIONS,
+                effect_targets=(target,),
+            ),
+            *adopted,
+        )
     if request.operation_kind == "combat.intent" and request.payload.intent_type == "pass":
         if has_haste_effects(request.state_snapshot):
             return result, haste_effect_changes(request, result)
@@ -1387,7 +1508,15 @@ def validate_dnd_result(request, result, *, loader=None):
     return result, (
         closure_changes(request, result)
         if request.operation_kind == "combat.close"
-        else delta_changes(request, result)
+        else delta_changes(
+            request,
+            result,
+            reviewed_region_damage=(
+                getattr(request.payload, "intent_type", None) == "attack"
+                and loader is not None
+                and supports_fixed_combat_regions(request.state_snapshot, loader)
+            ),
+        )
     )
 
 
@@ -1576,6 +1705,11 @@ class RulesAdapter:
                     }
                 )
             )
+            shield_fields = shield_combat_fields(snapshot, self.loader)
+            if shield_fields:
+                snapshot = snapshot.model_copy(
+                    update={"combat_state": snapshot.combat_state.model_copy(update=shield_fields)}
+                )
             if for_pass and not has_speed_effects(snapshot):
                 independent = self.characters.effects.world_passive_identities(sid, roster)
                 if independent:
@@ -1596,28 +1730,28 @@ class RulesAdapter:
 
     @staticmethod
     def _project_walk_budgets(snapshot):
-        """For a reviewed timed walk, project its target's budget from the existing ledger."""
+        """Project budgets for timed walk modifiers from the fixed combat ledgers."""
         try:
-            timed = timed_walk_bonus(snapshot)
+            bonuses = timed_walk_bonuses(snapshot)
         except ValueError:
             # Keep the complete fixed input for other mechanics and RE refusal of walking.
             return snapshot
-        if timed is None:
+        if not any(bonuses.values()):
             return snapshot
-        target, bonus = timed
-        ledger = snapshot.combat_state.movement_ledgers[target]
-        if ledger.active_mode != "walk":
-            return snapshot
+        ledgers = snapshot.combat_state.movement_ledgers
+
+        def project(actor):
+            """Update the walking mirror while leaving the expenditure ledger fixed."""
+            bonus = bonuses.get(actor.entity_id, 0)
+            if not bonus or (ledger := ledgers[actor.entity_id]).active_mode != "walk":
+                return actor
+            return actor.model_copy(
+                update={"movement_remaining": ledger.remaining(walk_speed(actor, bonus))}
+            )
+
         return snapshot.model_copy(
             update={
-                "character_states": tuple(
-                    actor.model_copy(
-                        update={"movement_remaining": ledger.remaining(walk_speed(actor, bonus))}
-                    )
-                    if actor.entity_id == target
-                    else actor
-                    for actor in snapshot.character_states
-                )
+                "character_states": tuple(project(actor) for actor in snapshot.character_states)
             }
         )
 
@@ -1739,6 +1873,7 @@ class RulesAdapter:
         if type(payload) in (
             ExplorationItemUsePayload,
             ExplorationEnvironmentalSpellCastPayload,
+            ExplorationMultiSpellCastPayload,
             ExplorationSpellCastPayload,
         ):
             return None  # RE validates the fixed exploration operation.
@@ -1818,15 +1953,17 @@ class RulesAdapter:
             if spell is None:
                 return "spell.capability"
             level = spell.level
+            point_save = mechanism == "area_save_damage"
             hit_speed_rider = spell_attack_has_speed_effect(canonical, payload.spell_id)
             basic = type(payload)(
                 intent_type="cast_spell",
                 source_id=payload.source_id,
                 spell_id=payload.spell_id,
-                target_id=payload.target_id,
+                target_id=None if point_save else payload.target_id,
                 target_ids=payload.target_ids
                 if mechanism == "healing" and spell.activities[0].target.affects.count != "1"
                 else None,
+                target_zone_id=payload.target_zone_id if point_save else None,
                 slot_level=payload.slot_level,
                 spell_source_id=payload.spell_source_id,
             )
@@ -1835,7 +1972,7 @@ class RulesAdapter:
                 or payload.slot_level not in ((None, 0) if level == 0 else (level,))
                 or payload.source_id not in (None, actor_id)
                 or payload.spell_source_id is None
-                or payload.target_id is None
+                or (payload.target_zone_id is None if point_save else payload.target_id is None)
                 or actor_id not in combat.party_ids
                 or combat.pending_reactions
                 or (snapshot.effect_states and not hit_speed_rider)
@@ -1872,6 +2009,15 @@ class RulesAdapter:
                     payload == basic
                     and payload.source_id in (None, actor_id)
                     and snapshot.snapshot_schema_version == "engine-snapshot/20"
+                    and combat.active_reaction_responses
+                    and not combat.pending_reactions
+                    and shield_support_failure(snapshot, self.loader, turn=True) is None
+                ):
+                    return None
+                if (
+                    payload == basic
+                    and payload.source_id in (None, actor_id)
+                    and snapshot.snapshot_schema_version == "engine-snapshot/20"
                     and not (
                         combat.pending_reactions
                         or combat.active_reaction_responses
@@ -1887,6 +2033,7 @@ class RulesAdapter:
                         or _hold_source(snapshot) is not None
                         or has_haste_effects(snapshot)
                         or has_speed_effects(snapshot)
+                        or supports_fixed_combat_regions(snapshot, self.loader)
                     )
                 ):
                     return None
@@ -1908,7 +2055,7 @@ class RulesAdapter:
                 return "unsupported_stat_block_action"
         return None
 
-    def _apply_dnd_changes(self, row, changes, *, command_id=None):
+    def _apply_dnd_changes(self, row, changes, *, command_id=None, snapshot=None, turn_starts=()):
         """Adopt verified rules changes through domain interfaces in the shared write
         scope.
         """
@@ -1923,6 +2070,7 @@ class RulesAdapter:
                 "effect_lifecycle",
                 "hold_concentration",
                 "effect_follow_up",
+                "shield_graph",
             }
             for component, _, _, _ in changes
         )
@@ -1946,6 +2094,12 @@ class RulesAdapter:
                 if before is None or self.facts.item_entry(before) != value or command_id is None:
                     _invalid("Selected inventory instance changed")
                 self.facts.consume_item(sid, before, command_id)
+            elif component == "item" and field == "spend_charge":
+                expected, amount = value
+                before = self.facts.object(sid, identity)
+                if before is None or self.facts.item_entry(before) != expected:
+                    _invalid("Selected item charge pre-value changed")
+                self.facts.spend_item_charge(sid, before, amount=amount)
             elif component == "xp":
                 self.characters.award_xp(sid, identity, value)
             elif component == "resource":
@@ -1959,6 +2113,8 @@ class RulesAdapter:
                 self.world.runtime.time.consumers["effects"].apply_verified(sid, value)
             elif component == "combat_effect":
                 self.characters.effects.apply_combat_creation(sid, value)
+            elif component == "shield_graph":
+                self.characters.effects.apply_shield(sid, value)
             elif component == "slot_ledger":
                 self.records.spend_slot(
                     sid,
@@ -2012,8 +2168,11 @@ class RulesAdapter:
                 position = self.characters.position(sid, identity)
                 if (position.scene_id, position.cell) != (value.scene_id, value.expected):
                     raise StateMachineError("version_conflict", "Walking position changed")
-                require_walk_route(self.world, sid, value)
+                edges = require_walk_route(self.world, sid, value)
                 self.characters.move(sid, identity, SpatialPosition(value.scene_id, value.value))
+                adopt_combat_region_edges(
+                    self.world, row, snapshot, identity, value.scene_id, edges
+                )
             elif component == "actor" and field == "hp_current":
                 self.characters.set_hp(sid, identity, value)
             elif component == "actor":
@@ -2048,13 +2207,30 @@ class RulesAdapter:
                         != value
                     ):
                         _invalid("Effect-linked conditions differ after adoption")
+        for incoming in turn_starts:
+            adopt_combat_region_turn_start(
+                self.world, row, snapshot, incoming, effect_updates=effect_updates
+            )
 
-    def request(self, command, package, snapshot, rng, *, row=None, spell_positions=None):
+    def request(
+        self,
+        command,
+        package,
+        snapshot,
+        rng,
+        *,
+        row=None,
+        spell_positions=None,
+        multi_spell_positions=None,
+        exploration_charge=False,
+    ):
         """Build a rules request with durable Session identity and isolated fixed inputs."""
         row = row if row is not None else self._pinned_row(command.session_id, package)
         return RuleEvaluationRequest(
             schema_version=(
-                ENVIRONMENTAL_SPELL_SCHEMA_VERSION
+                MULTI_SPELL_SCHEMA_VERSION
+                if type(command.payload) is ExplorationMultiSpellCastPayload
+                else ENVIRONMENTAL_SPELL_SCHEMA_VERSION
                 if type(command.payload) is ExplorationEnvironmentalSpellCastPayload
                 else "engine-evaluation/30"
                 if command.command_type == "combat.intent"
@@ -2062,7 +2238,7 @@ class RulesAdapter:
                 and (
                     command.payload.spell_id == "haste"
                     or (
-                        command.payload.intent_type in {"pass", "drop_concentration"}
+                        command.payload.intent_type in {"pass", "drop_concentration", "attack"}
                         and has_haste_effects(snapshot)
                     )
                     or (
@@ -2077,6 +2253,8 @@ class RulesAdapter:
                 )
                 else "engine-evaluation/29"
                 if type(command.payload) is ExplorationSpellCastPayload
+                else CHARGED_ITEM_SCHEMA_VERSION
+                if exploration_charge
                 else "engine-evaluation/28"
                 if type(command.payload) is ExplorationItemUsePayload
                 else "engine-evaluation/27"
@@ -2096,6 +2274,7 @@ class RulesAdapter:
             ruleset_binding=self.session_binding(row),
             rng_context=rng,
             spell_positions=spell_positions,
+            multi_spell_positions=multi_spell_positions,
         )
 
     def query_availability(

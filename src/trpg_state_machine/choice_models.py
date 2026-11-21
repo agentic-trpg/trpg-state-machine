@@ -1,4 +1,4 @@
-"""Public response payload and Host-facing details for a pending exploration spell."""
+"""Public command payloads and Host-facing details for pending choices."""
 
 from dataclasses import dataclass
 from typing import Literal
@@ -13,11 +13,21 @@ class ChoiceRespondOperationPayload:
 
 
 @dataclass(frozen=True, slots=True)
+class ChoiceFinalizeSpellOperationPayload:
+    """Confirm the original spell against a subset of its willing targets."""
+
+    pending_operation_id: str
+    target_ids: tuple[str, ...]
+
+
+@dataclass(frozen=True, slots=True)
 class PendingChoice:
     """Describe a saved prompt in its original command receipt."""
 
     pending_operation_id: str
     authorized_responder: str
-    choice_kind: Literal["spell.target_willingness"]
+    choice_kind: Literal[
+        "spell.target_willingness", "spell.targets_willingness", "combat.shield_reaction"
+    ]
     allowed_options: tuple[str, ...]
-    expires_at_tick: int
+    expires_at_tick: int | None

@@ -162,10 +162,10 @@ def adopt_death_ledger(snapshot, op, target, killer, target_kind, edit):
     edit("combat", op.combat_id, "deaths_recorded", op.expected_records, op.records)
 
 
-def adopt_damage_operation(request, target_kind, op, edit):
+def adopt_damage_operation(request, target_kind, op, edit, *, target_id=None):
     """Match one typed damage edit to its owner and pass guarded fields to the candidate."""
     snapshot = request.state_snapshot
-    target = request.payload.target_id
+    target = target_id if target_id is not None else request.payload.target_id
     source = request.actor_id
     combat = snapshot.combat_state.combat_id
     if getattr(op, "target_id", target) != target or getattr(op, "combat_id", combat) != combat:
@@ -198,3 +198,99 @@ def adopt_damage_operation(request, target_kind, op, edit):
         edit("combat", combat, "processed_zero_hp_damage_instances", op.expected, op.value)
     elif type(op) is delta.DeathLedgerUpdate:
         adopt_death_ledger(snapshot, op, target, source, target_kind, edit)
+
+
+def validate_area_damage(request, result, targets, packets, *, source_id):
+    """Bind ordered area damage packets to each actor's guarded edits and encounter history."""
+    caster = request.actor_id
+    snapshot = request.state_snapshot
+    state = snapshot.combat_state
+    actor_ops = (
+        delta.HPDelta,
+        delta.TempHPSet,
+        delta.DamageAttributionUpdate,
+        delta.DeathStateUpdate,
+    )
+    changes = {}
+    sequence_op = None
+    death_ledger = None
+    for op in result.state_delta.operations:
+        kind = type(op)
+        if kind in actor_ops:
+            key = kind, op.target_id
+            if op.target_id not in targets or key in changes:
+                _invalid("Area damage edit repeats or names an unaffected creature")
+            changes[key] = op
+        elif kind is delta.DamageSequenceUpdate:
+            if sequence_op is not None:
+                _invalid("Area damage repeats the encounter sequence edit")
+            sequence_op = op
+        elif kind is delta.DeathLedgerUpdate:
+            if death_ledger is not None:
+                _invalid("Area damage repeats the encounter death ledger edit")
+            death_ledger = op
+        elif kind is delta.ProcessedDamageUpdate:
+            _invalid("Area damage cannot change the processed zero-HP ledger")
+
+    initial_sequence = state.damage_instance_sequence
+    dead = []
+    for sequence, ((target_id, target), packet) in enumerate(
+        zip(targets.items(), packets, strict=True), start=initial_sequence + 1
+    ):
+        if (
+            not ordinary_damage_target(state, target)
+            or packet.target_id != target_id
+            or packet.source_actor_id != caster
+            or packet.source_id != source_id
+            or packet.source_parent_id is not None
+            or packet.damage_instance_id != f"damage:{sequence}:{caster}:{target_id}"
+            or packet.amount < 0
+            or packet.is_crit
+        ):
+            _invalid("Area damage packet differs from its source, creature or sequence")
+        hp, temp, _ = damage_balances(target.hp_current, target.temp_hp, packet.amount)
+        for kind, before, after, field in (
+            (delta.HPDelta, target.hp_current, hp, "resulting_hp"),
+            (delta.TempHPSet, target.temp_hp, temp, "temp_hp"),
+            (delta.DamageAttributionUpdate, target.last_damaged_by, caster, "value"),
+        ):
+            edit = changes.get((kind, target_id))
+            if (edit is not None) != (before != after) or (
+                edit is not None and getattr(edit, field) != after
+            ):
+                _invalid("Area damage edits differ from the resolved damage balances")
+        life = changes.get((delta.DeathStateUpdate, target_id))
+        if (life is not None) != (hp == 0) or (
+            life is not None
+            and (life.value.is_alive or life.value.death_saves != target.death_saves)
+        ):
+            _invalid("Area damage edits differ from the creature's resolved life state")
+        if hp == 0:
+            dead.append(target_id)
+
+    deaths = [event for event in result.proposed_events if event.type == "death"]
+    if (sequence_op is not None) != bool(targets) or (
+        sequence_op is not None and sequence_op.value != initial_sequence + len(targets)
+    ):
+        _invalid("Area damage sequence differs from the resolved packets")
+    if [event.target_id for event in deaths] != dead or any(e.reason != "damage" for e in deaths):
+        _invalid("Area death evidence differs from resolved terminal damage")
+    if (death_ledger is not None) != bool(dead):
+        _invalid("Area deaths require one encounter death ledger update")
+    if death_ledger is not None:
+        old = death_ledger.expected_records
+        records = death_ledger.records[len(old) :]
+        if (
+            death_ledger.dead_ids != death_ledger.expected_dead_ids | set(dead)
+            or death_ledger.records[: len(old)] != old
+            or [record.target_id for record in records] != dead
+            or any(
+                record.killer_id != caster
+                or record.location_id != snapshot.scene_state.scene_id
+                or record.target_kind != targets[record.target_id].entity_type.lower()
+                or record.reason != "damage"
+                for record in records
+            )
+        ):
+            _invalid("Area death ledger differs from resolved terminal damage")
+    return set(dead)

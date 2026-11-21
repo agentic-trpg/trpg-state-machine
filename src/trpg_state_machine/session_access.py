@@ -9,6 +9,7 @@ from dnd5e_engine.evaluation_contracts import (
     CombatIntentPayload,
     ExplorationEnvironmentalSpellCastPayload,
     ExplorationItemUsePayload,
+    ExplorationMultiSpellCastPayload,
     ExplorationSpellCastPayload,
     ItemUsePayload,
 )
@@ -26,7 +27,7 @@ from ._operations import (
     TraversePassage,
     UnlockDoor,
 )
-from .choice_models import ChoiceRespondOperationPayload
+from .choice_models import ChoiceFinalizeSpellOperationPayload, ChoiceRespondOperationPayload
 from .environment_commands import ENVIRONMENT_OPERATIONS
 from .errors import StateMachineError
 from .game_time import AdvanceGameTime
@@ -133,9 +134,15 @@ class SessionAccess:
             type(payload) in (ItemUsePayload, ExplorationItemUsePayload)
             and actor_id != row["pc_actor_id"]
         ):
-            raise StateMachineError("unauthorized", "Only the selected PC can drink a potion")
+            raise StateMachineError("unauthorized", "Only the selected PC can use an item")
         if (
-            type(payload) in (ExplorationSpellCastPayload, ExplorationEnvironmentalSpellCastPayload)
+            type(payload)
+            in (
+                ExplorationSpellCastPayload,
+                ExplorationEnvironmentalSpellCastPayload,
+                ExplorationMultiSpellCastPayload,
+                ChoiceFinalizeSpellOperationPayload,
+            )
             and actor_id != row["pc_actor_id"]
         ):
             raise StateMachineError("unauthorized", "Only the selected PC can cast in exploration")

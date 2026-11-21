@@ -183,12 +183,14 @@ class WorldMagic:
             for record in self._records(sid, scene)
         )
 
-    def has_other_scene_concentration(self, sid):
-        """Check the selected caster's world concentration even across an anchor's scene change."""
+    def has_exploration_concentration(self, sid):
+        """Check the selected caster's elapsed group even when its effect is in another Scene."""
         actor = self.store.connection.execute(
             "SELECT pc_actor_id FROM sessions WHERE session_id=?", (sid,)
         ).fetchone()
-        return actor is not None and self.owner.concentration(sid, actor[0]) is not None
+        return actor is not None and self.h.characters.effects.has_world_concentration(
+            sid, actor[0]
+        )
 
     @instance_read("scene", "lighting", "magic_anchors", maintained="light_sources")
     def illumination_anchors(self, sid, scene):
@@ -346,24 +348,20 @@ class WorldMagic:
         ]
 
     def drop_concentration(self, sid, caster, package):
-        """Release only the caller's current spatial concentration group."""
-        record = self.owner.concentration(sid, caster)
-        if record is None:
-            raise StateMachineError("no_spatial_concentration", "No active spatial concentration")
-        return [self.end_event(sid, package, record, "concentration_ended")]
+        """Voluntarily end only the caster's current exploration group."""
+        events = self.h.runtime.time.consumers["effects"].end_world_concentration(
+            sid, package, caster, "concentration_ended"
+        )
+        if not events:
+            raise StateMachineError(
+                "no_spatial_concentration", "No active exploration concentration"
+            )
+        return events
 
     def apply(self, row, package, command_id, proposal):
-        """Adopt a verified effect and settle its scoped lifecycle within the existing savepoint."""
+        """Adopt a verified spatial application after authorized concentration replacement."""
         sid, scene = row["session_id"], row["current_scene_id"]
         ended = []
-        if proposal.concentration:
-            group = self.owner.concentration(sid, proposal.source_id)
-            if group is not None:
-                ended.append(self.end_event(sid, package, group, "concentration_replaced"))
-            elif self.h.characters.effects.has_concentration(sid, proposal.source_id):
-                raise StateMachineError(
-                    "spell.concentration", "Actor effect concentration is active"
-                )
         if proposal.replace_same_caster_on_recast:
             for record in self.owner.by_spell(sid, proposal.source_id, proposal.spell_id):
                 ended.append(self.end_event(sid, package, record, "recast"))

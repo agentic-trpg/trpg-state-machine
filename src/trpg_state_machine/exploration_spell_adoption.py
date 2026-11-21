@@ -2,8 +2,10 @@
 
 from dnd5e_engine import evaluation_delta as delta
 from dnd5e_engine.damage_rules import healing_balance
+from dnd5e_engine.evaluation_charged_item import exploration_charged_cast_profile
 from dnd5e_engine.evaluation_effects import effect_state
 from dnd5e_engine.evaluation_exploration_healing import exploration_healing_activity
+from dnd5e_engine.evaluation_multi_spells import verify_multi_spell_definition
 from dnd5e_engine.evaluation_spells import spell_event
 from dnd5e_engine.evaluation_world_effect import WorldEffectApplicationRequest
 from dnd5e_engine.events import EffectApplied, HealingApplied, IntentSubmitted, SpellCast
@@ -34,12 +36,55 @@ def exploration_spell_changes(request, result, loader):
     return _timed_spell_changes(request, result, spell)
 
 
+def multi_exploration_spell_changes(request, result, loader):
+    """Bind the /33 proposal to the ruleset before translating candidate writes."""
+    if loader is None:
+        raise StateMachineError("invalid_rule_result", "Multi spell has no bound ruleset loader")
+    try:
+        verify_multi_spell_definition(result, request, loader)
+    except ValueError as exc:
+        raise StateMachineError("invalid_rule_result", str(exc)) from exc
+    payment, *effects = result.state_delta.operations
+    return (
+        _slot_change(request, payment),
+        *(
+            ("world_effect", effect.value.effect.target_id, "create", effect.value)
+            for effect in effects
+        ),
+    )
+
+
 def environmental_spell_changes(request, result):
     """Bind the payment of a previously verified environmental cast to its one owned slot."""
     # RuleEvaluationResult.verify_request checks the exact typed environmental
     # create operation, the payment (if any), and the unchanged RNG and events.
     operations = result.state_delta.operations
     return (_slot_change(request, operations[0]),) if request.payload.slot_level else ()
+
+
+def charged_item_changes(request, result, loader):
+    """Adopt one verified item cast after matching its frozen asset and charge cost.
+
+    The result envelope has already bound the typed payment and optional HP
+    edit to the exact request and evidence.
+    """
+    spend, *healing = result.state_delta.operations
+    entry = spend.expected
+    asset = loader.get_item(entry.item_slug) if loader is not None else None
+    profile = exploration_charged_cast_profile(asset, loader) if asset is not None else None
+    _, cast, _ = result.proposed_events
+    if (
+        profile is None
+        or profile.activity.id != request.payload.activity_id
+        or profile.spell.slug != cast.spell_id
+        or profile.cost != spend.amount
+        or entry.charges_remaining_per_unit > profile.capacity
+    ):
+        raise StateMachineError("invalid_rule_result", "Item cast differs from its bound activity")
+    return (
+        ("item", entry.instance_id, "spend_charge", (entry.model_dump(mode="json"), spend.amount)),
+        *(("actor", edit.target_id, "hp_current", edit.resulting_hp) for edit in healing),
+    )
 
 
 def _healing_changes(request, result, spell, activity):
@@ -132,11 +177,22 @@ def _timed_spell_changes(request, result, spell):
             "invalid_rule_result", "Timed spell effect association differs"
         ) from exc
 
+    caster = next(
+        (actor for actor in snapshot.character_states if actor.entity_id == request.actor_id), None
+    )
     if (
         not create.expected_absent
+        or caster is None
+        or spell is None
+        or spell.concentration != proposal.concentration
         or not any(actor.entity_id == payload.target_id for actor in snapshot.character_states)
         or any(
             (effect.target_id, effect.id, effect.origin) == proposal.identity
+            and not (
+                proposal.concentration
+                and caster.concentration_effect_id == effect.id
+                and effect.flags.get("concentration") is True
+            )
             for effect in snapshot.effect_states
         )
     ):
@@ -156,7 +212,6 @@ def _timed_spell_changes(request, result, spell):
         or intent.spell_id != payload.spell_id
         or intent.source_id != payload.spell_source_id
         or intent.target_id != payload.target_id
-        or spell is None
         or not any(activity.id == intent.activity_id for activity in spell.activities)
         or cast.actor_id != request.actor_id
         or cast.spell_id != payload.spell_id

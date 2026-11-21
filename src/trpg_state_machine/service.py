@@ -180,6 +180,19 @@ class StateMachine(
         """Delegate reading time synchronization status to the unified time service."""
         return self._session_runtime.time.sync(session_id, package, context=context)
 
+    def read_multi_spell_prompt(
+        self, session_id, pending_operation_id, responder_id, package, *, context
+    ):
+        """Read the outstanding consent prompt under the responder's current grant."""
+        from .pending_multi_spell_choices import PendingMultiSpellChoices
+
+        with self._transaction():
+            row = self._session(session_id, package, context)
+            choices = PendingMultiSpellChoices(
+                self._store, self._session_runtime, self._sessions, self._world_facts
+            )
+            return choices.read_prompt(row, pending_operation_id, responder_id, context)
+
     def attach_time_driver(self, session_id, package, *, context, **options):
         """Create a unified time driver for the selected Session."""
         from .time_driver import TimeDriver
@@ -496,11 +509,10 @@ class StateMachine(
             ]
             effects = [
                 EffectState.model_validate_json(canonical_json(value))
-                for value in self._characters.effects.for_targets(session_id, (actor_id,))
+                for value in self._characters.effects.visible_for_target(session_id, actor_id)
             ]
-            active = [effect for effect in effects if not effect.disabled]
             try:
-                effective = effective_armor_class(base, active)
+                effective = effective_armor_class(base, effects)
             except (TypeError, ValueError) as exc:
                 raise StateMachineError(
                     "unsupported_armor_class", "Active AC effect has no scalar value"
