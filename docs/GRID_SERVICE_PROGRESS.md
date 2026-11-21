@@ -1,5 +1,17 @@
 # W-01 GridService 切片进度
 
+## 2026-11-21 探索光源投影与角色遮光
+
+灯具和物品上的 Light 法术使用同一个连续投影。公开区域查询用同一位置、同一范围和斜墙
+复验半格受照、整格阴影和微光。RE 继续处理施法可达性、魔法黑暗的整格覆盖和持续效果
+驱散。受照多边形不用于重新判定效果驱散。
+
+PC 模板和 NPC 可设 `light_opaque: true`。此配置持久化于 Actor 实例配置，
+使用现有的占格索引并沿用场景光照版本。生命值降为零时占格继续遮光，离开格子后
+重新投影。测试覆盖默认透明、提交移动、候选回滚、重开，以及增加 32 个远处不透明
+角色后公开查询仍只读取路径内的 Actor 配置。
+[公开路径回归](../tests/test_lighting_source_composition.py)
+
 ## 2026-10-22 GridView 与 PlaceObject 定向读取
 
 本批基线 `a2a2fe0`，分支 `fix/runtime-local-query-reuse`。公开 PlaceObject 的目标占用

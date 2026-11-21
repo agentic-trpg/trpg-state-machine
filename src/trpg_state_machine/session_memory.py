@@ -759,7 +759,7 @@ class SessionMemory:
         """Mutation-maintained source and geometry stamps, in the existing UoW.
 
         Sources follow moved subtrees/carriers and shading ancestors. Geometry
-        follows actual ground blockers and both shared-door endpoints. No read
+        follows ground blockers, opt-in Actor positions and both shared-door endpoints. No read
         validates the collected source/config leaves again.
         """
         if table in ("mechanical_scenes", "scene_instances"):
@@ -803,6 +803,7 @@ class SessionMemory:
             row = new if new is not None else old
             sid = row["session_id"]
             scenes = {r["current_scene_id"] for r in (old, new) if r is not None}
+            self._light_actor_moved(sid, row["actor_id"], old, new)
             if not any(
                 (f"light_sources:{s!r}", sid) in self.store._scope.memory_versions for s in scenes
             ):
@@ -858,6 +859,9 @@ class SessionMemory:
                             ):
                                 self.store._scope.memory_versions[dep] += 1
             row = new if new is not None else old
+            if row["domain"] == "actor":
+                self._light_actor_config_changed(row["session_id"], row["instance_id"], old, new)
+                return
             if row["domain"] != "object":
                 return
             obj = self._object(row["session_id"], row["instance_id"])
@@ -892,6 +896,38 @@ class SessionMemory:
             }:
                 for scene in self._light_door_scenes(sid, oid):
                     self._advance_field("light_candidates", sid, scene)
+
+    def _light_actor_moved(self, sid, actor_id, old, new):
+        """Dirty occupied scenes when an explicitly opaque actor moves or disappears."""
+        scenes = {
+            row["current_scene_id"]
+            for row in (old, new)
+            if row is not None and row["cell"] is not None
+        }
+        versions = self.store._scope.memory_versions
+        observed = {scene for scene in scenes if (f"light_candidates:{scene!r}", sid) in versions}
+        if not observed:
+            return
+        from .instance_data import actor_light_opaque
+
+        if actor_light_opaque(self.store, sid, actor_id):
+            for scene in observed:
+                self._advance_field("light_candidates", sid, scene)
+
+    def _light_actor_config_changed(self, sid, actor_id, old, new):
+        """Dirty the actual occupied scene when its Actor opacity is configured or removed."""
+        before, after = (
+            row is not None and self.json(row["config_json"]).get("light_opaque") is True
+            for row in (old, new)
+        )
+        if before == after:
+            return
+        position = self.select(
+            "SELECT current_scene_id,cell FROM actors WHERE session_id=? AND actor_id=?",
+            (sid, actor_id),
+        ).fetchone()
+        if position is not None and position["cell"] is not None:
+            self._advance_field("light_candidates", sid, position["current_scene_id"])
 
     def _spatial_light_changes(self, rows):
         """Advance the light version specifically where an application changes or expires."""

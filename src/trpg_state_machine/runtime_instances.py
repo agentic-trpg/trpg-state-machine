@@ -226,7 +226,7 @@ class LightingFields:
     ambient_scope: tuple = ()
     sources: tuple = ()
     magic_records: tuple = ()
-    magic: tuple = ()
+    magic_anchors: tuple = ()
     geometry: tuple = ()
     candidates: tuple = ()
     cells: tuple = ()

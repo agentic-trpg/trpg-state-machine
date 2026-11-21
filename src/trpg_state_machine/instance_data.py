@@ -64,6 +64,16 @@ def decode(value):
     return value
 
 
+def actor_light_opaque(store, sid, actor_id):
+    """Read the authored opacity flag from this Actor instance, if configured."""
+    row = store.connection.execute(
+        "SELECT config_json FROM instance_configs "
+        "WHERE session_id=? AND domain='actor' AND instance_id=?",
+        (sid, actor_id),
+    ).fetchone()
+    return row is not None and store.memory.json(row[0]).get("light_opaque") is True
+
+
 def passage_index(store, sid):
     """Shared World association; config mutations maintain its one validity stamp."""
 
@@ -311,6 +321,7 @@ class InstanceData:
                     {
                         "actor_id": actor.actor_id,
                         "senses": actor.senses,
+                        "light_opaque": actor.light_opaque,
                     },
                 )
 

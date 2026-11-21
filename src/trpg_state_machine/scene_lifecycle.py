@@ -153,6 +153,10 @@ class SceneLifecycleService:
             if scene.grid_json is not None and scene.scene_id != package.entry_scene_id:
                 self.ensure_scene(sid, scene.scene_id, package, _defer_acceptance=True)
         self.characters.initialize_pc(sid, pc_actor_id, package.entry_scene_id, pc)
+        if pc.light_opaque:
+            self.facts.instances.put(
+                sid, "actor", pc_actor_id, {"actor_id": pc_actor_id, "light_opaque": True}
+            )
         self.runtime.move_pc_scene(sid, package.entry_scene_id)
         self.facts.visit(sid, package.entry_scene_id)
 

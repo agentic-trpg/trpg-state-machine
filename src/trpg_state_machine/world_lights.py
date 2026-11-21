@@ -3,51 +3,43 @@
 from dataclasses import asdict, dataclass
 from itertools import chain
 from math import ceil, floor
-from typing import TYPE_CHECKING, NamedTuple, NotRequired, TypedDict
+from typing import Literal, NamedTuple
 
+from dnd5e_engine.areas import has_line_of_effect
 from dnd5e_engine.spatial import cell_id, parse_cell
 
 from ._execution import _execution_data
 from .errors import StateMachineError
+from .grid import cell_in_bounds
 from .light_fuel import LightFuel
-from .light_geometry import (
-    Point,
-    Polygon,
-    Segment,
-    clip_to_bounds,
-    clip_to_cone,
-    lit_polygons,
-    shadow_intersects_interior,
-)
+from .light_geometry import LightGeometry, LightProjection, Polygon
 from .runtime_instances import instance_read, resolve_field, resolve_field_batch
 from .world_commands import SetLightEnabled
 from .world_daylight import SceneAmbientSource, scene_ambient_source
-from .world_package import LightMode
-
-if TYPE_CHECKING:
-    from .world_magic import MagicLightSource
 
 _RANK = {"dark": 0, "dim": 1, "bright": 2}
 _MAX_QUERY_CELLS = 256
 
 
-class _EmitterSource(TypedDict):
-    """Retain the current position, range and transmission of a point emitter."""
+@dataclass(frozen=True, slots=True)
+class _LightSource:
+    """World provenance, transmission and composition for one geometric source."""
 
-    object_id: str
-    cell: str | None
-    mode: LightMode
-    transmission: str
-    direction: NotRequired[str]
+    source_id: str
+    object_id: str | None
+    geometry: LightGeometry
+    unknown: bool
+    kind: Literal["lamp", "spell_light", "magical_darkness"] = "lamp"
+    sunlight: bool = False
+    sunlight_in_dim: bool = False
 
 
 @dataclass(frozen=True, slots=True)
 class _SceneLightSources:
-    """Share prepared emitters and area-wide sources between light projections."""
+    """Share prepared local and ambient sources between light projections."""
 
-    emitters: tuple[_EmitterSource, ...]
+    local: tuple[_LightSource, ...]
     ambient: SceneAmbientSource | None
-    magic: tuple["MagicLightSource", ...]
 
 
 class CellLight(NamedTuple):
@@ -70,15 +62,6 @@ class CellLight(NamedTuple):
     def __deepcopy__(self, memo):
         """Share fixed lighting data, including immutable polygon vertices."""
         return self
-
-
-@dataclass(frozen=True, slots=True)
-class _SourceCoverage:
-    """Hold local point-light coverage under definite and possible occlusion."""
-
-    origin: Point
-    lit: tuple[Polygon, ...]
-    possible_edges: tuple[Segment, ...]
 
 
 def _cell_edges(cells):
@@ -179,7 +162,7 @@ class LightService:
         return d.capability("light") if d else None
 
     @instance_read("scene", "lighting", "sources", maintained="light_sources")
-    def sources(self, sid, scene, package) -> list[_EmitterSource]:
+    def sources(self, sid, scene, package) -> list[_LightSource]:
         """Resolve actual scene lights, accounting for mode, damage and enclosing-container
         transmission.
         """
@@ -211,24 +194,48 @@ class LightService:
             if transmission == "block":
                 continue
             mode = next(m for m in c.modes if m.mode_id == light["mode"])
-            source: _EmitterSource = {
-                "object_id": oid,
-                "cell": location["cell"],
-                "transmission": transmission,
-                "mode": mode,
-            }
-            if c.emission_shape == "grid_cone_static_los":
-                source["direction"] = self.h.facts.object(sid, oid)["orientation"]
-            result.append(source)
+            direction = (
+                self.h.facts.object(sid, oid)["orientation"]
+                if c.emission_shape == "grid_cone_static_los"
+                else None
+            )
+            result.append(
+                _LightSource(
+                    oid,
+                    oid,
+                    LightGeometry(
+                        location["cell"], mode.bright_radius_ft, mode.dim_outer_radius_ft, direction
+                    ),
+                    transmission == "unknown",
+                )
+            )
         return result
 
-    def _scene_sources(self, sid, scene, package, ambient, *, cells=None):
-        """Read the effective World light sources for one scene version."""
-        return _SceneLightSources(
-            tuple(self.sources(sid, scene, package)),
-            ambient,
-            self.h.magic.active_magic_sources(sid, scene, package, cells=cells),
-        )
+    def _scene_sources(self, sid, scene, package, grid, ambient):
+        """Adapt active World emitters and typed spell areas into one source selection."""
+        magical = []
+        for anchor in self.h.magic.illumination_anchors(sid, scene):
+            spec, radius = anchor.spec, anchor.template.size_ft
+            if spec.kind not in ("light", "magical_darkness") or not cell_in_bounds(
+                grid.topology, anchor.cell
+            ):
+                continue
+            magical.append(
+                _LightSource(
+                    anchor.effect_id,
+                    anchor.item_id,
+                    LightGeometry(
+                        anchor.cell,
+                        radius if spec.light == "bright" else None,
+                        radius + spec.dim_extension_ft,
+                    ),
+                    anchor.unknown,
+                    "magical_darkness" if spec.kind == "magical_darkness" else "spell_light",
+                    spec.sunlight,
+                    spec.sunlight_in_dim,
+                )
+            )
+        return _SceneLightSources((*self.sources(sid, scene, package), *magical), ambient)
 
     @staticmethod
     def _projection_key(package, ambient):
@@ -271,7 +278,7 @@ class LightService:
             if (
                 ambient is None
                 and not self.sources(sid, scene, package)
-                and not self.h.magic.active_magic_sources(sid, scene, package)
+                and not self.h.magic.illumination_anchors(sid, scene)
             ):
                 return prepared.topology
             grid, _, _ = self._cached_projection(sid, scene, package, prepared, ambient)
@@ -335,7 +342,7 @@ class LightService:
 
     def _compute_cells(self, sid, scene, package, cells, prepared, ambient):
         """Use current map facts and compute only missing cell light results."""
-        sources = self._scene_sources(sid, scene, package, ambient, cells=cells)
+        sources = self._scene_sources(sid, scene, package, prepared, ambient)
         return self._evaluate_cells(sid, scene, package, prepared, sources, cells)
 
     @staticmethod
@@ -350,140 +357,117 @@ class LightService:
     def _evaluate_cells(self, sid, scene, package, grid, sources, cells):
         """Share one regional blocker read and one geometric result per relevant source."""
         topology = grid.topology
-        magic_at = {}
-        if sources.magic:
-            cells = tuple(dict.fromkeys(cells))
-            selected = frozenset(cells)
-            for effect in sources.magic:
-                for covered in (effect.cells, effect.dim_cells):
-                    for cell in selected.intersection(covered):
-                        magic_at.setdefault(cell, []).append(effect)
-        masked = {
-            cell
-            for cell, effects in magic_at.items()
-            if any(
-                effect.spec.kind == "magical_darkness" and not effect.unknown for effect in effects
-            )
-        }
-        if not sources.emitters:
-            return {
-                cell: self._combine_magic(
-                    self._ambient_cell(grid, sources.ambient, cell),
-                    cell,
-                    magic_at.get(cell, ()),
-                    cell in masked,
-                )
-                for cell in cells
-            }
-        by_cell = self._sources_for_cells(topology, sources.emitters, cells)
-        for cell in masked:
-            by_cell[cell] = []
-        coverage, uncertain = self._coverage(sid, scene, package, grid, by_cell)
+        if not sources.local:
+            return {cell: self._ambient_cell(grid, sources.ambient, cell) for cell in cells}
+        by_cell = self._sources_for_cells(topology, sources.local, cells)
+        coverage, uncertain, darkness = self._coverage(sid, scene, package, grid, by_cell)
         values = {}
         for cell, applicable in by_cell.items():
-            result = self._ambient_cell(grid, sources.ambient, cell)
-            if applicable:
-                result = self._illuminate_cell(
-                    topology, coverage, uncertain, applicable, cell, base_light=result
-                )
-            values[cell] = self._combine_magic(result, cell, magic_at.get(cell, ()), cell in masked)
-        return values
-
-    @staticmethod
-    def _combine_magic(result, cell, effects, masked):
-        """Combine already projected spell footprints with ordinary light and ambient light."""
-        if not effects:
-            return result
-        if any(effect.unknown and effect.spec.kind == "magical_darkness" for effect in effects):
-            return CellLight("dark", unknown=True, magical_darkness=True)
-        if masked:
-            result = CellLight.ambient("dark")._replace(magical_darkness=True)
-        if any(effect.unknown for effect in effects):
-            result = result._replace(unknown=True)
-        grade, sunlight = "dark", result.sunlight
-        object_ids = list(result.sources)
-        for effect in effects:
-            if effect.spec.kind != "light" or effect.unknown:
+            if darkness.get(cell):
+                values[cell] = CellLight("dark", unknown=True, magical_darkness=True)
                 continue
-            primary = cell in effect.cells
-            value = effect.spec.light if primary else "dim"
-            if _RANK[value] > _RANK[grade]:
-                grade = value
-            sunlight |= effect.spec.sunlight if primary else effect.spec.sunlight_in_dim
-            if effect.item_id is not None and effect.item_id not in object_ids:
-                object_ids.append(effect.item_id)
-        if _RANK[grade] <= _RANK[result.base]:
-            return result._replace(sunlight=sunlight, sources=tuple(object_ids))
-        x, y = parse_cell(cell)
-        polygon = (((x, y), (x + 1, y), (x + 1, y + 1), (x, y + 1)),)
-        return result._replace(
-            level=max(grade, result.level, key=_RANK.__getitem__),
-            sunlight=sunlight,
-            magical_darkness=False,
-            sources=tuple(object_ids),
-            dim=polygon if grade == "dim" else (),
-            bright=polygon if grade == "bright" else result.bright,
-        )
+            result = self._ambient_cell(grid, sources.ambient, cell)
+            if cell in darkness:
+                result = CellLight.ambient("dark")._replace(magical_darkness=True)
+            emitters = [
+                source
+                for source in applicable
+                if source.kind != "magical_darkness"
+                and (source.kind != "lamp" or cell not in darkness)
+            ]
+            if emitters:
+                result = self._illuminate_cell(
+                    topology, coverage, uncertain, emitters, cell, base_light=result
+                )
+            values[cell] = result
+        return values
 
     def _coverage(self, sid, scene, package, grid, by_cell):
         """Prepare visibility pieces over the union of possible source-to-target paths."""
-        coordinates = {}
-        origins = {}
+        coordinates, valid_origins = {}, {}
         for cell, sources in by_cell.items():
-            xy = parse_cell(cell) if sources else None
+            if not sources:
+                continue
+            point = parse_cell(cell)
             for source in sources:
-                oid = source["object_id"]
-                if oid not in origins:
-                    origin = source["cell"]
-                    origins[oid] = (
-                        origin
-                        if origin is not None
-                        and grid.topology.distance_ft(origin, origin) is not None
-                        else None
+                if source not in valid_origins:
+                    origin = source.geometry.cell
+                    valid_origins[source] = (
+                        origin is not None and grid.topology.distance_ft(origin, origin) is not None
                     )
-                if (origin := origins[oid]) is not None:
-                    if oid not in coordinates:
-                        coordinates[oid] = (origin, [])
-                    coordinates[oid][1].append(xy)
+                if valid_origins[source]:
+                    coordinates.setdefault(source, []).append(point)
         if not coordinates:
-            return {}, frozenset()
+            return {}, frozenset(), {}
 
-        scopes = {}
-        for oid, (origin, points) in coordinates.items():
-            columns, rows = zip(*points, strict=True)
-            x, y = parse_cell(origin)
-            target = (min(columns), min(rows), max(columns) + 1, max(rows) + 1)
-            left, top, right, bottom = target
-            scopes[oid] = (
-                origin,
-                target,
-                (min(left, x), min(top, y), max(right, x + 1), max(bottom, y + 1)),
-            )
-        corridor_cells = _corridor_cells(coordinates.values())
-        blockers = self.h.grid.light_occluders(sid, scene, package, corridor_cells, fixed_grid=grid)
+        corridor_cells = _corridor_cells(
+            (source.geometry.cell, points) for source, points in coordinates.items()
+        )
+        blockers = self.h.grid.light_occluders(
+            sid,
+            scene,
+            package,
+            corridor_cells,
+            fixed_grid=grid,
+            include_actors=any(source.kind != "magical_darkness" for source in coordinates),
+        )
         walls = tuple(((x1, y1), (x2, y2)) for x1, y1, x2, y2 in blockers.walls)
-        opaque_objects = {oid: frozenset(cells) for oid, cells in blockers.opaque_objects}
-        coverage = {}
-        for oid, (origin, target, path) in scopes.items():
+        darkness = self._darkness_mask(grid.topology, coordinates, blockers)
+        coverage: dict[str, LightProjection] = {}
+        for source, points in coordinates.items():
+            if source.kind == "magical_darkness":
+                continue
+            if darkness:
+                points = [
+                    point
+                    for point in points
+                    if not darkness.get(cell := cell_id(*point))
+                    and (source.kind != "lamp" or cell not in darkness)
+                ]
+                if not points:
+                    continue
+            origin = source.geometry.cell
+            # An emitter sharing an occupied source cell shines outward from it.
+            solids = blockers.solid_cells(exclude_object=source.object_id, origin=origin)
+            solids |= blockers.opaque_actor_cells - {origin}
+            columns, rows = zip(*points, strict=True)
+            left, top, right, bottom = min(columns), min(rows), max(columns) + 1, max(rows) + 1
             x, y = parse_cell(origin)
-            point = (x + 0.5, y + 0.5)
-            solids = blockers.opaque_cells - {origin}
-            for other, cells in opaque_objects.items():
-                if other != oid:
-                    solids |= cells
-            definite = tuple(
+            path = (min(left, x), min(top, y), max(right, x + 1), max(bottom, y + 1))
+            definite = (
                 segment
                 for segment in chain(walls, _cell_edges(solids))
                 if _segment_meets_bounds(segment, path)
             )
-            lit = lit_polygons(point, target, definite)
-            possible_edges = tuple(
+            possible = (
                 segment
                 for segment in _cell_edges(blockers.uncertain_cells - {origin})
                 if _segment_meets_bounds(segment, path)
             )
-            coverage[oid] = _SourceCoverage(point, lit, possible_edges)
-        return coverage, blockers.uncertain_cells
+            coverage[source.source_id] = source.geometry.project(
+                (x + 0.5, y + 0.5), (left, top, right, bottom), definite, possible
+            )
+        return coverage, blockers.uncertain_cells, darkness
+
+    @staticmethod
+    def _darkness_mask(topology, coordinates, blockers):
+        """Use the RE total-cover test on selected cells of radial Darkness areas.
+
+        Retain whether a mask may be uncertain due to its anchor's transmission.
+        The continuous positive-area projector handles emitted light separately.
+        """
+        darkness = {}
+        for source, points in coordinates.items():
+            if source.kind != "magical_darkness":
+                continue
+            origin = source.geometry.cell
+            solids = blockers.solid_cells(exclude_object=source.object_id) - {origin}
+            blocked_topology = topology.with_blocked(solids)
+            for point in points:
+                cell = cell_id(*point)
+                if cell not in solids and has_line_of_effect(blocked_topology, origin, cell):
+                    darkness[cell] = source.unknown or darkness.get(cell, False)
+        return darkness
 
     @staticmethod
     def _sources_for_cells(topology, sources, cells):
@@ -500,38 +484,21 @@ class LightService:
         top, bottom = min(rows), max(rows)
         by_cell = {cell: [] for cell in coordinates}
         for source in sources:
-            origin = source["cell"]
+            origin = source.geometry.cell
             if origin is None or topology.distance_ft(origin, origin) is None:
                 for candidates in by_cell.values():
                     candidates.append(source)
                 continue
             x, y = parse_cell(origin)
-            radius = LightService._candidate_radius(source, topology.cell_size_ft)
+            radius = source.geometry.envelope_radius(topology.cell_size_ft)
             if not (left - radius <= x <= right + radius and top - radius <= y <= bottom + radius):
                 continue
             for cell, (col, row) in coordinates.items():
-                if max(abs(col - x), abs(row - y)) <= radius and LightService._in_cone(
-                    source, (x, y), col, row, topology.cell_size_ft
+                if max(abs(col - x), abs(row - y)) <= radius and source.geometry.reaches(
+                    (x + 0.5, y + 0.5), col, row, topology.cell_size_ft
                 ):
                     by_cell[cell].append(source)
         return by_cell
-
-    @staticmethod
-    def _candidate_radius(source, cell_size):
-        """Select cells in the grid radius or a conservative cone envelope."""
-        outer = source["mode"].dim_outer_radius_ft
-        return ceil(outer / cell_size) if source.get("direction") else outer // cell_size
-
-    @staticmethod
-    def _in_cone(source, origin, col, row, cell_size):
-        """Confirm positive-area cone reach before reading the path's occluders."""
-        direction = source.get("direction")
-        if direction is None:
-            return True
-        x, y = origin
-        cell = ((col, row), (col + 1, row), (col + 1, row + 1), (col, row + 1))
-        length = source["mode"].dim_outer_radius_ft / cell_size
-        return bool(clip_to_cone((cell,), (x + 0.5, y + 0.5), direction, length))
 
     @staticmethod
     def _illuminate_cell(topology, coverage, uncertain_cells, sources, cell, *, base_light):
@@ -539,45 +506,35 @@ class LightService:
         base = level = base_light.level
         contributions, unknown = [], False
         dim, bright = [], []
+        sunlight, magical_darkness = base_light.sunlight, base_light.magical_darkness
         x, y = parse_cell(cell)
         bounds = (x, y, x + 1, y + 1)
         for source in sources:
-            oid = source["object_id"]
-            if oid not in coverage:
+            visible = coverage.get(source.source_id)
+            if visible is None:
                 unknown = True
                 continue
-            visible = coverage[oid]
-            pieces = clip_to_bounds(visible.lit, bounds)
-            mode = source["mode"]
-            if direction := source.get("direction"):
-                bright_length = (mode.bright_radius_ft or 0) / topology.cell_size_ft
-                dim_length = mode.dim_outer_radius_ft / topology.cell_size_ft
-                bright_pieces = clip_to_cone(pieces, visible.origin, direction, bright_length)
-                dim_pieces = clip_to_cone(
-                    pieces, visible.origin, direction, dim_length, start=bright_length
-                )
-                pieces = (*bright_pieces, *dim_pieces)
-            else:
-                distance = topology.distance_ft(source["cell"], cell)
-                is_bright = mode.bright_radius_ft is not None and distance <= mode.bright_radius_ft
-                bright_pieces, dim_pieces = (pieces, ()) if is_bright else ((), pieces)
-            if not pieces:
+            bright_pieces, dim_pieces, possible_shadow = visible.in_cell(
+                bounds, topology.distance_ft(source.geometry.cell, cell), topology.cell_size_ft
+            )
+            if not bright_pieces and not dim_pieces:
                 continue
-            if (
-                source["transmission"] == "unknown"
-                or cell in uncertain_cells
-                or shadow_intersects_interior(visible.origin, pieces, visible.possible_edges)
-            ):
+            if source.unknown or cell in uncertain_cells or possible_shadow:
                 unknown = True
                 continue
             value = "bright" if bright_pieces else "dim"
             if _RANK[value] > _RANK[level]:
                 level = value
+                magical_darkness = False
+            sunlight |= (bool(bright_pieces) and source.sunlight) or (
+                bool(dim_pieces) and source.sunlight_in_dim
+            )
             if base != "bright":
                 bright.extend(bright_pieces)
             if base == "dark":
                 dim.extend(dim_pieces)
-            contributions.append(oid)
+            if source.object_id is not None and source.object_id not in contributions:
+                contributions.append(source.object_id)
         return CellLight(
             level,
             unknown,
@@ -585,7 +542,8 @@ class LightService:
             base,
             tuple(dim),
             tuple(bright),
-            sunlight=base_light.sunlight,
+            sunlight=sunlight,
+            magical_darkness=magical_darkness,
         )
 
     @staticmethod
@@ -637,9 +595,9 @@ class LightService:
         grid = supplied.copy_data()
         if cells is not None:
             cells = tuple(cells)
-        sources = self._scene_sources(sid, scene, package, ambient, cells=cells)
+        sources = self._scene_sources(sid, scene, package, supplied, ambient)
         self._apply_ambient(grid, sources.ambient)
-        if not sources.emitters and not sources.magic:
+        if not sources.local:
             return grid, (), {}
         selected = cells if cells is not None else self._projection_cells(supplied, sources)
         uncertain, evidence = self._project_cells(
@@ -656,9 +614,9 @@ class LightService:
         """
         grid = fixed_grid or self.h.grid.reader.current_grid(sid, scene, package)
         ambient = scene_ambient_source(self.h, sid, scene, grid)
-        sources = self._scene_sources(sid, scene, package, ambient)
+        sources = self._scene_sources(sid, scene, package, grid, ambient)
         self._apply_ambient(output_grid, sources.ambient)
-        if not sources.emitters and not sources.magic:
+        if not sources.local:
             return {}, (), {}
         cells = self._projection_cells(grid, sources)
         levels = {}
@@ -669,19 +627,14 @@ class LightService:
 
     @staticmethod
     def _projection_cells(grid, sources):
-        """Stream ordinary light cells and the cells explicitly covered by active magic."""
-        ordinary = LightService._affected_light_cells(grid.topology, grid.data, sources.emitters)
-        magical = {
-            cell for effect in sources.magic for cell in chain(effect.cells, effect.dim_cells)
-        }
-        yield from ordinary
-        yield from sorted(magical)
+        """Stream the union of all local sources' possible reach."""
+        return LightService._affected_light_cells(grid.topology, grid.data, sources.local)
 
     @staticmethod
     def _affected_light_cells(topology, grid, sources):
         """Yield each possible affected cell once in row-major order."""
         width, height = grid["width"], grid["height"]
-        origins = [source["cell"] for source in sources]
+        origins = [source.geometry.cell for source in sources]
         if any(
             origin is None or topology.distance_ft(origin, origin) is None for origin in origins
         ):
@@ -692,14 +645,16 @@ class LightService:
         row_ranges = {}
         for source, origin in zip(sources, origins, strict=True):
             x, y = parse_cell(origin)
-            radius = LightService._candidate_radius(source, topology.cell_size_ft)
+            radius = source.geometry.envelope_radius(topology.cell_size_ft)
             columns = (max(0, x - radius), min(width, x + radius + 1))
             for row in range(max(0, y - radius), min(height, y + radius + 1)):
-                if not source.get("direction"):
+                if not source.geometry.direction:
                     row_ranges.setdefault(row, []).append(columns)
                 else:
                     for col in range(*columns):
-                        if LightService._in_cone(source, (x, y), col, row, topology.cell_size_ft):
+                        if source.geometry.reaches(
+                            (x + 0.5, y + 0.5), col, row, topology.cell_size_ft
+                        ):
                             row_ranges.setdefault(row, []).append((col, col + 1))
         for row in sorted(row_ranges):
             for start, stop in _merge_intervals(row_ranges[row]):

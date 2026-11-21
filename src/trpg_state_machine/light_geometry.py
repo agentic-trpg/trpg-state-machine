@@ -8,7 +8,7 @@ rendering and positive-area cell queries.
 from collections.abc import Iterable
 from dataclasses import dataclass
 from itertools import pairwise
-from math import fsum, ulp
+from math import ceil, fsum, ulp
 
 type Point = tuple[float, float]
 type Segment = tuple[Point, Point]
@@ -21,6 +21,76 @@ _CARDINAL_VECTORS: dict[str, Point] = {
     "south": (0, 1),
     "west": (-1, 0),
 }
+
+
+@dataclass(frozen=True, slots=True)
+class LightGeometry:
+    """An origin cell and its emission bands, with an optional cardinal cone.
+
+    Radial reach follows the topology's grid distance. Cone lengths use
+    continuous grid units. A None bright radius denotes a dim-only emitter.
+    """
+
+    cell: str | None
+    bright_radius_ft: int | None
+    outer_radius_ft: int
+    direction: str | None = None
+
+    def envelope_radius(self, cell_size_ft: int) -> int:
+        """Bound the cells that can have positive-area coverage."""
+        return (
+            ceil(self.outer_radius_ft / cell_size_ft)
+            if self.direction
+            else self.outer_radius_ft // cell_size_ft
+        )
+
+    def reaches(self, origin: Point, x: int, y: int, cell_size_ft: int) -> bool:
+        """Test a cell already selected by the enclosing grid radius."""
+        if self.direction is None:
+            return True
+        corners = ((x, y), (x + 1, y), (x + 1, y + 1), (x, y + 1))
+        return bool(
+            clip_to_cone((corners,), origin, self.direction, self.outer_radius_ft / cell_size_ft)
+        )
+
+    def project(
+        self,
+        origin: Point,
+        bounds: Bounds,
+        solid: Iterable[Segment],
+        uncertain: Iterable[Segment],
+    ) -> "LightProjection":
+        """Clip the selected region against solid geometry and retain possible shadows."""
+        return LightProjection(self, origin, lit_polygons(origin, bounds, solid), tuple(uncertain))
+
+
+@dataclass(frozen=True, slots=True)
+class LightProjection:
+    """A fixed source projection independent of who or what emits the light."""
+
+    geometry: LightGeometry
+    origin: Point
+    lit: tuple[Polygon, ...]
+    possible_edges: tuple[Segment, ...]
+
+    def in_cell(
+        self, bounds: Bounds, distance_ft: int, cell_size_ft: int
+    ) -> tuple[tuple[Polygon, ...], tuple[Polygon, ...], bool]:
+        """Return bright pieces, dim pieces and possible shadow for one cell."""
+        pieces = clip_to_bounds(self.lit, bounds)
+        if direction := self.geometry.direction:
+            bright_length = (self.geometry.bright_radius_ft or 0) / cell_size_ft
+            dim_length = self.geometry.outer_radius_ft / cell_size_ft
+            bright = clip_to_cone(pieces, self.origin, direction, bright_length)
+            dim = clip_to_cone(pieces, self.origin, direction, dim_length, start=bright_length)
+        elif self.geometry.bright_radius_ft is not None and (
+            distance_ft <= self.geometry.bright_radius_ft
+        ):
+            bright, dim = pieces, ()
+        else:
+            bright, dim = (), pieces
+        uncertain = shadow_intersects_interior(self.origin, (*bright, *dim), self.possible_edges)
+        return bright, dim, uncertain
 
 
 @dataclass(frozen=True, slots=True)

@@ -1,5 +1,6 @@
 import json
 from copy import deepcopy
+from dataclasses import replace
 
 import pytest
 from dnd5e_engine.spatial import GridTopology
@@ -19,7 +20,6 @@ from trpg_state_machine import (
     SwitchLightMode,
 )
 from trpg_state_machine.world_lights import LightService
-from trpg_state_machine.world_package import LightMode
 
 
 def light_config():
@@ -125,7 +125,7 @@ def test_illumination_area_filters_only_misses_and_keeps_source_disclosure(
             return select(topology, sources, cells)
 
         def count_compose(topology, uncertain, candidates, sources, cell, **kwargs):
-            composed.append((cell, tuple(source["object_id"] for source in sources)))
+            composed.append((cell, tuple(source.object_id for source in sources)))
             return illuminate(topology, uncertain, candidates, sources, cell, **kwargs)
 
         monkeypatch.setattr(lights, "_sources_for_cells", count_filter)
@@ -368,7 +368,10 @@ def test_event_preserves_uncertainty_when_source_position_is_unavailable(
     sources = LightService.sources
 
     def missing_source_position(self, sid, scene, package):
-        return [{**source, "cell": origin} for source in sources(self, sid, scene, package)]
+        return [
+            replace(source, geometry=replace(source.geometry, cell=origin))
+            for source in sources(self, sid, scene, package)
+        ]
 
     with sm:
         monkeypatch.setattr(LightService, "sources", missing_source_position)
@@ -388,10 +391,15 @@ def test_event_preserves_uncertainty_when_source_position_is_unavailable(
 
 
 def test_light_envelopes_merge_overlap_and_skip_gaps():
+    from trpg_state_machine.light_geometry import LightGeometry
+    from trpg_state_machine.world_lights import _LightSource
+
     grid = {"width": 8, "height": 3, "cell_size_ft": 3}
     topology = GridTopology(GridScene(**grid))
-    mode = LightMode("test", None, 4)
-    sources = [{"cell": cell, "mode": mode} for cell in ("0,0", "2,0", "7,1")]
+    sources = [
+        _LightSource(cell, None, LightGeometry(cell, None, 4), False)
+        for cell in ("0,0", "2,0", "7,1")
+    ]
     assert list(LightService._affected_light_cells(topology, grid, sources)) == [
         *(f"{x},{y}" for y in range(2) for x in (0, 1, 2, 3, 6, 7)),
         "6,2",

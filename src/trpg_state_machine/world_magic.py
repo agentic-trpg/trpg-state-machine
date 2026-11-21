@@ -7,12 +7,29 @@ from dnd5e_engine.areas import AreaTemplate, area_cells, has_line_of_effect
 from dnd5e_engine.environment import EnvironmentalSource, environmental_dispels
 from dnd5e_engine.evaluation_contracts import EnvironmentalItemFacts, ExplorationSpellPositions
 from dnd5e_engine.spatial import parse_cell
+from dnd5e_srd_data.schema.environment import EnvironmentalSpec
 
 from .errors import StateMachineError
 from .grid import cell_in_bounds
 from .instance_data import passage_index
 from .runtime_instances import instance_read
 from .scoped_reads import scoped_read
+
+
+@dataclass(frozen=True, slots=True)
+class SpellLightAnchor:
+    """The current position and typed range of one admitted spatial spell."""
+
+    effect_id: str
+    item_id: str | None
+    cell: str
+    template: AreaTemplate
+    spec: EnvironmentalSpec
+    unknown: bool
+
+    def __deepcopy__(self, memo):
+        """Share the immutable position and rules profile across read scopes."""
+        return self
 
 
 @dataclass(frozen=True, slots=True)
@@ -173,13 +190,37 @@ class WorldMagic:
         ).fetchone()
         return actor is not None and self.owner.concentration(sid, actor[0]) is not None
 
-    @instance_read("scene", "lighting", "magic", capacity=8, maintained="light_result")
-    def active_magic_sources(self, sid, scene, package, *, cells=None):
-        """Resolve local footprints, clipping work to effects that can reach a requested cell."""
-        return self._project_sources(sid, scene, package, self._records(sid, scene), cells=cells)
+    @instance_read("scene", "lighting", "magic_anchors", maintained="light_sources")
+    def illumination_anchors(self, sid, scene):
+        """Resolve effective spell anchors once for the current source version."""
+        return tuple(
+            anchor
+            for record in self._records(sid, scene)
+            if (anchor := self._illumination_anchor(sid, scene, record)) is not None
+        )
 
-    def _project_sources(self, sid, scene, package, records, *, cells=None):
-        """Build the applicable footprints from the caller's fixed application records."""
+    def _illumination_anchor(self, sid, scene, record):
+        """Resolve a stored application to its present, transmissive World anchor."""
+        actual_scene, cell, transmission = self._anchor(sid, record)
+        if actual_scene != scene or transmission == "block" or cell is None:
+            return None
+        return SpellLightAnchor(
+            record["effect_id"],
+            record["object_id"],
+            cell,
+            # Exploration admits only self-inclusive radial spell templates.
+            AreaTemplate(record["shape"], "sphere", record["radius_ft"], "target", True),
+            self.owner.spec(record),
+            transmission == "unknown",
+        )
+
+    @scoped_read
+    def active_magic_sources(self, sid, scene, package):
+        """Return current spell applications with their RE rules footprints."""
+        return self._project_sources(sid, scene, package, self._records(sid, scene))
+
+    def _project_sources(self, sid, scene, package, records):
+        """Build rules footprints for overlap and dispels from the current candidate facts."""
         if not records:
             return ()
         stored = self.h.facts.maps.scene(sid, scene, spatial_only=True)
@@ -188,34 +229,18 @@ class WorldMagic:
         grid = stored.grid
         sources = []
         for record in records:
-            actual_scene, cell, transmission = self._anchor(sid, record)
-            if (
-                actual_scene != scene
-                or transmission == "block"
-                or not cell_in_bounds(grid.topology, cell)
-            ):
-                continue
-            spec = self.owner.spec(record)
-            outer_radius = record["radius_ft"] + spec.dim_extension_ft
-            if cells is not None and not any(
-                grid.topology.within_range(cell, target, outer_radius) for target in cells
-            ):
-                continue
-            sources.append(
-                self._source(
-                    sid, scene, package, grid, cell, record, spec, transmission == "unknown"
-                )
-            )
+            anchor = self._illumination_anchor(sid, scene, record)
+            if anchor is not None and cell_in_bounds(grid.topology, anchor.cell):
+                sources.append(self._source(sid, scene, package, grid, anchor, record))
         return tuple(sources)
 
-    def _source(self, sid, scene, package, grid, cell, record, spec, unknown):
-        """Rasterize the bound area once and clip it to actual known geometry."""
-        radius = record["radius_ft"]
-        shape = record["shape"]
-        template = AreaTemplate(shape, "sphere", radius, "target", True)
+    def _source(self, sid, scene, package, grid, anchor, record):
+        """Project a typed RE rules area for overlap and dispels."""
+        cell, spec, template = anchor.cell, anchor.spec, anchor.template
+        radius = template.size_ft
         topology = grid.topology
         size = radius + spec.dim_extension_ft
-        candidates = topology.cells_in_template(cell, "sphere", size)
+        candidates = topology.cells_in_template(cell, template.grid_shape, size)
         blocked = self._opaque_cells(sid, scene, package, grid, candidates, record["object_id"]) - {
             cell
         }
@@ -245,18 +270,13 @@ class WorldMagic:
             origin_object_id=record["object_id"],
             spell_id=record["spell_id"],
             spell_source_id=record["spell_source_id"],
-            unknown=unknown,
+            unknown=anchor.unknown,
         )
 
     def _opaque_cells(self, sid, scene, package, grid, cells, origin_item):
         """Read known opaque fixtures only in the selected spell footprint or targeting ray."""
         blockers = self.h.grid.light_occluders(sid, scene, package, cells, fixed_grid=grid)
-        return blockers.opaque_cells.union(
-            cell
-            for oid, footprint in blockers.opaque_objects
-            if oid != origin_item
-            for cell in footprint
-        )
+        return blockers.solid_cells(exclude_object=origin_item)
 
     def end_event(self, sid, package, record, reason, *, cause=None):
         """Write the exact terminal removal and capture its actual post-removal stage."""

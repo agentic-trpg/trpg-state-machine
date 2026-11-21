@@ -119,6 +119,7 @@ class ActorDefinition:
     controller_kind: str = "scripted_event"
     npc_state: "NPCInitialState | None" = None
     initial_cell: str | None = None
+    light_opaque: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -132,6 +133,7 @@ class PCTemplate:
     resources: tuple[tuple[str, int], ...] = ()
     inventory: tuple[str, ...] = ()
     initial_cell: str | None = None
+    light_opaque: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -700,6 +702,8 @@ def _validate(data: dict, *, allow_legacy_audit=False) -> AdventurePackage:
             fields += " npc_state"
         if interactions:
             fields += " initial_cell"
+            if isinstance(value, dict) and "light_opaque" in value:
+                fields += " light_opaque"
         a = _mapping(value, fields, path)
         key = _identifier(a["actor_id"], path + ".actor_id", "npc")
         initial_scene = _identifier(a["initial_scene_id"], path + ".initial_scene_id", "scene")
@@ -733,6 +737,7 @@ def _validate(data: dict, *, allow_legacy_audit=False) -> AdventurePackage:
                     next(s for s in scenes if s.scene_id == initial_scene).grid_json,
                     path,
                 ),
+                light_opaque=_actor_light_opaque(a, path),
             )
         )
     _unique([a.actor_id for a in actors], "actors")
@@ -759,9 +764,12 @@ def _validate(data: dict, *, allow_legacy_audit=False) -> AdventurePackage:
     templates = []
     for i, value in enumerate(_list(root["pc_templates"], "pc_templates", nonempty=True)):
         path = f"pc_templates[{i}]"
-        pc = _mapping(
-            value, "pc_template_id name character" + (" initial_cell" if interactions else ""), path
-        )
+        fields = "pc_template_id name character"
+        if interactions:
+            fields += " initial_cell"
+            if isinstance(value, dict) and "light_opaque" in value:
+                fields += " light_opaque"
+        pc = _mapping(value, fields, path)
         key = _identifier(pc["pc_template_id"], path + ".pc_template_id", "pc_template")
         char = _mapping(pc["character"], "hp resources inventory", path + ".character")
         hp = _mapping(char["hp"], "current max", path + ".character.hp")
@@ -807,6 +815,7 @@ def _validate(data: dict, *, allow_legacy_audit=False) -> AdventurePackage:
                     next(s for s in scenes if s.scene_id == entry).grid_json,
                     path,
                 ),
+                light_opaque=_actor_light_opaque(pc, path),
             )
         )
     _unique([pc.pc_template_id for pc in templates], "pc_templates")
@@ -1049,6 +1058,14 @@ def _initial_cell(cell, grid_json, path, *, standing=True):
     except (ValueError, TypeError):
         _fail("invalid_reference", path, "Expected a canonical cell in this Scene's grid")
     return cell
+
+
+def _actor_light_opaque(definition, path):
+    """Read the opt-in opacity of an actor's existing occupied cell."""
+    opaque = definition.get("light_opaque", False)
+    if type(opaque) is not bool:
+        _fail("schema_error", path + ".light_opaque", "Light opacity must be a boolean")
+    return opaque
 
 
 def _spatial_initial_consistency(scenes, actors, templates, entry):
