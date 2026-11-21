@@ -16,8 +16,10 @@ from dnd5e_engine.evaluation_availability import (
     query_action_availability,
 )
 from dnd5e_engine.evaluation_contracts import (
+    ENVIRONMENTAL_SPELL_SCHEMA_VERSION,
     CheckPayload,
     CombatClosePayload,
+    ExplorationEnvironmentalSpellCastPayload,
     ExplorationItemUsePayload,
     ExplorationSpellCastPayload,
     ItemUsePayload,
@@ -81,7 +83,7 @@ from .damage_adoption import (
 from .dnd_checks import check_changes
 from .dnd_closure import closure_changes
 from .errors import StateMachineError
-from .exploration_spell_adoption import exploration_spell_changes
+from .exploration_spell_adoption import environmental_spell_changes, exploration_spell_changes
 from .haste_adoption import haste_cast_admission, haste_pass_admission
 from .package import canonical_json
 from .rest_activity import rest_changes
@@ -1288,6 +1290,8 @@ def validate_dnd_result(request, result, *, loader=None):
         return result, rest_changes(request, result)
     if type(request.payload) is ExplorationItemUsePayload:
         return result, exploration_potion_changes(request, result)
+    if type(request.payload) is ExplorationEnvironmentalSpellCastPayload:
+        return result, environmental_spell_changes(request, result)
     if type(request.payload) is ExplorationSpellCastPayload:
         return result, exploration_spell_changes(request, result, loader)
     if type(request.payload) is ItemUsePayload:
@@ -1728,7 +1732,11 @@ class RulesAdapter:
             return "pending_choice_unsupported" if payload.dc is None else None
         if type(payload) is CombatClosePayload:
             return None
-        if type(payload) in (ExplorationItemUsePayload, ExplorationSpellCastPayload):
+        if type(payload) in (
+            ExplorationItemUsePayload,
+            ExplorationEnvironmentalSpellCastPayload,
+            ExplorationSpellCastPayload,
+        ):
             return None  # RE validates the fixed exploration operation.
         if type(payload) is ItemUsePayload:
             if payload.target_id != actor_id or actor_id not in snapshot.combat_state.party_ids:
@@ -2042,7 +2050,9 @@ class RulesAdapter:
         row = row if row is not None else self._pinned_row(command.session_id, package)
         return RuleEvaluationRequest(
             schema_version=(
-                "engine-evaluation/30"
+                ENVIRONMENTAL_SPELL_SCHEMA_VERSION
+                if type(command.payload) is ExplorationEnvironmentalSpellCastPayload
+                else "engine-evaluation/30"
                 if command.command_type == "combat.intent"
                 and snapshot.snapshot_schema_version == "engine-snapshot/20"
                 and (

@@ -190,7 +190,17 @@ class SessionCreation:
             if replay := self._replay(context, request.command_id, fingerprint):
                 return replay
             self.runtime.initialize(session_id, package, context, pc, pc_actor_id, rng_ref)
-            self.world.facts.initialize_world(session_id, package)
+            spatial_light_evidence = (
+                selected_time is not None
+                and package.noncombat_foundation_json is not None
+                and json.loads(package.noncombat_foundation_json)["snapshot"][
+                    "snapshot_schema_version"
+                ]
+                == "engine-snapshot/20"
+            )
+            self.world.facts.initialize_world(
+                session_id, package, spatial_light_evidence=spatial_light_evidence
+            )
             self.world.time.initialize(session_id, selected_time)
             self.runtime.time.initialize(session_id)
             self.world.scenes.initialize_session(session_id, pc_actor_id, pc, package)

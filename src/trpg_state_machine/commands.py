@@ -9,6 +9,7 @@ from dnd5e_engine.evaluation_contracts import (
     CheckPayload,
     CombatClosePayload,
     CombatIntentPayload,
+    ExplorationEnvironmentalSpellCastPayload,
     ExplorationItemUsePayload,
     ExplorationSpellCastPayload,
     ItemUsePayload,
@@ -17,6 +18,7 @@ from pydantic import ValidationError
 
 from ._operations import (
     DropItem,
+    DropWorldConcentration,
     EnterScene,
     LockDoor,
     MoveActor,
@@ -102,6 +104,7 @@ OPERATIONS = {
     "combat.item": ItemUsePayload,
     "world.use_item": ExplorationItemUsePayload,
     "world.cast_spell": ExplorationSpellCastPayload,
+    "world.drop_concentration": DropWorldConcentration,
     "combat.initialize": InitializeCombat,
     "rule_operation": RuleOperation,
     "enter_scene": EnterScene,
@@ -172,6 +175,7 @@ class TypedCommand:
         | CombatIntentPayload
         | ItemUsePayload
         | ExplorationItemUsePayload
+        | ExplorationEnvironmentalSpellCastPayload
         | ExplorationSpellCastPayload
         | LongRest
         | ShortRest
@@ -186,6 +190,7 @@ class TypedCommand:
         | CancelNavigation
         | PickupItem
         | DropItem
+        | DropWorldConcentration
         | UnlockDoor
         | LockDoor
     )
@@ -240,6 +245,7 @@ def validate_command(command: TypedCommand) -> None:
             SetTimeRunning,
             RuleOperation,
             ExplorationItemUsePayload,
+            ExplorationEnvironmentalSpellCastPayload,
             ExplorationSpellCastPayload,
             LongRest,
             ShortRest,
@@ -283,9 +289,16 @@ def validate_command(command: TypedCommand) -> None:
                         "invalid_command", "Invalid typed world operation value"
                     )
     operation_type = OPERATIONS.get(command.command_type)
+    if (
+        command.command_type == "world.cast_spell"
+        and type(command.payload) is ExplorationEnvironmentalSpellCastPayload
+    ):
+        operation_type = ExplorationEnvironmentalSpellCastPayload
     if operation_type is None or type(command.payload) is not operation_type:
         raise StateMachineError("unsupported_operation", "Unknown command or payload type")
     if operation_type is LongRest:
+        return
+    if operation_type is DropWorldConcentration:
         return
     if operation_type is ShortRest:
         validate_short_rest(command.payload)
@@ -349,6 +362,7 @@ def validate_command(command: TypedCommand) -> None:
         CheckPayload,
         ItemUsePayload,
         ExplorationItemUsePayload,
+        ExplorationEnvironmentalSpellCastPayload,
         ExplorationSpellCastPayload,
     ):
         try:
@@ -452,6 +466,7 @@ class CommandRuntime:
             CombatIntentPayload,
             ItemUsePayload,
             ExplorationItemUsePayload,
+            ExplorationEnvironmentalSpellCastPayload,
             ExplorationSpellCastPayload,
             LongRest,
             ShortRest,
@@ -611,6 +626,7 @@ def world_command_from_data(data):
         "world.drop_item",
         "world.use_item",
         "world.cast_spell",
+        "world.drop_concentration",
         "enter_scene",
         "move_actor",
         "set_object_state",
@@ -636,6 +652,8 @@ def world_command_from_data(data):
         operation = (
             environment_operation_from_data(kind, payload)
             if kind in ENVIRONMENT_COMMANDS
+            else ExplorationEnvironmentalSpellCastPayload(**payload)
+            if kind == "world.cast_spell" and "target" in payload
             else OPERATIONS[kind](**payload)
         )
         ref = data.get("time_wait")

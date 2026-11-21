@@ -212,7 +212,7 @@ class InstanceData:
             else value
         )
 
-    def initialize_world(self, sid, package):
+    def initialize_world(self, sid, package, *, spatial_light_evidence=False):
         """Materialize world creation references as Session instance configuration."""
         self.put(
             sid,
@@ -223,7 +223,8 @@ class InstanceData:
                 "passages": package.passages,
                 "navigation": package.navigation,
                 "evidence_schema": "event-evidence/6"
-                if any(d.capability("light") for d in package.world_objects)
+                if spatial_light_evidence
+                or any(d.capability("light") for d in package.world_objects)
                 or any(s.daylight is not None for s in package.scenes)
                 else "event-evidence/5"
                 if any(

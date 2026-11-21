@@ -715,13 +715,19 @@ class SessionMemory:
             "SELECT object_id FROM object_lights WHERE session_id=? AND object_id=?", (sid, oid)
         ).fetchone():
             return True
+        tables = ("object_lights",)
+        if "magic_light_anchors" in self.columns:
+            tables = (*tables, "magic_light_anchors")
+            if self.select(
+                "SELECT object_id FROM magic_light_anchors WHERE session_id=? AND object_id=?",
+                (sid, oid),
+            ).fetchone():
+                return True
         if not self.select(
             "SELECT object_id FROM objects WHERE session_id=? AND container_id=?", (sid, oid)
         ).fetchone():
             return False
-        return bool(
-            self._subtree_capabilities(sid, oid, tables=("object_lights",))["object_lights"]
-        )
+        return any(self._subtree_capabilities(sid, oid, tables=tables).values())
 
     def _light_door_scenes(self, sid, oid):
         """Read door scenes from the shared passage reverse index, including a valid empty
@@ -781,6 +787,14 @@ class SessionMemory:
                     scene = self._scene_for(self._object(sid, row["object_id"]))
                     if scene is not None:
                         self._advance_field("light_sources", sid, scene)
+            return
+        if table == "spatial_light_effects":
+            self._spatial_light_changes(row for row in (old, new) if row is not None)
+            return
+        if table == "magic_light_anchors":
+            for row in (old, new):
+                if row is not None and row["scene_id"] is not None:
+                    self._advance_field("light_sources", row["session_id"], row["scene_id"])
             return
         if table == "actors":
             columns = ("session_id", "actor_id", "current_scene_id", "cell")
@@ -878,6 +892,14 @@ class SessionMemory:
             }:
                 for scene in self._light_door_scenes(sid, oid):
                     self._advance_field("light_candidates", sid, scene)
+
+    def _spatial_light_changes(self, rows):
+        """Advance the light version specifically where an application changes or expires."""
+        for row in rows:
+            sid, oid = row["session_id"], row["object_id"]
+            scene = row["fixed_scene_id"] or self._scene_for(self._object(sid, oid))
+            if scene is not None:
+                self._advance_field("light_sources", sid, scene)
 
     def _object(self, sid, oid):
         """Reuse an object row within one captured change."""

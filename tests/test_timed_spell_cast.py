@@ -61,6 +61,8 @@ def timed_spell_world(tmp_path, context):
         hit_rider=None,
         target_first=False,
         proficiency_override=None,
+        additional_spells=(),
+        configure=None,
     ):
         canonical = BundledAssetLoader()
         base = item_loader()
@@ -102,7 +104,11 @@ def timed_spell_world(tmp_path, context):
             classes=[wizard],
             subclasses=[evoker],
             features=[canonical.get_feature(slug) for slug in features],
-            spells=[spell, *([canonical.get_spell(hit_rider)] if hit_rider else [])],
+            spells=[
+                spell,
+                *([canonical.get_spell(hit_rider)] if hit_rider else []),
+                *(canonical.get_spell(slug) for slug in additional_spells),
+            ],
         )
         data = item_data()
         if region_mechanism:
@@ -303,12 +309,24 @@ def timed_spell_world(tmp_path, context):
                                         if hit_rider
                                         else []
                                     ),
+                                    *[
+                                        {
+                                            "spell_id": slug,
+                                            "prepared_order": order
+                                            if canonical.get_spell(slug).level
+                                            else None,
+                                            "material": prepared["material"],
+                                        }
+                                        for order, slug in enumerate(additional_spells, 1)
+                                    ],
                                 ],
                             }
                         ],
                     }
                 ]
             }
+        if configure is not None:
+            configure(data)
         package = _validate(data)
         authorized = replace(context, can_advance_time=True)
         sm = StateMachine(tmp_path / database, dnd_loader=loader)

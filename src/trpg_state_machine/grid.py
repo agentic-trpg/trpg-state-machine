@@ -13,7 +13,7 @@ from functools import wraps
 from math import isfinite
 from types import MappingProxyType
 
-from dnd5e_engine.spatial import GridTopology, canonical_cell_id
+from dnd5e_engine.spatial import GridTopology, _bresenham_cells, canonical_cell_id, parse_cell
 from dnd5e_engine.specs import GridScene
 
 from .errors import StateMachineError
@@ -518,22 +518,43 @@ class GridService:
 
     @_read
     @scoped_read
-    def base_topology(self, sid, scene_id, package=None, *, with_extent=False, cells=None):
+    def base_topology(
+        self, sid, scene_id, package=None, *, with_extent=False, cells=None, observer_cell=None
+    ):
         """Prepare static or light-overlaid topology for authorized visibility.
 
-        An explicit selection only overlays illumination for its valid cells.
+        An explicit selection overlays valid targets and the relevant sight rays
+        when a magical-darkness source could intercept them.
         """
         scene = self.reader.maps.scene(sid, scene_id, spatial_only=True)
         if scene is None or scene.grid is None:
             raise StateMachineError("spatial_unconfigured", "Scene has no fine spatial capability")
         prepared = scene.grid
         if package is not None and cells is not None:
-            selected = (
+            selected = tuple(
                 cell for cell in dict.fromkeys(cells) if cell_in_bounds(prepared.topology, cell)
             )
+            if (
+                selected
+                and cell_in_bounds(prepared.topology, observer_cell)
+                and self.h.magic.may_have_darkness(sid, scene_id)
+            ):
+                origin = parse_cell(observer_cell)
+                rays = (
+                    cell
+                    for target in selected
+                    for cell in _bresenham_cells(*origin, *parse_cell(target))
+                )
+                selected = tuple(dict.fromkeys((*selected, *rays)))
             levels = self.h.objects.lights.current_cells(sid, scene_id, package, selected)
-            lighting = {cell: result[0] for cell, result in levels.items()}
-            topology = prepared.topology.with_lighting(lighting)
+            lighting = {cell: result.level for cell, result in levels.items()}
+            topology = prepared.topology.with_lighting(
+                lighting,
+                sunlight_overrides={cell: result.sunlight for cell, result in levels.items()},
+                magical_darkness_cells=(
+                    cell for cell, result in levels.items() if result.magical_darkness
+                ),
+            )
             return (
                 (topology, (prepared.data["width"], prepared.data["height"]))
                 if with_extent

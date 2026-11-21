@@ -12,6 +12,7 @@ from dnd5e_engine.evaluation_state import InventoryEntry
 from ._execution import _execution_data
 from ._operations import (
     DropItem,
+    DropWorldConcentration,
     EnterScene,
     FoundationOperation,
     LockDoor,
@@ -147,8 +148,10 @@ class WorldHandler:
         )
 
         from .environment import EnvironmentService
+        from .world_magic import WorldMagic
 
         self.environment = EnvironmentService(self)
+        self.magic = WorldMagic(self)
         self.capture.lights = self.objects.lights
 
     @property
@@ -210,7 +213,7 @@ class WorldHandler:
                 or self.characters.effects.has_linked_conditions(
                     sid, actor_id, capability="movement" if movement else None
                 )
-                or self.characters.effects.has_concentration(sid, actor_id)
+                or self.characters.effects.has_concentration(sid, actor_id, actor_effect_only=True)
             )
         ):
             raise StateMachineError(
@@ -277,7 +280,12 @@ class WorldHandler:
     def _prepare_visibility(self, sid, position, package, *, cells=None):
         """Prepare ordinary sight for an authorized position in the current read scope."""
         topology, extent = self.grid.base_topology(
-            sid, position.scene_id, package, with_extent=True, cells=cells
+            sid,
+            position.scene_id,
+            package,
+            with_extent=True,
+            cells=cells,
+            observer_cell=position.cell,
         )
         return ObserverVisibility(position, topology, extent)
 
@@ -928,8 +936,23 @@ class WorldHandler:
 
     def _spatial_combat_guard(self, sid, scene_id, package):
         """Check whether current spatial state supports entering combat."""
+        if self.magic.has_other_scene_concentration(sid):
+            raise StateMachineError(
+                "unsupported_combat_dynamic_lighting",
+                "Active exploration concentration needs combat integration",
+            )
         if self._spatial_scene(sid, scene_id) is None:
             return
+        if self.facts.instances.scene_daylight(sid, scene_id) is not None:
+            raise StateMachineError(
+                "unsupported_combat_dynamic_lighting",
+                "Outdoor daylight needs combat integration",
+            )
+        if self.magic.has_scene_effects(sid, scene_id):
+            raise StateMachineError(
+                "unsupported_combat_dynamic_lighting",
+                "Active exploration light effects need combat integration",
+            )
         if self.objects.lights.sources(sid, scene_id, package):
             raise StateMachineError(
                 "unsupported_combat_dynamic_lighting",
@@ -1067,6 +1090,8 @@ class WorldHandler:
         # Container transfers check world capability in their shared validator.
         if type(operation) not in (PutItem, TakeItem):
             self._world_operation_capability(row, operation)
+        if type(operation) is DropWorldConcentration:
+            return self.magic.drop_concentration(row["session_id"], actor_id, package)
         if type(operation) in ENVIRONMENT_OPERATIONS:
             return self.environment.operate(row, operation, package)
         if type(operation) in WORLD_CAPABILITY_OPERATIONS:

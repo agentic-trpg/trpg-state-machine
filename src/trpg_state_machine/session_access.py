@@ -7,6 +7,7 @@ from dnd5e_engine.evaluation_contracts import (
     CheckPayload,
     CombatClosePayload,
     CombatIntentPayload,
+    ExplorationEnvironmentalSpellCastPayload,
     ExplorationItemUsePayload,
     ExplorationSpellCastPayload,
     ItemUsePayload,
@@ -14,6 +15,7 @@ from dnd5e_engine.evaluation_contracts import (
 
 from ._operations import (
     DropItem,
+    DropWorldConcentration,
     EnterScene,
     LockDoor,
     MoveActor,
@@ -131,7 +133,10 @@ class SessionAccess:
             and actor_id != row["pc_actor_id"]
         ):
             raise StateMachineError("unauthorized", "Only the selected PC can drink a potion")
-        if type(payload) is ExplorationSpellCastPayload and actor_id != row["pc_actor_id"]:
+        if (
+            type(payload) in (ExplorationSpellCastPayload, ExplorationEnvironmentalSpellCastPayload)
+            and actor_id != row["pc_actor_id"]
+        ):
             raise StateMachineError("unauthorized", "Only the selected PC can cast in exploration")
         if type(payload) in ENVIRONMENT_OPERATIONS and not context.can_manage_environment:
             raise StateMachineError("unauthorized", "Trusted environment management grant required")
@@ -197,6 +202,7 @@ class SessionAccess:
                 PlaceObject,
                 PickupItem,
                 DropItem,
+                DropWorldConcentration,
                 UnlockDoor,
                 LockDoor,
             ),

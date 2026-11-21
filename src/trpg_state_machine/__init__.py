@@ -2,6 +2,7 @@
 
 from ._operations import (
     DropItem,
+    DropWorldConcentration,
     EnterScene,
     LockDoor,
     MoveActor,
@@ -144,6 +145,7 @@ __all__ = [
     "UnlockDoor",
     "LockDoor",
     "DropItem",
+    "DropWorldConcentration",
     "PickupItem",
     "StartNavigation",
     "AdvanceNavigation",

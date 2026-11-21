@@ -34,6 +34,14 @@ def exploration_spell_changes(request, result, loader):
     return _timed_spell_changes(request, result, spell)
 
 
+def environmental_spell_changes(request, result):
+    """Bind the payment of a previously verified environmental cast to its one owned slot."""
+    # RuleEvaluationResult.verify_request checks the exact typed environmental
+    # create operation, the payment (if any), and the unchanged RNG and events.
+    operations = result.state_delta.operations
+    return (_slot_change(request, operations[0]),) if request.payload.slot_level else ()
+
+
 def _healing_changes(request, result, spell, activity):
     """Bind the rolled HEAL event to the guarded HP edit and slot spend."""
     snapshot, payload = request.state_snapshot, request.payload

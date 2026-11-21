@@ -200,8 +200,16 @@ class ReadOnlyTopology(GridTopology):
         """Share the immutable topology during deep copying."""
         return self
 
-    def with_lighting(self, lighting, *, default_lighting=None):
-        """Immutable query overlay; share parsed geometry without rebuilding a map."""
+    def with_lighting(
+        self,
+        lighting,
+        *,
+        default_lighting=None,
+        sunlight=None,
+        sunlight_overrides=None,
+        magical_darkness_cells=None,
+    ):
+        """Share geometry and attach either a local or a fixed full-map light projection."""
         result = object.__new__(type(self))
         for name, value in vars(self).items():
             object.__setattr__(result, name, value)
@@ -210,6 +218,18 @@ class ReadOnlyTopology(GridTopology):
         )
         if default_lighting is not None:
             object.__setattr__(result, "_default_lighting", default_lighting)
+        if sunlight is not None:
+            object.__setattr__(result, "_sunlight", sunlight)
+        if sunlight_overrides is not None:
+            overrides = _freeze(sunlight_overrides)
+            if sunlight is None:
+                overrides = MappingProxyType(ChainMap(overrides, self._sunlight_overrides))
+            object.__setattr__(result, "_sunlight_overrides", overrides)
+        if magical_darkness_cells is not None:
+            darkness = frozenset(magical_darkness_cells)
+            if sunlight is None:
+                darkness = _BlockedOverlay(self._magical_darkness_cells, darkness)
+            object.__setattr__(result, "_magical_darkness_cells", darkness)
         return result
 
     def with_blocked(self, cells):

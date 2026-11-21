@@ -361,7 +361,7 @@ class UnsupportedMechanismEffects:
         )
 
 
-def validate_mechanism_result(request, value):
+def validate_mechanism_result(request, value, *, spatial_concentration_ids=frozenset()):
     """Reuse RE DTO invariants, complete read fence and closed owner adoption.
 
     The attack validator cannot be reused unchanged: its authorization and
@@ -430,6 +430,25 @@ def validate_mechanism_result(request, value):
                     "unsupported_mechanism_effect_delta",
                     "Death adoption needs the corresponding conditions/Effects packet",
                 )
+        if any(
+            event.target_id in spatial_concentration_ids
+            and event.kind == "damage"
+            and event.amount > 0
+            for event in result.proposed_events
+        ) or any(
+            op.target_id in spatial_concentration_ids
+            and (
+                type(op) is HPDelta
+                and op.amount < 0
+                or type(op) is TempHPSet
+                and op.temp_hp < op.expected_temp_hp
+            )
+            for op in result.state_delta
+        ):
+            raise StateMachineError(
+                "unsupported_mechanism_effect_lifecycle",
+                "Mechanism damage cannot yet resolve a spatial concentration save",
+            )
         data = request.state_snapshot.model_dump(mode="json")
         data["character_states"] = [
             actors[a.entity_id] for a in request.state_snapshot.character_states
@@ -567,7 +586,16 @@ class MechanismEffectRunner:
             raise StateMachineError(
                 "rule_evaluation_failed", "Mechanism evaluator fault; retry original command"
             ) from exc
-        result, changes = validate_mechanism_result(request, value)
+        spatial_lights = self.h.characters.effects.spatial_lights
+        spatial_concentration_ids = frozenset(
+            target_id
+            for target_id in request.target_ids
+            if request.effect.damage is not None
+            and spatial_lights.concentration(row["session_id"], target_id) is not None
+        )
+        result, changes = validate_mechanism_result(
+            request, value, spatial_concentration_ids=spatial_concentration_ids
+        )
         if result.status != "accepted":
             code = {
                 "unsupported": "unsupported_mechanism_effect",

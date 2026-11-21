@@ -21,6 +21,7 @@ from dnd5e_engine.types.conditions import ActiveCondition
 from .errors import StateMachineError
 from .package import canonical_json
 from .scoped_reads import scoped_read
+from .spatial_light_effects import SpatialLightEffects
 
 
 def _fixed_region_effect(row, statuses):
@@ -36,6 +37,7 @@ class OngoingEffects:
     def __init__(self, store):
         """Bind the domain owner to the shared transaction and RAM scope."""
         self.store = store
+        self.spatial_lights = SpatialLightEffects(self)
 
     @property
     def _conn(self):
@@ -458,6 +460,9 @@ class OngoingEffects:
         ).fetchone()
         if row is None:
             return None
+        if self.spatial_lights.get(sid, row["concentration_id"]) is not None:
+            # The actor effect wire field only accepts actor-target concentration chains.
+            return None
         if (
             self._conn.execute(
                 "SELECT 1 FROM ongoing_effects WHERE session_id=? AND concentration_id=?",
@@ -521,15 +526,14 @@ class OngoingEffects:
                 return True
         return False
 
-    def has_concentration(self, sid, caster_id):
-        """Check the caster's keyed group without constructing its RE wire token."""
-        return (
-            self._conn.execute(
-                "SELECT concentration_id FROM effect_concentrations "
-                "WHERE session_id=? AND caster_id=?",
-                (sid, caster_id),
-            ).fetchone()
-            is not None
+    def has_concentration(self, sid, caster_id, *, actor_effect_only=False):
+        """Check the caster's group, optionally excluding the spatial World member."""
+        group = self._conn.execute(
+            "SELECT concentration_id FROM effect_concentrations WHERE session_id=? AND caster_id=?",
+            (sid, caster_id),
+        ).fetchone()
+        return group is not None and (
+            not actor_effect_only or self.spatial_lights.get(sid, group[0]) is None
         )
 
     @scoped_read

@@ -64,6 +64,11 @@ class MoveActor:
 
 
 @dataclass(frozen=True, slots=True)
+class DropWorldConcentration:
+    """Request voluntary release of the selected actor's spatial concentration."""
+
+
+@dataclass(frozen=True, slots=True)
 class PlaceObject:
     """One adjacent object adjustment, including its derived passage blocking."""
 
@@ -157,6 +162,7 @@ type FoundationOperation = (
     | SetSceneFlag
     | SetObjectState
     | MoveActor
+    | DropWorldConcentration
     | PlaceObject
     | StepActor
     | TraversePassage

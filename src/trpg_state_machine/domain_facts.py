@@ -2008,10 +2008,10 @@ class WorldFacts:
         """Return the shared world-facts connection."""
         return self.store.connection
 
-    def initialize_world(self, sid, package):
+    def initialize_world(self, sid, package, *, spatial_light_evidence=False):
         """Initialize persisted world/object facts and Session instance configuration."""
         self.store.require_write()
-        self.instances.initialize_world(sid, package)
+        self.instances.initialize_world(sid, package, spatial_light_evidence=spatial_light_evidence)
         self._conn.executemany(
             "INSERT OR IGNORE INTO scene_environment_versions(session_id,scene_id) VALUES (?,?)",
             [(sid, scene.scene_id) for scene in package.scenes],
@@ -2701,6 +2701,17 @@ class WorldFacts:
         finally:
             memory.collectors = collectors
             memory.scene_association(table, sid, scene_id)
+
+    def magic_light_anchors(self, sid, scene_id):
+        """Read the scene bucket of magic anchors through SessionMemory's indexed range."""
+        return tuple(
+            row[0]
+            for row in self._conn.execute(
+                "SELECT object_id FROM magic_light_anchors WHERE session_id=? AND scene_id=? "
+                "ORDER BY object_id",
+                (sid, scene_id),
+            )
+        )
 
     def _discover_capability_ids(self, sid, scene_id, table):
         """Discover capability-bearing object identities associated with the scene."""
