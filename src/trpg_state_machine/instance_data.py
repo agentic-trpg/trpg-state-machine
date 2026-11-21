@@ -224,6 +224,7 @@ class InstanceData:
                 "navigation": package.navigation,
                 "evidence_schema": "event-evidence/6"
                 if any(d.capability("light") for d in package.world_objects)
+                or any(s.daylight is not None for s in package.scenes)
                 else "event-evidence/5"
                 if any(
                     s.grid_json or any(o.state is None for o in s.objects) for s in package.scenes
@@ -264,6 +265,7 @@ class InstanceData:
                     "exit_passages": scene.exit_passages,
                     "public_interactions": scene.public_interactions,
                     "grid_json": scene.grid_json,
+                    "daylight": scene.daylight,
                 },
             )
 
@@ -447,6 +449,25 @@ class InstanceData:
         """Construct a configuration view for the selected scene."""
         return SceneConfig(self, sid, dict(self._scene_data(sid, scene_id)))
 
+    @instance_read("scene", "lighting", "ambient_scope")
+    def scene_daylight(self, sid, scene_id):
+        """Load the selected scene's outdoor scope into its immutable runtime field."""
+        from .world_daylight import OutdoorLightScope
+
+        row = self.conn.execute(
+            "SELECT json_extract(config_json,'$.daylight') FROM instance_configs "
+            "WHERE session_id=? AND domain='scene' AND instance_id=?",
+            (sid, scene_id),
+        ).fetchone()
+        if row is None:
+            raise StateMachineError("incomplete_instance_config", "Missing scene configuration")
+        scope = row[0]
+        if scope is None:
+            return None
+        if scope == "scene":
+            return OutdoorLightScope(None)
+        return OutdoorLightScope(frozenset(decode(json.loads(scope))))
+
     @scoped_read
     def _scene_data(self, sid, scene_id):
         """Read core scene configuration, distinguishing unknown scenes from incomplete
@@ -454,7 +475,8 @@ class InstanceData:
         """
         row = self.conn.execute(
             "SELECT json_remove(config_json,'$.object_ids','$.actor_ids','$.actor_initial_ids',"
-            "'$.pending_objects','$.pending_actors','$.pending_definitions') FROM instance_configs "
+            "'$.pending_objects','$.pending_actors','$.pending_definitions','$.daylight') "
+            "FROM instance_configs "
             "WHERE session_id=? AND domain='scene' AND instance_id=?",
             (sid, scene_id),
         ).fetchone()

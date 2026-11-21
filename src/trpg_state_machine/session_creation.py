@@ -145,6 +145,12 @@ class SessionCreation:
             )
         if replay is not None:
             return replay
+        if any(scene.daylight is not None for scene in package.scenes) and (
+            selected_time is None or selected_time.cycle != "alternating"
+        ):
+            raise StateMachineError(
+                "invalid_time_binding", "Scene daylight requires an alternating time binding"
+            )
         if selected_time is not None and any(a.npc_state is not None for a in package.actors):
             raise StateMachineError(
                 "unsupported_time_consumer",

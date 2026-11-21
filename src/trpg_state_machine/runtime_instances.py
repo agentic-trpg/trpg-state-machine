@@ -221,8 +221,9 @@ class EnvironmentFields:
 
 @dataclass(frozen=True)
 class LightingFields:
-    """Retain light sources, geometry and illumination result fields."""
+    """Retain daylight scope, light sources, geometry and illumination results."""
 
+    ambient_scope: tuple = ()
     sources: tuple = ()
     geometry: tuple = ()
     candidates: tuple = ()

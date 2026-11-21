@@ -105,6 +105,7 @@ class SceneDefinition:
     exit_passages: tuple[tuple[str, str], ...] = ()
     public_interactions: bool = False
     grid_json: str | None = None
+    daylight: str | tuple[str, ...] | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -560,7 +561,9 @@ def _validate(data: dict, *, allow_legacy_audit=False) -> AdventurePackage:
         s = _mapping(
             value,
             "scene_id location_id description exits initial_state actor_ids objects "
-            "event_definition_ids access_policy" + (" grid" if interactions else ""),
+            "event_definition_ids access_policy"
+            + (" grid" if interactions else "")
+            + (" daylight" if isinstance(value, dict) and "daylight" in value else ""),
             path,
         )
         key = _identifier(s["scene_id"], path + ".scene_id", "scene")
@@ -577,6 +580,7 @@ def _validate(data: dict, *, allow_legacy_audit=False) -> AdventurePackage:
         _list(s["event_definition_ids"], path + ".event_definition_ids")
         initial = _mapping(s["initial_state"], "local_flags", path + ".initial_state")
         grid_json = _grid_config(s["grid"], path + ".grid") if interactions else None
+        daylight = _daylight_scope(s["daylight"], grid_json, path) if "daylight" in s else None
         exits, exit_passages = [], []
         for j, value in enumerate(_list(s["exits"], path + ".exits")):
             ex = _mapping(
@@ -644,6 +648,7 @@ def _validate(data: dict, *, allow_legacy_audit=False) -> AdventurePackage:
                 tuple(exit_passages),
                 s["access_policy"] == "public_interactions",
                 grid_json,
+                daylight,
             )
         )
     scene_ids = {s.scene_id for s in scenes}
@@ -987,6 +992,32 @@ def _grid_config(raw, path):
         return grid.model_dump_json()
     except (ValidationError, ValueError, TypeError) as exc:
         _fail("schema_error", path, f"Invalid mechanical grid: {type(exc).__name__}")
+
+
+def _daylight_scope(raw, grid_json, path):
+    """Validate authored outdoor cells against the scene's normalized mechanical grid."""
+    from dnd5e_engine.spatial import canonical_cell_id, parse_cell
+
+    path += ".daylight"
+    if grid_json is None:
+        _fail("invalid_reference", path, "Daylight requires a mechanical grid")
+    grid = json.loads(grid_json)
+    if grid["sunlight"]:
+        _fail("schema_error", path, "Daylight requires grid.sunlight=false")
+    if raw == "scene":
+        return raw
+    cells = _list(raw, path, nonempty=True)
+    for cell in cells:
+        try:
+            if type(cell) is not str or canonical_cell_id(cell) != cell:
+                raise ValueError("Noncanonical cell")
+            x, y = parse_cell(cell)
+            if not (0 <= x < grid["width"] and 0 <= y < grid["height"]):
+                raise ValueError("Cell outside grid")
+        except (ValueError, TypeError):
+            _fail("invalid_reference", path, "Expected canonical cells in the scene grid")
+    _unique(cells, path)
+    return tuple(cells)
 
 
 def _initial_cell(cell, grid_json, path, *, standing=True):

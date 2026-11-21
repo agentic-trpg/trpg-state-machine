@@ -82,15 +82,22 @@ class WorldTimeService:
         """Compute the next tick at the selected within-day offset."""
         return tick + (offset - binding.start_day_tick - tick - 1) % binding.day_length + 1
 
-    @classmethod
-    def _phase(cls, binding, tick):
-        """Select the next boundary from day phase and offset."""
-        if binding.cycle == "none":
-            return None, None
+    @staticmethod
+    def _phase_at(binding, tick):
+        """Resolve the configured day or night at the given tick."""
+        if type(binding) is LegacyTimeBinding or binding.cycle == "none":
+            return None
         tod = (binding.start_day_tick + tick) % binding.day_length
         day = (tod - binding.day_start) % binding.day_length
         day_span = (binding.night_start - binding.day_start) % binding.day_length
-        phase = "day" if day < day_span else "night"
+        return "day" if day < day_span else "night"
+
+    @classmethod
+    def _phase(cls, binding, tick):
+        """Select the current phase and its next boundary."""
+        phase = cls._phase_at(binding, tick)
+        if phase is None:
+            return None, None
         candidates = [
             (cls._next(binding, tick, offset), kind)
             for offset, kind in (
@@ -100,6 +107,10 @@ class WorldTimeService:
         ]
         next_tick, kind = min(candidates)
         return phase, TimeBoundary(next_tick, (kind,))
+
+    def current_phase(self, sid):
+        """Read the phase in the consumer's authorized transaction or candidate stage."""
+        return self._phase_at(*self.facts.time_state(sid))
 
     def read(self, session_id, package, *, context):
         """Authorize reading the sole game tick and derive calendar/day-phase views."""
