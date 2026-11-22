@@ -2,6 +2,7 @@
 
 from copy import deepcopy
 from dataclasses import asdict, replace
+from json import dumps, loads
 from random import Random
 
 import pytest
@@ -20,6 +21,7 @@ from trpg_state_machine import (
     StateMachine,
     StateMachineError,
     TimeBinding,
+    world_command_from_data,
 )
 
 STAFF, SPARE = "object.healing_staff", "object.spare_healing_staff"
@@ -333,6 +335,19 @@ def test_staff_casts_both_spells_at_their_prices_and_heals_the_chosen_sphere(tmp
             level=5,
             area=ExplorationItemAreaTarget(center_cell="6,0", target_ids=(NPC, pc)),
         )
+        wire = asdict(cast)
+        wire.pop("check_world_effects")
+        wire["payload"] = cast.payload.model_dump(mode="json")
+        decoded = loads(dumps(wire))
+        assert decoded["payload"]["area_target"]["target_ids"] == [NPC, pc]
+        for invalid_targets in ([NPC, NPC], NPC):
+            malformed = deepcopy(decoded)
+            malformed["payload"]["area_target"]["target_ids"] = invalid_targets
+            with pytest.raises(StateMachineError) as exc:
+                world_command_from_data(malformed)
+            assert exc.value.code == "invalid_command"
+        cast = world_command_from_data(decoded)
+        assert cast.payload.area_target.target_ids == (NPC, pc)
         sm._conn.execute(
             "CREATE TEMP TRIGGER fail_mass_receipt BEFORE INSERT ON command_receipts "
             "WHEN NEW.command_id='mass-charges' BEGIN SELECT RAISE(ABORT,'injected'); END"

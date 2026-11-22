@@ -742,6 +742,13 @@ def world_command_from_data(data):
             if type(targets) not in (list, tuple):
                 raise ValueError("Expected ordered spell targets")
             payload = {**payload, "target_ids": tuple(targets)}
+        if kind == "world.use_item":
+            area = payload.get("area_target")
+            if type(area) is dict and type(area.get("target_ids")) is list:
+                payload = {
+                    **payload,
+                    "area_target": {**area, "target_ids": tuple(area["target_ids"])},
+                }
         if kind == "activity.short_rest" and "hit_dice" in payload:
             selections = payload["hit_dice"]
             if type(selections) not in (list, tuple):
