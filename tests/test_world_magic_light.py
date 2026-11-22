@@ -809,8 +809,11 @@ def test_public_creature_dispel_uses_two_distinct_canonical_spell_profiles(timed
         assert sm.read_noncombat_snapshot(sid, package, context=context).effect_states == ()
 
 
-def test_public_creature_dispel_adopts_both_overlapping_hp_applications(timed_spell_world):
-    """The creature Dispel endpoint withdraws one effective paired HP bonus."""
+@pytest.mark.parametrize("cast_levels", [(3,), (3, 2, 2, 2)], ids=["one-aid", "four-aid"])
+def test_public_creature_dispel_adopts_both_overlapping_hp_applications(
+    timed_spell_world, cast_levels
+):
+    """One creature Dispel reads and adopts its affected HP family once."""
     session = timed_spell_world(
         spell_id="aid",
         caster_class="cleric",
@@ -823,8 +826,9 @@ def test_public_creature_dispel_adopts_both_overlapping_hp_applications(timed_sp
         state = sm.read_session(sid, package, context=context)
         caster = state.pc_actor_id
 
-        def facts():
-            snapshot = sm.read_noncombat_snapshot(sid, package, context=context)
+        def facts(snapshot=None):
+            if snapshot is None:
+                snapshot = sm.read_noncombat_snapshot(sid, package, context=context)
             actor = next(actor for actor in snapshot.character_states if actor.entity_id == caster)
             slot = next(
                 pool.current for pool in snapshot.resource_state.pools if pool.pool_id == "spell:3"
@@ -856,16 +860,17 @@ def test_public_creature_dispel_adopts_both_overlapping_hp_applications(timed_sp
             )
 
         base_hp, _, _ = facts()
-        for slot in (3, 2):
+        for index, slot in enumerate(cast_levels):
             receipt = sm.submit_command(
-                command("aid", slot, f"aid:{slot}", {"target_id": caster}),
+                command("aid", slot, f"aid:{index}", {"target_id": caster}),
                 package,
                 context=context,
             )
             assert receipt.status == "committed", receipt
-        boosted_hp, old_slot, effects = facts()
+        old_snapshot = sm.read_noncombat_snapshot(sid, package, context=context)
+        boosted_hp, old_slot, effects = facts(old_snapshot)
         assert boosted_hp == (base_hp[0] + 10, base_hp[1] + 10)
-        assert len({effect.origin for effect in effects}) == 2
+        assert len({effect.origin for effect in effects}) == len(cast_levels)
         rng = sm.read_rng_context(sid, package, context=context)
         dispel = command(
             "dispel-magic",
@@ -875,9 +880,36 @@ def test_public_creature_dispel_adopts_both_overlapping_hp_applications(timed_sp
                 "target": {"kind": "creature", "target_id": caster},
             },
         )
-        receipt = sm.submit_command(dispel, package, context=context)
+        effects_owner = sm._characters.effects
+        read_group = effects_owner.for_target_effect
+        returned_rows = []
+
+        def count_group_rows(*args):
+            """Count the actual records read through the Effects owner."""
+            rows = read_group(*args)
+            returned_rows.append(len(rows))
+            return rows
+
+        with (
+            patch.object(
+                effects_owner, "for_target_effect", side_effect=count_group_rows
+            ) as group_reads,
+            patch.object(
+                sm._characters, "effect_hp_facts", wraps=sm._characters.effect_hp_facts
+            ) as hp_reads,
+            patch.object(
+                sm._characters, "set_hp_pair", wraps=sm._characters.set_hp_pair
+            ) as hp_writes,
+        ):
+            receipt = sm.submit_command(dispel, package, context=context)
         assert receipt.status == "committed", receipt
+        group_reads.assert_called_once_with(sid, caster, "effect:aid")
+        assert returned_rows == [len(cast_levels)]
+        hp_reads.assert_called_once_with(sid, caster)
+        hp_writes.assert_called_once()
+        assert hp_writes.call_args.args[:2] == (sid, caster)
         assert facts() == (base_hp, old_slot - 1, ())
+        assert facts(old_snapshot) == (boosted_hp, old_slot, effects)
         assert sm.read_rng_context(sid, package, context=context) == rng
         assert sm.submit_command(dispel, package, context=context) == receipt
         assert facts() == (base_hp, old_slot - 1, ())
