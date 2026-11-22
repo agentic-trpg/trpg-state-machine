@@ -176,3 +176,118 @@ def test_cure_wounds_heals_during_aid_without_changing_base_maximum(timed_spell_
             min(before_max, healed - 5),
             before_max,
         )
+
+
+@pytest.mark.parametrize("end", ["expiry", "dismissal"])
+def test_aid_loss_to_zero_has_non_damage_life_consequence(timed_spell_world, tmp_path, end):
+    session = timed_spell_world(
+        spell_id="aid",
+        caster_class="cleric",
+        caster_subclass="life",
+        configure=lambda data: data["rule_bindings"].pop("combat_foundation"),
+    )
+    sm, sid, package, context = session
+    loader = sm._world.loader
+    with sm:
+        cast = cast_command(
+            session,
+            spell_id="aid",
+            source_id="class:cleric",
+            slot_level=2,
+            command_id=f"aid.zero.{end}",
+        )
+        target = cast.actor_id
+        original_max = _hp(sm, sid, package, context, target)[1]
+        assert sm.submit_command(cast, package, context=context).status == "committed"
+        (effect,) = _hp(sm, sid, package, context, target)[2]
+        # This explicitly supplied intervening HP outcome is not a claim that
+        # an exploration damage command exists in the production dispatcher.
+        with sm._transaction(write=True):
+            sm._characters.set_hp(sid, target, 3)
+        if end == "expiry":
+            receipt = submit(session, AdvanceSessionTime(28800), "aid.zero.expire")
+        else:
+            dismiss = world_command(
+                sm,
+                sid,
+                package,
+                context,
+                DismissWorldSpell(target, effect.id, effect.origin, cast.command_id),
+                "aid.zero.dismiss",
+            )
+            receipt = sm.submit_command(dismiss, package, context=context)
+        assert receipt.status == "committed", receipt
+        actor = next(
+            actor
+            for actor in sm.read_noncombat_snapshot(sid, package, context=context).character_states
+            if actor.entity_id == target
+        )
+        assert (actor.hp_current, actor.hp_max, actor.is_alive, actor.death_saves) == (
+            0,
+            original_max,
+            True,
+            None,
+        )
+        assert [c.condition for c in actor.conditions] == ["unconscious"]
+        assert _hp(sm, sid, package, context, target)[2] == ()
+    with StateMachine(tmp_path / "timed-spell.sqlite", dnd_loader=loader) as reopened:
+        actor = next(
+            actor
+            for actor in reopened.read_noncombat_snapshot(
+                sid, package, context=context
+            ).character_states
+            if actor.entity_id == target
+        )
+        assert actor.hp_current == 0
+        assert [c.condition for c in actor.conditions] == ["unconscious"]
+
+
+def test_aid_zero_dismissal_failure_rolls_back_and_retries(timed_spell_world, monkeypatch):
+    session = timed_spell_world(
+        spell_id="aid",
+        caster_class="cleric",
+        caster_subclass="life",
+        configure=lambda data: data["rule_bindings"].pop("combat_foundation"),
+    )
+    sm, sid, package, context = session
+    with sm:
+        cast = cast_command(
+            session,
+            spell_id="aid",
+            source_id="class:cleric",
+            slot_level=2,
+            command_id="aid.zero.rollback.cast",
+        )
+        target = cast.actor_id
+        assert sm.submit_command(cast, package, context=context).status == "committed"
+        (effect,) = _hp(sm, sid, package, context, target)[2]
+        with sm._transaction(write=True):
+            sm._characters.set_hp(sid, target, 3)
+        dismiss = world_command(
+            sm,
+            sid,
+            package,
+            context,
+            DismissWorldSpell(target, effect.id, effect.origin, cast.command_id),
+            "aid.zero.rollback.dismiss",
+        )
+        before = sm.read_noncombat_snapshot(sid, package, context=context)
+        with monkeypatch.context() as failure:
+            failure.setattr(
+                sm._characters,
+                "add_condition",
+                lambda *_args: (_ for _ in ()).throw(RuntimeError("condition write failed")),
+            )
+            with pytest.raises(RuntimeError, match="condition write failed"):
+                sm.submit_command(dismiss, package, context=context)
+        assert sm.read_noncombat_snapshot(sid, package, context=context) == before
+        receipt = sm.submit_command(dismiss, package, context=context)
+        assert receipt.status == "committed", receipt
+        assert sm.submit_command(dismiss, package, context=context) == receipt
+        actor = next(
+            actor
+            for actor in sm.read_noncombat_snapshot(sid, package, context=context).character_states
+            if actor.entity_id == target
+        )
+        assert actor.hp_current == 0
+        assert [condition.condition for condition in actor.conditions] == ["unconscious"]

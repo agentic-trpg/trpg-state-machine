@@ -42,7 +42,7 @@ from ._execution import _WorldEffectKind, _WorldEffectOrigin
 from .choice_models import ChoiceFinalizeSpellOperationPayload, ChoiceRespondOperationPayload
 from .combat import process_id
 from .dnd_checks import world_effects_ready
-from .effect_hp_adoption import apply_world_spell_end
+from .effect_hp_adoption import apply_world_spell_ends
 from .errors import StateMachineError
 from .pending_multi_spell_choices import PendingMultiSpellChoices
 from .pending_spell_choices import PendingSpellChoices
@@ -889,8 +889,15 @@ class RuleExecution:
                     # A native condition edit still refers to the fixed linked
                     # effects. Adopt that edit before ending any of those effects.
                     conditions_update = any(type(op) is ConditionsUpdate for op in operations)
-                    for ending in () if conditions_update else spell_ends:
-                        apply_world_spell_end(self.world, command.session_id, ending)
+                    spell_end_events = []
+                    if spell_ends and not conditions_update:
+                        spell_end_events = apply_world_spell_ends(
+                            self.world,
+                            command.session_id,
+                            spell_ends,
+                            package=package,
+                            command_id=command.command_id,
+                        )
                     spatial_proposal = (
                         spatial_operation.value
                         if isinstance(spatial_operation, WorldEnvironmentalEffectCreate)
@@ -974,8 +981,14 @@ class RuleExecution:
                             if type(operation) is TurnUpdate
                         ),
                     )
-                    for ending in spell_ends if conditions_update else ():
-                        apply_world_spell_end(self.world, command.session_id, ending)
+                    if spell_ends and conditions_update:
+                        spell_end_events = apply_world_spell_ends(
+                            self.world,
+                            command.session_id,
+                            spell_ends,
+                            package=package,
+                            command_id=command.command_id,
+                        )
                     if spatial_proposal is not None:
                         spatial_effect_id, spatial_events = self.world.magic.apply(
                             row, package, command.command_id, spatial_proposal
@@ -1077,6 +1090,7 @@ class RuleExecution:
                         if not isinstance(event, ObjectIdentified)
                     ]
                     events.extend(effects_events)
+                    events.extend(spell_end_events)
                     events.extend(
                         effect_time.spell_end_event(row["session_id"], package, ending)
                         for ending in spell_ends

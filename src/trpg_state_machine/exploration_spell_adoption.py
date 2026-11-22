@@ -412,7 +412,9 @@ def _timed_spell_changes(request, result, spell, loader):
         )
         before = effective_hp_bonus(active)
         after = effective_hp_bonus((*active, proposal.effect))
-        transition = paired_hp_transition(target.hp_current, target.hp_max, before, after)
+        transition = paired_hp_transition(
+            target.hp_current, target.hp_max, before, after, entity_type=target.entity_type
+        )
         hp_changes = (("actor", payload.target_id, "hp_pair", transition),)
     return (
         spend,

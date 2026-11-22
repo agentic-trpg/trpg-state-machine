@@ -318,6 +318,18 @@ class CharacterFacts:
             (value, sid, actor_id),
         )
 
+    def effect_hp_facts(self, sid, actor_id):
+        """Read only the active target's paired HP and mechanical creature type."""
+        row = self._conn.execute(
+            "SELECT c.current_hp,c.max_hp,json_extract(m.state_json,'$.entity_type') "
+            "FROM characters c JOIN mechanical_actors m USING(session_id,actor_id) "
+            "WHERE c.session_id=? AND c.actor_id=?",
+            (sid, actor_id),
+        ).fetchone()
+        if row is None or row[2] is None:
+            raise StateMachineError("invalid_mechanical_state", "Effect HP target is missing")
+        return tuple(row)
+
     def set_hp_pair(self, sid, actor_id, transition):
         """Write a guarded effect current/maximum pair through the Character owner."""
         self.store.require_write()
