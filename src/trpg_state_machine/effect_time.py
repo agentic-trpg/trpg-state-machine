@@ -108,11 +108,11 @@ class EffectTimeConsumer:
         return min((value for value in (actor, spatial) if value is not None), default=None)
 
     def _due_actor(self, sid, tick):
-        """Read the first actor expiry in the owner’s indexed deadline order."""
+        """Read the first deadline, using effect-list order for ties on one actor."""
         return self.db.execute(
             "SELECT target_id,effect_id,origin,expires_tick,payload_json "
             "FROM ongoing_effects WHERE session_id=? AND expires_tick<=? "
-            "ORDER BY expires_tick,target_id,effect_id,origin LIMIT 1",
+            "ORDER BY expires_tick,target_id,ordinal LIMIT 1",
             (sid, tick),
         ).fetchone()
 
