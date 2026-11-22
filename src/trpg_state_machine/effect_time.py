@@ -119,7 +119,9 @@ class EffectTimeConsumer:
             raise StateMachineError("ruleset_binding_mismatch", str(exc)) from exc
         except ValueError as exc:
             raise StateMachineError("spell.dismiss", str(exc)) from exc
-        self.owner.apply_spell_end(sid, proposal)
+        from .effect_hp_adoption import apply_world_spell_end
+
+        apply_world_spell_end(self.world, sid, proposal)
         return self.spell_end_event(sid, package, proposal)
 
     def end_world_concentration(self, sid, package, caster_id, reason):
@@ -213,7 +215,14 @@ class EffectTimeConsumer:
                 }
             )
         )
-        self.owner.expire_world_effect(sid, identity, due["expires_tick"])
+        from .effect_hp_adoption import apply_hp_effect_expiry
+
+        apply_hp_effect_expiry(
+            self.world,
+            sid,
+            expired,
+            lambda: self.owner.expire_world_effect(sid, identity, due["expires_tick"]),
+        )
         refresh_world_walk_expiry(self.world, sid, expired)
         event = self.world._capture_event(
             sid,

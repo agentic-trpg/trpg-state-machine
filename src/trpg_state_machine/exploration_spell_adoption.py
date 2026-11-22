@@ -2,6 +2,11 @@
 
 from dnd5e_engine import evaluation_delta as delta
 from dnd5e_engine.damage_rules import healing_balance
+from dnd5e_engine.evaluation_aid import (
+    effective_hp_bonus,
+    paired_hp_transition,
+    reviewed_hp_bonus,
+)
 from dnd5e_engine.evaluation_beacon import is_reviewed_beacon_effect
 from dnd5e_engine.evaluation_cast_activity import cast_activity_components, casting_activity_seconds
 from dnd5e_engine.evaluation_charged_item import exploration_charged_cast_profile
@@ -325,8 +330,23 @@ def _timed_spell_changes(request, result, spell, loader):
     ):
         raise StateMachineError("invalid_rule_result", "Timed spell events do not match the writes")
 
+    hp_changes = ()
+    if reviewed_hp_bonus(proposal.effect) is not None:
+        target = next(
+            actor for actor in snapshot.character_states if actor.entity_id == payload.target_id
+        )
+        active = tuple(
+            effect
+            for effect in snapshot.effect_states
+            if effect.target_id == payload.target_id and effect.id == proposal.effect.id
+        )
+        before = effective_hp_bonus(active)
+        after = effective_hp_bonus((*active, proposal.effect))
+        transition = paired_hp_transition(target.hp_current, target.hp_max, before, after)
+        hp_changes = (("actor", payload.target_id, "hp_pair", transition),)
     return (
         spend,
         *material_changes,
+        *hp_changes,
         ("world_effect", payload.target_id, "create", proposal),
     )

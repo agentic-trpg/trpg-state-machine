@@ -318,6 +318,24 @@ class CharacterFacts:
             (value, sid, actor_id),
         )
 
+    def set_hp_pair(self, sid, actor_id, transition):
+        """Write a guarded effect current/maximum pair through the Character owner."""
+        self.store.require_write()
+        changed = self._conn.execute(
+            "UPDATE characters SET current_hp=?,max_hp=? WHERE session_id=? AND actor_id=? "
+            "AND current_hp=? AND max_hp=?",
+            (
+                transition.current,
+                transition.maximum,
+                sid,
+                actor_id,
+                transition.expected_current,
+                transition.expected_maximum,
+            ),
+        ).rowcount
+        if changed != 1:
+            raise StateMachineError("version_conflict", "Effect HP pair changed")
+
     def spend_resource(self, sid, actor_id, resource_id, amount, *, expected_current=None):
         """Debit one keyed pool, optionally checking the evaluator's fixed starting balance."""
         self.store.require_write()

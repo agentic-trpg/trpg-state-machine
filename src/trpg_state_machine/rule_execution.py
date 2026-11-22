@@ -41,6 +41,7 @@ from ._execution import _WorldEffectKind, _WorldEffectOrigin
 from .choice_models import ChoiceFinalizeSpellOperationPayload, ChoiceRespondOperationPayload
 from .combat import process_id
 from .dnd_checks import world_effects_ready
+from .effect_hp_adoption import apply_world_spell_end
 from .errors import StateMachineError
 from .pending_multi_spell_choices import PendingMultiSpellChoices
 from .pending_spell_choices import PendingSpellChoices
@@ -878,7 +879,7 @@ class RuleExecution:
                     )
                     effect_time = self.runtime.time.consumers["effects"]
                     for ending in spell_ends:
-                        self.world.characters.effects.apply_spell_end(command.session_id, ending)
+                        apply_world_spell_end(self.world, command.session_id, ending)
                     spatial_proposal = (
                         spatial_operation.value
                         if isinstance(spatial_operation, WorldEnvironmentalEffectCreate)

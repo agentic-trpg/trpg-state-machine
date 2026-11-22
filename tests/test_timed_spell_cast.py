@@ -76,7 +76,7 @@ def timed_spell_world(tmp_path, context):
         subclass = canonical.get_subclass(caster_subclass)
         ability = spellcaster.spellcasting.ability
         ogre = canonical.get_monster("ogre") if attack_after_walk else None
-        spell = canonical.get_spell("longstrider")
+        spell = canonical.get_spell("aid" if spell_id == "aid" else "longstrider")
         if spell_id in (PERCEPTION_SPELL, SENSE_SPELL):
             # Reuse the supported activity shape under a distinct fixture-only rule identity.
             if spell_id == PERCEPTION_SPELL:
@@ -231,6 +231,8 @@ def timed_spell_world(tmp_path, context):
                 custom_counters=(
                     {"feature_use:arcane-recovery": {"spent": 0}}
                     if caster_class == "wizard"
+                    else {"feature_use:channel-divinity-cleric": {"spent": 0}}
+                    if caster_class == "cleric"
                     else {}
                 ),
                 save_proficiencies=sorted(proficiency.saves),
@@ -306,6 +308,17 @@ def timed_spell_world(tmp_path, context):
                         }
                     ]
                     if caster_class == "wizard"
+                    else [
+                        {
+                            "kind": "feature_uses",
+                            "owner_id": pc["entity_id"],
+                            "pool_id": "feature:channel-divinity-cleric",
+                            "feature_slug": "channel-divinity-cleric",
+                            "current": 2,
+                            "maximum": 2,
+                        }
+                    ]
+                    if caster_class == "cleric"
                     else []
                 )
             }

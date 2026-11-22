@@ -570,6 +570,24 @@ class OngoingEffects:
         ]
 
     @scoped_read
+    def for_target_effect(self, sid, target_id, effect_id):
+        """Read one target and effect group through the composite identity index."""
+        rows = self._conn.execute(
+            "SELECT * FROM ongoing_effects WHERE session_id=? AND target_id=? "
+            "AND effect_id=? ORDER BY ordinal",
+            (sid, target_id, effect_id),
+        )
+        return [
+            {
+                "id": row["effect_id"],
+                "origin": row["origin"],
+                "target_id": row["target_id"],
+                **self.store.memory.json(row["payload_json"]),
+            }
+            for row in rows
+        ]
+
+    @scoped_read
     def visible_for_target(self, sid, target_id):
         """Project active effects, including the exact shield linked by its reaction."""
         rows = sorted(self._target_rows(sid, target_id), key=lambda row: row["ordinal"])
