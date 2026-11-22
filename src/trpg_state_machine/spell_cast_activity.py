@@ -11,6 +11,7 @@ from .time_binding import deadline_after_seconds, integer
 from .time_waits import DomainTimeWait, TimeWaitResolution
 
 CASTING_FOCUS_PREFIX = "cast.activity:"
+EXPLORATION_RULES_SNAPSHOT_VERSION = "engine-snapshot/20"
 
 
 @dataclass(frozen=True, slots=True)
@@ -175,6 +176,9 @@ class SpellCastActivities:
 
     def interrupt_lost_contact(self, row, package, command_id):
         """Check the selected PC's indexed active cast against the candidate world."""
+        # Only this pinned mechanical Snapshot can admit exploration casting.
+        if row["mechanical_schema_version"] != EXPLORATION_RULES_SNAPSHOT_VERSION:
+            return ()
         sid, actor_id = row["session_id"], row["pc_actor_id"]
         record = self.active(sid, actor_id)
         if record is None or record["target_object_id"] is None:

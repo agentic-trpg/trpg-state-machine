@@ -50,7 +50,11 @@ from .rules_adapter import UnsupportedEffectConsequence, validate_dnd_result
 from .shield_adoption import UnsupportedShieldKnockout, UnsupportedShieldTerminal
 from .shield_window import ShieldWindows, guard_shield_window
 from .spell_adoption import UnsupportedSpellConsequence
-from .spell_cast_activity import FinishSpellCast, StartSpellCast
+from .spell_cast_activity import (
+    EXPLORATION_RULES_SNAPSHOT_VERSION,
+    FinishSpellCast,
+    StartSpellCast,
+)
 from .time_binding import TimeBinding
 from .world_commands import OPENABLE_CHECK_OPERATIONS, CheckMechanism, PickLock
 
@@ -373,7 +377,7 @@ class RuleExecution:
             """Check mode and protocol, deferring use while saved time work is unfinished."""
             if self.world._active_combat(command.session_id):
                 return "unsupported_combat_world_operation"
-            if value["mechanical_schema_version"] != "engine-snapshot/20":
+            if value["mechanical_schema_version"] != EXPLORATION_RULES_SNAPSHOT_VERSION:
                 return "unsupported_mechanical_version"
             if exploration_spell and not isinstance(
                 self.world.facts.time_state(command.session_id)[0], TimeBinding
