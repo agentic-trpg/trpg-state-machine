@@ -275,6 +275,7 @@ class WorldMagic:
         placement = self.h.facts.placement(sid, oid)
         return placement["scene_id"], placement["cell"], self._transmission(sid, oid, placement)
 
+    @scoped_read(stage_only=True, maintained="light_sources")
     @instance_read("scene", "lighting", "magic_records", maintained="light_sources")
     def _records(self, sid, scene):
         """Reuse one fixed collection of applications attached to the current Scene."""

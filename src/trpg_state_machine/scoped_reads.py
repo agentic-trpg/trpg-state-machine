@@ -21,10 +21,17 @@ def _key(value):
     return value
 
 
-def scoped_read(method=None, *, membership=()):
-    """Decorate a read for reuse within one UnitOfWork mutation stage."""
+def scoped_read(method=None, *, membership=(), stage_only=False, maintained=None):
+    """Reuse a read within one mutation stage, optionally without a persisted copy.
+
+    A stage-only wrapper around an instance field names its maintained source so
+    enclosing reads still collect that dependency on a memo hit. The wrapped
+    field performs the initial version check; writes and rollback clear the memo.
+    """
     if method is None:
-        return partial(scoped_read, membership=membership)
+        return partial(
+            scoped_read, membership=membership, stage_only=stage_only, maintained=maintained
+        )
 
     @wraps(method)
     def read(self, *args, **kwargs):
@@ -69,6 +76,15 @@ def scoped_read(method=None, *, membership=()):
             value, dependencies = scope.read_memo[key]
             for dependency in dependencies:
                 memory.dependency(*dependency)
+            return value
+        if stage_only:
+            value = method(self, *args, **kwargs)
+            dependencies = (
+                (memory.maintained_dependency(maintained, args[0], args[1], None),)
+                if maintained
+                else ()
+            )
+            scope.read_memo[key] = (value, dependencies)
             return value
         cached = memory.get(key)
         if cached is not None:

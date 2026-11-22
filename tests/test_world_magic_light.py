@@ -291,6 +291,28 @@ def test_fog_cloud_expiry_reopens_without_obscuring_area(timed_spell_world, tmp_
         assert old.scene_state.grid.obscurement_cells["2,0"] == "heavy"
 
 
+def test_fog_record_stage_reuse_invalidates_on_write_and_savepoint_rollback(timed_spell_world):
+    """An in-flight source edit cannot leave a prior stage's spell facts in use."""
+    session = _magic_world(timed_spell_world, additional_spells=("fog-cloud",))
+    sm, sid, package, _ = session
+    with sm:
+        _, receipt = cast(session, "fog-stage", "fog-cloud", 1, {"kind": "point", "cell_id": "2,0"})
+        assert receipt.status == "committed", receipt
+        magic = sm._world.magic
+        with sm._transaction(write=True):
+            assert magic._records(sid, A)[0]["fixed_cell"] == "2,0"
+            assert magic._records(sid, A)[0]["fixed_cell"] == "2,0"
+            with pytest.raises(ValueError), sm._store.savepoint():
+                sm._conn.execute(
+                    "UPDATE spatial_light_effects SET fixed_cell=? "
+                    "WHERE session_id=? AND effect_id=?",
+                    ("3,0", sid, "spatial:fog-stage"),
+                )
+                assert magic._records(sid, A)[0]["fixed_cell"] == "3,0"
+                raise ValueError("rollback the candidate anchor")
+            assert magic._records(sid, A)[0]["fixed_cell"] == "2,0"
+
+
 def test_fog_cloud_fixed_area_reads_do_not_follow_unrelated_objects(timed_spell_world):
     """The same spell area reads a bounded source and geometry as the scene grows."""
     observations = []
