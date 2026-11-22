@@ -12,7 +12,7 @@ from test_mechanism_effects import FixturePort, install, rule_action, rule_data,
 from test_ongoing_effect_storage import _effect
 from test_scoped_runtime_validation import measure
 from test_session_time_coordination import submit as submit_time
-from test_timed_spell_cast import cast_command
+from test_timed_spell_cast import PERCEPTION_SPELL, cast_command
 from test_timed_spell_cast import timed_spell_world as timed_spell_world
 from test_world_mechanisms import LEVER
 
@@ -438,6 +438,32 @@ def test_public_creature_dispel_ends_only_selected_actors_spell_applications(tim
             effect.target_id == sm.read_session(sid, package, context=context).pc_actor_id
             for effect in after.effect_states
         )
+
+
+def test_public_creature_dispel_ends_bound_overlay_spell(timed_spell_world):
+    """The public result verifier replays an admitted nonbundled victim identity."""
+
+    def overlay(**kwargs):
+        return timed_spell_world(**kwargs, spell_id=PERCEPTION_SPELL)
+
+    session = _magic_world(overlay)
+    sm, sid, package, context = session
+    with sm:
+        command = cast_command(session, spell_id=PERCEPTION_SPELL, command_id="bound-overlay")
+        receipt = sm.submit_command(command, package, context=context)
+        assert receipt.status == "committed", receipt
+        before = sm.read_noncombat_snapshot(sid, package, context=context)
+        assert any(effect.target_id == command.actor_id for effect in before.effect_states)
+        _, dispelled = cast(
+            session,
+            "dispel:bound-overlay",
+            "dispel-magic",
+            3,
+            {"kind": "creature", "target_id": command.actor_id},
+        )
+        assert dispelled.status == "committed", dispelled
+        after = sm.read_noncombat_snapshot(sid, package, context=context)
+        assert not any(effect.target_id == command.actor_id for effect in after.effect_states)
 
 
 def test_public_creature_dispel_uses_two_distinct_canonical_spell_profiles(timed_spell_world):
