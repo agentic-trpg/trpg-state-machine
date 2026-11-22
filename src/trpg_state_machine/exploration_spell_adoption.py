@@ -2,6 +2,7 @@
 
 from dnd5e_engine import evaluation_delta as delta
 from dnd5e_engine.damage_rules import healing_balance
+from dnd5e_engine.evaluation_beacon import is_reviewed_beacon_effect
 from dnd5e_engine.evaluation_cast_activity import casting_activity_seconds
 from dnd5e_engine.evaluation_charged_item import exploration_charged_cast_profile
 from dnd5e_engine.evaluation_effects import effect_state
@@ -41,7 +42,7 @@ def exploration_spell_changes(request, result, loader):
     """Select the bound spell's consequence profile before accepting any writes."""
     spell = loader.get_spell(request.payload.spell_id)
     if spell is not None and (activity := exploration_healing_activity(loader, spell)):
-        return _healing_changes(request, result, spell, activity)
+        return _healing_changes(request, result, spell, activity, loader)
     return _timed_spell_changes(request, result, spell, loader)
 
 
@@ -140,8 +141,8 @@ def charged_item_changes(request, result, loader):
     )
 
 
-def _healing_changes(request, result, spell, activity):
-    """Bind the rolled HEAL event to the guarded HP edit and slot spend."""
+def _healing_changes(request, result, spell, activity, loader):
+    """Bind healing evidence and its RNG discipline to the guarded HP and slot edits."""
     snapshot, payload = request.state_snapshot, request.payload
     target = next((a for a in snapshot.character_states if a.entity_id == payload.target_id), None)
     events = result.proposed_events
@@ -152,6 +153,10 @@ def _healing_changes(request, result, spell, activity):
     ):
         raise StateMachineError("invalid_rule_result", "Unexpected exploration healing events")
     intent, cast, healing = events
+    expects_rng_draw = not any(
+        effect.target_id == payload.target_id and is_reviewed_beacon_effect(effect, loader)
+        for effect in snapshot.effect_states
+    )
     if (
         target is None
         or not target.is_alive
@@ -168,7 +173,7 @@ def _healing_changes(request, result, spell, activity):
         or cast != spell_event(request.actor_id, spell, payload.slot_level)
         or healing.target_id != payload.target_id
         or healing.amount < 0
-        or not result.rng_transition.state_changed
+        or result.rng_transition.state_changed != expects_rng_draw
     ):
         raise StateMachineError("invalid_rule_result", "Exploration healing evidence differs")
     hp = healing_balance(target.hp_current, target.hp_max, healing.amount)
