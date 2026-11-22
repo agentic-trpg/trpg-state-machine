@@ -225,14 +225,15 @@ class OngoingEffects:
         )
 
     def target_spell_applications(self, sid, target_id, need):
-        """Read only applications of the declared trigger definition on this target."""
+        """Read declared application facts in the owning target effect-list order."""
+        rows = self._conn.execute(
+            "SELECT * FROM ongoing_effects WHERE session_id=? AND target_id=? "
+            "AND effect_id=? AND cast_spell_id=?",
+            (sid, target_id, need.effect_id, need.spell_id),
+        )
+        # SQL ORDER BY ordinal can choose the session-wide ordinal index.
         return tuple(
-            self._spell_application(row)
-            for row in self._conn.execute(
-                "SELECT * FROM ongoing_effects WHERE session_id=? AND target_id=? "
-                "AND effect_id=? AND cast_spell_id=? ORDER BY origin",
-                (sid, target_id, need.effect_id, need.spell_id),
-            )
+            self._spell_application(row) for row in sorted(rows, key=lambda r: r["ordinal"])
         )
 
     def apply_spell_end(self, sid, proposal):

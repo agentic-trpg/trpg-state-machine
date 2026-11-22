@@ -3,6 +3,7 @@
 from dataclasses import asdict, replace
 
 import pytest
+from dnd5e_engine.evaluation_world_effect import EffectExpiryPolicy, WorldEffectApplication
 from item_support import NPC
 from spatial_support import command as world_command
 from test_ongoing_effect_storage import _effect
@@ -188,9 +189,52 @@ def test_spell_end_reads_stay_local_as_unrelated_effects_grow(timed_spell_world,
             plan = sm._conn.execute(
                 "EXPLAIN QUERY PLAN SELECT * FROM ongoing_effects "
                 "WHERE session_id=? AND target_id=? "
-                "AND effect_id=? AND cast_spell_id=? ORDER BY origin",
+                "AND effect_id=? AND cast_spell_id=?",
                 (sid, invisible.actor_id, "effect:invisibility", "invisibility"),
             ).fetchone()[3]
             assert "SEARCH" in plan and "session_id=? AND target_id=? AND effect_id=?" in plan
     assert rows[0] == rows[1]
     assert calls == [2, 2]
+
+
+def test_light_endings_follow_target_effect_order_across_sources(timed_spell_world):
+    """Select two actual owner rows whose origins sort against application order."""
+    session = _magic_world(timed_spell_world, additional_spells=("invisibility",))
+    sm, sid, package, context = session
+    with sm:
+        first = cast_command(
+            session, spell_id="invisibility", slot_level=2, command_id="first-hide"
+        )
+        assert sm.submit_command(first, package, context=context).status == "committed"
+        before = sm.read_noncombat_snapshot(sid, package, context=context)
+        (effect,) = before.effect_states
+        later = effect.model_copy(update={"origin": f"cast:invisibility:{NPC}"})
+        # Exploration admission currently casts only from the selected PC.
+        # Install the later caster's canonical application at the trusted owner.
+        with sm._store.transaction(write=True):
+            row = sm._world.sessions._session(sid, package, context)
+            sm._session_runtime.time.consumers["effects"].apply_verified(
+                sid,
+                WorldEffectApplication(
+                    session_id=sid,
+                    command_id="later-hide",
+                    source_id=NPC,
+                    effect=later,
+                    expiry=EffectExpiryPolicy(action="remove"),
+                    concentration=True,
+                    ruleset_binding=sm._rules.session_binding(row),
+                ),
+                spell_id="invisibility",
+            )
+        assert later.origin < effect.origin
+        light = prepare_cast(session, "clear-both", "light", 0, {"kind": "item", "item_id": ITEM})
+        receipt = sm.submit_command(light, package, context=context)
+        assert receipt.status == "committed", receipt
+        endings = [
+            event.payload["cast_command_id"]
+            for event in sm.read_events(sid, package, context=context)
+            if event.source_command_id == light.command_id
+            and event.event_type == "effect.spell_ended"
+        ]
+        assert endings == [first.command_id, "later-hide"]
+        assert sm.read_noncombat_snapshot(sid, package, context=context).effect_states == ()
