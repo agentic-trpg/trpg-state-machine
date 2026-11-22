@@ -191,15 +191,34 @@ class WorldMagic:
             return False
         rays = ((source, (parse_cell(center),)), (center, tuple(map(parse_cell, targets))))
         corridor = _corridor_cells(rays)
-        blocked = self._opaque_cells(sid, scene_id, package, grid, corridor, None)
-        blocked = blocked - {source}
-        return not blocked or (
-            center not in blocked
-            and not blocked.intersection(targets)
-            and healing_staff_area_reaches(
-                topology.with_blocked(blocked), spell, source, center, targets
-            )
+        cover_cells = self._total_cover_cells(sid, scene_id, package, corridor)
+        for cell in sorted(cover_cells):
+            topology = topology.with_cover_at(cell, "total")
+        return not cover_cells or healing_staff_area_reaches(
+            topology, spell, source, center, targets
         )
+
+    def _total_cover_cells(self, sid, scene_id, package, corridor):
+        """Project only the affected object footprints and local shared-door thresholds."""
+        passages = passage_index(self.h.store, sid)
+        door_cells = {}
+        for cell in corridor:
+            for door in passages.doors_by_threshold.get((scene_id, cell), ()):
+                door_cells.setdefault(door, set()).add(cell)
+        _, occupants = self.h.grid.reader.region_occupants(sid, scene_id, corridor)
+        objects = {oid for oid, _, _ in occupants if oid not in passages.by_door}
+        spatial = self.h.objects.spatial
+        total = set()
+        for oid in sorted(objects | door_cells.keys()):
+            cover = spatial.project(sid, oid, package).cover_cells
+            if oid in door_cells:
+                if any(degree == "total" for _, degree in cover):
+                    total.update(door_cells[oid])
+            else:
+                total.update(
+                    cell for cell, degree in cover if degree == "total" and cell in corridor
+                )
+        return total
 
     @staticmethod
     def _ending_facts(record):

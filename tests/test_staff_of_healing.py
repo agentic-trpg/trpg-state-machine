@@ -1,15 +1,18 @@
 """Exercise the bound SRD Staff of Healing through public exploration commands."""
 
+from copy import deepcopy
 from dataclasses import asdict, replace
 from random import Random
 
 import pytest
 from dnd5e_engine.evaluation_contracts import ExplorationItemAreaTarget
 from dnd5e_srd_data import BundledAssetLoader, MemoryAssetLoader
-from item_support import NPC, command, submit
+from item_support import NPC, A, command, submit
 from test_cure_wounds import cure_world
 from test_exploration_charged_item import cast_command
+from test_object_spatial_service import oriented_data
 from test_scoped_runtime_validation import measure
+from test_world_spatial import OBSTACLE
 
 from trpg_state_machine import (
     AdvanceSessionTime,
@@ -24,7 +27,9 @@ CURE, MASS = "mkIIFw98V1d8uABu", "tfGfEtth3JKF7BXQ"
 SLUG = "staff-of-healing"
 
 
-def staff_world(tmp_path, context, *, charges=10, seed=0, wide_map=False, far_objects=0):
+def staff_world(
+    tmp_path, context, *, charges=10, seed=0, wide_map=False, far_objects=0, obstacle=None
+):
     """Load the unmodified bundled asset into one canonical Cleric 1 session."""
 
     def configure(data, loader):
@@ -53,6 +58,22 @@ def staff_world(tmp_path, context, *, charges=10, seed=0, wide_map=False, far_ob
                 )
                 for index in range(far_objects)
             )
+        if obstacle is not None:
+            opacity, cover = obstacle
+            reference = oriented_data(anchor="9,0", footprint=[[0, 0]], blocking=False)
+            placement = next(
+                obj for obj in reference["scenes"][0]["objects"] if obj["object_id"] == OBSTACLE
+            )
+            definition = deepcopy(
+                next(obj for obj in reference["world_objects"] if obj["object_id"] == OBSTACLE)
+            )
+            data["manifest"]["schema_version"] = reference["manifest"]["schema_version"]
+            data["lockable_doors"] = []
+            data["scenes"][0]["objects"].append(deepcopy(placement))
+            capability = definition["capabilities"][0]
+            capability["open_properties"] = {"cover": cover, "light_opaque": opacity}
+            capability["closed_properties"] = {"cover": cover, "light_opaque": opacity}
+            data.setdefault("world_objects", []).append(definition)
         for instance, balance in ((STAFF, charges), (SPARE, 10)):
             data["scenes"][0]["objects"].append(
                 dict(
@@ -375,3 +396,41 @@ def test_mass_cast_reads_local_rays_and_actors(tmp_path, context):
             assert receipt.status == "committed", receipt
             observed.append((counts["sql_selects"], counts["sql_rows"], counts["returned_bytes"]))
     assert observed[0] == observed[1], observed
+
+
+@pytest.mark.parametrize(
+    ("opacity", "cover", "expected"),
+    [
+        (False, "total", "rejected"),
+        (True, "total", "rejected"),
+        (False, "three_quarters", "committed"),
+        (True, "none", "committed"),
+    ],
+)
+def test_mass_healing_obeys_total_cover_independently_of_light(
+    tmp_path, context, opacity, cover, expected
+):
+    sm, sid, package, _, _ = staff_world(
+        tmp_path, context, wide_map=True, obstacle=(opacity, cover)
+    )
+    with sm:
+        held = submit(sm, sid, package, context, EquipWeapon(STAFF), "hold")
+        assert held.status == "committed", held
+        assert sm._world.grid.read_scene(sid, A, package).cover_between("6,0", "12,0") == cover
+        before = sm.read_rng_context(sid, package, context=context)
+        cast = use(
+            sm,
+            sid,
+            package,
+            context,
+            "area-cover",
+            activity=MASS,
+            level=5,
+            area=ExplorationItemAreaTarget(center_cell="6,0", target_ids=(NPC,)),
+        )
+        result = sm.submit_command(cast, package, context=context)
+        assert result.status == expected, result
+        if expected == "rejected":
+            assert result.error_code == "target_invalid"
+            assert sm.read_rng_context(sid, package, context=context) == before
+            assert inventory(sm, sid, package, context)[STAFF].charges_remaining_per_unit == 10
