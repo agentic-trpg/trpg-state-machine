@@ -1,5 +1,6 @@
 """Public JSON condition choice for an actual bound Lesser Restoration cast."""
 
+import json
 from dataclasses import replace
 
 import pytest
@@ -61,7 +62,7 @@ def test_public_condition_choice_preserves_other_conditions_and_retry(timed_spel
                 "selected_condition": "poisoned",
             },
         }
-        selected = world_command_from_data(raw)
+        selected = world_command_from_data(json.loads(json.dumps(raw)))
         before_rng = sm.read_rng_context(sid, package, context=context)
         before = sm.read_noncombat_snapshot(sid, package, context=context)
         before_ids = {
@@ -104,6 +105,59 @@ def test_public_condition_choice_preserves_other_conditions_and_retry(timed_spel
         assert [(c.condition, c.source_entity_id) for c in actor.conditions] == [
             ("deafened", "implied:noise")
         ]
+
+
+def test_selected_condition_and_spell_cast_ending_commit_together(timed_spell_world):
+    def configure(data):
+        data["rule_bindings"].pop("combat_foundation")
+        snapshot = data["rule_bindings"]["noncombat_foundation"]["snapshot"]
+        snapshot["character_states"][0]["conditions"] = [_condition("poisoned", "implied:toxin")]
+
+    session = timed_spell_world(
+        additional_spells=("lesser-restoration", "invisibility"),
+        caster_class="bard",
+        caster_subclass="lore",
+        configure=configure,
+    )
+    sm, sid, package, context = session
+    with sm:
+        hidden = cast_command(
+            session, spell_id="invisibility", slot_level=2, source_id="class:bard"
+        )
+        assert sm.submit_command(hidden, package, context=context).status == "committed"
+        before = sm.read_noncombat_snapshot(sid, package, context=context)
+        assert any(effect.id == "effect:invisibility" for effect in before.effect_states)
+        restore = cast_command(
+            session, spell_id="lesser-restoration", slot_level=2, source_id="class:bard"
+        )
+        raw = {
+            "session_id": sid,
+            "command_id": restore.command_id,
+            "actor_id": restore.actor_id,
+            "command_type": restore.command_type,
+            "expected_world_version": restore.expected_world_version,
+            "schema_version": restore.schema_version,
+            "payload": {
+                **restore.payload.model_dump(mode="json"),
+                "selected_condition": "poisoned",
+            },
+        }
+        command = world_command_from_data(json.loads(json.dumps(raw)))
+        receipt = sm.submit_command(command, package, context=context)
+        assert receipt.status == "committed", receipt
+        after = sm.read_noncombat_snapshot(sid, package, context=context)
+        assert not after.effect_states
+        assert not next(
+            a for a in after.character_states if a.entity_id == restore.actor_id
+        ).conditions
+        (ending,) = [
+            event
+            for event in sm.read_events(sid, package, context=context)
+            if event.event_seq in receipt.event_seqs and event.event_type == "effect.spell_ended"
+        ]
+        assert ending.payload["cast_command_id"] == hidden.command_id
+        assert ending.payload["reason"] == "spell_cast"
+        assert sm.submit_command(command, package, context=context) == receipt
 
 
 def test_invalid_or_stale_condition_choice_has_no_payment(timed_spell_world):

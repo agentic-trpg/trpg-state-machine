@@ -19,7 +19,7 @@ from dnd5e_engine.evaluation_contracts import (
     ItemUsePayload,
     RestPayload,
 )
-from dnd5e_engine.evaluation_delta import TurnUpdate
+from dnd5e_engine.evaluation_delta import ConditionsUpdate, TurnUpdate
 from dnd5e_engine.evaluation_environmental_contracts import (
     EnvironmentalCreatureTarget,
     EnvironmentalMagicEffectTarget,
@@ -885,7 +885,10 @@ class RuleExecution:
                         operations[-len(spell_ends) - 1] if environmental_spell else None
                     )
                     effect_time = self.runtime.time.consumers["effects"]
-                    for ending in spell_ends:
+                    # A native condition edit still refers to the fixed linked
+                    # effects. Adopt that edit before ending any of those effects.
+                    conditions_update = any(type(op) is ConditionsUpdate for op in operations)
+                    for ending in () if conditions_update else spell_ends:
                         self.world.characters.effects.apply_spell_end(command.session_id, ending)
                     spatial_proposal = (
                         spatial_operation.value
@@ -970,6 +973,8 @@ class RuleExecution:
                             if type(operation) is TurnUpdate
                         ),
                     )
+                    for ending in spell_ends if conditions_update else ():
+                        self.world.characters.effects.apply_spell_end(command.session_id, ending)
                     if spatial_proposal is not None:
                         spatial_effect_id, spatial_events = self.world.magic.apply(
                             row, package, command.command_id, spatial_proposal
