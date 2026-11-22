@@ -18,6 +18,7 @@ from dnd5e_engine.evaluation_availability import (
 from dnd5e_engine.evaluation_contracts import (
     CAST_ACTIVITY_SCHEMA_VERSION,
     CHARGED_ITEM_SCHEMA_VERSION,
+    DISPEL_MAGIC_SCHEMA_VERSION,
     ENVIRONMENTAL_SPELL_SCHEMA_VERSION,
     IDENTIFY_ACTIVITY_SCHEMA_VERSION,
     MATERIAL_SPELL_SCHEMA_VERSION,
@@ -39,7 +40,10 @@ from dnd5e_engine.evaluation_contracts import (
     RuleEvaluationResult,
     SpellWillingnessChoice,
 )
-from dnd5e_engine.evaluation_environmental_contracts import EnvironmentalMagicEffectTarget
+from dnd5e_engine.evaluation_environmental_contracts import (
+    EnvironmentalCreatureTarget,
+    EnvironmentalMagicEffectTarget,
+)
 from dnd5e_engine.evaluation_haste import has_haste_effects, haste_speed
 from dnd5e_engine.evaluation_movement import timed_walk_bonuses, walk_speed
 from dnd5e_engine.evaluation_preflight import template_support_failure
@@ -2081,7 +2085,15 @@ class RulesAdapter:
         return None
 
     def _apply_dnd_changes(
-        self, row, changes, *, command_id=None, snapshot=None, turn_starts=(), cast_spell_id=None
+        self,
+        row,
+        changes,
+        *,
+        command_id=None,
+        snapshot=None,
+        turn_starts=(),
+        cast_spell_id=None,
+        cast_slot_level=None,
     ):
         """Adopt verified rules changes through domain interfaces in the shared write
         scope.
@@ -2144,7 +2156,7 @@ class RulesAdapter:
                 self.characters.restore_resource(sid, identity, field, *value)
             elif component == "world_effect" and field == "create":
                 self.world.runtime.time.consumers["effects"].apply_verified(
-                    sid, value, spell_id=cast_spell_id
+                    sid, value, spell_id=cast_spell_id, cast_slot_level=cast_slot_level
                 )
             elif component == "combat_effect":
                 self.characters.effects.apply_combat_creation(sid, value)
@@ -2281,6 +2293,21 @@ class RulesAdapter:
             if type(command.payload) is ExplorationCastActivityPayload
             else MULTI_SPELL_SCHEMA_VERSION
             if type(command.payload) is ExplorationMultiSpellCastPayload
+            else DISPEL_MAGIC_SCHEMA_VERSION
+            if type(command.payload) is ExplorationEnvironmentalSpellCastPayload
+            and (
+                isinstance(command.payload.target, EnvironmentalCreatureTarget)
+                or (
+                    isinstance(command.payload.target, EnvironmentalMagicEffectTarget)
+                    and spell_positions is not None
+                    and spell_positions.target_effect is not None
+                    and (
+                        spell_positions.target_effect.anchor_item_id is not None
+                        or spell_positions.target_effect.spell_id != "darkness"
+                        or spell_positions.target_effect.slot_level > 3
+                    )
+                )
+            )
             else SPATIAL_EFFECT_END_SCHEMA_VERSION
             if type(command.payload) is ExplorationEnvironmentalSpellCastPayload
             and isinstance(command.payload.target, EnvironmentalMagicEffectTarget)

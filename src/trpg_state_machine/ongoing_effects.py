@@ -102,6 +102,7 @@ class OngoingEffects:
                     cast_by=member.get("cast_by"),
                     cast_spell_id=member.get("cast_spell_id"),
                     cast_command_id=member.get("cast_command_id"),
+                    cast_slot_level=member.get("cast_slot_level"),
                 )
 
     def create_casting_focus(self, sid, caster_id, activity_id):
@@ -128,6 +129,7 @@ class OngoingEffects:
         cast_by=None,
         cast_spell_id=None,
         cast_command_id=None,
+        cast_slot_level=None,
     ):
         """Persist one target effect and its links, assigning an ordinal when omitted."""
         self.store.require_write()
@@ -150,8 +152,8 @@ class OngoingEffects:
         self._conn.execute(
             "INSERT INTO ongoing_effects(session_id,target_id,effect_id,origin,ordinal,"
             "payload_json,concentration_id,chain_ordinal,conditions_json,"
-            "lifecycle_json,expires_tick,cast_by,cast_spell_id,cast_command_id) "
-            "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            "lifecycle_json,expires_tick,cast_by,cast_spell_id,cast_command_id,cast_slot_level) "
+            "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
             (
                 sid,
                 target,
@@ -167,10 +169,11 @@ class OngoingEffects:
                 cast_by,
                 cast_spell_id,
                 cast_command_id,
+                cast_slot_level,
             ),
         )
 
-    def add_world_effect(self, sid, proposal, *, expires_tick, spell_id):
+    def add_world_effect(self, sid, proposal, *, expires_tick, spell_id, cast_slot_level=None):
         """Persist an elapsed-time effect and its optional one-member concentration."""
         entry = {
             "effect": proposal.effect.model_dump(mode="json"),
@@ -179,6 +182,7 @@ class OngoingEffects:
             "cast_by": proposal.source_id,
             "cast_spell_id": spell_id,
             "cast_command_id": proposal.command_id,
+            "cast_slot_level": cast_slot_level,
         }
         if proposal.concentration:
             self.create_concentration(
@@ -212,6 +216,7 @@ class OngoingEffects:
             cast_command_id=row["cast_command_id"],
             expires_tick=row["expires_tick"],
             concentration_id=row["concentration_id"],
+            cast_slot_level=row["cast_slot_level"],
         )
 
     def spell_application(self, sid, identity):
@@ -236,8 +241,17 @@ class OngoingEffects:
             self._spell_application(row) for row in sorted(rows, key=lambda r: r["ordinal"])
         )
 
+    @scoped_read
+    def all_target_spell_applications(self, sid, target_id):
+        """Read cast applications on one selected creature in owner order."""
+        return tuple(
+            application
+            for row in sorted(self._target_rows(sid, target_id), key=lambda r: r["ordinal"])
+            if (application := self._spell_application(row)) is not None
+        )
+
     def apply_spell_end(self, sid, proposal):
-        """Recheck the exact application before deleting its row and empty group."""
+        """Recheck one application before removing it and preserving group siblings."""
         self.store.require_write()
         expected = proposal.expected
         if self.spell_application(sid, expected.identity) != expected:
@@ -249,7 +263,13 @@ class OngoingEffects:
                 or group.concentration_id != expected.concentration_id
                 or group.effect_id != expected.effect.id
                 or group.rounds_remaining
-                or group.actor_members != (expected.identity,)
+                # Dispel targets one creature's member; another target in the
+                # same cast keeps concentrating until its own member ends.
+                or (
+                    expected.identity not in group.actor_members
+                    if proposal.reason == "dispelled"
+                    else group.actor_members != (expected.identity,)
+                )
                 or group.spatial_member is not None
                 or group.casting_activity_id is not None
             ):

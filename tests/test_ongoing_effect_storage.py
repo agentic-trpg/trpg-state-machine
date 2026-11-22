@@ -3,6 +3,7 @@
 import sqlite3
 
 import pytest
+from dnd5e_engine.evaluation_spell_termination import WorldSpellEnd
 from dnd_support import create, initialize, loader, make_package
 
 from trpg_state_machine import StateMachine, StateMachineError
@@ -59,6 +60,65 @@ def _clock(target, effect_id):
         "last_repeat_turn_serial": None,
         "remaining_one_use_modifiers": [],
     }
+
+
+def test_exact_dispel_member_preserves_concentration_sibling_and_condition(
+    tmp_path, package_data, context
+):
+    """The Effects owner removes one verified member without deleting its group sibling."""
+    assets = loader()
+    package = make_package(package_data, assets)
+    with StateMachine(tmp_path / "dispel-member.db", dnd_loader=assets) as sm:
+        sid = create(sm, package, context)
+        initialize(sm, sid, package, context)
+        caster, target = (
+            actor.entity_id
+            for actor in sm.read_combat_snapshot(sid, package, context=context).character_states[:2]
+        )
+        owner = sm._characters.effects
+        with sm._store.transaction(write=True):
+            owner.create_concentration(
+                sid,
+                "group.dispel",
+                caster,
+                "effect.one",
+                0,
+                (
+                    {
+                        "effect": _effect(target, "effect.one"),
+                        "expires_tick": 600,
+                        "conditions": ["restrained"],
+                        "cast_by": caster,
+                        "cast_spell_id": "longstrider",
+                        "cast_command_id": "cast:one",
+                        "cast_slot_level": 1,
+                    },
+                    {
+                        "effect": _effect(caster, "effect.two"),
+                        "expires_tick": 600,
+                        "conditions": ["restrained"],
+                        "cast_by": caster,
+                        "cast_spell_id": "longstrider",
+                        "cast_command_id": "cast:one",
+                        "cast_slot_level": 1,
+                    },
+                ),
+            )
+            owner.add_effect(
+                sid,
+                {**_effect(target, "effect.one"), "origin": "independent"},
+                conditions=["restrained"],
+            )
+            selected = owner.spell_application(sid, (target, "effect.one", "test"))
+            owner.apply_spell_end(sid, WorldSpellEnd(expected=selected, reason="dispelled"))
+        assert owner.spell_application(sid, (target, "effect.one", "test")) is None
+        assert owner.concentration_group(sid, caster).actor_members == (
+            (caster, "effect.two", "test"),
+        )
+        assert any(
+            effect.origin == "independent"
+            for effect in sm.read_combat_snapshot(sid, package, context=context).effect_states
+        )
 
 
 def test_multi_target_effect_ids_survive_member_removal_reopen_and_group_removal(

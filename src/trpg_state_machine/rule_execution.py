@@ -21,6 +21,7 @@ from dnd5e_engine.evaluation_contracts import (
 )
 from dnd5e_engine.evaluation_delta import TurnUpdate
 from dnd5e_engine.evaluation_environmental_contracts import (
+    EnvironmentalCreatureTarget,
     EnvironmentalMagicEffectTarget,
     WorldEnvironmentalEffectCreate,
     WorldEnvironmentalEffectEnd,
@@ -491,12 +492,19 @@ class RuleExecution:
                     row, command, package
                 )
             elif environmental_spell and prepare_error is None:
-                spell_actor_ids = (command.actor_id,)
+                spell_actor_ids = (
+                    tuple(dict.fromkeys((command.actor_id, command.payload.target.target_id)))
+                    if isinstance(command.payload.target, EnvironmentalCreatureTarget)
+                    else (command.actor_id,)
+                )
                 spell_positions = self.world.magic.cast_positions(row, package, command)
                 if spell_positions is None:
                     prepare_error = (
                         "target_invalid"
-                        if isinstance(command.payload.target, EnvironmentalMagicEffectTarget)
+                        if isinstance(
+                            command.payload.target,
+                            (EnvironmentalMagicEffectTarget, EnvironmentalCreatureTarget),
+                        )
                         else "spell.target"
                     )
             elif multi_spell and prepare_error is None:
@@ -927,6 +935,16 @@ class RuleExecution:
                         command_id=command.command_id,
                         snapshot=request.state_snapshot,
                         cast_spell_id=rule_command.payload.spell_id if exploration_spell else None,
+                        # A finished Ritual paid no slot but retains its bound
+                        # spell's base level for later Dispel eligibility.
+                        cast_slot_level=(
+                            rule_command.payload.slot_level
+                            if exploration_spell
+                            and getattr(rule_command.payload, "slot_level", None) is not None
+                            else self.rules.loader.get_spell(rule_command.payload.spell_id).level
+                            if casting_finish
+                            else None
+                        ),
                         turn_starts=tuple(
                             request.state_snapshot.combat_state.initiative_ids[
                                 operation.value.current_turn_index

@@ -8,15 +8,18 @@ from dnd5e_engine.environment import EnvironmentalSource, environmental_dispels
 from dnd5e_engine.evaluation_charged_item import healing_staff_area_reaches
 from dnd5e_engine.evaluation_contracts import EnvironmentalItemFacts, ExplorationSpellPositions
 from dnd5e_engine.evaluation_environmental_contracts import (
+    EnvironmentalCreatureTarget,
     EnvironmentalMagicEffectFacts,
     EnvironmentalMagicEffectTarget,
 )
 from dnd5e_engine.spatial import parse_cell
+from dnd5e_engine.spellcasting import spell_range_ft
 from dnd5e_srd_data.schema.environment import EnvironmentalSpec
 
 from .errors import StateMachineError
 from .grid import cell_in_bounds
 from .instance_data import passage_index
+from .perception import visible_actor_in_range
 from .runtime_instances import instance_read
 from .scoped_reads import scoped_read
 
@@ -112,7 +115,28 @@ class WorldMagic:
             return None
         target = command.payload.target
         item_facts, effect_facts = None, None
-        if isinstance(target, EnvironmentalMagicEffectTarget):
+        applications = ()
+        if isinstance(target, EnvironmentalCreatureTarget):
+            placement = facts.carrier_position(sid, target.target_id)
+            if placement is None or placement[0] != scene or placement[1] is None:
+                return None
+            cell = placement[1]
+            spell = self.h.loader.get_spell(command.payload.spell_id)
+            reach = spell_range_ft(spell) if spell else None
+            if reach is None or not visible_actor_in_range(
+                self.h,
+                sid,
+                command.actor_id,
+                target.target_id,
+                cell,
+                package,
+                range_ft=reach,
+            ):
+                return None
+            applications = self.h.characters.effects.all_target_spell_applications(
+                sid, target.target_id
+            )
+        elif isinstance(target, EnvironmentalMagicEffectTarget):
             try:
                 self.h._public_scope(sid, command.actor_id, package)
             except StateMachineError as exc:
@@ -120,9 +144,12 @@ class WorldMagic:
                     return None
                 raise
             record = self.owner.get(sid, target.effect_id)
-            if record is None or record["fixed_scene_id"] != scene:
+            if record is None:
                 return None
-            effect_facts = self._ending_facts(record)
+            anchor_scene, anchor_cell, transmission = self._anchor(sid, record)
+            if anchor_scene != scene or anchor_cell is None or transmission == "unknown":
+                return None
+            effect_facts = self._ending_facts(record, current_cell=anchor_cell)
             cell = effect_facts.cell_id
         elif target.kind == "point":
             cell = target.cell_id
@@ -177,6 +204,10 @@ class WorldMagic:
             target_cell=cell,
             target_item=item_facts,
             target_effect=effect_facts,
+            target_applications=applications,
+            visible_target_id=target.target_id
+            if isinstance(target, EnvironmentalCreatureTarget)
+            else None,
         )
 
     def healing_sphere_reaches(self, sid, scene_id, package, spell, source, center, targets):
@@ -221,17 +252,18 @@ class WorldMagic:
         return total
 
     @staticmethod
-    def _ending_facts(record):
-        """Project the exact fixed-point application and provenance for a rules decision."""
+    def _ending_facts(record, *, current_cell=None):
+        """Project exact spatial provenance with its current World anchor cell."""
         return EnvironmentalMagicEffectFacts(
             effect_id=record["effect_id"],
             caster_id=record["caster_id"],
             spell_source_id=record["spell_source_id"],
             spell_id=record["spell_id"],
             slot_level=record["slot_level"],
-            cell_id=record["fixed_cell"],
+            cell_id=current_cell or record["fixed_cell"],
             expires_tick=record["expires_tick"],
             concentration_id=record["concentration_id"],
+            anchor_item_id=record["object_id"],
         )
 
     def _anchor(self, sid, record):
@@ -462,8 +494,8 @@ class WorldMagic:
         record = self.owner.get(sid, expected.effect_id)
         if (
             record is None
-            or record["fixed_scene_id"] != row["current_scene_id"]
-            or self._ending_facts(record) != expected
+            or self._anchor(sid, record)[0] != row["current_scene_id"]
+            or self._ending_facts(record, current_cell=self._anchor(sid, record)[1]) != expected
         ):
             raise StateMachineError("version_conflict", "Spatial spell selection changed")
         return self.end_event(sid, package, record, proposal.reason)

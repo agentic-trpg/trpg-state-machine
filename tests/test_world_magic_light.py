@@ -12,6 +12,7 @@ from test_mechanism_effects import FixturePort, install, rule_action, rule_data,
 from test_ongoing_effect_storage import _effect
 from test_scoped_runtime_validation import measure
 from test_session_time_coordination import submit as submit_time
+from test_timed_spell_cast import cast_command
 from test_timed_spell_cast import timed_spell_world as timed_spell_world
 from test_world_mechanisms import LEVER
 
@@ -39,7 +40,16 @@ def magic_world(timed_spell_world, request):
     return _magic_world(timed_spell_world, opaque_case=getattr(request, "param", False))
 
 
-def _magic_world(timed_spell_world, *, opaque_case=False, growth=0, additional_spells=()):
+def _magic_world(
+    timed_spell_world,
+    *,
+    opaque_case=False,
+    growth=0,
+    additional_spells=(),
+    truesight=False,
+    high_slot=False,
+    seed=0,
+):
     """Make a fixed spatial cast scene with optional unrelated placed objects."""
 
     def configure(data):
@@ -121,14 +131,39 @@ def _magic_world(timed_spell_world, *, opaque_case=False, growth=0, additional_s
             )
         for scene in data["scenes"]:
             scene["grid"]["width"] = 14
+        if high_slot:
+            data["rule_bindings"].pop("combat_foundation", None)
         for foundation in data["rule_bindings"].values():
             foundation["snapshot"]["scene_state"]["grid"]["width"] = 14
+            if high_slot:
+                fixed = foundation["snapshot"]
+                caster = fixed["character_states"][0]
+                caster["character_level"] = 7
+                caster["classes"] = {"wizard": 7}
+                caster["spell_slots"][4] = 2
+                fixed["resource_state"]["pools"].append(
+                    {
+                        "kind": "spell_slot",
+                        "owner_id": caster["entity_id"],
+                        "pool_id": "spell:4",
+                        "current": 2,
+                        "maximum": 2,
+                        "level": 4,
+                    }
+                )
+            if truesight:
+                foundation["snapshot"]["character_states"][0]["senses"]["truesight"] = 60
             for scene in foundation.get("additional_scenes", ()):
                 scene["grid"]["width"] = 14
 
     return timed_spell_world(
         additional_spells=("light", "darkness", "dispel-magic", *additional_spells),
-        database=f"magic-{growth}.sqlite" if growth else "timed-spell.sqlite",
+        database=f"magic-high-{seed}.sqlite"
+        if high_slot
+        else f"magic-{growth}.sqlite"
+        if growth
+        else "timed-spell.sqlite",
+        seed=seed,
         configure=configure,
     )
 
@@ -302,7 +337,7 @@ def test_public_dispel_ends_the_observed_darkness_and_keeps_unrelated_light(magi
         assert ended[0].payload["reason"] == "dispelled"
         assert ended[0].source_command_id == command.command_id
 
-        for absent in (effect_id, "spatial:unknown", "spatial:light"):
+        for absent in (effect_id, "spatial:unknown"):
             _, refused = cast(
                 magic_world,
                 f"dispel:{absent}",
@@ -315,6 +350,203 @@ def test_public_dispel_ends_the_observed_darkness_and_keeps_unrelated_light(magi
             sm.read_noncombat_snapshot(sid, package, context=context).resource_state
             == current.resource_state
         )
+
+        _, light_end = cast(
+            magic_world,
+            "dispel:light",
+            "dispel-magic",
+            3,
+            {"kind": "effect", "effect_id": "spatial:light"},
+        )
+        assert light_end.status == "committed", light_end
+        assert sources(magic_world) == ()
+
+
+def test_public_dispel_follows_the_selected_moving_darkness_item(timed_spell_world):
+    """End the exact object spell after its unattended anchor becomes carried."""
+    magic_world = _magic_world(timed_spell_world, opaque_case=True, truesight=True)
+    sm, sid, package, context = magic_world
+    with sm:
+        _, dark = cast(magic_world, "item-dark", "darkness", 2, {"kind": "item", "item_id": DAGGER})
+        assert dark.status == "committed", dark
+        assert (
+            submit_world(
+                sm, sid, package, context, StepActor(A, "0,0", "0,1"), "approach-dark-anchor"
+            ).status
+            == "committed"
+        )
+        taken = submit_world(
+            sm, sid, package, context, PickupItem(DAGGER, A, "0,1"), "take-dark-anchor"
+        )
+        assert taken.status == "committed", taken
+        moved = submit_world(
+            sm, sid, package, context, StepActor(A, "0,1", "1,1"), "move-dark-anchor"
+        )
+        assert moved.status == "committed", moved
+        assert sources(magic_world)[0].cell == "1,1"
+        _, ended = cast(
+            magic_world,
+            "dispel:item-dark",
+            "dispel-magic",
+            3,
+            {"kind": "effect", "effect_id": "spatial:item-dark"},
+        )
+        assert ended.status == "committed", ended
+        assert sources(magic_world) == ()
+
+
+def test_public_three_ring_fixed_darkness_keeps_legacy_auto_end(magic_world):
+    """Preserve the previously supported exact fixed-point level-three path."""
+    sm, sid, package, context = magic_world
+    with sm:
+        _, dark = cast(
+            magic_world, "dark-three", "darkness", 3, {"kind": "point", "cell_id": "5,0"}
+        )
+        assert dark.status == "committed", dark
+        before = sm.read_rng_context(sid, package, context=context)
+        _, ended = cast(
+            magic_world,
+            "dispel:dark-three",
+            "dispel-magic",
+            3,
+            {"kind": "effect", "effect_id": "spatial:dark-three"},
+        )
+        assert ended.status == "committed", ended
+        assert sources(magic_world) == ()
+        assert sm.read_rng_context(sid, package, context=context) == before
+
+
+def test_public_creature_dispel_ends_only_selected_actors_spell_applications(timed_spell_world):
+    """One paid cast removes independent Longstrider identities on the visible NPC."""
+    session = _magic_world(timed_spell_world)
+    sm, sid, package, context = session
+    with sm:
+        for name, target in (("npc-one", NPC), ("npc-two", NPC), ("self", None)):
+            command = cast_command(session, target_id=target, command_id=name)
+            receipt = sm.submit_command(command, package, context=context)
+            assert receipt.status == "committed", receipt
+        before = sm.read_noncombat_snapshot(sid, package, context=context)
+        npc_effects = [effect for effect in before.effect_states if effect.target_id == NPC]
+        assert len(npc_effects) == 2
+        _, dispelled = cast(
+            session, "dispel:npc", "dispel-magic", 3, {"kind": "creature", "target_id": NPC}
+        )
+        assert dispelled.status == "committed", dispelled
+        after = sm.read_noncombat_snapshot(sid, package, context=context)
+        assert not any(effect.target_id == NPC for effect in after.effect_states)
+        assert any(
+            effect.target_id == sm.read_session(sid, package, context=context).pc_actor_id
+            for effect in after.effect_states
+        )
+
+
+def test_public_creature_dispel_uses_two_distinct_canonical_spell_profiles(timed_spell_world):
+    """A druid ends Longstrider and Barkskin by typed application facts."""
+
+    def configure(data):
+        data["rule_bindings"].pop("combat_foundation")
+
+    session = timed_spell_world(
+        database="druid-dispel.sqlite",
+        caster_class="druid",
+        caster_subclass="land",
+        additional_spells=("barkskin", "dispel-magic"),
+        configure=configure,
+    )
+    sm, sid, package, context = session
+    with sm:
+        caster = sm.read_session(sid, package, context=context).pc_actor_id
+        for spell_id, level in (("longstrider", 1), ("barkskin", 2)):
+            command = cast_command(
+                session,
+                spell_id=spell_id,
+                source_id="class:druid",
+                target_id=caster,
+                slot_level=level,
+                command_id=f"cast:{spell_id}",
+            )
+            receipt = sm.submit_command(command, package, context=context)
+            assert receipt.status == "committed", receipt
+        assert {
+            effect.id
+            for effect in sm.read_noncombat_snapshot(sid, package, context=context).effect_states
+        } == {"effect:longstrider", "effect:bark-like_skin"}
+        state = sm.read_session(sid, package, context=context)
+        command = world_command_from_data(
+            {
+                "schema_version": "sm-command/1",
+                "session_id": sid,
+                "command_id": "dispel:two-profiles",
+                "actor_id": caster,
+                "command_type": "world.cast_spell",
+                "expected_world_version": state.world_version,
+                "payload": {
+                    "kind": "world.cast_spell",
+                    "spell_id": "dispel-magic",
+                    "spell_source_id": "class:druid",
+                    "slot_level": 3,
+                    "target": {"kind": "creature", "target_id": caster},
+                },
+            }
+        )
+        receipt = sm.submit_command(command, package, context=context)
+        assert receipt.status == "committed", receipt
+        assert sm.read_noncombat_snapshot(sid, package, context=context).effect_states == ()
+
+
+def test_public_high_ring_dispel_pays_on_failure_and_auto_ends_with_adequate_slot(
+    timed_spell_world,
+):
+    """A real level-four Darkness tests DC 14 at slot three and skips RNG at slot four."""
+    outcomes = set()
+    for seed in range(8):
+        session = _magic_world(timed_spell_world, high_slot=True, seed=seed)
+        sm, sid, package, context = session
+        with sm:
+            _, dark = cast(session, "dark-high", "darkness", 4, {"kind": "point", "cell_id": "5,0"})
+            assert dark.status == "committed", dark
+            before = sm.read_rng_context(sid, package, context=context)
+            old_slot = next(
+                pool.current
+                for pool in sm.read_noncombat_snapshot(
+                    sid, package, context=context
+                ).resource_state.pools
+                if pool.pool_id == "spell:3"
+            )
+            _, dispelled = cast(
+                session,
+                "dispel:high",
+                "dispel-magic",
+                3,
+                {"kind": "effect", "effect_id": "spatial:dark-high"},
+            )
+            assert dispelled.status == "committed", dispelled
+            assert sm.read_rng_context(sid, package, context=context) != before
+            new_slot = next(
+                pool.current
+                for pool in sm.read_noncombat_snapshot(
+                    sid, package, context=context
+                ).resource_state.pools
+                if pool.pool_id == "spell:3"
+            )
+            assert new_slot == old_slot - 1
+            survived = bool(sources(session))
+            outcomes.add(survived)
+            if survived:
+                auto_before = sm.read_rng_context(sid, package, context=context)
+                _, auto = cast(
+                    session,
+                    "dispel:auto",
+                    "dispel-magic",
+                    4,
+                    {"kind": "effect", "effect_id": "spatial:dark-high"},
+                )
+                assert auto.status == "committed", auto
+                assert sources(session) == ()
+                assert sm.read_rng_context(sid, package, context=context) == auto_before
+        if outcomes == {True, False}:
+            break
+    assert outcomes == {True, False}
 
 
 def test_dispel_receipt_failure_restores_spatial_effect_concentration_and_slot(magic_world):
@@ -377,6 +609,29 @@ def test_public_dispel_scope_fixed_when_unrelated_objects_increase(timed_spell_w
                 "dispel-magic",
                 3,
                 {"kind": "effect", "effect_id": "spatial:dark"},
+            )
+            with measure(sm) as (counts, _):
+                result = sm.submit_command(command, package, context=context)
+            assert result.status == "committed", result
+            observed.append(tuple(counts[k] for k in ("sql_selects", "sql_rows", "returned_bytes")))
+    assert observed[0] == observed[1]
+
+
+def test_public_creature_dispel_reads_fixed_target_when_unrelated_objects_grow(timed_spell_world):
+    """Count the complete selected-creature path with its effect scope fixed."""
+    observed = []
+    for growth in (0, 25):
+        session = _magic_world(timed_spell_world, growth=growth)
+        sm, sid, package, context = session
+        with sm:
+            applied = cast_command(session, target_id=NPC, command_id="longstrider:npc")
+            assert sm.submit_command(applied, package, context=context).status == "committed"
+            command = prepare_cast(
+                session,
+                "dispel:npc",
+                "dispel-magic",
+                3,
+                {"kind": "creature", "target_id": NPC},
             )
             with measure(sm) as (counts, _):
                 result = sm.submit_command(command, package, context=context)
