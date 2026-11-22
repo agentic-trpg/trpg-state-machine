@@ -68,6 +68,10 @@ RE `/47` 已接通三环 Hold Person 在同一专注组内选择两个目标。
 参见 [Hold Person 双目标](SESSION_MANAGEMENT_PROGRESS.md#2026-11-19-战斗-hold-person-双目标)。
 
 探索施法可通过 `world.cast_spell` 采用 RE 的法术位扣减和定时效果。
+次级复原术的施法者可通过 `StateMachine.query_spell_condition_choices` 查询本次
+合法触及目标的独立条件选项。选项按角色条件记录顺序只返回名称与不透明 ID，
+不含来源；命令用 `selected_condition_id` 和查询的世界版本精确解除一条记录。
+RE 按固定输入和绑定法术核对解除，SM 按目标身份核对并采用对应记录、法术位和回执。
 Effects 和 SessionTime 共同保存及消费到期时间。`drop_concentration`
 通过已有战斗命令入口解除受支持的专注图。详见
 [Session Management 进度](SESSION_MANAGEMENT_PROGRESS.md#2026-11-18-effect-03-定时施法和主动结束专注)。

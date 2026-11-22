@@ -1,15 +1,23 @@
 """Public JSON condition choice for an actual bound Lesser Restoration cast."""
 
+import asyncio
 import json
-from dataclasses import replace
+from dataclasses import asdict, replace
 
 import pytest
+from dnd5e_engine.evaluation_contracts import RuleEvaluationRequest
 from dnd5e_engine.evaluation_state import ConditionRecord
+from item_support import NPC
 from spatial_support import submit as submit_world
 from test_timed_spell_cast import cast_command
 from test_timed_spell_cast import timed_spell_world as timed_spell_world
 
-from trpg_state_machine import AdvanceSessionTime, StateMachine, world_command_from_data
+from trpg_state_machine import (
+    AdvanceSessionTime,
+    StateMachine,
+    StateMachineError,
+    world_command_from_data,
+)
 
 
 def _condition(name, source):
@@ -107,7 +115,10 @@ def test_public_condition_choice_preserves_other_conditions_and_retry(timed_spel
         ]
 
 
-def test_selected_condition_and_spell_cast_ending_commit_together(timed_spell_world):
+@pytest.mark.parametrize("exact", [False, True])
+def test_selected_condition_and_spell_cast_ending_commit_together(timed_spell_world, exact):
+    """Both condition selectors compose with the authorized end-of-spell delta."""
+
     def configure(data):
         data["rule_bindings"].pop("combat_foundation")
         snapshot = data["rule_bindings"]["noncombat_foundation"]["snapshot"]
@@ -130,6 +141,13 @@ def test_selected_condition_and_spell_cast_ending_commit_together(timed_spell_wo
         restore = cast_command(
             session, spell_id="lesser-restoration", slot_level=2, source_id="class:bard"
         )
+        selector = {"selected_condition": "poisoned"}
+        if exact:
+            choices = asyncio.run(
+                sm.query_spell_condition_choices(restore, package, context=context)
+            )
+            (option,) = choices.options
+            selector = {"selected_condition_id": option.condition_id}
         raw = {
             "session_id": sid,
             "command_id": restore.command_id,
@@ -139,7 +157,7 @@ def test_selected_condition_and_spell_cast_ending_commit_together(timed_spell_wo
             "schema_version": restore.schema_version,
             "payload": {
                 **restore.payload.model_dump(mode="json"),
-                "selected_condition": "poisoned",
+                **selector,
             },
         }
         command = world_command_from_data(json.loads(json.dumps(raw)))
@@ -298,3 +316,173 @@ def test_condition_write_failure_rolls_back_payment_and_receipt(timed_spell_worl
         assert sm.read_events(sid, package, context=context) == before_events
         assert sm.get_command_receipt(sid, command.command_id, package, context=context) is None
         assert sm.submit_command(command, package, context=context).status == "committed"
+
+
+@pytest.mark.parametrize("second_origin", ["implied:toxin", "implied:venom"])
+def test_caster_selects_exact_other_actor_condition(
+    timed_spell_world, tmp_path, monkeypatch, second_origin
+):
+    """A public cast removes the specified row even when its neighbor has equal facts."""
+    poisoned = _condition("poisoned", "implied:toxin")
+    other = _condition("poisoned", second_origin)
+    deafened = _condition("deafened", "implied:noise")
+    stunned = _condition("stunned", "implied:stun")
+
+    def configure(data):
+        data["rule_bindings"].pop("combat_foundation")
+        pc, npc = data["rule_bindings"]["noncombat_foundation"]["snapshot"]["character_states"]
+        pc["conditions"] = [poisoned]
+        npc["conditions"] = [poisoned, other, deafened, stunned]
+
+    session = timed_spell_world(
+        additional_spells=("lesser-restoration",),
+        caster_class="cleric",
+        caster_subclass="life",
+        configure=configure,
+        database="exact-condition.sqlite",
+    )
+    sm, sid, package, context = session
+    with sm:
+        evaluate = sm._rules._evaluate_dnd
+
+        async def evaluate_wire(request):
+            """Use the real closed RE wire before evaluating the fixed inputs."""
+            return await evaluate(
+                RuleEvaluationRequest.model_validate_json(request.model_dump_json())
+            )
+
+        monkeypatch.setattr(sm._rules, "_evaluate_dnd", evaluate_wire)
+        seed = submit_world(sm, sid, package, context, AdvanceSessionTime(1), "seed-time")
+        assert seed.status == "committed", seed
+        query = cast_command(
+            session,
+            spell_id="lesser-restoration",
+            slot_level=2,
+            source_id="class:cleric",
+            target_id=NPC,
+        )
+        unauthorized = replace(context, principal_id="unrelated-principal")
+        with pytest.raises(StateMachineError) as denied:
+            asyncio.run(sm.query_spell_condition_choices(query, package, context=unauthorized))
+        assert denied.value.code == "unauthorized"
+        before = sm.read_noncombat_snapshot(sid, package, context=context)
+        before_rng = sm.read_rng_context(sid, package, context=context)
+        before_events = sm.read_events(sid, package, context=context)
+        choices = asyncio.run(sm.query_spell_condition_choices(query, package, context=context))
+        assert choices.world_version == before.world_version
+        first, second, remaining = choices.options
+        assert [option.condition for option in choices.options] == [
+            "poisoned",
+            "poisoned",
+            "deafened",
+        ]
+        assert len({option.condition_id for option in choices.options}) == 3
+        assert all(
+            set(asdict(option)) == {"condition_id", "condition"} for option in choices.options
+        )
+        assert (
+            asyncio.run(sm.query_spell_condition_choices(query, package, context=context))
+            == choices
+        )
+        wrong_target = replace(
+            query, payload=query.payload.model_copy(update={"target_id": "missing-creature"})
+        )
+        assert not asyncio.run(
+            sm.query_spell_condition_choices(wrong_target, package, context=context)
+        ).options
+        wrong_slot = replace(query, payload=query.payload.model_copy(update={"slot_level": 3}))
+        assert not asyncio.run(
+            sm.query_spell_condition_choices(wrong_slot, package, context=context)
+        ).options
+        assert sm.read_noncombat_snapshot(sid, package, context=context) == before
+        assert sm.read_events(sid, package, context=context) == before_events
+
+        def exact(command_id, condition_id=first.condition_id, **changes):
+            payload = {
+                **query.payload.model_dump(mode="json"),
+                "selected_condition_id": condition_id,
+            }
+            raw = {
+                "session_id": sid,
+                "command_id": command_id,
+                "actor_id": query.actor_id,
+                "command_type": query.command_type,
+                "expected_world_version": choices.world_version,
+                "schema_version": query.schema_version,
+                "payload": {**payload, **changes},
+            }
+            return world_command_from_data(json.loads(json.dumps(raw)))
+
+        with pytest.raises(StateMachineError) as denied:
+            sm.submit_command(exact("not-authorized"), package, context=unauthorized)
+        assert denied.value.code == "unauthorized"
+        with pytest.raises(StateMachineError) as dual_selector:
+            exact("two-selectors", selected_condition="poisoned")
+        assert dual_selector.value.code == "invalid_command"
+        wrong = sm.submit_command(
+            exact("wrong-target", target_id=query.actor_id), package, context=context
+        )
+        assert (wrong.status, wrong.error_code, wrong.event_seqs) == (
+            "rejected",
+            "spell.condition_choice",
+            (),
+        )
+        stale = sm.submit_command(
+            replace(exact("old-version"), expected_world_version=choices.world_version - 1),
+            package,
+            context=context,
+        )
+        assert (stale.status, stale.error_code, stale.event_seqs) == (
+            "conflict",
+            "version_conflict",
+            (),
+        )
+        assert sm.read_noncombat_snapshot(sid, package, context=context) == before
+        assert sm.read_rng_context(sid, package, context=context) == before_rng
+
+        # Remove the first duplicate. A value-only list rewrite would retain it
+        # and remove the second when the two rows have identical source facts.
+        selected = exact("exact-poison")
+        remove = sm._characters.remove_condition
+
+        def fail_after_delete(sid, actor, condition_id):
+            assert remove(sid, actor, condition_id)
+            raise RuntimeError("injected failure after exact deletion")
+
+        with monkeypatch.context() as patch:
+            patch.setattr(sm._characters, "remove_condition", fail_after_delete)
+            with pytest.raises(RuntimeError, match="injected failure"):
+                sm.submit_command(selected, package, context=context)
+        assert sm.read_noncombat_snapshot(sid, package, context=context) == before
+        assert sm.read_rng_context(sid, package, context=context) == before_rng
+        assert sm.read_events(sid, package, context=context) == before_events
+        assert sm.get_command_receipt(sid, selected.command_id, package, context=context) is None
+
+        receipt = sm.submit_command(selected, package, context=context)
+        assert receipt.status == "committed", receipt
+        after = sm.read_noncombat_snapshot(sid, package, context=context)
+        cured = next(actor for actor in after.character_states if actor.entity_id == NPC)
+        assert [c.model_dump(mode="json") for c in cured.conditions] == [other, deafened, stunned]
+        assert next(p.current for p in after.resource_state.pools if p.pool_id == "spell:2") == (
+            next(p.current for p in before.resource_state.pools if p.pool_id == "spell:2") - 1
+        )
+        assert sm.read_rng_context(sid, package, context=context) == before_rng
+        current = asyncio.run(sm.query_spell_condition_choices(query, package, context=context))
+        assert current.options == (second, remaining)
+        assert current.world_version == after.world_version
+        expired = sm.submit_command(
+            replace(exact("removed-id"), expected_world_version=current.world_version),
+            package,
+            context=context,
+        )
+        assert (expired.status, expired.error_code, expired.event_seqs) == (
+            "rejected",
+            "spell.condition_choice",
+            (),
+        )
+        assert sm.read_noncombat_snapshot(sid, package, context=context) == after
+        loader = sm._characters.loader
+
+    with StateMachine(tmp_path / "exact-condition.sqlite", dnd_loader=loader) as reopened:
+        assert reopened.submit_command(selected, package, context=context) == receipt
+        assert reopened.read_noncombat_snapshot(sid, package, context=context) == after

@@ -30,6 +30,7 @@ from .models import (
     RNGState,
     SceneInstance,
     SessionSnapshot,
+    SpellConditionOptions,
     TrustedContext,
     WorldState,
 )
@@ -538,6 +539,16 @@ class StateMachine(
     async def submit_command_async(self, command, package, *, context):
         """Delegate supported asynchronous rule command submission."""
         return await self._combat.submit_command_async(command, package, context=context)
+
+    async def query_spell_condition_choices(
+        self, command: TypedCommand, package: AdventurePackage, *, context: TrustedContext
+    ) -> SpellConditionOptions:
+        """Return this caster's condition options for the specified exploration cast."""
+        from .rule_execution import RuleExecution
+
+        return await RuleExecution(self._combat).query_spell_condition_choices(
+            command, package, context
+        )
 
     async def _submit_dnd(self, command, package, context, fingerprint):
         """Delegate rules submission coordination to the combat handler."""

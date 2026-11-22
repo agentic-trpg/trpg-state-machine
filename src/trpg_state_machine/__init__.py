@@ -49,7 +49,14 @@ from .environment_models import (
 )
 from .errors import StateMachineError
 from .game_time import AdvanceGameTime
-from .models import CharacterAC, CreateSessionRequest, PlayerSelection, TrustedContext
+from .models import (
+    CharacterAC,
+    CreateSessionRequest,
+    PlayerSelection,
+    SpellConditionOption,
+    SpellConditionOptions,
+    TrustedContext,
+)
 from .navigation_driver import pump_navigation
 from .navigation_models import (
     AdvanceNavigation,
@@ -162,6 +169,8 @@ __all__ = [
     "StartSpellCast",
     "FinishSpellCast",
     "SpellCastActivity",
+    "SpellConditionOption",
+    "SpellConditionOptions",
     "HitDiceSpend",
     "LongRest",
     "ShortRest",

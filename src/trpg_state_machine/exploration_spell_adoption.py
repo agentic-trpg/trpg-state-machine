@@ -10,7 +10,10 @@ from dnd5e_engine.evaluation_aid import (
 from dnd5e_engine.evaluation_beacon import is_reviewed_beacon_effect
 from dnd5e_engine.evaluation_cast_activity import cast_activity_components, casting_activity_seconds
 from dnd5e_engine.evaluation_charged_item import exploration_charged_cast_profile
-from dnd5e_engine.evaluation_condition_choice import condition_choice_profile
+from dnd5e_engine.evaluation_condition_choice import (
+    condition_choice_profile,
+    independent_condition_matches,
+)
 from dnd5e_engine.evaluation_effects import effect_state
 from dnd5e_engine.evaluation_exploration_healing import exploration_healing_activity
 from dnd5e_engine.evaluation_identify import identify_object
@@ -56,13 +59,13 @@ def exploration_spell_changes(request, result, loader):
     spell = loader.get_spell(request.payload.spell_id)
     if spell is not None and (activity := exploration_healing_activity(loader, spell)):
         return _healing_changes(request, result, spell, activity, loader)
-    if request.payload.selected_condition is not None:
+    if request.payload.has_condition_choice:
         return _condition_choice_changes(request, result, spell)
     return _timed_spell_changes(request, result, spell, loader)
 
 
 def _condition_choice_changes(request, result, spell):
-    """Bind one uniquely named independent removal; duplicate sources stay unsupported."""
+    """Bind one exact independent removal and leave the other records in order."""
     profile = condition_choice_profile(spell) if spell is not None else None
     target = next(
         (
@@ -72,19 +75,15 @@ def _condition_choice_changes(request, result, spell):
         ),
         None,
     )
-    choice = request.payload.selected_condition
-    if profile is None or target is None or choice not in profile[1]:
+    if profile is None or target is None:
         raise StateMachineError("invalid_rule_result", "Condition spell definition differs")
-    matches = [
-        i
-        for i, c in enumerate(target.conditions)
-        if c.condition == choice and c.source_effect_id is None
-    ]
+    matches = independent_condition_matches(request, target, profile[1])
     if len(matches) != 1:
         raise StateMachineError(
             "invalid_rule_result", "Selected condition does not have one independent source"
         )
     index = matches[0]
+    selected = target.conditions[index]
     expected = (*target.conditions[:index], *target.conditions[index + 1 :])
     operations = result.state_delta.operations
     if (
@@ -110,13 +109,23 @@ def _condition_choice_changes(request, result, spell):
             activity_id=profile[0].id,
         ),
         spell_event(request.actor_id, spell, request.payload.slot_level),
-        ConditionRemoved(target_id=target.entity_id, condition=choice),
+        ConditionRemoved(target_id=target.entity_id, condition=selected.condition),
     ):
         raise StateMachineError("invalid_rule_result", "Condition choice evidence differs")
-    return (
-        _slot_change(request, operations[0]),
-        ("actor", target.entity_id, "conditions", [c.model_dump(mode="json") for c in expected]),
-    )
+    remaining = [condition.model_dump(mode="json") for condition in expected]
+    payment = _slot_change(request, operations[0])
+    choice = request.independent_condition
+    if choice is not None:
+        return (
+            payment,
+            (
+                "independent_condition",
+                target.entity_id,
+                choice.condition_id,
+                (selected.model_dump(mode="json"), remaining),
+            ),
+        )
+    return payment, ("actor", target.entity_id, "conditions", remaining)
 
 
 def casting_activity_changes(request, result, loader):

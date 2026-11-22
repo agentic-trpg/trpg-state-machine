@@ -106,6 +106,22 @@ class CharacterState:
 
 
 @dataclass(frozen=True, slots=True)
+class SpellConditionOption:
+    """Disclose an eligible condition's name and opaque identity to the caster."""
+
+    condition_id: str
+    condition: str
+
+
+@dataclass(frozen=True, slots=True)
+class SpellConditionOptions:
+    """Carry cast-specific choices from one fixed World version."""
+
+    world_version: int
+    options: tuple[SpellConditionOption, ...] = ()
+
+
+@dataclass(frozen=True, slots=True)
 class CharacterAC:
     """Show stored equipment/stat AC and active scalar effect adjustment."""
 

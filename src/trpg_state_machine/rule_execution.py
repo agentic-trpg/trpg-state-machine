@@ -7,6 +7,7 @@ from dnd5e_engine.evaluation_charged_item import (
     exploration_charged_cast_profile,
     is_healing_staff,
 )
+from dnd5e_engine.evaluation_condition_choice import condition_choice_profile
 from dnd5e_engine.evaluation_contracts import (
     CheckPayload,
     ExplorationCastActivityPayload,
@@ -16,6 +17,7 @@ from dnd5e_engine.evaluation_contracts import (
     ExplorationMultiSpellCastPayload,
     ExplorationSpellCastPayload,
     ExplorationSpellPositions,
+    IndependentConditionSelection,
     ItemUsePayload,
     RestPayload,
 )
@@ -44,6 +46,7 @@ from .combat import process_id
 from .dnd_checks import world_effects_ready
 from .effect_hp_adoption import apply_world_spell_ends
 from .errors import StateMachineError
+from .models import SpellConditionOption, SpellConditionOptions
 from .pending_multi_spell_choices import PendingMultiSpellChoices
 from .pending_spell_choices import PendingSpellChoices
 from .perception import visible_actor_in_range
@@ -132,6 +135,97 @@ class RuleExecution:
             if spell is not None and exploration_healing_requires_sight(spell)
             else None
         )
+
+    def _exploration_error(
+        self, row, command, *, exploration_spell, casting_finish=False, casting_activity=False
+    ):
+        """Require the exploration mode, time boundary and compatible caster activity."""
+        sid = command.session_id
+        if self.world._active_combat(sid):
+            return "unsupported_combat_world_operation"
+        if row["mechanical_schema_version"] != EXPLORATION_RULES_SNAPSHOT_VERSION:
+            return "unsupported_mechanical_version"
+        if exploration_spell and not isinstance(self.world.facts.time_state(sid)[0], TimeBinding):
+            return "unsupported_time_protocol"
+        if self.runtime.time is not None and not casting_finish:
+            progress = self.runtime.time.progress(sid)
+            if progress is not None and progress["status"] != "completed":
+                raise StateMachineError("time_advance_pending", "Finish the saved time work first")
+        if not casting_activity and self.world.spell_casts.active(sid, command.actor_id):
+            return "activity_conflict"
+        return None
+
+    def _independent_condition(self, command):
+        """Resolve an opaque ID inside the selected target's independent conditions."""
+        payload = command.payload
+        index = self.world.characters.condition_index(
+            command.session_id, payload.target_id, payload.selected_condition_id
+        )
+        if index is None:
+            return None
+        return IndependentConditionSelection(
+            target_id=payload.target_id, condition_id=payload.selected_condition_id, index=index
+        )
+
+    async def query_spell_condition_choices(self, command, package, context):
+        """Return only the caster's legal conditions from a fixed read, with no commit."""
+        from .commands import validate_command
+
+        validate_command(command)
+        payload = command.payload
+        if (
+            type(payload) is not ExplorationSpellCastPayload
+            or payload.has_condition_choice
+            or payload.material_instance_id is not None
+        ):
+            raise StateMachineError("invalid_query", "Expected a creature cast without a selection")
+        with self.store.transaction():
+            sid = command.session_id
+            row = self.sessions._session(sid, package, context)
+            self.sessions._authorize_command(row, command.actor_id, payload, context)
+            self.rules._verify_dnd_binding(package, row)
+            empty = SpellConditionOptions(row["world_version"])
+            if self._exploration_error(
+                row, command, exploration_spell=True
+            ) or not world_effects_ready(self.world, row, command):
+                return empty
+            spell = self.rules.loader.get_spell(payload.spell_id)
+            profile = condition_choice_profile(spell) if spell is not None else None
+            error, actors, positions = self._spell_positions(row, command, package)
+            if profile is None or error is not None:
+                return empty
+            options = tuple(
+                (index, SpellConditionOption(condition_id, condition))
+                for index, (condition_id, condition) in enumerate(
+                    self.world.characters.condition_options(sid, payload.target_id)
+                )
+                if condition in profile[1]
+            )
+            if not options:
+                return empty
+            # All options share the same delivery, source and payment admission. One
+            # full stateless proposal proves those checks without publishing its Delta.
+            index, first = options[0]
+            probe = replace(
+                command,
+                payload=payload.model_copy(update={"selected_condition_id": first.condition_id}),
+            )
+            request = self.rules.request(
+                probe,
+                package,
+                self.rules._noncombat_snapshot(row, actor_ids=actors),
+                self.rules._rng_context(row),
+                row=row,
+                spell_positions=positions,
+                spell_end_applications=self.rules.spell_end_applications(sid, command.actor_id),
+                independent_condition=IndependentConditionSelection(
+                    target_id=payload.target_id, condition_id=first.condition_id, index=index
+                ),
+            )
+        result = await self.rules._evaluate_dnd(request)
+        if result.status != "accepted":
+            return empty
+        return SpellConditionOptions(empty.world_version, tuple(option for _, option in options))
 
     def _charged_item_positions(self, row, package, command, entry):
         """Freeze the visible area center or an ordinary creature target."""
@@ -318,6 +412,11 @@ class RuleExecution:
             or type(command.payload) is ExplorationSpellCastPayload
         )
         exploration_rule = exploration_item or exploration_spell
+        exact_condition_choice = (
+            type(command.payload) is ExplorationSpellCastPayload
+            and command.payload.selected_condition_id is not None
+        )
+        independent_condition = None
         rest = type(command.payload) in (LongRest, ShortRest)
         long_rest = type(command.payload) is LongRest
         if casting_activity or (not (exploration_rule or rest) and shield_prompt is None):
@@ -377,25 +476,13 @@ class RuleExecution:
 
         def exploration_error(value):
             """Check mode and protocol, deferring use while saved time work is unfinished."""
-            if self.world._active_combat(command.session_id):
-                return "unsupported_combat_world_operation"
-            if value["mechanical_schema_version"] != EXPLORATION_RULES_SNAPSHOT_VERSION:
-                return "unsupported_mechanical_version"
-            if exploration_spell and not isinstance(
-                self.world.facts.time_state(command.session_id)[0], TimeBinding
-            ):
-                return "unsupported_time_protocol"
-            if self.runtime.time is not None and not casting_finish:
-                progress = self.runtime.time.progress(command.session_id)
-                if progress is not None and progress["status"] != "completed":
-                    raise StateMachineError(
-                        "time_advance_pending", "Finish the saved time work first"
-                    )
-            if not casting_activity and self.world.spell_casts.active(
-                command.session_id, command.actor_id
-            ):
-                return "activity_conflict"
-            return None
+            return self._exploration_error(
+                value,
+                command,
+                exploration_spell=exploration_spell,
+                casting_finish=casting_finish,
+                casting_activity=casting_activity,
+            )
 
         def prepare_rest_plan(value):
             """A cast and rest cannot run as concurrent Activities for this actor."""
@@ -523,6 +610,10 @@ class RuleExecution:
                         willing_target_id=willing_target_id,
                         sight_range=sight_range,
                     )
+            if exact_condition_choice and prepare_error is None:
+                independent_condition = self._independent_condition(command)
+                if independent_condition is None:
+                    prepare_error = "spell.condition_choice"
             material = None
             if (
                 prepare_error is None
@@ -587,6 +678,7 @@ class RuleExecution:
                 exploration_charge=charged_item is not None,
                 spell_end_applications=spell_end_applications,
                 item_area_facts=item_area_facts,
+                independent_condition=independent_condition,
             )
             capability = (
                 None
@@ -760,6 +852,10 @@ class RuleExecution:
                     != (rule_command, cast_record, None)
                 )
                 or (material is not None and cast_material(row) != material)
+                or (
+                    independent_condition is not None
+                    and self._independent_condition(command) != independent_condition
+                )
                 or (
                     environmental_spell
                     and prepare_error is None

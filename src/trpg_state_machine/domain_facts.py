@@ -551,6 +551,29 @@ class CharacterFacts:
         ).fetchone()
         return self._condition_data(row) if row is not None else None
 
+    def condition_index(self, sid, actor_id, condition_id):
+        """Locate an exact independent row in the ordered target-only rules projection."""
+        row = self._conn.execute(
+            "SELECT (SELECT COUNT(*) FROM character_conditions AS preceding "
+            "WHERE preceding.session_id=selected.session_id "
+            "AND preceding.actor_id=selected.actor_id AND preceding.ordinal<selected.ordinal) "
+            "FROM character_conditions AS selected WHERE selected.session_id=? "
+            "AND selected.actor_id=? AND selected.condition_id=?",
+            (sid, actor_id, condition_id),
+        ).fetchone()
+        return row[0] if row is not None else None
+
+    def condition_options(self, sid, actor_id):
+        """Read opaque IDs and names of one actor's independent conditions in rules order."""
+        return tuple(
+            (row[0], row[1])
+            for row in self._conn.execute(
+                "SELECT condition_id,condition FROM character_conditions "
+                "WHERE session_id=? AND actor_id=? ORDER BY ordinal",
+                (sid, actor_id),
+            )
+        )
+
     def condition_names(self, sid, actor_id):
         """Read only one actor's independent condition names in record order."""
         return [

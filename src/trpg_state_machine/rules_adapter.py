@@ -2153,6 +2153,18 @@ class RulesAdapter:
                 )
             elif component == "resource_restore":
                 self.characters.restore_resource(sid, identity, field, *value)
+            elif component == "independent_condition":
+                expected, remaining = value
+                if self.characters.condition(
+                    sid, identity, field
+                ) != expected or not self.characters.remove_condition(sid, identity, field):
+                    raise StateMachineError("version_conflict", "Selected condition changed")
+                independent = self.characters.conditions(sid, identity)
+                if (
+                    self.characters.effects.actor_conditions(sid, identity, independent)
+                    != remaining
+                ):
+                    _invalid("Exact condition removal changed another source")
             elif component == "world_effect" and field == "create":
                 self.world.runtime.time.consumers["effects"].apply_verified(
                     sid, value, spell_id=cast_spell_id, cast_slot_level=cast_slot_level
@@ -2283,6 +2295,7 @@ class RulesAdapter:
         exploration_charge=False,
         spell_end_applications=(),
         item_area_facts=None,
+        independent_condition=None,
     ):
         """Build a rules request with durable Session identity and isolated fixed inputs."""
         row = row if row is not None else self._pinned_row(command.session_id, package)
@@ -2321,7 +2334,7 @@ class RulesAdapter:
             )
             else CONDITION_CHOICE_SCHEMA_VERSION
             if type(command.payload) is ExplorationSpellCastPayload
-            and command.payload.selected_condition is not None
+            and command.payload.has_condition_choice
             else MATERIAL_SPELL_SCHEMA_VERSION
             if type(command.payload) is ExplorationSpellCastPayload
             and command.payload.material_instance_id is not None
@@ -2365,6 +2378,7 @@ class RulesAdapter:
             spell_positions=spell_positions,
             multi_spell_positions=multi_spell_positions,
             item_area_facts=item_area_facts,
+            independent_condition=independent_condition,
         )
 
     def query_availability(
