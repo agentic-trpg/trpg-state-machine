@@ -170,6 +170,24 @@ class EffectTimeConsumer:
             (sid, tick),
         ).fetchone()
 
+    def due_attached_to(self, sid, tick, object_id):
+        """Return the event route for the next expiry when it is on this exact item.
+
+        The actor/spatial arbitration matches settle_one, including its actor
+        tie preference. The caller checks Package consequences before ordering.
+        """
+        actor = self._due_actor(sid, tick)
+        spatial = self.owner.spatial_lights.due(sid, tick)
+        if (
+            spatial is None
+            or spatial["expires_tick"] != tick
+            or spatial["object_id"] != object_id
+            or (actor is not None and actor["expires_tick"] <= spatial["expires_tick"])
+        ):
+            return None
+        placement = self.world.facts.placement(sid, object_id)
+        return "effect.spatial_light_ended", placement["scene_id"]
+
     def _actor_scene(self, sid, actor_id):
         """Read the scene used to route an actor effect’s expiry event."""
         location = self.db.execute(

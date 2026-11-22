@@ -16,17 +16,20 @@ from test_session_time_coordination import submit as submit_time
 from test_session_time_coordination import sync
 from test_timed_spell_cast import first_level_balance
 from test_timed_spell_cast import timed_spell_world as timed_spell_world
+from test_world_magic_light import cast as cast_spatial
 
 from trpg_state_machine import (
     AdvanceSessionTime,
     DropItem,
     FinishSpellCast,
     PickupItem,
+    SetSceneFlag,
     StartSpellCast,
     StateMachine,
     StateMachineError,
     StepActor,
 )
+from trpg_state_machine.package import EventDefinition
 
 PEARL = "object.identify_pearl"
 SECOND_PEARL = "object.second_pearl"
@@ -89,13 +92,199 @@ def test_identify_completion_keeps_private_result_when_it_ends_foreign_invisibil
         assert all("properties_and_use" not in str(event.payload) for event in events)
 
 
-def _world(factory, *, slots=4, pearl_price=100, target_cell="0,1", growth=0):
+@pytest.mark.parametrize("start_tick", [2939, 2940])
+def test_identify_sees_attached_light_only_before_its_real_expiry(
+    timed_spell_world, tmp_path, start_tick
+):
+    """At the shared deadline, Light ends before Identify fixes its item result."""
+
+    def factory(**options):
+        return timed_spell_world(**options, additional_spells=("light",))
+
+    session = _world(factory, target_cell="0,0", sized_target=True)
+    sm, sid, package, context = session
+    with sm:
+        _pickup_pearl(session)
+        _, applied = cast_spatial(
+            session, "light-on-identified-wand", "light", 0, {"kind": "item", "item_id": WAND}
+        )
+        assert applied.status == "committed", applied
+        assert sm._world.magic.object_spells(sid, WAND) == ("light",)
+        assert submit_time(session, AdvanceSessionTime(start_tick), "before-ritual").status == (
+            "committed"
+        )
+        started = _start_identify(session, ritual=True)
+        assert _submit(session, started).status == "committed"
+        assert _progress(session, started).deadline_tick == start_tick + 660
+        advance = _command(
+            session,
+            "reach-ritual-completion",
+            "session.advance_time",
+            AdvanceSessionTime(3601),
+        )
+        if start_tick == 2940:
+            old_snapshot = sm.read_noncombat_snapshot(sid, package, context=context)
+            old_events = sm.read_events(sid, package, context=context)
+            sm._conn.execute(
+                "CREATE TEMP TRIGGER fail_item_expiry_wait BEFORE INSERT ON command_receipts "
+                "WHEN NEW.command_id='reach-ritual-completion' "
+                "AND NOT EXISTS (SELECT 1 FROM spatial_light_effects "
+                "WHERE session_id=NEW.session_id AND object_id='object.touched_wand') "
+                "AND EXISTS (SELECT 1 FROM spell_cast_activities "
+                "WHERE session_id=NEW.session_id AND activity_id='my-casting' "
+                "AND status='waiting') "
+                "BEGIN SELECT RAISE(ABORT,'injected item expiry/wait failure'); END"
+            )
+            with pytest.raises(StateMachineError):
+                _submit(session, advance)
+            sm._conn.execute("DROP TRIGGER fail_item_expiry_wait")
+            assert sm.read_noncombat_snapshot(sid, package, context=context) == old_snapshot
+            assert sm.read_events(sid, package, context=context) == old_events
+            assert _progress(session, started).status == "casting"
+            assert sm._world.magic.object_spells(sid, WAND) == ("light",)
+            assert sync(session).committed_tick == start_tick
+            assert sm.get_command_receipt(sid, advance.command_id, package, context=context) is None
+        receipt = _submit(session, advance)
+        assert receipt.status == "committed", receipt
+        assert _submit(session, advance) == receipt
+        waiting = sync(session)
+        assert (waiting.committed_tick, waiting.progress_status) == (
+            start_tick + 660,
+            "waiting",
+        )
+        assert waiting.time_wait is not None
+        ended = [
+            event
+            for event in sm.read_events(sid, package, context=context)
+            if event.event_type == "effect.spatial_light_ended"
+        ]
+        assert len(ended) == int(start_tick == 2940)
+        assert all(event.event_seq in receipt.event_seqs for event in ended)
+        loader = sm._rules.loader
+
+    with StateMachine(tmp_path / "timed-spell.sqlite", dnd_loader=loader) as sm:
+        session = sm, sid, package, context
+        assert sync(session).time_wait == waiting.time_wait
+        finish = _command(
+            session,
+            "finish-after-light-boundary",
+            "activity.finish_spell_cast",
+            FinishSpellCast("my-casting"),
+            wait=waiting.time_wait,
+        )
+        committed = _submit(session, finish)
+        assert committed.status == "committed", committed
+        assert _submit(session, finish) == committed
+        result = _progress(session, started).identification
+        assert result.target_id == WAND
+        assert result.ongoing_spells == (() if start_tick == 2940 else ("Light",))
+        if start_tick == 2939:
+            assert submit_time(
+                session, AdvanceSessionTime(3601), "continue-after-ritual"
+            ).status == ("committed")
+            assert sm._world.magic.object_spells(sid, WAND) == ()
+
+
+def test_identify_and_attached_expiry_with_package_consequence_wait_for_choice(
+    timed_spell_world,
+):
+    """Do not infer an order when a typed Package callback observes the expiry."""
+
+    def factory(**options):
+        return timed_spell_world(**options, additional_spells=("light",))
+
+    sm, sid, package, context = _world(factory, target_cell="0,0", sized_target=True)
+    package = replace(
+        package,
+        events=(
+            EventDefinition(
+                "event.item_expiry",
+                "effect.spatial_light_ended",
+                A,
+                "flag.item_expired",
+                False,
+                SetSceneFlag(A, "flag.item_expired", True),
+                (),
+            ),
+        ),
+    )
+    session = sm, sid, package, context
+    with sm:
+        _pickup_pearl(session)
+        _, applied = cast_spatial(
+            session, "light-with-package-callback", "light", 0, {"kind": "item", "item_id": WAND}
+        )
+        assert applied.status == "committed"
+        assert submit_time(session, AdvanceSessionTime(2940), "to-ritual").status == "committed"
+        started = _start_identify(session, ritual=True)
+        assert _submit(session, started).status == "committed"
+        receipt = submit_time(session, AdvanceSessionTime(3601), "ambiguous-order")
+        assert receipt.status == "committed"
+        waiting = sync(session)
+        assert (waiting.committed_tick, waiting.progress_status, waiting.progress_reason) == (
+            3600,
+            "waiting",
+            "simultaneous_time_choice",
+        )
+        assert waiting.time_wait is None
+        assert _progress(session, started).status == "casting"
+        assert sm._world.magic.object_spells(sid, WAND) == ("light",)
+
+
+def test_same_tick_item_expiry_reads_stay_local_as_unrelated_objects_grow(
+    timed_spell_world,
+):
+    """Count public advancement SQL work with one fixed item and more remote objects."""
+    samples = []
+    for growth in (0, 40):
+
+        def factory(**options):
+            return timed_spell_world(**options, additional_spells=("light",))
+
+        session = _world(factory, target_cell="0,0", sized_target=True, growth=growth)
+        sm, _, _, _ = session
+        with sm:
+            _pickup_pearl(session)
+            _, applied = cast_spatial(
+                session, "light-locality", "light", 0, {"kind": "item", "item_id": WAND}
+            )
+            assert applied.status == "committed"
+            assert submit_time(session, AdvanceSessionTime(2940), "to-ritual").status == (
+                "committed"
+            )
+            assert _submit(session, _start_identify(session, ritual=True)).status == "committed"
+            with measure(sm) as (counts, _):
+                assert submit_time(session, AdvanceSessionTime(3600), "mixed-boundary").status == (
+                    "committed"
+                )
+            assert sync(session).progress_reason == "spell_cast_completion"
+            samples.append((counts["sql_selects"], counts["sql_rows"]))
+    assert samples[0] == samples[1]
+
+
+def _world(factory, *, slots=4, pearl_price=100, target_cell="0,1", growth=0, sized_target=False):
     """Build a seconds Session with the published spell and two distinct item pairs."""
     canonical = BundledAssetLoader()
     pearl = canonical.get_item("pearl").model_copy(update={"cost_gp": pearl_price})
 
     def configure(data):
         """Author instance positions and unequal current charges independently of asset."""
+        if sized_target:
+            data["manifest"]["schema_version"] = "state-machine-foundation/6"
+            data["lockable_doors"] = []
+            data["scenes"][0]["initial_state"]["local_flags"]["flag.item_expired"] = False
+            data.setdefault("world_objects", []).append(
+                {
+                    "object_id": WAND,
+                    "definition_ref": "definition.touched_wand",
+                    "display_name": "Wand of Magic Missiles",
+                    "description_ref": None,
+                    "material": None,
+                    "size_category": "small",
+                    "weight_lb": 1,
+                    "capabilities": [],
+                }
+            )
         for oid, slug, charges, cell in (
             (PEARL, "pearl", 0, "0,0"),
             (SECOND_PEARL, "pearl", 0, "0,0"),
@@ -134,7 +323,7 @@ def _world(factory, *, slots=4, pearl_price=100, target_cell="0,1", growth=0):
 
     return factory(
         first_level_slots=slots,
-        material=False,
+        material=sized_target,
         spell_id="identify",
         configure_spell=lambda _: canonical.get_spell("identify"),
         additional_items=(pearl,),

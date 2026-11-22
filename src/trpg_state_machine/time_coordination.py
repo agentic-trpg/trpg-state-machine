@@ -222,6 +222,40 @@ class SessionTime:
                 return False
         return True
 
+    def _attached_expiry_before_cast_wait(self, sid, package, due, tick):
+        """Settle an exact item's spatial expiry before its Identify result is fixed.
+
+        Identify reads the touched item's ongoing spells at completion. The
+        casting boundary only opens a durable wait, so a due expiry on that item
+        must be removed first. Unrelated expiries and Package-triggered effects
+        retain the existing unresolved choice.
+        """
+        if set(due) != {"effects", "spell_casts"} or any(t != tick for t in due.values()):
+            return False
+        from .effect_time import EffectTimeConsumer
+
+        effect_port = self.consumers["effects"]
+        cast_port = self.consumers["spell_casts"]
+        if (
+            type(effect_port) is not EffectTimeConsumer
+            or effect_port.world is not self.world
+            or cast_port is not self.world.spell_casts
+            or (target := cast_port.due_object_target(sid, tick)) is None
+            or (event_key := effect_port.due_attached_to(sid, tick, target)) is None
+        ):
+            return False
+        by_trigger, _ = self.effects.capture.event_index(package)
+        # Public Package admission excludes these event types. Retain the guard
+        # for host-supplied typed Packages, including the activity's no-scene route.
+        return not any(
+            by_trigger.get(key)
+            for key in (
+                event_key,
+                ("activity.spell_cast_ready", None),
+                ("activity.spell_cast_interrupted", None),
+            )
+        )
+
     def _advance(self, row, package, target, command_id, source, budget):
         """Advance the sole world tick within bounded write work, settling consumers and
         waits.
@@ -293,6 +327,12 @@ class SessionTime:
                     and self._independent_same_tick(sid, package, due, current)
                 ):
                     chosen = next(iter(due))
+                elif (
+                    source != "combat"
+                    and len(expanded_clock) == len(clock_events)
+                    and self._attached_expiry_before_cast_wait(sid, package, due, current)
+                ):
+                    chosen = "effects"
                 else:
                     chosen = None
                 if chosen not in due:
