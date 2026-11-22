@@ -88,7 +88,7 @@ class EffectTimeConsumer:
             phase="effects.after_spell_end",
         )
 
-    def dismiss(self, row, package, actor_id, operation):
+    def dismiss(self, row, package, actor_id, operation, *, command_id):
         """End an authorized original cast without payment or a second transaction."""
         self.store.require_write()
         sid = row["session_id"]
@@ -121,8 +121,10 @@ class EffectTimeConsumer:
             raise StateMachineError("spell.dismiss", str(exc)) from exc
         from .effect_hp_adoption import apply_world_spell_end
 
-        apply_world_spell_end(self.world, sid, proposal)
-        return self.spell_end_event(sid, package, proposal)
+        events = apply_world_spell_end(
+            self.world, sid, proposal, package=package, command_id=command_id
+        )
+        return [*events, self.spell_end_event(sid, package, proposal)]
 
     def end_world_concentration(self, sid, package, caster_id, reason):
         """End the caster's current elapsed-time group inside the caller's write scope."""
@@ -217,11 +219,13 @@ class EffectTimeConsumer:
         )
         from .effect_hp_adoption import apply_hp_effect_expiry
 
-        apply_hp_effect_expiry(
+        lifecycle_events = apply_hp_effect_expiry(
             self.world,
             sid,
             expired,
             lambda: self.owner.expire_world_effect(sid, identity, due["expires_tick"]),
+            package=package,
+            command_id=command_id,
         )
         refresh_world_walk_expiry(self.world, sid, expired)
         event = self.world._capture_event(
@@ -236,4 +240,4 @@ class EffectTimeConsumer:
             },
             phase="effects.after_expiry",
         )
-        return DueResult((event,))
+        return DueResult((*lifecycle_events, event))

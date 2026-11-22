@@ -878,8 +878,17 @@ class RuleExecution:
                         operations[-len(spell_ends) - 1] if environmental_spell else None
                     )
                     effect_time = self.runtime.time.consumers["effects"]
+                    spell_end_events = []
                     for ending in spell_ends:
-                        apply_world_spell_end(self.world, command.session_id, ending)
+                        spell_end_events.extend(
+                            apply_world_spell_end(
+                                self.world,
+                                command.session_id,
+                                ending,
+                                package=package,
+                                command_id=command.command_id,
+                            )
+                        )
                     spatial_proposal = (
                         spatial_operation.value
                         if isinstance(spatial_operation, WorldEnvironmentalEffectCreate)
@@ -1037,6 +1046,7 @@ class RuleExecution:
                         if not isinstance(event, ObjectIdentified)
                     ]
                     events.extend(effects_events)
+                    events.extend(spell_end_events)
                     events.extend(
                         effect_time.spell_end_event(row["session_id"], package, ending)
                         for ending in spell_ends
