@@ -18,6 +18,7 @@ from dnd5e_engine.evaluation_availability import (
 from dnd5e_engine.evaluation_contracts import (
     CAST_ACTIVITY_SCHEMA_VERSION,
     CHARGED_ITEM_SCHEMA_VERSION,
+    CONDITION_CHOICE_SCHEMA_VERSION,
     ENVIRONMENTAL_SPELL_SCHEMA_VERSION,
     IDENTIFY_ACTIVITY_SCHEMA_VERSION,
     MATERIAL_SPELL_SCHEMA_VERSION,
@@ -2302,6 +2303,9 @@ class RulesAdapter:
                 )
                 or (command.payload.intent_type in {"move", "pass"} and has_speed_effects(snapshot))
             )
+            else CONDITION_CHOICE_SCHEMA_VERSION
+            if type(command.payload) is ExplorationSpellCastPayload
+            and command.payload.selected_condition is not None
             else MATERIAL_SPELL_SCHEMA_VERSION
             if type(command.payload) is ExplorationSpellCastPayload
             and command.payload.material_instance_id is not None
