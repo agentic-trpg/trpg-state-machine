@@ -3,7 +3,11 @@
 from dataclasses import asdict, replace
 
 import pytest
-from dnd5e_engine.evaluation_contracts import ExplorationItemUsePayload
+from dnd5e_engine.evaluation_contracts import (
+    STAFF_CAST_SCHEMA_VERSION,
+    ExplorationItemUsePayload,
+    RuleEvaluationRequest,
+)
 from dnd5e_engine.evaluation_delta import InventorySpendCharge
 from dnd5e_engine.evaluation_ruleset import ruleset_binding
 from dnd5e_srd_data import BundledAssetLoader, MemoryAssetLoader
@@ -437,3 +441,37 @@ def test_dawn_refill_scope_is_independent_of_full_items(tmp_path, context):
             assert [event.payload["instance_id"] for event in recoveries] == [FIRST]
             observed.append((counts["sql_selects"], counts["sql_rows"], counts["returned_bytes"]))
     assert observed[0] == observed[1]
+
+
+def test_fixed_charm_rejects_staff_cast_contract_without_draw_or_payment(
+    tmp_path, context, monkeypatch
+):
+    sm, sid, package, _, _ = charged_world(tmp_path, context)
+    with sm:
+        original = sm._rules._evaluate_dnd
+        before = sm.read_noncombat_snapshot(sid, package, context=context)
+        rng = sm.read_rng_context(sid, package, context=context)
+        cast = cast_command(sm, sid, package, context, "charm-level")
+        cast = replace(cast, payload=cast.payload.model_copy(update={"cast_level": 2}))
+        result = sm.submit_command(cast, package, context=context)
+        assert result.error_code == "item.capability"
+        assert sm.submit_command(cast, package, context=context) == result
+        assert sm.read_noncombat_snapshot(sid, package, context=context) == before
+        assert sm.read_rng_context(sid, package, context=context) == rng
+        verified = []
+
+        async def check_staff_contract(request):
+            """Try the same legitimate charm through /41 before the ordinary /32 evaluation."""
+            staff_request = RuleEvaluationRequest.model_validate(
+                request.model_copy(update={"schema_version": STAFF_CAST_SCHEMA_VERSION})
+            )
+            refused = await original(staff_request)
+            assert refused.status == "unsupported"
+            assert refused.state_delta is None and refused.rng_transition is None
+            verified.append(True)
+            return await original(request)
+
+        monkeypatch.setattr(sm._rules, "_evaluate_dnd", check_staff_contract)
+        ordinary = cast_command(sm, sid, package, context, "charm-normal")
+        assert sm.submit_command(ordinary, package, context=context).status == "committed"
+        assert verified == [True]

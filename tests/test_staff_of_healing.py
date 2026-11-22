@@ -4,10 +4,12 @@ from dataclasses import asdict, replace
 from random import Random
 
 import pytest
+from dnd5e_engine.evaluation_contracts import ExplorationItemAreaTarget
 from dnd5e_srd_data import BundledAssetLoader, MemoryAssetLoader
 from item_support import NPC, command, submit
 from test_cure_wounds import cure_world
 from test_exploration_charged_item import cast_command
+from test_scoped_runtime_validation import measure
 
 from trpg_state_machine import (
     AdvanceSessionTime,
@@ -18,11 +20,11 @@ from trpg_state_machine import (
 )
 
 STAFF, SPARE = "object.healing_staff", "object.spare_healing_staff"
-CURE = "mkIIFw98V1d8uABu"
+CURE, MASS = "mkIIFw98V1d8uABu", "tfGfEtth3JKF7BXQ"
 SLUG = "staff-of-healing"
 
 
-def staff_world(tmp_path, context, *, charges=10, seed=0, attuned=True):
+def staff_world(tmp_path, context, *, charges=10, seed=0, wide_map=False, far_objects=0):
     """Load the unmodified bundled asset into one canonical Cleric 1 session."""
 
     def configure(data, loader):
@@ -34,6 +36,23 @@ def staff_world(tmp_path, context, *, charges=10, seed=0, attuned=True):
         pc = data["pc_templates"][0]
         owner = pc["pc_template_id"]
         pc["character"]["inventory"] = [SLUG]
+        if wide_map:
+            pc["character"]["hp"]["max"] = 50
+            data["actors"][0]["initial_cell"] = "12,0"
+            data["scenes"][0]["grid"].update(width=15, lighting={"7,0": "dark"})
+            snapshot = data["rule_bindings"]["noncombat_foundation"]["snapshot"]
+            snapshot["character_states"][0]["hp_max"] = 50
+            snapshot["scene_state"]["grid"].update(width=15, lighting={"7,0": "dark"})
+            data["scenes"][0]["objects"].extend(
+                dict(
+                    object_id=f"object.unrelated_fixture_{index}",
+                    state=None,
+                    movable=False,
+                    blocks_passage=False,
+                    initial_cell="14,2",
+                )
+                for index in range(far_objects)
+            )
         for instance, balance in ((STAFF, charges), (SPARE, 10)):
             data["scenes"][0]["objects"].append(
                 dict(
@@ -52,7 +71,7 @@ def staff_world(tmp_path, context, *, charges=10, seed=0, attuned=True):
                     quantity=1,
                     charges_remaining_per_unit=balance,
                     policy="charge_exhaust_retain",
-                    initially_attuned=attuned and instance == STAFF,
+                    initially_attuned=instance == STAFF,
                 )
             )
             for foundation in data["rule_bindings"].values():
@@ -80,6 +99,7 @@ def staff_world(tmp_path, context, *, charges=10, seed=0, attuned=True):
     return cure_world(
         tmp_path,
         context,
+        extra_spells=("mass-cure-wounds",),
         exploration=True,
         slot_count=0,
         target_hp=2,
@@ -88,12 +108,23 @@ def staff_world(tmp_path, context, *, charges=10, seed=0, attuned=True):
     )
 
 
-def use(sm, sid, package, context, key, *, activity=CURE, instance=STAFF, level=1):
+def use(
+    sm, sid, package, context, key, *, activity=CURE, instance=STAFF, level=1, target=NPC, area=None
+):
     """Build a public item command selecting the bound activity and actual cast level."""
     cmd = cast_command(
-        sm, sid, package, context, key, target=NPC, activity=activity, instance=instance
+        sm, sid, package, context, key, target=target, activity=activity, instance=instance
     )
-    return replace(cmd, payload=cmd.payload.model_copy(update={"cast_level": level}))
+    return replace(
+        cmd,
+        payload=cmd.payload.model_copy(
+            update={
+                "cast_level": level,
+                "area_target": area,
+                "target_id": None if area else target,
+            }
+        ),
+    )
 
 
 def inventory(sm, sid, package, context):
@@ -237,3 +268,110 @@ def test_staff_last_charge_roll_ties_equipment_and_absence_to_receipt(tmp_path, 
         actor = next(a for a in snapshot.character_states if a.entity_type == "Character")
         assert actor.held_weapon_instance_id == (None if destroyed else STAFF)
         assert reopened.submit_command(cast, package, context=context) == receipt
+
+
+def test_staff_casts_both_spells_at_their_prices_and_heals_the_chosen_sphere(tmp_path, context):
+    sm, sid, package, _, _ = staff_world(tmp_path, context, wide_map=True)
+    with sm:
+        pc = sm.read_session(sid, package, context=context).pc_actor_id
+        held = submit(sm, sid, package, context, EquipWeapon(STAFF), "hold-for-mass")
+        assert held.status == "committed", held
+        cure = use(sm, sid, package, context, "cure-before-mass", target=pc)
+        assert sm.submit_command(cure, package, context=context).status == "committed"
+        assert inventory(sm, sid, package, context)[STAFF].charges_remaining_per_unit == 9
+        before = sm.read_noncombat_snapshot(sid, package, context=context)
+        rng = sm.read_rng_context(sid, package, context=context)
+        expected = rng.state.restore()
+        for label, center in (
+            ("out-of-sphere", "5,0"),
+            ("unseen", "7,0"),
+            ("out-of-range", "13,0"),
+        ):
+            affected = (pc, NPC) if label == "out-of-sphere" else (NPC,)
+            invalid = use(
+                sm,
+                sid,
+                package,
+                context,
+                label,
+                activity=MASS,
+                level=5,
+                area=ExplorationItemAreaTarget(center_cell=center, target_ids=affected),
+            )
+            denied = sm.submit_command(invalid, package, context=context)
+            assert denied.error_code == "target_invalid", denied
+        assert sm.read_noncombat_snapshot(sid, package, context=context) == before
+        assert sm.read_rng_context(sid, package, context=context) == rng
+        cast = use(
+            sm,
+            sid,
+            package,
+            context,
+            "mass-charges",
+            activity=MASS,
+            level=5,
+            area=ExplorationItemAreaTarget(center_cell="6,0", target_ids=(NPC, pc)),
+        )
+        sm._conn.execute(
+            "CREATE TEMP TRIGGER fail_mass_receipt BEFORE INSERT ON command_receipts "
+            "WHEN NEW.command_id='mass-charges' BEGIN SELECT RAISE(ABORT,'injected'); END"
+        )
+        with pytest.raises(StateMachineError) as exc:
+            sm.submit_command(cast, package, context=context)
+        assert exc.value.code == "storage_error"
+        assert sm.read_noncombat_snapshot(sid, package, context=context) == before
+        assert sm.read_rng_context(sid, package, context=context) == rng
+        assert sm.get_command_receipt(sid, cast.command_id, package, context=context) is None
+        sm._conn.execute("DROP TRIGGER fail_mass_receipt")
+        receipt = sm.submit_command(cast, package, context=context)
+        assert receipt.status == "committed", receipt
+        assert sm.submit_command(cast, package, context=context) == receipt
+        intent, cast_event, *healing = heal_events(sm, sid, package, context)[-4:]
+        assert intent["area_center_cell"] == "6,0"
+        assert intent["area_target_ids"] == [NPC, pc]
+        assert cast_event["spell_id"] == "mass-cure-wounds"
+        assert cast_event["slot_level"] is None and cast_event["item_cast_level"] == 5
+        assert [(event["target_id"], event["amount"]) for event in healing] == [
+            (target, sum(expected.randint(1, 8) for _ in range(5)) + 3) for target in (NPC, pc)
+        ]
+        assert inventory(sm, sid, package, context)[STAFF].charges_remaining_per_unit == 4
+        after = sm.read_noncombat_snapshot(sid, package, context=context)
+        assert after.resource_state == before.resource_state
+        assert {actor.entity_id: actor.hp_current for actor in after.character_states} == {
+            event["target_id"]: min(target.hp_max, target.hp_current + event["amount"])
+            for event in healing
+            for target in before.character_states
+            if target.entity_id == event["target_id"]
+        }
+        stale = replace(cast, command_id="mass-stale")
+        assert sm.submit_command(stale, package, context=context).status == "conflict"
+        assert sm.read_noncombat_snapshot(sid, package, context=context) == after
+
+
+def test_mass_cast_reads_local_rays_and_actors(tmp_path, context):
+    observed = []
+    for far_objects in (0, 25):
+        directory = tmp_path / str(far_objects)
+        directory.mkdir()
+        sm, sid, package, _, _ = staff_world(
+            directory, context, wide_map=True, far_objects=far_objects
+        )
+        with sm:
+            actor = sm.read_session(sid, package, context=context).pc_actor_id
+            held = submit(sm, sid, package, context, EquipWeapon(STAFF), "hold")
+            assert held.status == "committed", held
+            cast = use(
+                sm,
+                sid,
+                package,
+                context,
+                "scope",
+                activity=MASS,
+                level=5,
+                area=ExplorationItemAreaTarget(center_cell="6,0", target_ids=(actor, NPC)),
+            )
+            with measure(sm) as (counts, _):
+                receipt = sm.submit_command(cast, package, context=context)
+            assert receipt.status == "committed", receipt
+            observed.append((counts["sql_selects"], counts["sql_rows"], counts["returned_bytes"]))
+    assert observed[0] == observed[1], observed

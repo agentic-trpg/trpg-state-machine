@@ -5,6 +5,7 @@ from typing import Literal
 
 from dnd5e_engine.areas import AreaTemplate, area_cells, has_line_of_effect
 from dnd5e_engine.environment import EnvironmentalSource, environmental_dispels
+from dnd5e_engine.evaluation_charged_item import healing_staff_area_reaches
 from dnd5e_engine.evaluation_contracts import EnvironmentalItemFacts, ExplorationSpellPositions
 from dnd5e_engine.evaluation_environmental_contracts import (
     EnvironmentalMagicEffectFacts,
@@ -176,6 +177,28 @@ class WorldMagic:
             target_cell=cell,
             target_item=item_facts,
             target_effect=effect_facts,
+        )
+
+    def healing_sphere_reaches(self, sid, scene_id, package, spell, source, center, targets):
+        """Check bounded healing rays against fixed geometry and local opaque objects."""
+        from .world_lights import _corridor_cells
+
+        spatial = self.h.facts.maps.scene(sid, scene_id, spatial_only=True)
+        if spatial is None or (grid := spatial.grid) is None:
+            return False
+        topology = grid.topology
+        if not healing_staff_area_reaches(topology, spell, source, center, targets):
+            return False
+        rays = ((source, (parse_cell(center),)), (center, tuple(map(parse_cell, targets))))
+        corridor = _corridor_cells(rays)
+        blocked = self._opaque_cells(sid, scene_id, package, grid, corridor, None)
+        blocked = blocked - {source}
+        return not blocked or (
+            center not in blocked
+            and not blocked.intersection(targets)
+            and healing_staff_area_reaches(
+                topology.with_blocked(blocked), spell, source, center, targets
+            )
         )
 
     @staticmethod

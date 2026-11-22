@@ -153,6 +153,7 @@ def charged_item_changes(request, result, loader):
         or profile.activity.id != request.payload.activity_id
         or profile.spell.slug != cast.spell_id
         or profile.cost != spend.amount
+        or (request.payload.area_target is not None) != (cast.spell_id == "mass-cure-wounds")
         or entry.charges_remaining_per_unit > profile.capacity
         or (cast.item_cast_level is not None) != profile.requires_held_attunement
         or (

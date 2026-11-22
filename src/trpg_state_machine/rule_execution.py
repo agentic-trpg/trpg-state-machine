@@ -3,10 +3,15 @@
 import copy
 from dataclasses import asdict, replace
 
+from dnd5e_engine.evaluation_charged_item import (
+    exploration_charged_cast_profile,
+    is_healing_staff,
+)
 from dnd5e_engine.evaluation_contracts import (
     CheckPayload,
     ExplorationCastActivityPayload,
     ExplorationEnvironmentalSpellCastPayload,
+    ExplorationItemAreaFacts,
     ExplorationItemUsePayload,
     ExplorationMultiSpellCastPayload,
     ExplorationSpellCastPayload,
@@ -121,6 +126,46 @@ class RuleExecution:
             if spell is not None and exploration_healing_requires_sight(spell)
             else None
         )
+
+    def _charged_item_positions(self, row, package, command, entry):
+        """Freeze the visible area center or an ordinary creature target."""
+        area = command.payload.area_target
+        if area is None:
+            error, actors, positions = self._spell_positions(row, command, package)
+            return error, actors, positions, None
+        sid, scene_id = row["session_id"], row["current_scene_id"]
+        actors = tuple(dict.fromkeys((command.actor_id, *area.target_ids)))
+        loader = self.rules.loader
+        item = loader.get_item(entry["item_slug"])
+        profile = (
+            exploration_charged_cast_profile(item, loader, activity_id=command.payload.activity_id)
+            if item is not None
+            else None
+        )
+        if profile is None or profile.spell.slug != "mass-cure-wounds":
+            return "item.capability", actors, None, None
+        cells = {}
+        for target_id in actors:
+            placement = self.world.facts.carrier_position(sid, target_id)
+            if placement is None or placement[0] != scene_id or placement[1] is None:
+                return "target_invalid", actors, None, None
+            cells[target_id] = placement[1]
+        source = cells[command.actor_id]
+        targets = {target_id: cells[target_id] for target_id in area.target_ids}
+        if not self.world.magic.healing_sphere_reaches(
+            sid, scene_id, package, profile.spell, source, area.center_cell, tuple(targets.values())
+        ):
+            return "target_invalid", actors, None, None
+        try:
+            self.world._visible_target(sid, command.actor_id, area.center_cell, package)
+        except StateMachineError as exc:
+            if exc.code in ("unsupported_target_visibility", "invalid_spatial_state"):
+                return "target_invalid", actors, None, None
+            raise
+        facts = ExplorationItemAreaFacts(
+            source_cell=source, visible_center_cell=area.center_cell, target_cells=targets
+        )
+        return None, actors, None, facts
 
     def _prepare_cast_activity(self, row, command, package):
         """Freeze the selected spell at start or its exact deadline continuation."""
@@ -284,7 +329,7 @@ class RuleExecution:
         spell_actor_ids, spell_positions = None, None
         multi_spell_positions = None
         sight_range = self._spell_sight_range(command)
-        charged_item = None
+        charged_item, item_area_facts = None, None
 
         def project_multi_spell_positions(value):
             """Project the selected positions and confirmation-specific willingness."""
@@ -399,11 +444,22 @@ class RuleExecution:
                 prepare_error = initial_exploration_error
             if exploration_item and prepare_error is None:
                 charged_item, prepare_error = prepare_charged_item(row)
-                if charged_item is not None:
-                    prepare_error, spell_actor_ids, spell_positions = self._spell_positions(
-                        row, command, package
+                payload = command.payload
+                if prepare_error is None and (
+                    payload.cast_level is not None or payload.area_target is not None
+                ):
+                    asset = (
+                        self.rules.loader.get_item(charged_item["item_slug"])
+                        if charged_item is not None
+                        else None
                     )
-                elif prepare_error is None and command.payload.target_id != command.actor_id:
+                    if asset is None or not is_healing_staff(asset):
+                        prepare_error = "item.capability"
+                if charged_item is not None and prepare_error is None:
+                    prepare_error, spell_actor_ids, spell_positions, item_area_facts = (
+                        self._charged_item_positions(row, package, command, charged_item)
+                    )
+                elif prepare_error is None and payload.target_id != command.actor_id:
                     raise StateMachineError(
                         "invalid_target", "Drinking a potion requires self target"
                     )
@@ -517,6 +573,7 @@ class RuleExecution:
                 multi_spell_positions=multi_spell_positions,
                 exploration_charge=charged_item is not None,
                 spell_end_applications=spell_end_applications,
+                item_area_facts=item_area_facts,
             )
             capability = (
                 None
@@ -700,8 +757,8 @@ class RuleExecution:
                     and prepare_error is None
                     and (
                         prepare_charged_item(row) != (charged_item, None)
-                        or self._spell_positions(row, command, package)
-                        != (None, spell_actor_ids, spell_positions)
+                        or self._charged_item_positions(row, package, command, charged_item)
+                        != (None, spell_actor_ids, spell_positions, item_area_facts)
                     )
                 )
                 or (

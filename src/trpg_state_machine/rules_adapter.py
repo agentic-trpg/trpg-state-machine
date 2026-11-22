@@ -2269,6 +2269,7 @@ class RulesAdapter:
         multi_spell_positions=None,
         exploration_charge=False,
         spell_end_applications=(),
+        item_area_facts=None,
     ):
         """Build a rules request with durable Session identity and isolated fixed inputs."""
         row = row if row is not None else self._pinned_row(command.session_id, package)
@@ -2343,6 +2344,7 @@ class RulesAdapter:
             rng_context=rng,
             spell_positions=spell_positions,
             multi_spell_positions=multi_spell_positions,
+            item_area_facts=item_area_facts,
         )
 
     def query_availability(
