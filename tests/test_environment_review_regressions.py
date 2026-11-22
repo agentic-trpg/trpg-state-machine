@@ -23,6 +23,7 @@ from world_support import command, setup, submit
 
 from trpg_state_machine import (
     AddEnvironmentSource,
+    ApplyStrongWind,
     BatchEnvironment,
     EnvironmentArea,
     HeightInterval,
@@ -243,13 +244,21 @@ def test_canonical_encoder_roundtrips_every_registered_environment_type():
         RemoveEnvironmentSource(A, source.source_id),
         SetEnvironmentProtection(A, Protection((), ())),
     )
-    operations = (*mutations, BatchEnvironment(mutations))
+    wind = ApplyStrongWind(A, "roundtrip.wind", ("1,0", "0,0"))
+    operations = (*mutations, BatchEnvironment(mutations), wind)
     assert {type(op) for op in operations} == set(ENVIRONMENT_OPERATIONS)
     for op in operations:
         encoded = environment_operation_to_data(op)
         decoded = environment_operation_from_data(encoded["command_type"], encoded["payload"])
         assert decoded == op
         assert environment_operation_to_data(decoded) == encoded
+
+    wire = json.loads(canonical_json(environment_operation_to_data(wind)))
+    assert wire == {
+        "command_type": "world.apply_strong_wind",
+        "payload": {"scene_id": A, "source_id": "roundtrip.wind", "cells": ["0,0", "1,0"]},
+    }
+    assert environment_operation_from_data(wire["command_type"], wire["payload"]) == wind
 
 
 def test_public_point_queries_cannot_probe_hidden_vertical_or_horizontal_scope(tmp_path, context):
