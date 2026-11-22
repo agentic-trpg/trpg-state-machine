@@ -2,17 +2,21 @@
 
 import asyncio
 import json
+from unittest.mock import patch
 
 from dnd5e_engine.evaluation_state import ConditionRecord
 from dnd5e_srd_data import BundledAssetLoader
+from item_support import NPC
 from spatial_support import submit as submit_world
 from test_scoped_runtime_validation import measure
+from test_session_time_coordination import submit as submit_time
 from test_staff_of_healing import CURE, SLUG, STAFF
 from test_timed_spell_cast import PERCEPTION_SPELL, cast_command
 from test_timed_spell_cast import timed_spell_world as timed_spell_world
 from test_world_magic_light import sources
 
 from trpg_state_machine import (
+    AdvanceSessionTime,
     DropWorldConcentration,
     EquipWeapon,
     StartSpellCast,
@@ -274,3 +278,71 @@ def test_silence_also_blocks_the_condition_choice_preview(timed_spell_world):
         )
         assert ended.status == "committed", ended
         assert options() == ordinary
+
+
+def test_stationary_caster_is_blocked_by_another_creatures_silence(timed_spell_world):
+    """An established caster's position controls admission independently of effect ownership."""
+
+    def configure(data):
+        data["rule_bindings"].pop("combat_foundation")
+
+    session = timed_spell_world(
+        material=False,
+        additional_spells=("silence",),
+        caster_class="cleric",
+        caster_subclass="life",
+        configure=configure,
+    )
+    sm, sid, package, context = session
+    with sm:
+        magic = sm._world.magic
+        with patch.object(magic, "apply", wraps=magic.apply) as adopt:
+            command, cast = cast_json(
+                session,
+                "canonical-silence",
+                "silence",
+                2,
+                target={"kind": "point", "cell_id": "0,0"},
+            )
+            assert cast.status == "committed", cast
+        adopt.assert_called_once()
+        _, _, _, proposal = adopt.call_args.args
+        ended = submit_world(sm, sid, package, context, DropWorldConcentration(), "end-template")
+        assert ended.status == "committed", ended
+
+        # The public exploration entry controls the PC. Seed another living owner's
+        # application using the verified canonical proposal and the real Effects owner.
+        actor = command.actor_id
+        with sm._transaction(write=True):
+            row = sm._session(sid, package, context)
+            position = tuple(sm._world.facts.carrier_position(sid, actor))
+            assert position == (row["current_scene_id"], "0,0")
+            assert sm._characters.life(sid, NPC)["is_alive"]
+            effect_id, _ = magic.apply(
+                row, package, "npc-owned-silence", proposal.model_copy(update={"source_id": NPC})
+            )
+        (area,) = sources(session)
+        assert area.concentration_identity == (NPC, effect_id, effect_id)
+        assert position[1] in area.cells
+        assert not sm._characters.effects.has_world_concentration(sid, actor)
+        before = sm.read_noncombat_snapshot(sid, package, context=context)
+        rng = sm.read_rng_context(sid, package, context=context)
+        _, denied = cast_json(
+            session, "stationary-silenced", "silence", 2, target={"kind": "point", "cell_id": "1,0"}
+        )
+        assert (denied.status, denied.error_code) == ("rejected", "spell.source")
+        assert not denied.event_seqs
+        assert sm.read_noncombat_snapshot(sid, package, context=context) == before
+        assert sm.read_rng_context(sid, package, context=context) == rng
+        assert tuple(sm._world.facts.carrier_position(sid, actor)) == position
+        assert sm._characters.effects.has_world_concentration(sid, NPC)
+
+        elapsed = submit_time(session, AdvanceSessionTime(600), "npc-silence-expires")
+        assert elapsed.status == "committed", elapsed
+        assert not sources(session)
+        assert not sm._characters.effects.has_world_concentration(sid, NPC)
+        assert tuple(sm._world.facts.carrier_position(sid, actor)) == position
+        _, allowed = cast_json(
+            session, "stationary-restored", "silence", 2, target={"kind": "point", "cell_id": "1,0"}
+        )
+        assert allowed.status == "committed", allowed
