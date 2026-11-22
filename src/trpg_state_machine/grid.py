@@ -573,13 +573,14 @@ class GridService:
             )
             selected = tuple(dict.fromkeys((*selected, *rays)))
         levels = self.h.objects.lights.current_cells(sid, scene_id, package, selected)
-        return topology.with_lighting(
+        lit = topology.with_lighting(
             {cell: result.level for cell, result in levels.items()},
             sunlight_overrides={cell: result.sunlight for cell, result in levels.items()},
             magical_darkness_cells=(
                 cell for cell, result in levels.items() if result.magical_darkness
             ),
         )
+        return lit.with_obscurement(self.h.magic.obscuring_cells(sid, scene_id, package))
 
     @_read
     @scoped_read

@@ -288,7 +288,7 @@ class LightService:
                 sunlight=grid["sunlight"],
                 sunlight_overrides=grid.get("sunlight_overrides", {}),
                 magical_darkness_cells=grid.get("magical_darkness_cells", ()),
-            )
+            ).with_obscurement(grid["obscurement_cells"])
 
         return resolve_field(
             self.h.store,
@@ -595,6 +595,7 @@ class LightService:
         grid = supplied.copy_data()
         if cells is not None:
             cells = tuple(cells)
+        grid["obscurement_cells"].update(self.h.magic.obscuring_cells(sid, scene, package, cells))
         sources = self._scene_sources(sid, scene, package, supplied, ambient)
         self._apply_ambient(grid, sources.ambient)
         if not sources.local:

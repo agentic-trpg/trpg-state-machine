@@ -240,6 +240,16 @@ class ReadOnlyTopology(GridTopology):
         object.__setattr__(result, "_blocked", _BlockedOverlay(self._blocked, frozenset(cells)))
         return result
 
+    def with_obscurement(self, cells):
+        """Overlay current spell obscuration while retaining fixed map obscuration."""
+        result = object.__new__(type(self))
+        for name, value in vars(self).items():
+            object.__setattr__(result, name, value)
+        object.__setattr__(
+            result, "_obscurement", MappingProxyType(ChainMap(_freeze(cells), self._obscurement))
+        )
+        return result
+
     def with_cover(self, cells):
         """Replace only the cover channel; callers prepare independent-source maxima."""
         result = object.__new__(type(self))

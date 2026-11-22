@@ -19,11 +19,9 @@ from dnd5e_engine.evaluation_contracts import (
     CAST_ACTIVITY_SCHEMA_VERSION,
     CHARGED_ITEM_SCHEMA_VERSION,
     CONDITION_CHOICE_SCHEMA_VERSION,
-    ENVIRONMENTAL_SPELL_SCHEMA_VERSION,
     IDENTIFY_ACTIVITY_SCHEMA_VERSION,
     MATERIAL_SPELL_SCHEMA_VERSION,
     MULTI_SPELL_SCHEMA_VERSION,
-    SPATIAL_EFFECT_END_SCHEMA_VERSION,
     STAFF_CAST_SCHEMA_VERSION,
     CheckPayload,
     CombatClosePayload,
@@ -41,6 +39,7 @@ from dnd5e_engine.evaluation_contracts import (
     SpellWillingnessChoice,
 )
 from dnd5e_engine.evaluation_environmental_contracts import EnvironmentalMagicEffectTarget
+from dnd5e_engine.evaluation_environmental_spells import environmental_spell_schema_version
 from dnd5e_engine.evaluation_haste import has_haste_effects, haste_speed
 from dnd5e_engine.evaluation_movement import timed_walk_bonuses, walk_speed
 from dnd5e_engine.evaluation_preflight import template_support_failure
@@ -2282,10 +2281,11 @@ class RulesAdapter:
             if type(command.payload) is ExplorationCastActivityPayload
             else MULTI_SPELL_SCHEMA_VERSION
             if type(command.payload) is ExplorationMultiSpellCastPayload
-            else SPATIAL_EFFECT_END_SCHEMA_VERSION
-            if type(command.payload) is ExplorationEnvironmentalSpellCastPayload
-            and isinstance(command.payload.target, EnvironmentalMagicEffectTarget)
-            else ENVIRONMENTAL_SPELL_SCHEMA_VERSION
+            else environmental_spell_schema_version(
+                command.payload.spell_id,
+                self.loader,
+                ending=isinstance(command.payload.target, EnvironmentalMagicEffectTarget),
+            )
             if type(command.payload) is ExplorationEnvironmentalSpellCastPayload
             else "engine-evaluation/30"
             if command.command_type == "combat.intent"

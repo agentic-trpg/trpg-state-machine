@@ -214,6 +214,9 @@ class EventCapture:
                     sid, scene_id, package, fixed_grid=fixed, output_grid=grid
                 )
                 grid["lighting"].update(lighting)
+                grid["obscurement_cells"].update(
+                    self.lights.h.magic.obscuring_cells(sid, scene_id, package)
+                )
             topologies[scene_id] = topology
             evidence["scenes"][scene_id] = {
                 "grid": grid,

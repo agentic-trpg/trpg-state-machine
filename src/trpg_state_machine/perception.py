@@ -895,6 +895,8 @@ class PerceptionRuntime:
 
     def _scene_perception_clear(self, sid, scene):
         """No mechanical visibility calculation: unsupported environments stay unknown."""
+        if self._world.magic.may_have_obscurement(sid, scene):
+            return False
         stored = self._world_facts.mechanical_scene(sid, scene)
         if stored:
             grid = stored["grid"]

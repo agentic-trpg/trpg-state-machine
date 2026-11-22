@@ -39,12 +39,16 @@ def magic_world(timed_spell_world, request):
     return _magic_world(timed_spell_world, opaque_case=getattr(request, "param", False))
 
 
-def _magic_world(timed_spell_world, *, opaque_case=False, growth=0, additional_spells=()):
+def _magic_world(
+    timed_spell_world, *, opaque_case=False, growth=0, additional_spells=(), natural_fog=False
+):
     """Make a fixed spatial cast scene with optional unrelated placed objects."""
 
     def configure(data):
         data["manifest"]["schema_version"] = "state-machine-foundation/6"
         data["lockable_doors"] = []
+        if natural_fog:
+            data["rule_bindings"].pop("combat_foundation")
         data["world_objects"] = [
             {
                 "object_id": ITEM,
@@ -121,10 +125,16 @@ def _magic_world(timed_spell_world, *, opaque_case=False, growth=0, additional_s
             )
         for scene in data["scenes"]:
             scene["grid"]["width"] = 14
-        for foundation in data["rule_bindings"].values():
+            if natural_fog:
+                scene["grid"]["obscurement_cells"]["13,1"] = "heavy"
+        for binding, foundation in data["rule_bindings"].items():
             foundation["snapshot"]["scene_state"]["grid"]["width"] = 14
+            if natural_fog and binding == "noncombat_foundation":
+                foundation["snapshot"]["scene_state"]["grid"]["obscurement_cells"]["13,1"] = "heavy"
             for scene in foundation.get("additional_scenes", ()):
                 scene["grid"]["width"] = 14
+                if natural_fog:
+                    scene["grid"]["obscurement_cells"]["13,1"] = "heavy"
 
     return timed_spell_world(
         additional_spells=("light", "darkness", "dispel-magic", *additional_spells),
@@ -170,6 +180,92 @@ def sources(session):
     sm, sid, package, _ = session
     with sm._store.transaction():
         return sm._world.magic.active_magic_sources(sid, A, package)
+
+
+def test_fog_cloud_public_cast_obscures_authorized_sight_and_preserves_natural_fog(
+    timed_spell_world,
+):
+    """The spell's fixed area affects vision; ending it retains a separate map source."""
+    session = _magic_world(timed_spell_world, additional_spells=("fog-cloud",), natural_fog=True)
+    sm, sid, package, context = session
+    with sm:
+        actor = sm.read_session(sid, package, context=context).pc_actor_id
+        initial = sm.read_noncombat_snapshot(sid, package, context=context)
+        before = sm.get_spatial_view(sid, actor, package, context=context)
+        old_topology = sm._world.grid.base_topology(sid, A, package)
+        assert old_topology.can_see("0,0", "2,0")
+        assert before.objects
+        command, receipt = cast(session, "fog", "fog-cloud", 1, {"kind": "point", "cell_id": "2,0"})
+        assert receipt.status == "committed", receipt
+        (source,) = sources(session)
+        assert source.spec.kind == "fog"
+        assert source.origin == "2,0" and source.spec.obscurement == "heavy"
+        during = sm.read_noncombat_snapshot(sid, package, context=context)
+        assert during.scene_state.grid.obscurement_cells["2,0"] == "heavy"
+        assert during.scene_state.grid.obscurement_cells["13,1"] == "heavy"
+        obscured = sm.get_spatial_view(sid, actor, package, context=context)
+        assert not obscured.objects
+        assert not sm._world.grid.base_topology(sid, A, package).can_see("0,0", "2,0")
+        assert sm.submit_command(command, package, context=context) == receipt
+        ended = submit_world(sm, sid, package, context, DropWorldConcentration(), "end-fog")
+        assert ended.status == "committed", ended
+        assert sources(session) == ()
+        after = sm.read_noncombat_snapshot(sid, package, context=context)
+        assert "2,0" not in after.scene_state.grid.obscurement_cells
+        assert after.scene_state.grid.obscurement_cells["13,1"] == "heavy"
+        assert sm.get_spatial_view(sid, actor, package, context=context).objects == before.objects
+        assert sm._world.grid.base_topology(sid, A, package).can_see("0,0", "2,0")
+        assert old_topology.can_see("0,0", "2,0")
+        assert "2,0" not in initial.scene_state.grid.obscurement_cells
+
+
+def test_fog_cloud_expiry_reopens_without_obscuring_area(timed_spell_world, tmp_path):
+    """The existing Effects deadline removes the spell across cold reconstruction."""
+    session = _magic_world(timed_spell_world, additional_spells=("fog-cloud",))
+    sm, sid, package, context = session
+    with sm:
+        _, receipt = cast(
+            session, "expiring-fog", "fog-cloud", 1, {"kind": "point", "cell_id": "2,0"}
+        )
+        assert receipt.status == "committed", receipt
+        old = sm.read_noncombat_snapshot(sid, package, context=context)
+        assert old.scene_state.grid.obscurement_cells["2,0"] == "heavy"
+        loader = sm._rules.loader
+    with StateMachine(tmp_path / "timed-spell.sqlite", dnd_loader=loader) as reopened:
+        assert (
+            reopened.read_noncombat_snapshot(
+                sid, package, context=context
+            ).scene_state.grid.obscurement_cells["2,0"]
+            == "heavy"
+        )
+        ended = submit_time((reopened, sid, package, context), AdvanceSessionTime(3600), "fog-hour")
+        assert ended.status == "committed", ended
+        assert sources((reopened, sid, package, context)) == ()
+        assert (
+            "2,0"
+            not in reopened.read_noncombat_snapshot(
+                sid, package, context=context
+            ).scene_state.grid.obscurement_cells
+        )
+        assert old.scene_state.grid.obscurement_cells["2,0"] == "heavy"
+
+
+def test_fog_cloud_fixed_area_reads_do_not_follow_unrelated_objects(timed_spell_world):
+    """The same spell area reads a bounded source and geometry as the scene grows."""
+    observations = []
+    for growth in (0, 25):
+        session = _magic_world(timed_spell_world, growth=growth, additional_spells=("fog-cloud",))
+        sm, sid, package, context = session
+        with sm:
+            _, receipt = cast(
+                session, "fog-scope", "fog-cloud", 1, {"kind": "point", "cell_id": "2,0"}
+            )
+            assert receipt.status == "committed", receipt
+            with sm._store.transaction(), measure(sm) as (counts, _):
+                cells = sm._world.magic.obscuring_cells(sid, A, package, ("2,0", "13,1"))
+            assert cells == {"2,0": "heavy"}
+            observations.append((counts["sql_selects"], counts["sql_rows"]))
+    assert observations[1] == observations[0]
 
 
 def test_light_is_slotless_follows_the_actual_carrier_replays_and_expires(magic_world):
