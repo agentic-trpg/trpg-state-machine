@@ -78,6 +78,7 @@ class SpatialLightEffects:
     def fixed_at(self, sid, scene, cells, *, silence=False):
         """Fetch only matching fixed spells whose origins are exact candidate cells."""
         predicate = _SILENCE if silence else _OBSCURING
+        index = "spatial_silence_cell" if silence else "spatial_light_obscuring_cell"
         records = []
         selected = tuple(sorted(cells))
         for start in range(0, len(selected), 400):
@@ -85,7 +86,7 @@ class SpatialLightEffects:
             placeholders = ",".join("?" for _ in batch)
             records.extend(
                 self.db.execute(
-                    "SELECT * FROM spatial_light_effects "
+                    f"SELECT * FROM spatial_light_effects INDEXED BY {index} "
                     "WHERE session_id=? AND fixed_scene_id=? AND fixed_cell IS NOT NULL "
                     f"AND {predicate} AND fixed_cell IN ({placeholders})",
                     (sid, scene, *batch),

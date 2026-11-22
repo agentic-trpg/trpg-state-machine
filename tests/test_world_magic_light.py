@@ -623,12 +623,11 @@ def test_fixed_sight_skips_distant_fog_areas_and_refreshes_after_public_cast(
                 "ORDER BY radius_ft DESC LIMIT 1",
                 (sid, A),
             ).fetchall()
+            with measure(reopened) as (_, statements):
+                magic.owner.fixed_at(sid, A, ("2,0",))
+            (fog_lookup,) = (stmt for stmt in statements if "fixed_cell IN (" in stmt)
             cell_plan = reopened._conn.execute(
-                "EXPLAIN QUERY PLAN SELECT * FROM spatial_light_effects "
-                "WHERE session_id=? AND fixed_scene_id=? AND fixed_cell IS NOT NULL "
-                "AND json_extract(environment_json, '$.obscurement') != 'none' "
-                "AND fixed_cell IN (?)",
-                (sid, A, "2,0"),
+                f"EXPLAIN QUERY PLAN {fog_lookup}", (sid, A, "2,0")
             ).fetchall()
             assert any("spatial_light_obscuring_radius" in row[3] for row in radius_plan)
             assert any("spatial_light_obscuring_cell" in row[3] for row in cell_plan)

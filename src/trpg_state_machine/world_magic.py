@@ -276,7 +276,7 @@ class WorldMagic:
         return placement["scene_id"], placement["cell"], self._transmission(sid, oid, placement)
 
     @scoped_read(stage_only=True, maintained="light_sources")
-    @instance_read("scene", "lighting", "magic_records", maintained="light_sources")
+    @instance_read("scene", "lighting", "magic_records", capacity=2, maintained="light_sources")
     def _records(self, sid, scene, *, illuminating=False):
         """Reuse applications attached to the current Scene or its light-bearing subset."""
         fixed = (

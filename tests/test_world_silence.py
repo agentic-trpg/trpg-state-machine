@@ -1,11 +1,14 @@
 """Silence uses the caster's current position when freezing exploration spell inputs."""
 
+import asyncio
 import json
 
+from dnd5e_engine.evaluation_state import ConditionRecord
 from dnd5e_srd_data import BundledAssetLoader
 from spatial_support import submit as submit_world
+from test_scoped_runtime_validation import measure
 from test_staff_of_healing import CURE, SLUG, STAFF
-from test_timed_spell_cast import PERCEPTION_SPELL
+from test_timed_spell_cast import PERCEPTION_SPELL, cast_command
 from test_timed_spell_cast import timed_spell_world as timed_spell_world
 from test_world_magic_light import sources
 
@@ -115,18 +118,18 @@ def test_silence_public_cast_projection_and_reopen(timed_spell_world, tmp_path):
         assert silence.status == "committed", silence
         assert sources(session)[0].spec.kind == "magical_silence"
         assert sources(session)[0].radius_ft == 20
-        where = (
-            "WHERE session_id=? AND fixed_scene_id=? AND fixed_cell IS NOT NULL "
-            "AND json_extract(environment_json, '$.kind') = 'magical_silence' "
-        )
         scene = sm.read_session(sid, package, context=context).current_scene_id
-        for projection, order, name, parameters in (
-            ("radius_ft", "ORDER BY radius_ft DESC LIMIT 1", "spatial_silence_radius", ()),
-            ("*", "AND fixed_cell IN (?)", "spatial_silence_cell", ("0,0",)),
+        owner = sm._world.magic.owner
+        with measure(sm) as (_, statements):
+            owner.maximum_fixed_radius(sid, scene, silence=True)
+            owner.fixed_at(sid, scene, ("0,0",), silence=True)
+        for match, name, parameters in (
+            ("ORDER BY radius_ft DESC", "spatial_silence_radius", ()),
+            ("fixed_cell IN (", "spatial_silence_cell", ("0,0",)),
         ):
+            (query,) = (stmt for stmt in statements if match in stmt)
             plan = sm._conn.execute(
-                f"EXPLAIN QUERY PLAN SELECT {projection} FROM spatial_light_effects {where}{order}",
-                (sid, scene, *parameters),
+                f"EXPLAIN QUERY PLAN {query}", (sid, scene, *parameters)
             ).fetchall()
             assert any(name in row[3] for row in plan)
         during = sm.read_noncombat_snapshot(sid, package, context=context)
@@ -220,3 +223,54 @@ def test_silence_public_cast_projection_and_reopen(timed_spell_world, tmp_path):
         assert not sources(after)
         started = submit_world(reopened, sid, package, context, ritual, "ended-verbal-ritual")
         assert started.status == "committed", started
+
+
+def test_silence_also_blocks_the_condition_choice_preview(timed_spell_world):
+    """Preview and normal casting share the same effective verbal availability."""
+
+    def configure(data):
+        data["rule_bindings"].pop("combat_foundation")
+        snapshot = data["rule_bindings"]["noncombat_foundation"]["snapshot"]
+        snapshot["character_states"][0]["conditions"] = [
+            ConditionRecord(
+                condition="poisoned",
+                source_entity_id=f"implied:{poison}",
+                scope="session",
+                duration_rounds=None,
+                save_dc=None,
+                applied_round=0,
+                exhaustion_level=1,
+                source_effect_id=None,
+            ).model_dump(mode="json")
+            for poison in ("toxin", "venom")
+        ]
+
+    session = timed_spell_world(
+        additional_spells=("lesser-restoration", "silence"),
+        caster_class="cleric",
+        caster_subclass="life",
+        configure=configure,
+    )
+    sm, sid, package, context = session
+
+    def options():
+        command = cast_command(
+            session, spell_id="lesser-restoration", slot_level=2, source_id="class:cleric"
+        )
+        return asyncio.run(
+            sm.query_spell_condition_choices(command, package, context=context)
+        ).options
+
+    with sm:
+        ordinary = options()
+        assert len(ordinary) == 2
+        _, placed = cast_json(
+            session, "affect-choice", "silence", 2, target={"kind": "point", "cell_id": "0,0"}
+        )
+        assert placed.status == "committed", placed
+        assert not options()
+        ended = submit_world(
+            sm, sid, package, context, DropWorldConcentration(), "end-choice-silence"
+        )
+        assert ended.status == "committed", ended
+        assert options() == ordinary

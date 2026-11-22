@@ -213,7 +213,12 @@ class RuleExecution:
             request = self.rules.request(
                 probe,
                 package,
-                self.rules._noncombat_snapshot(row, actor_ids=actors),
+                self.with_current_verbal_availability(
+                    self.rules._noncombat_snapshot(row, actor_ids=actors),
+                    row,
+                    package,
+                    command.actor_id,
+                ),
                 self.rules._rng_context(row),
                 row=row,
                 spell_positions=positions,
