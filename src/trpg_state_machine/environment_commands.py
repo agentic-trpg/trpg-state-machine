@@ -6,6 +6,7 @@ from json import loads
 from .environment_models import (
     CONDITION_TYPES,
     MAX_BATCH,
+    MAX_CELLS,
     EnvironmentArea,
     EnvironmentConditions,
     EnvironmentSceneFacts,
@@ -84,6 +85,24 @@ class BatchEnvironment:
     changes: tuple[EnvironmentMutation, ...]
 
 
+@dataclass(frozen=True, slots=True)
+class ApplyStrongWind:
+    """Attest a one-shot strong wind in exposed cells of the current Scene."""
+
+    scene_id: str
+    source_id: str
+    cells: tuple[str, ...]
+
+    def __post_init__(self):
+        """Normalize the bounded and nonempty coverage for deterministic replay."""
+        identity(self.scene_id)
+        identity(self.source_id)
+        area = EnvironmentArea(self.cells)
+        if not area.cells:
+            invalid("Strong wind requires attested cells")
+        object.__setattr__(self, "cells", area.cells)
+
+
 ENVIRONMENT_COMMANDS = {
     "world.initialize_environment": InitializeEnvironment,
     "world.set_environment_base": SetEnvironmentBase,
@@ -92,6 +111,7 @@ ENVIRONMENT_COMMANDS = {
     "world.remove_environment_source": RemoveEnvironmentSource,
     "world.set_environment_protection": SetEnvironmentProtection,
     "world.batch_environment": BatchEnvironment,
+    "world.apply_strong_wind": ApplyStrongWind,
 }
 ENVIRONMENT_OPERATIONS = tuple(ENVIRONMENT_COMMANDS.values())
 
@@ -102,8 +122,8 @@ def validate_environment_operation(op):
         if type(op.changes) is not tuple or not 1 <= len(op.changes) <= MAX_BATCH:
             invalid("Batch requires 1..16 immutable mutations")
         for change in op.changes:
-            if type(change) is BatchEnvironment:
-                invalid("Nested batches unsupported")
+            if type(change) in (BatchEnvironment, ApplyStrongWind):
+                invalid("Batch requires persistent environment mutations")
             validate_environment_operation(change)
         return
     if type(op) not in ENVIRONMENT_OPERATIONS:
@@ -290,11 +310,13 @@ def environment_operation_from_data(kind, raw):
             """Restore one tagged mutation within the batch list."""
             if type(v) is not dict or set(v) != {"command_type", "payload"}:
                 invalid("Batch wire mutations require command_type and payload")
-            if v["command_type"] == "world.batch_environment":
-                invalid("Nested batch unsupported")
+            if v["command_type"] in ("world.batch_environment", "world.apply_strong_wind"):
+                invalid("Batch requires persistent environment mutations")
             return environment_operation_from_data(v["command_type"], v["payload"])
 
         op = _decode(cls, raw, {"changes": lambda v: _tuple(v, mutation, MAX_BATCH)})
+    elif cls is ApplyStrongWind:
+        op = _decode(cls, raw, {"cells": lambda v: _tuple(v, lambda cell: cell, MAX_CELLS)})
     else:
         op = _decode(
             cls,

@@ -5,11 +5,13 @@ from collections.abc import Mapping
 from dataclasses import asdict, dataclass, replace
 from types import MappingProxyType
 
+from dnd5e_engine.environment import StrongWind
 from dnd5e_engine.evaluation_region_effect import validate_region_effect_rule
 from dnd5e_engine.evaluation_ruleset import RulesetBinding, RulesetBindingError
 
 from .environment_commands import (
     AddEnvironmentSource,
+    ApplyStrongWind,
     BatchEnvironment,
     InitializeEnvironment,
     RemoveEnvironmentSource,
@@ -344,6 +346,16 @@ class EnvironmentService:
         self.h.store.require_write()
         validate_environment_operation(op)
         sid = row["session_id"]
+        if type(op) is ApplyStrongWind:
+            if self.h._active_combat(sid):
+                raise StateMachineError(
+                    "unsupported_combat_world_operation", "Strong wind requires exploration"
+                )
+            if op.scene_id != row["current_scene_id"]:
+                raise StateMachineError("invalid_target", "Strong wind requires the current Scene")
+            return self.h.magic.apply_strong_wind(
+                sid, op.scene_id, package, StrongWind(source_id=op.source_id, cells=op.cells)
+            )
         operations = op.changes if type(op) is BatchEnvironment else (op,)
         originals, planned, changes = {}, {}, []
         regions = defaultdict(dict)

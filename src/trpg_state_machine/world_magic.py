@@ -5,7 +5,7 @@ from math import ceil
 from typing import Literal
 
 from dnd5e_engine.areas import AreaTemplate, area_cells, has_line_of_effect
-from dnd5e_engine.environment import EnvironmentalSource, environmental_dispels
+from dnd5e_engine.environment import EnvironmentalSource, environmental_dispels, strong_wind_dispels
 from dnd5e_engine.evaluation_charged_item import healing_staff_area_reaches
 from dnd5e_engine.evaluation_contracts import EnvironmentalItemFacts, ExplorationSpellPositions
 from dnd5e_engine.evaluation_environmental_contracts import (
@@ -466,7 +466,7 @@ class WorldMagic:
         blockers = self.h.grid.light_occluders(sid, scene, package, cells, fixed_grid=grid)
         return blockers.solid_cells(exclude_object=origin_item)
 
-    def end_event(self, sid, package, record, reason, *, cause=None):
+    def end_event(self, sid, package, record, reason, *, cause=None, wind_source=None):
         """Write the exact terminal removal and capture its actual post-removal stage."""
         scene, _, _ = self._anchor(sid, record)
         self.owner.remove(record)
@@ -481,10 +481,33 @@ class WorldMagic:
                 "spell_id": record["spell_id"],
                 "reason": reason,
                 "cause_effect_id": cause,
+                **({"wind_source_id": wind_source} if wind_source is not None else {}),
                 "boundary_tick": record["expires_tick"],
             },
             phase="effects.after_spatial_end",
         )
+
+    def apply_strong_wind(self, sid, scene, package, wind):
+        """End only susceptible intersecting applications in the current write candidate."""
+        self.store.require_write()
+        stored = self.h.facts.maps.scene(sid, scene, spatial_only=True)
+        if stored is None or stored.grid is None:
+            raise StateMachineError("invalid_target", "Strong wind requires Scene geometry")
+        try:
+            cells = wind.cells_on(stored.grid.topology)
+        except ValueError as exc:
+            raise StateMachineError("invalid_cell", "Invalid strong wind coverage") from exc
+        records = self._local_fixed_records(sid, scene, cells, self.obscuring_radius(sid, scene))
+        hits = {
+            source.effect_id
+            for source in self._project_sources(sid, scene, package, records)
+            if strong_wind_dispels(source.spec, source.cells, cells)
+        }
+        return [
+            self.end_event(sid, package, record, "strong_wind", wind_source=wind.source_id)
+            for record in records
+            if record["effect_id"] in hits
+        ]
 
     def reconcile_scene(self, sid, scene, package):
         """Apply RE's overlap decisions only on a candidate mutation stage."""

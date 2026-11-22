@@ -26,6 +26,7 @@ from .commands import CheckWorldEffects, CommandReceipt, TypedCommand, world_com
 from .environment import EnvironmentService
 from .environment_commands import (
     AddEnvironmentSource,
+    ApplyStrongWind,
     BatchEnvironment,
     InitializeEnvironment,
     RemoveEnvironmentSource,
@@ -118,6 +119,7 @@ __all__ = [
     "Temperature",
     "Wind",
     "AddEnvironmentSource",
+    "ApplyStrongWind",
     "BatchEnvironment",
     "InitializeEnvironment",
     "RemoveEnvironmentSource",

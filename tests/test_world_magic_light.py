@@ -1,6 +1,7 @@
 """Public spatial spell casting and its durable Effects lifecycle."""
 
 import json
+from dataclasses import replace
 from unittest.mock import patch
 
 import pytest
@@ -291,6 +292,118 @@ def test_fog_cloud_expiry_reopens_without_obscuring_area(timed_spell_world, tmp_
         assert old.scene_state.grid.obscurement_cells["2,0"] == "heavy"
 
 
+def strong_wind_command(session, command_id, cells, *, scene=A):
+    """Create a bounded, JSON-decoded Environment attestation for the public entry point."""
+    sm, sid, package, context = session
+    state = sm.read_session(sid, package, context=context)
+    wire = {
+        "schema_version": "sm-command/1",
+        "session_id": sid,
+        "actor_id": state.pc_actor_id,
+        "command_id": command_id,
+        "command_type": "world.apply_strong_wind",
+        "expected_world_version": state.world_version,
+        "payload": {"scene_id": scene, "source_id": "wind.test-gust", "cells": cells},
+    }
+    return world_command_from_data(json.loads(json.dumps(wire)))
+
+
+def test_authorized_wind_ends_only_hit_fog_and_reopens(timed_spell_world, tmp_path):
+    """Publish early expiry, its group teardown and view update in the same command."""
+    session = _magic_world(timed_spell_world, additional_spells=("fog-cloud",), natural_fog=True)
+    sm, sid, package, context = session
+    gm = replace(context, can_manage_environment=True)
+    with sm:
+        actor = sm.read_session(sid, package, context=context).pc_actor_id
+        _, light = cast(session, "other-spell", "light", 0, {"kind": "item", "item_id": ITEM})
+        assert light.status == "committed", light
+        baseline = sm.get_spatial_view(sid, actor, package, context=context)
+        _, fog = cast(session, "wind-fog", "fog-cloud", 1, {"kind": "point", "cell_id": "2,0"})
+        assert fog.status == "committed", fog
+        old = sm.read_noncombat_snapshot(sid, package, context=context)
+        old_topology = sm._world.grid.base_topology(sid, A, package)
+        rng = sm.read_rng_context(sid, package, context=context)
+        assert not old_topology.can_see("0,0", "2,0")
+        assert not sm.get_spatial_view(sid, actor, package, context=context).objects
+        assert sm._characters.effects.has_world_concentration(sid, actor)
+
+        miss = strong_wind_command(session, "wind-miss", ["13,1"])
+        with pytest.raises(StateMachineError) as denied:
+            sm.submit_command(miss, package, context=context)
+        assert denied.value.code == "unauthorized"
+        missed = sm.submit_command(miss, package, context=gm)
+        assert missed.status == "committed", missed
+        assert not missed.event_seqs
+        assert {source.effect_id for source in sources(session)} == {
+            "spatial:wind-fog",
+            "spatial:other-spell",
+        }
+
+        bad_scene = strong_wind_command(session, "wrong-scene", ["2,0"], scene="scene.other")
+        refused = sm.submit_command(bad_scene, package, context=gm)
+        assert (refused.status, refused.error_code) == ("rejected", "invalid_target")
+        with pytest.raises(StateMachineError):
+            strong_wind_command(session, "duplicate-cell", ["2,0", "2,0"])
+        with pytest.raises(StateMachineError):
+            strong_wind_command(session, "noncanonical-cell", ["02,0"])
+        outside = strong_wind_command(session, "outside-grid", ["30,0"])
+        refused = sm.submit_command(outside, package, context=gm)
+        assert (refused.status, refused.error_code) == ("rejected", "invalid_cell")
+
+        failing = strong_wind_command(session, "wind-rolled-back", ["3,0"])
+        end_event = sm._world.magic.end_event
+
+        def fail_after_removal(*args, **kwargs):
+            end_event(*args, **kwargs)
+            raise StateMachineError("test_candidate_fault", "Reject after deleting Fog Cloud")
+
+        with patch.object(sm._world.magic, "end_event", side_effect=fail_after_removal):
+            rolled_back = sm.submit_command(failing, package, context=gm)
+        assert (rolled_back.status, rolled_back.error_code) == ("rejected", "test_candidate_fault")
+        assert sm._characters.effects.has_world_concentration(sid, actor)
+        assert (
+            sm.read_noncombat_snapshot(sid, package, context=context).scene_state == old.scene_state
+        )
+        assert sm.submit_command(failing, package, context=gm) == rolled_back
+
+        hit = strong_wind_command(session, "wind-hit", ["3,0"])
+        dispersed = sm.submit_command(hit, package, context=gm)
+        assert dispersed.status == "committed", dispersed
+        assert sm.submit_command(hit, package, context=gm) == dispersed
+        assert [source.effect_id for source in sources(session)] == ["spatial:other-spell"]
+        assert not sm._characters.effects.has_world_concentration(sid, actor)
+        assert sm.read_rng_context(sid, package, context=context) == rng
+        (event,) = [
+            event
+            for event in sm.read_events(sid, package, context=context)
+            if event.source_command_id == "wind-hit"
+        ]
+        assert event.event_type == "effect.spatial_light_ended"
+        assert (
+            event.payload["effect_id"],
+            event.payload["reason"],
+            event.payload["wind_source_id"],
+        ) == (
+            "spatial:wind-fog",
+            "strong_wind",
+            "wind.test-gust",
+        )
+        assert not old_topology.can_see("0,0", "2,0")
+        assert sm.get_spatial_view(sid, actor, package, context=context).objects == baseline.objects
+        assert old.scene_state.grid.obscurement_cells["2,0"] == "heavy"
+        loader = sm._rules.loader
+
+    with StateMachine(tmp_path / "timed-spell.sqlite", dnd_loader=loader) as reopened:
+        assert reopened.submit_command(hit, package, context=gm) == dispersed
+        assert reopened.submit_command(failing, package, context=gm) == rolled_back
+        current = reopened.read_noncombat_snapshot(sid, package, context=context)
+        assert current.scene_state.grid.obscurement_cells == {"13,1": "heavy"}
+        assert not reopened._characters.effects.has_world_concentration(sid, actor)
+        assert [source.effect_id for source in sources((reopened, sid, package, context))] == [
+            "spatial:other-spell"
+        ]
+
+
 def test_fog_record_stage_reuse_invalidates_on_write_and_savepoint_rollback(timed_spell_world):
     """An in-flight source edit cannot leave a prior stage's spell facts in use."""
     session = _magic_world(timed_spell_world, additional_spells=("fog-cloud",))
@@ -406,6 +519,39 @@ def _seed_distant_fog_sources(sm, sid, actor, source, count, *, cell="13,1", hig
                     "concentration_id": identity,
                 },
             )
+
+
+def test_wind_command_keeps_local_fog_work_fixed_as_distant_sources_grow(timed_spell_world):
+    """A fixed attestation reaches the same Effects rows with 25 additional areas."""
+    observed = []
+    for growth in (0, 25):
+        session = _magic_world(
+            timed_spell_world,
+            additional_spells=("fog-cloud",),
+            database=f"wind-growth-{growth}.sqlite",
+        )
+        sm, sid, package, context = session
+        gm = replace(context, can_manage_environment=True)
+        with sm:
+            _, fog = cast(session, "near-fog", "fog-cloud", 1, {"kind": "point", "cell_id": "2,0"})
+            assert fog.status == "committed", fog
+            magic = sm._world.magic
+            source = dict(magic.owner.get(sid, "spatial:near-fog"))
+            actor = sm.read_session(sid, package, context=context).pc_actor_id
+            _seed_distant_fog_sources(sm, sid, actor, source, growth)
+            command = strong_wind_command(session, "close-exposure", ["3,0"])
+            with (
+                patch.object(magic, "_source", wraps=magic._source) as projected,
+                patch.object(magic.owner, "spec", wraps=magic.owner.spec) as parsed,
+                measure(sm) as (counts, statements),
+            ):
+                receipt = sm.submit_command(command, package, context=gm)
+            assert receipt.status == "committed", receipt
+            assert projected.call_count == parsed.call_count == 1
+            assert any("AND fixed_cell IN" in sql for sql in statements)
+            assert len(sources(session)) == growth
+            observed.append((counts["sql_selects"], counts["sql_rows"]))
+    assert observed[0] == observed[1]
 
 
 def test_fixed_sight_skips_distant_fog_areas_and_refreshes_after_public_cast(
