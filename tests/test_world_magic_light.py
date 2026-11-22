@@ -56,6 +56,7 @@ def _magic_world(
     natural_fog=False,
     database=None,
     grid_extent=None,
+    configure_extra=None,
 ):
     """Make a fixed spatial cast scene with optional unrelated placed objects."""
 
@@ -174,6 +175,8 @@ def _magic_world(
                     scene["grid"]["height"] = grid_extent
                 if natural_fog:
                     scene["grid"]["obscurement_cells"]["13,1"] = "heavy"
+        if configure_extra is not None:
+            configure_extra(data)
 
     if database is None:
         name = f"magic-{growth}.sqlite" if growth else "timed-spell.sqlite"

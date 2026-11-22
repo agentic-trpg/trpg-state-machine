@@ -229,6 +229,30 @@ class OngoingEffects:
             ).fetchone()
         )
 
+    def grants_passive_detection(self, sid, actor_id, spell_id):
+        """Find an active self-cast detection application through the target key."""
+        return (
+            self._conn.execute(
+                "SELECT 1 FROM ongoing_effects WHERE session_id=? AND target_id=? "
+                "AND cast_spell_id=? AND cast_by=target_id AND concentration_id IS NOT NULL "
+                "AND json_extract(payload_json,'$.disabled')=0 LIMIT 1",
+                (sid, actor_id, spell_id),
+            ).fetchone()
+            is not None
+        )
+
+    def has_detectable_spell(self, sid, actor_id, observer, granting_spell):
+        """Find active spell lineage, excluding the one powering the observer's detection."""
+        return (
+            self._conn.execute(
+                "SELECT 1 FROM ongoing_effects WHERE session_id=? AND target_id=? "
+                "AND cast_spell_id IS NOT NULL AND json_extract(payload_json,'$.disabled')=0 "
+                "AND NOT (target_id=? AND cast_by=target_id AND cast_spell_id=?) LIMIT 1",
+                (sid, actor_id, observer, granting_spell),
+            ).fetchone()
+            is not None
+        )
+
     def target_spell_applications(self, sid, target_id, need):
         """Read declared application facts in the owning target effect-list order."""
         rows = self._conn.execute(

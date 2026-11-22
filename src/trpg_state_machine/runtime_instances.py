@@ -253,6 +253,7 @@ class ObjectRuntime:
     object_id: str
     facts: tuple = ()
     definition: tuple = ()
+    detection_barrier: tuple = ()
     container: ContainerFields = field(default_factory=ContainerFields)
     mechanism: MechanismFields = field(default_factory=MechanismFields)
 

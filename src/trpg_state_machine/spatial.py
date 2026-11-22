@@ -88,6 +88,7 @@ class SpatialView:
     objects: tuple[tuple[str, str, bool, bool], ...]
     exits: tuple[tuple[str, str, str, str], ...]
     doors: tuple[SpatialDoor, ...] = ()
+    detection_clues: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -149,6 +150,7 @@ class WorldHandler:
             store, sessions, characters, facts, capture, npc_bootstrap, self.runtime
         )
 
+        from .detection import PassiveDetection
         from .environment import EnvironmentService
         from .spell_cast_activity import SpellCastActivities
         from .world_magic import WorldMagic
@@ -156,6 +158,7 @@ class WorldHandler:
         self.environment = EnvironmentService(self)
         self.spell_casts = SpellCastActivities(self)
         self.magic = WorldMagic(self)
+        self.detection = PassiveDetection(self)
         self.capture.lights = self.objects.lights
 
     @property
@@ -808,7 +811,7 @@ class WorldHandler:
             return WorldActionAvailability("available", "available", row["world_version"])
 
     def get_spatial_view(self, session_id, actor_id, package, *, context):
-        """Read objects, exits and doors visible to the authorized actor at one version."""
+        """Read authorized actor geometry and private detection clues at one world version."""
         with self._transaction():
             self._spatial_reader(session_id, actor_id, package, context)
             if self._active_combat(session_id):
@@ -876,7 +879,8 @@ class WorldHandler:
             version = self._conn.execute(
                 "SELECT world_version FROM sessions WHERE session_id=?", (session_id,)
             ).fetchone()[0]
-            return SpatialView(position, version, tuple(objects), exits, doors)
+            clues = self.detection.clues(session_id, scene_id, actor_id)
+            return SpatialView(position, version, tuple(objects), exits, doors, clues)
 
     def _operate_spatial(self, row, package, operation, actor_id, *, navigation_scope=None):
         """Apply validated movement, placement or transfer and coordinate scene-entry

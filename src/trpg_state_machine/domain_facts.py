@@ -2750,6 +2750,16 @@ class WorldFacts:
             (sid, oid),
         ).fetchall()
 
+    def carried_root_ids(self, sid, actor_id):
+        """Read the direct root object identities carried by one selected actor."""
+        return tuple(
+            row[0]
+            for row in self._conn.execute(
+                "SELECT object_id FROM objects WHERE session_id=? AND carrier_id=?",
+                (sid, actor_id),
+            )
+        )
+
     @instance_read("object", "container", "active_contents", maintained="container_members")
     def active_contents(self, sid, oid):
         """Resolve direct portable members to stable current identities in a read scope.

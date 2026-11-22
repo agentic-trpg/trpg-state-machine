@@ -387,6 +387,12 @@ class InstanceData:
             raise StateMachineError("incomplete_instance_config", "Object config identity differs")
         return definition
 
+    @instance_read("object", None, "detection_barrier")
+    def detection_barrier(self, sid, oid):
+        """Read just the persisted detection material and thickness for a live object."""
+        definition = self.facts.store.memory.json(self.get(sid, "object", oid)["definition"])
+        return decode(definition["fields"].get("detection_barrier")) if definition else None
+
     def pending_object(self, sid, oid):
         """Read a pending object creation definition and its containing scene."""
         row = self.conn.execute(

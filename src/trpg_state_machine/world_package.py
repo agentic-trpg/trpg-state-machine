@@ -3,6 +3,8 @@
 from dataclasses import asdict, dataclass
 from typing import Literal
 
+from dnd5e_engine.passive_detection import DetectionBarrier
+
 from .mechanism_models import Mechanism, MechanismAction, parse_mechanism
 from .package import _fail, _identifier, _list, _mapping, _reference, _text, _unique
 from .time_binding import MAX_TICK
@@ -161,6 +163,7 @@ class WorldObjectDefinition:
     volume_cu_ft: int | None = None
     fit_profile: str | None = None
     content_kind: str | None = None
+    detection_barrier: DetectionBarrier | None = None
 
     def capability(self, kind):
         """Select the capability configuration by kind from the object definition."""
@@ -192,8 +195,14 @@ def validate_world_objects(
         if type(value) is not dict:
             _fail("schema_error", p, "Definition must be a mapping")
         d = _mapping(
-            {"volume_cu_ft": None, "fit_profile": None, "content_kind": None, **value},
-            "volume_cu_ft fit_profile content_kind object_id definition_ref "
+            {
+                "volume_cu_ft": None,
+                "fit_profile": None,
+                "content_kind": None,
+                "detection_barrier": None,
+                **value,
+            },
+            "volume_cu_ft fit_profile content_kind detection_barrier object_id definition_ref "
             "display_name description_ref material "
             "size_category weight_lb capabilities",
             p,
@@ -204,6 +213,13 @@ def validate_world_objects(
         for field in ("description_ref", "material"):
             if d[field] is not None:
                 _text(d[field], p + "." + field)
+        if d["detection_barrier"] is not None:
+            barrier_path = p + ".detection_barrier"
+            barrier = _mapping(d["detection_barrier"], "material thickness_mils", barrier_path)
+            try:
+                d["detection_barrier"] = DetectionBarrier(**barrier)
+            except ValueError as exc:
+                _fail("schema_error", barrier_path, str(exc))
         if d["size_category"] not in (
             None,
             "tiny",

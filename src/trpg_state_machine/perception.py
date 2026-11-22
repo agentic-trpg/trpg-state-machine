@@ -130,6 +130,7 @@ class GameSceneView:
     own_character: CharacterState | None
     gm_facts: tuple[KnownFact, ...]
     gm_scene_flags: tuple[tuple[str, bool], ...]
+    detection_clues: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -929,7 +930,7 @@ class PerceptionRuntime:
     def _game_scene_view(self, sid, package, context):
         """Build the authorized game view, preserving unresolved environment status.
 
-        The player sees the IDs and names of enabled effects on their own character.
+        The player sees enabled own-character effects and their private passive clues.
         """
         if (
             context.session_id != sid
@@ -1007,4 +1008,7 @@ class PerceptionRuntime:
                 own,
                 facts,
                 flags,
+                self._world.detection.clues(sid, scene, row["pc_actor_id"])
+                if context.role == "player"
+                else (),
             )

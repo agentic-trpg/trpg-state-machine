@@ -36,6 +36,29 @@ def cell_in_bounds(topology, cell):
         return False
 
 
+def cells_within_range(prepared, origin, range_ft):
+    """Use the prepared base grid to find cells near a validated origin and range."""
+    topology = prepared.topology
+    width, height = prepared.data["width"], prepared.data["height"]
+    x0, y0 = map(int, origin.split(","))
+    cell_size = topology.cell_size_ft
+    # Clamp before division, including huge finite floats and arbitrary Python ints.
+    extent = max(width, height)
+    if range_ft >= extent * cell_size:
+        radius = extent
+    elif type(range_ft) is float:
+        numerator, denominator = range_ft.as_integer_ratio()
+        radius = numerator // (denominator * cell_size)
+    else:
+        radius = range_ft // cell_size
+    return tuple(
+        f"{x},{y}"
+        for y in range(max(0, y0 - radius), min(height, y0 + radius + 1))
+        for x in range(max(0, x0 - radius), min(width, x0 + radius + 1))
+        if topology.within_range(origin, f"{x},{y}", range_ft)
+    )
+
+
 def _read(method):
     """Wrap a grid method in a consistent read scope."""
 
@@ -211,24 +234,7 @@ class GridView(_GridSnapshot):
     def cells_within_range(self, origin, range_ft):
         """Enumerate cells within the requested geometric range."""
         origin = self._range_origin(origin, range_ft)
-        topology = self._base()
-        x0, y0 = map(int, origin.split(","))
-        # The pinned square grid uses Chebyshev distance. Clamp before division
-        # or conversion, including huge finite floats and arbitrary Python ints.
-        extent = max(self.width, self.height)
-        if range_ft >= extent * self.cell_size_ft:
-            radius = extent
-        elif type(range_ft) is float:
-            numerator, denominator = range_ft.as_integer_ratio()
-            radius = numerator // (denominator * self.cell_size_ft)
-        else:
-            radius = range_ft // self.cell_size_ft
-        return tuple(
-            f"{x},{y}"
-            for y in range(max(0, y0 - radius), min(self.height, y0 + radius + 1))
-            for x in range(max(0, x0 - radius), min(self.width, x0 + radius + 1))
-            if topology.within_range(origin, f"{x},{y}", range_ft)
-        )
+        return cells_within_range(self._map, origin, range_ft)
 
     def _range_origin(self, origin, range_ft):
         """Validate the range and normalize its origin."""
