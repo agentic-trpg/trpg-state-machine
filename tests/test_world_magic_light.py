@@ -809,6 +809,80 @@ def test_public_creature_dispel_uses_two_distinct_canonical_spell_profiles(timed
         assert sm.read_noncombat_snapshot(sid, package, context=context).effect_states == ()
 
 
+def test_public_creature_dispel_adopts_both_overlapping_hp_applications(timed_spell_world):
+    """The creature Dispel endpoint withdraws one effective paired HP bonus."""
+    session = timed_spell_world(
+        spell_id="aid",
+        caster_class="cleric",
+        caster_subclass="life",
+        additional_spells=("dispel-magic",),
+        configure=lambda data: data["rule_bindings"].pop("combat_foundation"),
+    )
+    sm, sid, package, context = session
+    with sm:
+        state = sm.read_session(sid, package, context=context)
+        caster = state.pc_actor_id
+
+        def facts():
+            snapshot = sm.read_noncombat_snapshot(sid, package, context=context)
+            actor = next(actor for actor in snapshot.character_states if actor.entity_id == caster)
+            slot = next(
+                pool.current for pool in snapshot.resource_state.pools if pool.pool_id == "spell:3"
+            )
+            return (actor.hp_current, actor.hp_max), slot, snapshot.effect_states
+
+        def command(spell_id, slot, command_id, target):
+            state = sm.read_session(sid, package, context=context)
+            return world_command_from_data(
+                json.loads(
+                    json.dumps(
+                        {
+                            "schema_version": "sm-command/1",
+                            "session_id": sid,
+                            "command_id": command_id,
+                            "actor_id": caster,
+                            "command_type": "world.cast_spell",
+                            "expected_world_version": state.world_version,
+                            "payload": {
+                                "kind": "world.cast_spell",
+                                "spell_id": spell_id,
+                                "spell_source_id": "class:cleric",
+                                "slot_level": slot,
+                                **target,
+                            },
+                        }
+                    )
+                )
+            )
+
+        base_hp, _, _ = facts()
+        for slot in (3, 2):
+            receipt = sm.submit_command(
+                command("aid", slot, f"aid:{slot}", {"target_id": caster}),
+                package,
+                context=context,
+            )
+            assert receipt.status == "committed", receipt
+        boosted_hp, old_slot, effects = facts()
+        assert boosted_hp == (base_hp[0] + 10, base_hp[1] + 10)
+        assert len({effect.origin for effect in effects}) == 2
+        rng = sm.read_rng_context(sid, package, context=context)
+        dispel = command(
+            "dispel-magic",
+            3,
+            "aid:dispel",
+            {
+                "target": {"kind": "creature", "target_id": caster},
+            },
+        )
+        receipt = sm.submit_command(dispel, package, context=context)
+        assert receipt.status == "committed", receipt
+        assert facts() == (base_hp, old_slot - 1, ())
+        assert sm.read_rng_context(sid, package, context=context) == rng
+        assert sm.submit_command(dispel, package, context=context) == receipt
+        assert facts() == (base_hp, old_slot - 1, ())
+
+
 def test_public_high_ring_dispel_pays_on_failure_and_auto_ends_with_adequate_slot(
     timed_spell_world,
 ):
