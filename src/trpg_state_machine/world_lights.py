@@ -279,6 +279,7 @@ class LightService:
                 ambient is None
                 and not self.sources(sid, scene, package)
                 and not self.h.magic.illumination_anchors(sid, scene)
+                and not self.h.magic.may_have_obscurement(sid, scene)
             ):
                 return prepared.topology
             grid, _, _ = self._cached_projection(sid, scene, package, prepared, ambient)

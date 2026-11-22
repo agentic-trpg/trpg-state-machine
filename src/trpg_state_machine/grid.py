@@ -562,8 +562,9 @@ class GridService:
         """Overlay target light and any relevant magical darkness along their sight rays."""
         if not selected:
             return topology
-        if cell_in_bounds(topology, observer_cell) and self.h.magic.may_have_darkness(
-            sid, scene_id
+        if cell_in_bounds(topology, observer_cell) and (
+            self.h.magic.may_have_darkness(sid, scene_id)
+            or self.h.magic.may_have_obscurement(sid, scene_id)
         ):
             origin = parse_cell(observer_cell)
             rays = (
@@ -580,7 +581,7 @@ class GridService:
                 cell for cell, result in levels.items() if result.magical_darkness
             ),
         )
-        return lit.with_obscurement(self.h.magic.obscuring_cells(sid, scene_id, package))
+        return lit.with_obscurement(self.h.magic.obscuring_cells(sid, scene_id, package, selected))
 
     @_read
     @scoped_read

@@ -1,5 +1,8 @@
 """Public spatial spell casting and its durable Effects lifecycle."""
 
+import json
+from unittest.mock import patch
+
 import pytest
 from dnd5e_engine.evaluation_contracts import ExplorationEnvironmentalSpellCastPayload
 from dnd5e_engine.evaluation_delta import TempHPSet
@@ -40,7 +43,14 @@ def magic_world(timed_spell_world, request):
 
 
 def _magic_world(
-    timed_spell_world, *, opaque_case=False, growth=0, additional_spells=(), natural_fog=False
+    timed_spell_world,
+    *,
+    opaque_case=False,
+    growth=0,
+    additional_spells=(),
+    natural_fog=False,
+    database=None,
+    grid_extent=None,
 ):
     """Make a fixed spatial cast scene with optional unrelated placed objects."""
 
@@ -124,21 +134,27 @@ def _magic_world(
                 }
             )
         for scene in data["scenes"]:
-            scene["grid"]["width"] = 14
+            scene["grid"]["width"] = grid_extent or 14
+            if grid_extent is not None:
+                scene["grid"]["height"] = grid_extent
             if natural_fog:
                 scene["grid"]["obscurement_cells"]["13,1"] = "heavy"
         for binding, foundation in data["rule_bindings"].items():
-            foundation["snapshot"]["scene_state"]["grid"]["width"] = 14
+            foundation["snapshot"]["scene_state"]["grid"]["width"] = grid_extent or 14
+            if grid_extent is not None:
+                foundation["snapshot"]["scene_state"]["grid"]["height"] = grid_extent
             if natural_fog and binding == "noncombat_foundation":
                 foundation["snapshot"]["scene_state"]["grid"]["obscurement_cells"]["13,1"] = "heavy"
             for scene in foundation.get("additional_scenes", ()):
-                scene["grid"]["width"] = 14
+                scene["grid"]["width"] = grid_extent or 14
+                if grid_extent is not None:
+                    scene["grid"]["height"] = grid_extent
                 if natural_fog:
                     scene["grid"]["obscurement_cells"]["13,1"] = "heavy"
 
     return timed_spell_world(
         additional_spells=("light", "darkness", "dispel-magic", *additional_spells),
-        database=f"magic-{growth}.sqlite" if growth else "timed-spell.sqlite",
+        database=database or (f"magic-{growth}.sqlite" if growth else "timed-spell.sqlite"),
         configure=configure,
     )
 
@@ -266,6 +282,193 @@ def test_fog_cloud_fixed_area_reads_do_not_follow_unrelated_objects(timed_spell_
             assert cells == {"2,0": "heavy"}
             observations.append((counts["sql_selects"], counts["sql_rows"]))
     assert observations[1] == observations[0]
+
+
+def _seed_distant_fog_sources(sm, sid, actor, source, count, *, cell="13,1", high=False):
+    """Grow valid keyed Effects sources with distinct remote casters for locality tests."""
+    if not count:
+        return
+    conn = sm._conn
+    remote = conn.execute(
+        "SELECT scene_id FROM scene_instances WHERE session_id=? AND scene_id<>? LIMIT 1",
+        (sid, A),
+    ).fetchone()[0]
+    actor_row = dict(
+        conn.execute(
+            "SELECT * FROM actors WHERE session_id=? AND actor_id=?", (sid, actor)
+        ).fetchone()
+    )
+    character_row = dict(
+        conn.execute(
+            "SELECT * FROM characters WHERE session_id=? AND actor_id=?", (sid, actor)
+        ).fetchone()
+    )
+    mechanical_row = dict(
+        conn.execute(
+            "SELECT * FROM mechanical_actors WHERE session_id=? AND actor_id=?", (sid, actor)
+        ).fetchone()
+    )
+
+    def insert(table, values):
+        columns = tuple(values)
+        conn.execute(
+            f"INSERT INTO {table} ({','.join(columns)}) VALUES ({','.join('?' for _ in columns)})",
+            tuple(values[column] for column in columns),
+        )
+
+    with sm._transaction(write=True):
+        for index in range(count):
+            caster = f"npc.distant_fog_{index}"
+            identity = f"spatial:distant-fog-{index}"
+            insert(
+                "actors",
+                {**actor_row, "actor_id": caster, "kind": "npc", "current_scene_id": remote},
+            )
+            insert("characters", {**character_row, "actor_id": caster})
+            state = json.loads(mechanical_row["state_json"])
+            state["entity_id"] = caster
+            insert(
+                "mechanical_actors",
+                {**mechanical_row, "actor_id": caster, "state_json": json.dumps(state)},
+            )
+            sm._world_facts.instances.put(
+                sid,
+                "actor",
+                caster,
+                {"actor_id": caster, "senses": (("visual", True), ("auditory", True))},
+            )
+            insert(
+                "effect_concentrations",
+                {
+                    "session_id": sid,
+                    "concentration_id": identity,
+                    "caster_id": caster,
+                    "effect_id": identity,
+                    "rounds_remaining": 0,
+                },
+            )
+            insert(
+                "spatial_light_effects",
+                {
+                    **source,
+                    "effect_id": identity,
+                    "caster_id": caster,
+                    "fixed_cell": cell,
+                    "slot_level": 9 if high and index == 0 else source["slot_level"],
+                    "radius_ft": 180 if high and index == 0 else source["radius_ft"],
+                    "concentration_id": identity,
+                },
+            )
+
+
+def test_fixed_sight_skips_distant_fog_areas_and_refreshes_after_public_cast(
+    timed_spell_world, tmp_path
+):
+    """Far same-scene Fog sources do not enter one nearby ray's rule projection."""
+    observed = []
+    for growth, extent, center, high in (
+        (0, None, "13,1", False),
+        (25, None, "13,1", False),
+        (1, 80, "60,60", True),
+        (25, 80, "60,60", True),
+    ):
+        database = f"fog-growth-{growth}-{extent}.sqlite"
+        session = _magic_world(
+            timed_spell_world,
+            additional_spells=("fog-cloud",),
+            database=database,
+            grid_extent=extent,
+        )
+        sm, sid, package, context = session
+        with sm:
+            actor = sm.read_session(sid, package, context=context).pc_actor_id
+            _, receipt = cast(
+                session, "template-fog", "fog-cloud", 1, {"kind": "point", "cell_id": "2,0"}
+            )
+            assert receipt.status == "committed", receipt
+            source = dict(
+                sm._conn.execute(
+                    "SELECT * FROM spatial_light_effects WHERE session_id=? AND effect_id=?",
+                    (sid, "spatial:template-fog"),
+                ).fetchone()
+            )
+            assert (
+                submit_world(
+                    sm, sid, package, context, DropWorldConcentration(), "clear-template"
+                ).status
+                == "committed"
+            )
+            _seed_distant_fog_sources(sm, sid, actor, source, growth, cell=center, high=high)
+            loader = sm._rules.loader
+        with StateMachine(tmp_path / database, dnd_loader=loader) as reopened:
+            session = reopened, sid, package, context
+            magic = reopened._world.magic
+            with (
+                patch.object(magic, "_source", wraps=magic._source) as projected,
+                patch.object(magic.owner, "spec", wraps=magic.owner.spec) as parsed,
+            ):
+                with measure(reopened) as (counts, _):
+                    first = reopened._world.grid.visibility_topology(
+                        sid, A, package, "0,0", ("2,0",)
+                    )
+                assert first.can_see_target("2,0", None)
+                assert projected.call_count == 0
+                assert parsed.call_count == 0
+            before = reopened.get_spatial_view(sid, actor, package, context=context)
+            with patch.object(magic, "_source", wraps=magic._source) as projected:
+                cached = reopened._world.grid.visibility_topology(sid, A, package, "0,0", ("2,0",))
+                assert cached.can_see_target("2,0", None)
+                assert projected.call_count == 0
+            observed.append((counts["sql_selects"], counts["sql_rows"]))
+            radius_plan = reopened._conn.execute(
+                "EXPLAIN QUERY PLAN SELECT radius_ft FROM spatial_light_effects "
+                "WHERE session_id=? AND fixed_scene_id=? AND fixed_cell IS NOT NULL "
+                "AND json_extract(environment_json, '$.obscurement') != 'none' "
+                "ORDER BY radius_ft DESC LIMIT 1",
+                (sid, A),
+            ).fetchall()
+            cell_plan = reopened._conn.execute(
+                "EXPLAIN QUERY PLAN SELECT * FROM spatial_light_effects "
+                "WHERE session_id=? AND fixed_scene_id=? AND fixed_cell IS NOT NULL "
+                "AND json_extract(environment_json, '$.obscurement') != 'none' "
+                "AND fixed_cell IN (?)",
+                (sid, A, "2,0"),
+            ).fetchall()
+            assert any("spatial_light_obscuring_radius" in row[3] for row in radius_plan)
+            assert any("spatial_light_obscuring_cell" in row[3] for row in cell_plan)
+            command, cast_receipt = cast(
+                session, "near-fog", "fog-cloud", 1, {"kind": "point", "cell_id": "2,0"}
+            )
+            assert cast_receipt.status == "committed", cast_receipt
+            with patch.object(magic, "_source", wraps=magic._source) as projected:
+                obscured = reopened._world.grid.visibility_topology(
+                    sid, A, package, "0,0", ("2,0",)
+                )
+                assert not obscured.can_see_target("2,0", None)
+                assert projected.call_count == 1
+            assert reopened.submit_command(command, package, context=context) == cast_receipt
+            assert (
+                submit_world(
+                    reopened, sid, package, context, DropWorldConcentration(), "end-near"
+                ).status
+                == "committed"
+            )
+            with patch.object(magic, "_source", wraps=magic._source) as projected:
+                restored = reopened._world.grid.visibility_topology(
+                    sid, A, package, "0,0", ("2,0",)
+                )
+                assert restored.can_see_target("2,0", None)
+                assert projected.call_count == 0
+            after = reopened.get_spatial_view(sid, actor, package, context=context)
+            assert (after.objects, after.exits, after.doors) == (
+                before.objects,
+                before.exits,
+                before.doors,
+            )
+    # A present source adds one indexed scalar-radius lookup and its one row;
+    # 25 additional distant sources add no more reads or projections.
+    assert observed[1] == (observed[0][0] + 1, observed[0][1] + 1)
+    assert observed[3] == observed[2]
 
 
 def test_light_is_slotless_follows_the_actual_carrier_replays_and_expires(magic_world):

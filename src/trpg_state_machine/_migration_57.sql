@@ -32,6 +32,20 @@ CREATE INDEX spatial_light_effects_by_spell
     ON spatial_light_effects(session_id, caster_id, spell_id, effect_id);
 CREATE INDEX spatial_light_effects_deadline
     ON spatial_light_effects(session_id, expires_tick, effect_id);
+-- Point spell contributions remain Effects facts; these indexes only select
+-- exact fixed origins for local sight and non-obscuring light independently.
+CREATE INDEX spatial_light_obscuring_radius
+    ON spatial_light_effects(session_id, fixed_scene_id, radius_ft DESC)
+    WHERE fixed_cell IS NOT NULL
+      AND json_extract(environment_json, '$.obscurement') != 'none';
+CREATE INDEX spatial_light_obscuring_cell
+    ON spatial_light_effects(session_id, fixed_scene_id, fixed_cell)
+    WHERE fixed_cell IS NOT NULL
+      AND json_extract(environment_json, '$.obscurement') != 'none';
+CREATE INDEX spatial_light_illuminating_scene
+    ON spatial_light_effects(session_id, fixed_scene_id, effect_id)
+    WHERE fixed_cell IS NOT NULL
+      AND json_extract(environment_json, '$.light') IS NOT NULL;
 
 -- Derived scene index for effect-bearing objects. World still owns the position.
 CREATE TABLE magic_light_anchors (
