@@ -221,13 +221,14 @@ class EnvironmentFields:
 
 @dataclass(frozen=True)
 class LightingFields:
-    """Retain daylight scope, light sources, geometry and illumination results."""
+    """Retain scene light and fixed spatial spell projections under the source version."""
 
     ambient_scope: tuple = ()
     sources: tuple = ()
     magic_records: tuple = ()
     magic_anchors: tuple = ()
     obscuring_radius: tuple = ()
+    silence_radius: tuple = ()
     geometry: tuple = ()
     candidates: tuple = ()
     cells: tuple = ()

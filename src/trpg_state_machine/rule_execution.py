@@ -268,7 +268,7 @@ class RuleExecution:
         return None, actors, None, facts
 
     def _prepare_cast_activity(self, row, command, package):
-        """Freeze the selected spell at start or its exact deadline continuation."""
+        """Resolve inputs for the timed cast whose snapshot checks current components."""
         sid, actor = row["session_id"], command.actor_id
         operation = command.payload
         domain = self.world.spell_casts
@@ -328,6 +328,23 @@ class RuleExecution:
             ),
             dict(record) if record is not None else None,
             None,
+        )
+
+    def with_current_verbal_availability(self, snapshot, row, package, actor_id):
+        """Project current area restrictions onto one caster's detached rules input."""
+        casting = snapshot.casting_state
+        if casting is None or not self.world.magic.blocks_verbal_casting(
+            row["session_id"], row["current_scene_id"], actor_id, package
+        ):
+            return snapshot
+        actors = tuple(
+            entry.model_copy(update={"verbal_available": False})
+            if entry.actor_id == actor_id and entry.verbal_available
+            else entry
+            for entry in casting.actors
+        )
+        return snapshot.model_copy(
+            update={"casting_state": casting.model_copy(update={"actors": actors})}
         )
 
     async def submit(self, command, package, context, fingerprint):
@@ -493,9 +510,7 @@ class RuleExecution:
             )
 
         def build_snapshot(value):
-            """Build the required mechanical snapshot for the command and current combat
-            state.
-            """
+            """Freeze the relevant cast, combat, check or item state for evaluation."""
             if domain_check and self.world._active_combat(command.session_id):
                 # Preserve a durable rejected receipt without pretending a combat
                 # snapshot is a noncombat check or relaxing any capability guard.
@@ -503,8 +518,14 @@ class RuleExecution:
             if rest:
                 return self.rules._noncombat_snapshot(value, actor_ids=(command.actor_id,))
             if exploration_spell or charged_item is not None:
-                # Touch delivery depends on explicit placement and the mechanical grid.
-                return self.rules._noncombat_snapshot(value, actor_ids=spell_actor_ids)
+                # Casts reuse the fixed mechanical grid and only project the caster's
+                # current component constraint onto the detached RE snapshot.
+                snapshot = self.rules._noncombat_snapshot(value, actor_ids=spell_actor_ids)
+                if exploration_spell:
+                    return self.with_current_verbal_availability(
+                        snapshot, value, package, command.actor_id
+                    )
+                return snapshot
             if type(command.payload) is CheckPayload or domain_check or exploration_item:
                 return self.rules._noncombat_snapshot(value, package)
             intent_type = getattr(command.payload, "intent_type", None)

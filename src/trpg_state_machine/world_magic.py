@@ -277,9 +277,13 @@ class WorldMagic:
 
     @scoped_read(stage_only=True, maintained="light_sources")
     @instance_read("scene", "lighting", "magic_records", maintained="light_sources")
-    def _records(self, sid, scene):
-        """Reuse one fixed collection of applications attached to the current Scene."""
-        fixed = self.owner.fixed(sid, scene)
+    def _records(self, sid, scene, *, illuminating=False):
+        """Reuse applications attached to the current Scene or its light-bearing subset."""
+        fixed = (
+            self.owner.fixed_illuminating(sid, scene)
+            if illuminating
+            else self.owner.fixed(sid, scene)
+        )
         objects = self.h.facts.magic_light_anchors(sid, scene)
         return (*fixed, *(record for oid in objects for record in self.owner.attached(sid, oid)))
 
@@ -303,7 +307,12 @@ class WorldMagic:
     @instance_read("scene", "lighting", "obscuring_radius", maintained="light_sources")
     def obscuring_radius(self, sid, scene):
         """Reuse the Effects radius bound until a spatial source changes."""
-        return self.owner.maximum_fixed_obscuring_radius(sid, scene)
+        return self.owner.maximum_fixed_radius(sid, scene)
+
+    @instance_read("scene", "lighting", "silence_radius", maintained="light_sources")
+    def silence_radius(self, sid, scene):
+        """Reuse the Silence radius bound until a spatial source changes."""
+        return self.owner.maximum_fixed_radius(sid, scene, silence=True)
 
     def has_exploration_concentration(self, sid):
         """Check the selected caster's elapsed group even when its effect is in another Scene."""
@@ -317,14 +326,9 @@ class WorldMagic:
     @instance_read("scene", "lighting", "magic_anchors", maintained="light_sources")
     def illumination_anchors(self, sid, scene):
         """Resolve effective spell anchors once for the current source version."""
-        fixed = self.owner.fixed_illuminating(sid, scene)
-        objects = self.h.facts.magic_light_anchors(sid, scene)
         return tuple(
             anchor
-            for record in (
-                *fixed,
-                *(record for oid in objects for record in self.owner.attached(sid, oid)),
-            )
+            for record in self._records(sid, scene, illuminating=True)
             if (anchor := self._illumination_anchor(sid, scene, record)) is not None
         )
 
@@ -360,29 +364,48 @@ class WorldMagic:
                 if self.owner.spec(record).obscurement != "none"
             )
         else:
-            radius_ft = self.obscuring_radius(sid, scene)
-            if radius_ft == 0:
-                return {}
-            stored = self.h.facts.maps.scene(sid, scene, spatial_only=True)
-            if stored is None or stored.grid is None:
-                return {}
-            grid = stored.grid
-            reach = ceil(radius_ft / grid.topology.cell_size_ft) + 1
-            width, height = grid.data["width"], grid.data["height"]
-            origins = {
-                cell_id(x, y)
-                for cell in selected
-                for point_x, point_y in (parse_cell(cell),)
-                for x in range(max(0, point_x - reach), min(width, point_x + reach + 1))
-                for y in range(max(0, point_y - reach), min(height, point_y + reach + 1))
-            }
-            records = self.owner.fixed_obscuring_at(sid, scene, origins)
+            records = self._local_fixed_records(
+                sid, scene, selected, self.obscuring_radius(sid, scene)
+            )
         return {
             cell: source.spec.obscurement
             for source in self._project_sources(sid, scene, package, records)
             for cell in source.cells
             if selected is None or cell in selected
         }
+
+    def _local_fixed_records(self, sid, scene, cells, radius_ft, *, silence=False):
+        """Look up matching region origins in the bounded neighborhood of requested cells."""
+        if not radius_ft:
+            return ()
+        stored = self.h.facts.maps.scene(sid, scene, spatial_only=True)
+        if stored is None or stored.grid is None:
+            return ()
+        grid = stored.grid
+        reach = ceil(radius_ft / grid.topology.cell_size_ft) + 1
+        width, height = grid.data["width"], grid.data["height"]
+        origins = {
+            cell_id(x, y)
+            for cell in cells
+            for point_x, point_y in (parse_cell(cell),)
+            for x in range(max(0, point_x - reach), min(width, point_x + reach + 1))
+            for y in range(max(0, point_y - reach), min(height, point_y + reach + 1))
+        }
+        return self.owner.fixed_at(sid, scene, origins, silence=silence)
+
+    def blocks_verbal_casting(self, sid, scene, actor_id, package):
+        """Test one trusted caster cell against current fixed Silence footprints."""
+        radius = self.silence_radius(sid, scene)
+        if not radius:
+            return False
+        position = self.h.facts.carrier_position(sid, actor_id)
+        if position is None or position[0] != scene or position[1] is None:
+            return False
+        cell = position[1]
+        records = self._local_fixed_records(sid, scene, (cell,), radius, silence=True)
+        return any(
+            cell in source.cells for source in self._project_sources(sid, scene, package, records)
+        )
 
     def _project_sources(self, sid, scene, package, records):
         """Build rules footprints for overlap and dispels from the current candidate facts."""
@@ -466,7 +489,7 @@ class WorldMagic:
     def reconcile_scene(self, sid, scene, package):
         """Apply RE's overlap decisions only on a candidate mutation stage."""
         self.store.require_write()
-        records = self._records(sid, scene)
+        records = self._records(sid, scene, illuminating=True)
         if len(records) < 2:
             return []
         positions = tuple(
@@ -536,7 +559,8 @@ class WorldMagic:
                 ended.append(self.end_event(sid, package, record, "recast"))
         deadline = self.h.time.seconds_deadline(sid, proposal.duration_seconds)
         identity = self.owner.add(sid, scene, command_id, proposal, deadline)
-        ended.extend(self.reconcile_scene(sid, scene, package))
+        if proposal.environment.light is not None:
+            ended.extend(self.reconcile_scene(sid, scene, package))
         return identity, ended
 
     def apply_end(self, row, package, proposal):

@@ -6,6 +6,9 @@ from .errors import StateMachineError
 from .package import canonical_json
 from .scoped_reads import scoped_read
 
+_OBSCURING = "json_extract(environment_json, '$.obscurement') != 'none'"
+_SILENCE = "json_extract(environment_json, '$.kind') = 'magical_silence'"
+
 
 class SpatialLightEffects:
     """Store admitted spell contributions and keyed lifecycle pre-values in the caller's UoW."""
@@ -44,20 +47,22 @@ class SpatialLightEffects:
         )
 
     @scoped_read
-    def maximum_fixed_obscuring_radius(self, sid, scene):
+    def maximum_fixed_radius(self, sid, scene, *, silence=False):
         """Use the source-owned radius index to bound exact origin-cell lookup."""
+        predicate = _SILENCE if silence else _OBSCURING
         row = self.db.execute(
             "SELECT radius_ft FROM spatial_light_effects "
             "WHERE session_id=? AND fixed_scene_id=? AND fixed_cell IS NOT NULL "
-            "AND json_extract(environment_json, '$.obscurement') != 'none' "
+            f"AND {predicate} "
             "ORDER BY radius_ft DESC LIMIT 1",
             (sid, scene),
         ).fetchone()
         return row[0] if row else 0
 
     @scoped_read
-    def fixed_obscuring_at(self, sid, scene, cells):
-        """Fetch only fixed obscuring spells whose origins are exact candidate cells."""
+    def fixed_at(self, sid, scene, cells, *, silence=False):
+        """Fetch only matching fixed spells whose origins are exact candidate cells."""
+        predicate = _SILENCE if silence else _OBSCURING
         records = []
         selected = tuple(sorted(cells))
         for start in range(0, len(selected), 400):
@@ -67,8 +72,7 @@ class SpatialLightEffects:
                 self.db.execute(
                     "SELECT * FROM spatial_light_effects "
                     "WHERE session_id=? AND fixed_scene_id=? AND fixed_cell IS NOT NULL "
-                    "AND json_extract(environment_json, '$.obscurement') != 'none' "
-                    f"AND fixed_cell IN ({placeholders})",
+                    f"AND {predicate} AND fixed_cell IN ({placeholders})",
                     (sid, scene, *batch),
                 )
             )
