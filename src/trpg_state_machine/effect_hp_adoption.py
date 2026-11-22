@@ -31,6 +31,7 @@ def _adopt_hp_bonus_change(world, sid, target_id, old, new, *, package, command_
     world.characters.set_hp_pair(sid, target_id, transition)
     if transition.zero_consequence == "none":
         return []
+    # RUO-45 tracks atomic adoption with the combat round and turn lifecycle.
     if world._active_combat(sid):
         raise StateMachineError(
             "unsupported_effect_consequence", "Combat zero-HP lifecycle needs encounter adoption"
