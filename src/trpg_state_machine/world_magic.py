@@ -1,6 +1,7 @@
 """Resolve World anchors and hand actual rule footprints back to Effects."""
 
 from dataclasses import dataclass, replace
+from math import ceil
 from typing import Literal
 
 from dnd5e_engine.areas import AreaTemplate, area_cells, has_line_of_effect
@@ -12,7 +13,7 @@ from dnd5e_engine.evaluation_environmental_contracts import (
     EnvironmentalMagicEffectFacts,
     EnvironmentalMagicEffectTarget,
 )
-from dnd5e_engine.spatial import parse_cell
+from dnd5e_engine.spatial import cell_id, parse_cell
 from dnd5e_engine.spellcasting import spell_range_ft
 from dnd5e_srd_data.schema.environment import EnvironmentalSpec
 
@@ -289,17 +290,19 @@ class WorldMagic:
     def may_have_darkness(self, sid, scene):
         """Detect possible active darkness from indexed facts without rendering any footprint."""
         return any(
-            self.owner.spec(record).kind == "magical_darkness"
-            and self._anchor(sid, record)[2] != "block"
-            for record in self._records(sid, scene)
+            anchor.spec.kind == "magical_darkness"
+            for anchor in self.illumination_anchors(sid, scene)
         )
 
     @scoped_read
     def may_have_obscurement(self, sid, scene):
         """Detect active spell obscuration before a scene-wide clear-sight shortcut."""
-        return any(
-            self.owner.spec(record).obscurement != "none" for record in self._records(sid, scene)
-        )
+        return bool(self.obscuring_radius(sid, scene))
+
+    @instance_read("scene", "lighting", "obscuring_radius", maintained="light_sources")
+    def obscuring_radius(self, sid, scene):
+        """Reuse the Effects radius bound until a spatial source changes."""
+        return self.owner.maximum_fixed_obscuring_radius(sid, scene)
 
     def has_exploration_concentration(self, sid):
         """Check the selected caster's elapsed group even when its effect is in another Scene."""
@@ -313,9 +316,14 @@ class WorldMagic:
     @instance_read("scene", "lighting", "magic_anchors", maintained="light_sources")
     def illumination_anchors(self, sid, scene):
         """Resolve effective spell anchors once for the current source version."""
+        fixed = self.owner.fixed_illuminating(sid, scene)
+        objects = self.h.facts.magic_light_anchors(sid, scene)
         return tuple(
             anchor
-            for record in self._records(sid, scene)
+            for record in (
+                *fixed,
+                *(record for oid in objects for record in self.owner.attached(sid, oid)),
+            )
             if (anchor := self._illumination_anchor(sid, scene, record)) is not None
         )
 
@@ -340,13 +348,34 @@ class WorldMagic:
         return self._project_sources(sid, scene, package, self._records(sid, scene))
 
     def obscuring_cells(self, sid, scene, package, cells=None):
-        """Project active spell obscuration without replacing independent map sources."""
+        """Project only spell areas that can touch requested cells or the full scene."""
         selected = None if cells is None else frozenset(cells)
-        records = tuple(
-            record
-            for record in self._records(sid, scene)
-            if self.owner.spec(record).obscurement != "none"
-        )
+        if selected == frozenset():
+            return {}
+        if selected is None:
+            records = tuple(
+                record
+                for record in self._records(sid, scene)
+                if self.owner.spec(record).obscurement != "none"
+            )
+        else:
+            radius_ft = self.obscuring_radius(sid, scene)
+            if radius_ft == 0:
+                return {}
+            stored = self.h.facts.maps.scene(sid, scene, spatial_only=True)
+            if stored is None or stored.grid is None:
+                return {}
+            grid = stored.grid
+            reach = ceil(radius_ft / grid.topology.cell_size_ft) + 1
+            width, height = grid.data["width"], grid.data["height"]
+            origins = {
+                cell_id(x, y)
+                for cell in selected
+                for point_x, point_y in (parse_cell(cell),)
+                for x in range(max(0, point_x - reach), min(width, point_x + reach + 1))
+                for y in range(max(0, point_y - reach), min(height, point_y + reach + 1))
+            }
+            records = self.owner.fixed_obscuring_at(sid, scene, origins)
         return {
             cell: source.spec.obscurement
             for source in self._project_sources(sid, scene, package, records)

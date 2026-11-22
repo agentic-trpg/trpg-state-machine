@@ -30,6 +30,50 @@ class SpatialLightEffects:
             )
         )
 
+    @scoped_read
+    def fixed_illuminating(self, sid, scene):
+        """Read light-bearing fixed spells without scanning obscuring area rows."""
+        return tuple(
+            self.db.execute(
+                "SELECT * FROM spatial_light_effects WHERE session_id=? AND fixed_scene_id=? "
+                "AND fixed_cell IS NOT NULL "
+                "AND json_extract(environment_json, '$.light') IS NOT NULL "
+                "ORDER BY effect_id",
+                (sid, scene),
+            )
+        )
+
+    @scoped_read
+    def maximum_fixed_obscuring_radius(self, sid, scene):
+        """Use the source-owned radius index to bound exact origin-cell lookup."""
+        row = self.db.execute(
+            "SELECT radius_ft FROM spatial_light_effects "
+            "WHERE session_id=? AND fixed_scene_id=? AND fixed_cell IS NOT NULL "
+            "AND json_extract(environment_json, '$.obscurement') != 'none' "
+            "ORDER BY radius_ft DESC LIMIT 1",
+            (sid, scene),
+        ).fetchone()
+        return row[0] if row else 0
+
+    @scoped_read
+    def fixed_obscuring_at(self, sid, scene, cells):
+        """Fetch only fixed obscuring spells whose origins are exact candidate cells."""
+        records = []
+        selected = tuple(sorted(cells))
+        for start in range(0, len(selected), 400):
+            batch = selected[start : start + 400]
+            placeholders = ",".join("?" for _ in batch)
+            records.extend(
+                self.db.execute(
+                    "SELECT * FROM spatial_light_effects "
+                    "WHERE session_id=? AND fixed_scene_id=? AND fixed_cell IS NOT NULL "
+                    "AND json_extract(environment_json, '$.obscurement') != 'none' "
+                    f"AND fixed_cell IN ({placeholders})",
+                    (sid, scene, *batch),
+                )
+            )
+        return tuple(sorted(records, key=lambda record: record["effect_id"]))
+
     def attached(self, sid, oid):
         """Read the cached range of one known object's attached spatial effects."""
         return tuple(
