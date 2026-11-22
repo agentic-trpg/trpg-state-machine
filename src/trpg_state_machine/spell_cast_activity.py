@@ -304,6 +304,18 @@ class SpellCastActivities:
             (sid,),
         ).fetchone()[0]
 
+    def due_object_target(self, sid, tick):
+        """Return the exact next cast's touched item at its completion tick, if any."""
+        record = self.db.execute(
+            "SELECT deadline_tick,target_object_id FROM spell_cast_activities "
+            "WHERE session_id=? AND status='casting' AND deadline_tick<=? "
+            "ORDER BY deadline_tick,activity_id LIMIT 1",
+            (sid, tick),
+        ).fetchone()
+        if record is not None and record["deadline_tick"] == tick:
+            return record["target_object_id"]
+        return None
+
     def settle_one(self, row, package, command_id):
         """Stage an exact completion wait without invoking rules in this write transaction."""
         from .time_coordination import DueResult

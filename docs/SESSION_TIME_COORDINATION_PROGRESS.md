@@ -1,5 +1,19 @@
 # Session 时间协调实施记录
 
+## 2026-11-22 RUO-24 候选：同刻附着法术到期与鉴定术完成
+
+鉴定术在完成时通过目标物品的当前附着法术形成私有结果。SessionTime 现按实际
+Effects 下一项与 Activity 下一项的精确同物品、同 tick 关系判断：若空间效果到期
+事件没有 Package 后果，先删除该项到期，再重新查询期限，让鉴定术进入原有持久等待。
+其余未证明依赖的跨领域同刻组合仍停在 `simultaneous_time_choice`。
+
+候选定向验证：目标魔杖上的光亮术在鉴定术完成前一秒仍列入结果；同刻 3600 到期
+后不再列入。覆盖 receipt 写入故障时 SQL／RAM／事件／进度回滚、同 key 重试、保存
+重开后完成，以及内存 typed Package 到期回调使同刻选择继续停点。实际执行
+`test_exploration_identify.py`、`test_same_tick_effects.py`、
+`test_exploration_spell_cast_activity.py` 的定向用例通过；公开同刻推进路径在固定目标、
+额外 0／40 个远处物体下 SQL SELECT 次数和返回行数相同。尚非全量回归或远端验收。
+
 ## 2026-11-21 RUO-7 候选：普通灯具燃料
 
 `world_time_metered` 灯具声明正数 `fuel_seconds`，火把样例声明 3,600 秒。

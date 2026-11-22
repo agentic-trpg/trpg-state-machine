@@ -158,6 +158,11 @@ Longstrider 效果期限按 expires_tick、target_id、effect_id、origin 排序
 替代选择。内部 `resolve_simultaneous` 是宿主已确认依赖／选择的接线点，业务选择仍应
 由领域保存。测试仅验证该契约，不冒充完整玩家／DM 选择 UI。
 
+已接入的鉴定术 Activity 在完成时读取所触物品当前附着的法术。同刻若 Effects 的下一项
+确为该物品的空间法术到期，且该事件没有 Package 后果，先结算这一项到期，再重新查询
+期限并进入 Activity 原有持久等待；之后的获准完成回复读取到期后的物品事实。其他尚未
+证明顺序的跨领域同刻工作仍保存 `simultaneous_time_choice`，不从领域名称推断先后。
+
 需要 RE、玩家选择或外部等待时，领域在本事务内保存自己的可靠继续工作并返回 waiting；
 Runtime 保存边界／目标并结束短事务。声明具体等待及获准回复的接口见下节。
 接口禁止在 settle_one 中持有写事务进行外部 I/O。
