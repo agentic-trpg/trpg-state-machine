@@ -1,5 +1,8 @@
 """Refill a bound retained item at its next configured world dawn."""
 
+from dnd5e_engine.evaluation_charged_item import is_healing_staff, roll_healing_staff_dawn
+from dnd5e_engine.evaluation_rng import RNGTransition
+
 from .errors import StateMachineError
 from .time_binding import TimeBinding
 from .world_time import WorldTimeService
@@ -35,7 +38,23 @@ class ItemRechargeTimeConsumer:
         before = self.world.facts.due_item_recharge(sid, tick)
         if before is None:
             raise StateMachineError("invalid_time_consumer", "Missing due item recovery")
-        self.world.facts.recover_item_charges(sid, before)
+        evidence = {}
+        asset = self.world.loader.get_item(before["item_slug"])
+        amount = None
+        if asset is not None and is_healing_staff(asset):
+            rng_context = self.world.runtime.rng_context(row)
+            rng = rng_context.state.restore()
+            roll = roll_healing_staff_dawn(asset, rng)
+            amount = roll.total
+            self.world.runtime.advance_rule_rng(
+                sid, RNGTransition.between(rng_context, rng), rng_context
+            )
+            evidence = {
+                "dice": roll.dice,
+                "modifier": roll.modifier,
+                "rng_version": rng_context.version + 1,
+            }
+        balance = self.world.facts.recover_item_charges(sid, before, amount)
         event = self.world._capture_event(
             sid,
             package,
@@ -43,8 +62,9 @@ class ItemRechargeTimeConsumer:
             {
                 "instance_id": before["object_id"],
                 "previous_charges": before["item_charges"],
-                "charges": before["item_recharge_capacity"],
+                "charges": balance,
                 "boundary_tick": before["item_recharge_due_tick"],
+                **evidence,
             },
             phase="world.after_item_recharge",
         )

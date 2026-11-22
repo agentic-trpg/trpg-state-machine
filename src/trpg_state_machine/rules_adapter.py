@@ -23,6 +23,7 @@ from dnd5e_engine.evaluation_contracts import (
     MATERIAL_SPELL_SCHEMA_VERSION,
     MULTI_SPELL_SCHEMA_VERSION,
     SPATIAL_EFFECT_END_SCHEMA_VERSION,
+    STAFF_CAST_SCHEMA_VERSION,
     CheckPayload,
     CombatClosePayload,
     ExplorationCastActivityPayload,
@@ -1356,7 +1357,7 @@ def validate_dnd_result(request, result, *, loader=None):
     if type(request.payload) is ExplorationCastActivityPayload:
         return result, casting_activity_changes(request, result, loader)
     if type(request.payload) is ExplorationItemUsePayload:
-        if request.schema_version == CHARGED_ITEM_SCHEMA_VERSION:
+        if request.schema_version in (CHARGED_ITEM_SCHEMA_VERSION, STAFF_CAST_SCHEMA_VERSION):
             return result, charged_item_changes(request, result, loader)
         return result, exploration_potion_changes(request, result)
     if type(request.payload) is ExplorationEnvironmentalSpellCastPayload:
@@ -2120,12 +2121,18 @@ class RulesAdapter:
                 if before is None or self.facts.item_entry(before) != value or command_id is None:
                     _invalid("Selected inventory instance changed")
                 self.facts.consume_item(sid, before, command_id)
-            elif component == "item" and field == "spend_charge":
+            elif component == "item" and field in ("spend_charge", "depleted_staff"):
                 expected, amount = value
                 before = self.facts.object(sid, identity)
                 if before is None or self.facts.item_entry(before) != expected:
                     _invalid("Selected item charge pre-value changed")
-                self.facts.spend_item_charge(sid, before, amount=amount)
+                if field == "depleted_staff":
+                    if command_id is None or expected["charges_remaining_per_unit"] != amount:
+                        _invalid("Staff did not spend its last charge")
+                    self.characters.set_held_weapon(sid, expected["owner_id"], None, "none")
+                    self.facts.consume_item(sid, before, command_id, depleted_staff=True)
+                else:
+                    self.facts.spend_item_charge(sid, before, amount=amount)
             elif component == "xp":
                 self.characters.award_xp(sid, identity, value)
             elif component == "resource":
@@ -2299,6 +2306,12 @@ class RulesAdapter:
             and command.payload.material_instance_id is not None
             else "engine-evaluation/29"
             if type(command.payload) is ExplorationSpellCastPayload
+            else STAFF_CAST_SCHEMA_VERSION
+            if exploration_charge
+            and any(
+                e.instance_id == command.payload.instance_id and e.item_slug == "staff-of-healing"
+                for e in snapshot.inventory_state.entries
+            )
             else CHARGED_ITEM_SCHEMA_VERSION
             if exploration_charge
             else "engine-evaluation/28"

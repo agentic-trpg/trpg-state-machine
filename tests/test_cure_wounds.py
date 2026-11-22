@@ -292,7 +292,10 @@ def cure_world(
         for person in data["actors"]:
             person.pop("npc_state", None)
     if configure is not None:
-        configure(data, loader)
+        configured_loader = configure(data, loader)
+        if configured_loader is not None:
+            loader = configured_loader
+            data["manifest"]["ruleset_binding"] = ruleset_binding(loader).model_dump(mode="json")
     package = _validate(data)
     db = tmp_path / "cure-wounds.sqlite"
     sm = StateMachine(db, dnd_loader=loader)

@@ -137,18 +137,45 @@ def charged_item_changes(request, result, loader):
     spend, *healing = result.state_delta.operations
     entry = spend.expected
     asset = loader.get_item(entry.item_slug) if loader is not None else None
-    profile = exploration_charged_cast_profile(asset, loader) if asset is not None else None
-    _, cast, _ = result.proposed_events
+    profile = (
+        exploration_charged_cast_profile(
+            asset,
+            loader,
+            activity_id=request.payload.activity_id,
+            cast_level=request.payload.cast_level,
+        )
+        if asset is not None
+        else None
+    )
+    cast = result.proposed_events[1]
     if (
         profile is None
         or profile.activity.id != request.payload.activity_id
         or profile.spell.slug != cast.spell_id
         or profile.cost != spend.amount
         or entry.charges_remaining_per_unit > profile.capacity
+        or (cast.item_cast_level is not None) != profile.requires_held_attunement
+        or (
+            profile.requires_held_attunement
+            and (
+                entry.attuned_actor_id != request.actor_id
+                or next(
+                    a
+                    for a in request.state_snapshot.character_states
+                    if a.entity_id == request.actor_id
+                ).held_weapon_instance_id
+                != entry.instance_id
+            )
+        )
     ):
         raise StateMachineError("invalid_rule_result", "Item cast differs from its bound activity")
     return (
-        ("item", entry.instance_id, "spend_charge", (entry.model_dump(mode="json"), spend.amount)),
+        (
+            "item",
+            entry.instance_id,
+            "spend_charge" if spend.value.quantity else "depleted_staff",
+            (entry.model_dump(mode="json"), spend.amount),
+        ),
         *(("actor", edit.target_id, "hp_current", edit.resulting_hp) for edit in healing),
     )
 

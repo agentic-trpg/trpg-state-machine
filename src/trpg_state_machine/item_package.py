@@ -17,6 +17,7 @@ class PortableItem:
     quantity: int
     charges_remaining_per_unit: int
     policy: str
+    initially_attuned: bool = False
 
 
 def validate_items(raw, scenes, foundation, definitions, *, world=False):
@@ -40,8 +41,11 @@ def validate_items(raw, scenes, foundation, definitions, *, world=False):
     if len(values) > 128:
         _fail("unsupported_mechanism", path, "At most 128 portable instances")
     for value in values:
+        attuned = value.get("initially_attuned", False) if type(value) is dict else False
         item = _mapping(
-            value,
+            {k: v for k, v in value.items() if k != "initially_attuned"}
+            if type(value) is dict
+            else value,
             "instance_id item_slug initial_owner_id quantity charges_remaining_per_unit policy",
             path,
         )
@@ -74,6 +78,10 @@ def validate_items(raw, scenes, foundation, definitions, *, world=False):
             "charges_remaining_per_unit": item["charges_remaining_per_unit"],
             "accessible": True,
         }
+        if type(attuned) is not bool or (
+            attuned and (owner is None or item["policy"] != "charge_exhaust_retain")
+        ):
+            _fail("schema_error", path, "Initial attunement requires an initial charge-item owner")
         if not valid_item_unit(unit):
             _fail("schema_error", path, "Invalid typed portable item balance")
         if (owner is None and iid in entries) or (
@@ -83,6 +91,6 @@ def validate_items(raw, scenes, foundation, definitions, *, world=False):
             _fail("invalid_reference", path, "Portable ownership must match initial inventory")
         if any(getattr(e.effect, "object_id", None) == iid for e in definitions):
             _fail("unsupported_mechanism", path, "Portable items cannot be automatic switches")
-        result.append(PortableItem(**item))
+        result.append(PortableItem(**item, initially_attuned=attuned))
     _unique([i.instance_id for i in result], path)
     return tuple(result)

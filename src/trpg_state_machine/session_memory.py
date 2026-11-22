@@ -561,6 +561,7 @@ class SessionMemory:
                 "item_slug",
                 "item_charges",
                 "item_accessible",
+                "item_attuned_actor_id",
                 "state",
             )
             if old is not None and new is not None and all(old[c] == new[c] for c in columns):
