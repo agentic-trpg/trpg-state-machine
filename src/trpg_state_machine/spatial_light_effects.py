@@ -1,5 +1,7 @@
 """Spatial members of Effects, with the existing Session clock and concentration owner."""
 
+import json
+
 from dnd5e_srd_data.schema.environment import EnvironmentalSpec
 
 from .errors import StateMachineError
@@ -30,6 +32,19 @@ class SpatialLightEffects:
                 "SELECT * FROM spatial_light_effects WHERE session_id=? AND fixed_scene_id=? "
                 "ORDER BY effect_id",
                 (sid, scene),
+            )
+        )
+
+    @scoped_read
+    def fixed_magic_at(self, sid, scene, cells):
+        """Locate exact fixed spell origins of every admitted kind in selected cells."""
+        return tuple(
+            row[0]
+            for row in self.db.execute(
+                "SELECT DISTINCT fixed_cell FROM spatial_light_effects "
+                "WHERE session_id=? AND fixed_scene_id=? AND fixed_cell IS NOT NULL "
+                "AND fixed_cell IN (SELECT value FROM json_each(?))",
+                (sid, scene, json.dumps(cells)),
             )
         )
 

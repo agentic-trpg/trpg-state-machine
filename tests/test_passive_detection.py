@@ -214,6 +214,35 @@ def test_indeterminate_path_does_not_mask_a_separate_source(timed_spell_world):
         assert _view(session).detection_clues == MAGIC
 
 
+def test_public_detect_magic_detects_fixed_darkness_origin(timed_spell_world):
+    """Detect the actual Darkness rule profile with separate concentration owners."""
+    session = _prepare(timed_spell_world, None)
+    sm, sid, package, context = session
+    with sm:
+        command = prepare_cast(
+            session, "fixed-darkness", "darkness", 2, {"kind": "point", "cell_id": "2,0"}
+        )
+        magic = sm._world.magic
+        with patch.object(magic, "apply", wraps=magic.apply) as adopt:
+            receipt = sm.submit_command(command, package, context=context)
+            assert receipt.status == "committed", receipt
+            _, _, _, darkness = adopt.call_args.args
+        assert darkness.environment.obscurement == "none" and darkness.environment.light == "dark"
+        _world(session, DropWorldConcentration(), "drop-first-darkness")
+        _detect(session)
+        assert _view(session).detection_clues == ()
+        # Fixture setup only. Either real spell takes concentration, and the public
+        # exploration cast command currently admits only the player character.
+        with sm._transaction(write=True):
+            row = sm._conn.execute("SELECT * FROM sessions WHERE session_id=?", (sid,)).fetchone()
+            magic.apply(
+                row, package, "fixture-darkness", darkness.model_copy(update={"source_id": NPC})
+            )
+        assert _view(session).detection_clues == MAGIC
+        npc = sm.get_spatial_view(sid, NPC, package, context=context)
+        assert npc.detection_clues == ()
+
+
 def test_detection_candidate_work_is_bounded_by_range_in_public_view(timed_spell_world):
     counts = []
     for growth in (0, 40):
@@ -239,6 +268,7 @@ def test_detection_candidate_work_is_bounded_by_range_in_public_view(timed_spell
             for table, index in (
                 ("object_spatial_cells", "spatial_cell_lookup"),
                 ("actors", "actors_cell_lookup"),
+                ("spatial_light_effects", "spatial_magic_fixed_cell"),
             ):
                 (query,) = [sql for sql in queries if f"FROM {table} " in sql and "cell IN" in sql]
                 plan = sm._conn.execute(

@@ -70,8 +70,10 @@ class PassiveDetection:
             ) and detectable("spell_effect", cell):
                 return True
             roots[cell].update(self.facts.carried_root_ids(sid, actor_id))
-        for effect in self.effects.spatial_lights.fixed_obscuring_at(sid, scene, cells):
-            if detectable("spell_effect", effect["fixed_cell"]):
+        # LF1123-D49-02: fixed origins are represented. Region interiors need a
+        # bounded query for affected cells, tested with the origin out of range.
+        for cell in self.effects.spatial_lights.fixed_magic_at(sid, scene, cells):
+            if detectable("spell_effect", cell):
                 return True
         for cell, object_ids in roots.items():
             for source, enclosing in self._object_sources(sid, object_ids):
@@ -85,6 +87,8 @@ class PassiveDetection:
         The grid's existing center ray locates crossed cells. Endpoint objects do
         not imply an enclosure; independently verified ancestor shells supply that
         fact. Unclassified static walls/solid cover carry an unknown profile.
+        LF1123-D49-01 needs explicit local barrier evidence for static walls and
+        paired-door thresholds outside their object's indexed ground footprint.
         """
         if (
             not topology.has_line_of_sight(origin, cell)
