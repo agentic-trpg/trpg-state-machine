@@ -21,12 +21,14 @@ from dnd5e_engine.evaluation_environmental_contracts import (
     WorldEnvironmentalEffectEnd,
 )
 from dnd5e_engine.evaluation_exploration_healing import exploration_healing_requires_sight
+from dnd5e_engine.evaluation_identify import IDENTIFY_SPELL_ID
 from dnd5e_engine.evaluation_openable import OpenableCheckRequest, evaluate_openable
 from dnd5e_engine.evaluation_resources import HitDieSpend
 from dnd5e_engine.evaluation_ruleset import EVALUATOR_VERSION, RulesetBindingError
 from dnd5e_engine.evaluation_shield_window import answer_shield, evaluate_for_shield
 from dnd5e_engine.evaluation_speed_effects import spell_attack_has_speed_effect
 from dnd5e_engine.evaluation_spell_termination import WorldSpellEnd
+from dnd5e_engine.events import ObjectIdentified
 from dnd5e_engine.spellcasting import spell_range_ft
 from pydantic import ValidationError
 
@@ -120,7 +122,7 @@ class RuleExecution:
             else None
         )
 
-    def _prepare_cast_activity(self, row, command):
+    def _prepare_cast_activity(self, row, command, package):
         """Freeze the selected spell at start or its exact deadline continuation."""
         sid, actor = row["session_id"], command.actor_id
         operation = command.payload
@@ -129,7 +131,8 @@ class RuleExecution:
         if position is None or position[0] != row["current_scene_id"]:
             return None, None, "spell.target"
         record = domain.get(sid, operation.activity_id)
-        if type(operation) is StartSpellCast:
+        starting = type(operation) is StartSpellCast
+        if starting:
             if record is not None:
                 return None, None, "activity_exists"
             if self.activities.active(sid, actor) or domain.active(sid, actor):
@@ -137,6 +140,7 @@ class RuleExecution:
             spell, source = operation.spell_id, operation.spell_source_id
             slot, ritual = operation.slot_level, operation.as_ritual
             phase, elapsed = "start", None
+            target_id, material_id = operation.target_object_id, operation.material_instance_id
         else:
             _, tick = self.world.facts.time_state(sid)
             if (
@@ -149,6 +153,18 @@ class RuleExecution:
             spell, source = record["spell_id"], record["spell_source_id"]
             slot, ritual = record["slot_level"], bool(record["as_ritual"])
             phase, elapsed = "finish", tick - record["start_tick"]
+            target_id, material_id = record["target_object_id"], record["material_instance_id"]
+        identify = None
+        if spell == IDENTIFY_SPELL_ID:
+            if target_id is None or material_id is None:
+                return None, None, "spell.target"
+            identify = domain.identify_facts(
+                sid, actor, target_id, material_id, package, starting=starting
+            )
+            if identify is None:
+                return None, None, "spell.target"
+        elif target_id is not None:
+            return None, None, "spell.target"
         return (
             replace(
                 command,
@@ -162,6 +178,7 @@ class RuleExecution:
                     slot_level=slot,
                     as_ritual=ritual,
                     elapsed_seconds=elapsed,
+                    identify=identify,
                 ),
             ),
             dict(record) if record is not None else None,
@@ -410,7 +427,9 @@ class RuleExecution:
                     )
             if casting_activity and prepare_error is None:
                 spell_actor_ids = (command.actor_id,)
-                rule_command, cast_record, prepare_error = self._prepare_cast_activity(row, command)
+                rule_command, cast_record, prepare_error = self._prepare_cast_activity(
+                    row, command, package
+                )
             elif environmental_spell and prepare_error is None:
                 spell_actor_ids = (command.actor_id,)
                 spell_positions = self.world.magic.cast_positions(row, package, command)
@@ -667,7 +686,7 @@ class RuleExecution:
                 or (
                     casting_activity
                     and prepare_error is None
-                    and self._prepare_cast_activity(row, command)
+                    and self._prepare_cast_activity(row, command, package)
                     != (rule_command, cast_record, None)
                 )
                 or (material is not None and cast_material(row) != material)
@@ -869,6 +888,12 @@ class RuleExecution:
                     # original rule result's candidate RNG successor. Never
                     # overwrite a mechanism successor with this earlier state.
                     self.runtime.advance_rule_rng(command.session_id, result.rng_transition, rng)
+                    if casting_finish and isinstance(result.proposed_events[-1], ObjectIdentified):
+                        self.world.spell_casts.record_identification(
+                            command.session_id,
+                            command.payload.activity_id,
+                            result.proposed_events[-1].identification,
+                        )
                     events = [
                         self.capture._capture_event(
                             command.session_id,
@@ -947,6 +972,7 @@ class RuleExecution:
                             unresolved=True,
                         )
                         for event in result.proposed_events
+                        if not isinstance(event, ObjectIdentified)
                     ]
                     events.extend(effects_events)
                     events.extend(

@@ -25,6 +25,7 @@ from .errors import StateMachineError
 from .package import canonical_json
 from .scoped_reads import scoped_read
 from .session_access import _binding
+from .spell_cast_activity import StartSpellCast
 from .world_commands import ActivateMechanism, RepositionObject
 
 
@@ -42,6 +43,9 @@ def _fingerprint(command, digest, binding, context):
                 data["payload"].pop(field)
     if type(command.payload) is ActivateMechanism and command.payload.operation_id == "activate":
         data["payload"].pop("operation_id")
+    if type(command.payload) is StartSpellCast and command.payload.target_object_id is None:
+        data["payload"].pop("target_object_id")
+        data["payload"].pop("material_instance_id")
     if command.check_world_effects is None:
         # Preserve canonical fingerprints of all pre-SM21 stored commands.
         data.pop("check_world_effects")
@@ -363,6 +367,13 @@ class SessionRuntime:
         guard_shield_window(self._conn, row)
         if self.version_conflict(row, command):
             raise StateMachineError("version_conflict", "Command was prepared on another version")
+        if self.time is not None:
+            events = (
+                *events,
+                *self.time.world.spell_casts.interrupt_lost_contact(
+                    row, package, command.command_id
+                ),
+            )
         version = row["world_version"] + 1
         self.set_world_version(command.session_id, version)
         self.persistence._append_events(

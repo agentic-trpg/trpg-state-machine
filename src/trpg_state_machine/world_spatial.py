@@ -409,17 +409,20 @@ class ObjectSpatialService:
             _, visible = self._object_visibility(sid, actor, position, oid, package)
             return visible
 
-    def contact_cell(self, sid, actor, oid, package):
-        """Nearest visible legal adjacent contact, excluding only the target itself.
+    def contact_cell(self, sid, actor, oid, package, *, require_visible=True):
+        """Nearest legal adjacent contact, excluding only the target itself.
 
         Callers own operation authorization, including door standing ports, container access and
-        tools.
+        tools. Ongoing, already authorized physical contact can persist without sight.
         """
         position = self.h._public_scope(sid, actor, package)
-        targets, visible = self._object_visibility(sid, actor, position, oid, package)
+        if require_visible:
+            targets, visible = self._object_visibility(sid, actor, position, oid, package)
+        else:
+            targets = visible = self.target_cells(sid, position.scene_id, oid, package)
         # Existing manual access permits contact at the actor's own cell even
         # without visual light there (e.g. an owned local emitter switch).
-        if position.cell in targets:
+        if require_visible and position.cell in targets:
             visible = tuple(dict.fromkeys((*visible, position.cell)))
         if not visible:
             raise StateMachineError("invalid_target", "No authorized local object")

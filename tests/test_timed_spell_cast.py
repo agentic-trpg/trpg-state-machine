@@ -64,6 +64,7 @@ def timed_spell_world(tmp_path, context):
         target_first=False,
         proficiency_override=None,
         additional_spells=(),
+        additional_items=(),
         caster_class="wizard",
         caster_subclass="evoker",
         configure=None,
@@ -115,7 +116,11 @@ def timed_spell_world(tmp_path, context):
             }
         )
         loader = MemoryAssetLoader(
-            items=[*base._items.values(), canonical.get_item("component-pouch")],
+            items=[
+                *base._items.values(),
+                canonical.get_item("component-pouch"),
+                *additional_items,
+            ],
             monsters=[ogre] if ogre else list(base._monsters.values()),
             classes=[spellcaster],
             subclasses=[subclass],

@@ -73,6 +73,10 @@ class WorldMagic:
         self.store = world.store
         self.owner = world.characters.effects.spatial_lights
 
+    def object_spells(self, sid, oid):
+        """Return rules references for ongoing spells on the selected object only."""
+        return tuple(sorted({record["spell_id"] for record in self.owner.attached(sid, oid)}))
+
     def _transmission(self, sid, oid, placement) -> Literal["block", "transmit", "unknown"]:
         """Preserve known enclosure, transmission and undecided fixture data independently."""
         if self.h.facts.object_hp(sid, oid) == 0:

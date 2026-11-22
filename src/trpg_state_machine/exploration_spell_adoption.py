@@ -3,10 +3,11 @@
 from dnd5e_engine import evaluation_delta as delta
 from dnd5e_engine.damage_rules import healing_balance
 from dnd5e_engine.evaluation_beacon import is_reviewed_beacon_effect
-from dnd5e_engine.evaluation_cast_activity import casting_activity_seconds
+from dnd5e_engine.evaluation_cast_activity import cast_activity_components, casting_activity_seconds
 from dnd5e_engine.evaluation_charged_item import exploration_charged_cast_profile
 from dnd5e_engine.evaluation_effects import effect_state
 from dnd5e_engine.evaluation_exploration_healing import exploration_healing_activity
+from dnd5e_engine.evaluation_identify import identify_object
 from dnd5e_engine.evaluation_multi_spells import verify_multi_spell_definition
 from dnd5e_engine.evaluation_payments import spell_payment
 from dnd5e_engine.evaluation_spell_materials import spell_material_payment
@@ -57,32 +58,43 @@ def casting_activity_changes(request, result, loader):
         raise StateMachineError("invalid_rule_result", "Casting activity lacks a bound spell")
     try:
         seconds = casting_activity_seconds(spell, as_ritual=payload.as_ritual)
+        expected = (
+            identify_object(spell, payload.identify, request.actor_id, loader)
+            if payload.identify is not None
+            else None
+        )
         if payload.phase == "start":
             if operations[0].duration_seconds != seconds:
                 raise ValueError("Activity duration differs from its bound spell")
             return ()
-        activity, effect, _ = _passive_profile(
-            spell,
-            target_id=request.actor_id,
-            caster_id=request.actor_id,
-            casting_activity=True,
-        )
-        if payload.elapsed_seconds != seconds or operations[-1].value.effect != effect_state(
-            effect
-        ):
-            raise ValueError("Casting effect differs from its bound spell")
-        intent, cast, _ = result.proposed_events
-        components, material, consumed, cost = spell_component_metadata(spell)
+        if payload.elapsed_seconds != seconds:
+            raise ValueError("Casting elapsed time differs from its bound spell")
+        intent, cast, consequence = result.proposed_events
+        if payload.identify is None:
+            activity, effect, _ = _passive_profile(
+                spell,
+                target_id=request.actor_id,
+                caster_id=request.actor_id,
+                casting_activity=True,
+            )
+            if operations[-1].value.effect != effect_state(effect):
+                raise ValueError("Casting effect differs from its bound spell")
+        else:
+            if consequence.identification != expected:
+                raise ValueError("Identify result differs from its bound item")
+            activity = spell.activities[0]
         if intent.activity_id != activity.id or (
             cast.components,
             cast.material,
             cast.material_consumed,
             cast.material_cost_gp,
-        ) != (list(components), material, consumed, cost):
+        ) != cast_activity_components(spell):
             raise ValueError("Casting evidence differs from its bound spell")
     except ValueError as exc:
         raise StateMachineError("invalid_rule_result", str(exc)) from exc
     edits = () if payload.as_ritual else (_slot_change(request, operations[0]),)
+    if payload.identify is not None:
+        return edits
     return (*edits, ("world_effect", request.actor_id, "create", operations[-1].value))
 
 

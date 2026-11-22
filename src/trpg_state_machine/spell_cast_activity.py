@@ -2,6 +2,10 @@
 
 from dataclasses import dataclass
 
+from dnd5e_engine.evaluation_identify import IdentifyObjectFacts
+from dnd5e_engine.evaluation_state import InventoryEntry
+from dnd5e_engine.events import ObjectIdentification
+
 from .errors import StateMachineError
 from .time_binding import deadline_after_seconds, integer
 from .time_waits import DomainTimeWait, TimeWaitResolution
@@ -11,13 +15,15 @@ CASTING_FOCUS_PREFIX = "cast.activity:"
 
 @dataclass(frozen=True, slots=True)
 class StartSpellCast:
-    """Select an exploration spell source and ordinary or Ritual casting."""
+    """Select an exploration spell source and any required object and material."""
 
     activity_id: str
     spell_id: str
     spell_source_id: str
     slot_level: int | None = None
     as_ritual: bool = False
+    target_object_id: str | None = None
+    material_instance_id: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -29,7 +35,7 @@ class FinishSpellCast:
 
 @dataclass(frozen=True, slots=True)
 class SpellCastActivity:
-    """An authorized immutable view of the selected spell and committed progress."""
+    """An authorized view of committed progress and any completed identification."""
 
     activity_id: str
     actor_id: str
@@ -41,6 +47,9 @@ class SpellCastActivity:
     deadline_tick: int
     status: str
     activity_version: int
+    target_object_id: str | None = None
+    material_instance_id: str | None = None
+    identification: ObjectIdentification | None = None
 
 
 def validate_spell_cast_activity(operation):
@@ -48,6 +57,9 @@ def validate_spell_cast_activity(operation):
     identifiers = (operation.activity_id,)
     if type(operation) is StartSpellCast:
         identifiers += (operation.spell_id, operation.spell_source_id)
+        selections = (operation.target_object_id, operation.material_instance_id)
+        if any(value is not None for value in selections):
+            identifiers += selections
         if type(operation.as_ritual) is not bool:
             raise StateMachineError("invalid_operation", "Ritual selection must be boolean")
         if operation.as_ritual:
@@ -115,7 +127,84 @@ class SpellCastActivities:
             deadline_tick=record["deadline_tick"],
             status=record["status"],
             activity_version=record["activity_version"],
+            target_object_id=record["target_object_id"],
+            material_instance_id=record["material_instance_id"],
+            identification=(
+                ObjectIdentification.model_validate_json(record["identification_json"])
+                if record["identification_json"] is not None
+                else None
+            ),
         )
+
+    def identify_facts(self, sid, actor_id, target_id, material_id, package, *, starting=False):
+        """Read the exact reachable item and retained pearl through the World owners."""
+        try:
+            target = self.world.objects.containers.reachable(
+                sid, actor_id, target_id, package, require_visible_contact=starting
+            )
+        except StateMachineError as exc:
+            if exc.code in {
+                "invalid_target",
+                "unsupported_target_visibility",
+                "unsupported_interaction_scope",
+                "container_inaccessible",
+                "object_out_of_reach",
+            }:
+                return None
+            raise
+        facts = self.world.facts
+        material = facts.object(sid, material_id)
+        entry = facts.item_entry(material) if material and material["item_slug"] else None
+        if (
+            entry is None
+            or entry["owner_id"] != actor_id
+            or not entry["accessible"]
+            or not target["item_slug"]
+        ):
+            return None
+        unit = facts.require_item_unit(target)
+        if unit["quantity"] != 1 or not unit["accessible"]:
+            return None
+        return IdentifyObjectFacts(
+            target_id=target_id,
+            item_slug=unit["item_slug"],
+            charges_remaining=unit["charges_remaining_per_unit"],
+            ongoing_spell_ids=self.world.magic.object_spells(sid, target_id),
+            material=InventoryEntry.model_validate(entry),
+        )
+
+    def interrupt_lost_contact(self, row, package, command_id):
+        """Check the selected PC's indexed active cast against the candidate world."""
+        sid, actor_id = row["session_id"], row["pc_actor_id"]
+        record = self.active(sid, actor_id)
+        if record is None or record["target_object_id"] is None:
+            return ()
+        if (
+            self.world._active_combat(sid)
+            or self.identify_facts(
+                sid, actor_id, record["target_object_id"], record["material_instance_id"], package
+            )
+            is None
+        ):
+            return (self.interrupt(record, package, command_id),)
+        return ()
+
+    def record_identification(self, sid, activity_id, identification):
+        """Keep resolved knowledge in the authorized Activity read, inside the finish scope."""
+        self.store.require_write()
+        changed = self.db.execute(
+            "UPDATE spell_cast_activities SET identification_json=? WHERE session_id=? "
+            "AND activity_id=? AND status='waiting' AND target_object_id=? "
+            "AND identification_json IS NULL",
+            (
+                identification.model_dump_json(),
+                sid,
+                activity_id,
+                identification.target_id,
+            ),
+        ).rowcount
+        if changed != 1:
+            raise StateMachineError("invalid_rule_result", "Identify result has no waiting cast")
 
     def _event(self, record, package, result):
         """Capture the actual activity transition without publishing cast effects."""
@@ -149,8 +238,9 @@ class SpellCastActivities:
         self.db.execute(
             "INSERT INTO spell_cast_activities (session_id,activity_id,actor_id,spell_id,"
             "spell_source_id,slot_level,as_ritual,start_tick,deadline_tick,status,activity_version,"
-            "concentration_id,source_command_id,last_command_id) "
-            "VALUES (?,?,?,?,?,?,?,?,?,'casting',1,?,?,?)",
+            "concentration_id,source_command_id,last_command_id,"
+            "target_object_id,material_instance_id) "
+            "VALUES (?,?,?,?,?,?,?,?,?,'casting',1,?,?,?,?,?)",
             (
                 sid,
                 operation.activity_id,
@@ -164,6 +254,8 @@ class SpellCastActivities:
                 concentration_id,
                 command_id,
                 command_id,
+                operation.target_object_id,
+                operation.material_instance_id,
             ),
         )
         return self._event(self.get(sid, operation.activity_id), package, "started")
@@ -221,6 +313,18 @@ class SpellCastActivities:
         ).fetchone()
         if record is None or record["deadline_tick"] != tick:
             raise StateMachineError("invalid_time_consumer", "Casting completion tick differs")
+        if (
+            record["target_object_id"] is not None
+            and self.identify_facts(
+                sid,
+                record["actor_id"],
+                record["target_object_id"],
+                record["material_instance_id"],
+                package,
+            )
+            is None
+        ):
+            return DueResult(events=(self.interrupt(record, package, command_id),))
         updated = self._transition(
             record, "waiting", command_id, concentration_id=record["concentration_id"]
         )
@@ -272,6 +376,8 @@ class SpellCastActivities:
             for evidence in (event.payload.get("engine_event", {}),)
         ):
             raise StateMachineError("invalid_time_wait_result", "Spell resolution was not adopted")
+        if record["target_object_id"] is not None and record["identification_json"] is None:
+            raise StateMachineError("invalid_time_wait_result", "Identify result was not adopted")
         updated = self._transition(record, "completed", command.command_id, concentration_id=None)
         self.world.characters.effects.remove_concentration(
             record["session_id"], record["concentration_id"]

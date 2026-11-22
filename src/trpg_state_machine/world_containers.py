@@ -91,7 +91,7 @@ class ContainerService:
         self.h = handler
         self.facts = handler.facts
 
-    def reachable(self, sid, actor, oid, package):
+    def reachable(self, sid, actor, oid, package, *, require_visible_contact=True):
         """Validate actual scene, carrier, ancestor access and spatial contact with the
         target.
         """
@@ -111,7 +111,9 @@ class ContainerService:
             )
         if location["carrier_id"] is None:
             root = location["ancestry"][-1] if location["ancestry"] else oid
-            h.objects.spatial.contact_cell(sid, actor, root, package)
+            h.objects.spatial.contact_cell(
+                sid, actor, root, package, require_visible=require_visible_contact
+            )
         return obj
 
     def config(self, sid, oid):

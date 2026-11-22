@@ -19,6 +19,7 @@ from dnd5e_engine.evaluation_contracts import (
     CAST_ACTIVITY_SCHEMA_VERSION,
     CHARGED_ITEM_SCHEMA_VERSION,
     ENVIRONMENTAL_SPELL_SCHEMA_VERSION,
+    IDENTIFY_ACTIVITY_SCHEMA_VERSION,
     MATERIAL_SPELL_SCHEMA_VERSION,
     MULTI_SPELL_SCHEMA_VERSION,
     SPATIAL_EFFECT_END_SCHEMA_VERSION,
@@ -1331,6 +1332,13 @@ def validate_dnd_result(request, result, *, loader=None):
     for event in result.proposed_events:
         for field in ("actor_id", "target_id", "source_actor_id", "attacker_id", "killer_id"):
             value = getattr(event, field, None)
+            if (
+                request.schema_version == IDENTIFY_ACTIVITY_SCHEMA_VERSION
+                and isinstance(event, IntentSubmitted)
+                and field == "target_id"
+                and value == request.payload.identify.target_id
+            ):
+                continue
             if value is not None and value not in actors:
                 _invalid("Proposed mechanical event refers to an actor outside the snapshot")
     if result.status != "accepted":
@@ -2258,7 +2266,10 @@ class RulesAdapter:
         """Build a rules request with durable Session identity and isolated fixed inputs."""
         row = row if row is not None else self._pinned_row(command.session_id, package)
         cast_version = (
-            CAST_ACTIVITY_SCHEMA_VERSION
+            IDENTIFY_ACTIVITY_SCHEMA_VERSION
+            if type(command.payload) is ExplorationCastActivityPayload
+            and command.payload.identify is not None
+            else CAST_ACTIVITY_SCHEMA_VERSION
             if type(command.payload) is ExplorationCastActivityPayload
             else MULTI_SPELL_SCHEMA_VERSION
             if type(command.payload) is ExplorationMultiSpellCastPayload
