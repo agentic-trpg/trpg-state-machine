@@ -73,6 +73,12 @@ Effects 和 SessionTime 共同保存及消费到期时间。`drop_concentration`
 SessionTime 处理同一角色在同一个探索时点的自然到期时，Effects 按该角色效果列表的保存顺序逐条结束，
 并在同一次时间推进中采用终止事件。不同消费者之间有依赖时沿已确认的顺序或等待处理。
 
+探索隐形术的首个公开切片采用二环单目标应用。Effects 按真实条件来源与原施法登记，
+成功的光亮术在同一次 `world.cast_spell` 中终止该应用。法术结果、条件关联、专注、
+事件和回执共同提交。非专注大步奔行的原施法者可以通过 `world.dismiss_spell` 提交
+目标、效果 ID、origin 和原施法命令 ID，精确结束所选应用且无需支付。
+攻击和伤害触发需各自接线。
+
 探索的普通长施法和仪式由 `activity.start_spell_cast` 建立可重开的 Activity。Effects 持有施法期间的专注，SessionTime 到达期限时保存完成等待。授权 `activity.finish_spell_cast` 沿同一规则采用与回执事务支付、施放并释放等待。获准开始时结束原专注，主动放弃施法专注会中断正在进行的活动。首批验收为完成后无需专注的自身定时效果。
 
 RUO-31 候选的单目标探索施法可由 RE 返回需要目标同意。`RuleExecution` 保存待答复及原命令

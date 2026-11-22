@@ -19,6 +19,7 @@ from dnd5e_engine.evaluation_contracts import (
 from pydantic import ValidationError
 
 from ._operations import (
+    DismissWorldSpell,
     DropItem,
     DropWorldConcentration,
     EnterScene,
@@ -118,6 +119,7 @@ OPERATIONS = {
     "choice.respond": ChoiceRespondOperationPayload,
     "choice.finalize_spell": ChoiceFinalizeSpellOperationPayload,
     "world.drop_concentration": DropWorldConcentration,
+    "world.dismiss_spell": DismissWorldSpell,
     "combat.initialize": InitializeCombat,
     "rule_operation": RuleOperation,
     "enter_scene": EnterScene,
@@ -209,6 +211,7 @@ class TypedCommand:
         | PickupItem
         | DropItem
         | DropWorldConcentration
+        | DismissWorldSpell
         | UnlockDoor
         | LockDoor
     )
@@ -363,6 +366,13 @@ def validate_command(command: TypedCommand) -> None:
     if operation_type is LongRest:
         return
     if operation_type is DropWorldConcentration:
+        return
+    if operation_type is DismissWorldSpell:
+        if any(
+            type(value) is not str or not value.strip() or len(value) > 1024
+            for value in asdict(command.payload).values()
+        ):
+            raise StateMachineError("invalid_operation", "Expected an exact spell application")
         return
     if operation_type in (StartSpellCast, FinishSpellCast):
         if operation_type is FinishSpellCast and command.time_wait is None:
@@ -707,6 +717,7 @@ def world_command_from_data(data):
         "choice.respond",
         "choice.finalize_spell",
         "world.drop_concentration",
+        "world.dismiss_spell",
         "enter_scene",
         "move_actor",
         "set_object_state",

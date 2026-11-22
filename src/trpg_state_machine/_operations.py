@@ -69,6 +69,16 @@ class DropWorldConcentration:
 
 
 @dataclass(frozen=True, slots=True)
+class DismissWorldSpell:
+    """Select one ongoing application by its effect key and original cast."""
+
+    target_id: str
+    effect_id: str
+    origin: str
+    cast_command_id: str
+
+
+@dataclass(frozen=True, slots=True)
 class PlaceObject:
     """One adjacent object adjustment, including its derived passage blocking."""
 
@@ -163,6 +173,7 @@ type FoundationOperation = (
     | SetObjectState
     | MoveActor
     | DropWorldConcentration
+    | DismissWorldSpell
     | PlaceObject
     | StepActor
     | TraversePassage

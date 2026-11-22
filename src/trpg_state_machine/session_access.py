@@ -15,6 +15,7 @@ from dnd5e_engine.evaluation_contracts import (
 )
 
 from ._operations import (
+    DismissWorldSpell,
     DropItem,
     DropWorldConcentration,
     EnterScene,
@@ -215,6 +216,7 @@ class SessionAccess:
                 PickupItem,
                 DropItem,
                 DropWorldConcentration,
+                DismissWorldSpell,
                 UnlockDoor,
                 LockDoor,
             ),

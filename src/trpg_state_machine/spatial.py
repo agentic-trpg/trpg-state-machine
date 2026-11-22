@@ -12,6 +12,7 @@ from dnd5e_engine.evaluation_state import InventoryEntry
 
 from ._execution import _execution_data
 from ._operations import (
+    DismissWorldSpell,
     DropItem,
     DropWorldConcentration,
     EnterScene,
@@ -267,7 +268,9 @@ class WorldHandler:
         ).fetchone()
         if mechanical and (
             self.characters.has_conditions(sid, actor_id)
-            or self.characters.effects.has_linked_conditions(sid, actor_id, capability="visibility")
+            or self.characters.effects.has_linked_conditions(
+                sid, actor_id, capability="observer_visibility"
+            )
         ):
             raise StateMachineError(
                 "unsupported_target_visibility",
@@ -1090,6 +1093,10 @@ class WorldHandler:
         # Container transfers check world capability in their shared validator.
         if type(operation) not in (PutItem, TakeItem):
             self._world_operation_capability(row, operation)
+        if type(operation) is DismissWorldSpell:
+            return [
+                self.runtime.time.consumers["effects"].dismiss(row, package, actor_id, operation)
+            ]
         if type(operation) is DropWorldConcentration:
             return self.magic.drop_concentration(
                 row["session_id"], actor_id, package, command_id=source_command_id

@@ -26,6 +26,7 @@ from dnd5e_engine.evaluation_resources import HitDieSpend
 from dnd5e_engine.evaluation_ruleset import EVALUATOR_VERSION, RulesetBindingError
 from dnd5e_engine.evaluation_shield_window import answer_shield, evaluate_for_shield
 from dnd5e_engine.evaluation_speed_effects import spell_attack_has_speed_effect
+from dnd5e_engine.evaluation_spell_termination import WorldSpellEnd
 from dnd5e_engine.spellcasting import spell_range_ft
 from pydantic import ValidationError
 
@@ -444,6 +445,11 @@ class RuleExecution:
                 if material is None:
                     prepare_error = "spell.material"
             snapshot = None if prepare_error else build_snapshot(row)
+            spell_end_applications = (
+                self.rules.spell_end_applications(command.session_id, command.actor_id)
+                if snapshot is not None and (exploration_spell or charged_item is not None)
+                else ()
+            )
             if domain_check:
                 try:
                     plan = check_service.prepare_check(
@@ -491,6 +497,7 @@ class RuleExecution:
                 spell_positions=spell_positions,
                 multi_spell_positions=multi_spell_positions,
                 exploration_charge=charged_item is not None,
+                spell_end_applications=spell_end_applications,
             )
             capability = (
                 None
@@ -784,9 +791,14 @@ class RuleExecution:
                                 sid, command.actor_id, place[0], command.command_id, start, target
                             )
                     spatial_effect_id, effects_events = None, []
+                    operations = result.state_delta.operations
+                    spell_ends = tuple(op for op in operations if type(op) is WorldSpellEnd)
                     spatial_operation = (
-                        result.state_delta.operations[-1] if environmental_spell else None
+                        operations[-len(spell_ends) - 1] if environmental_spell else None
                     )
+                    effect_time = self.runtime.time.consumers["effects"]
+                    for ending in spell_ends:
+                        self.world.characters.effects.apply_spell_end(command.session_id, ending)
                     spatial_proposal = (
                         spatial_operation.value
                         if isinstance(spatial_operation, WorldEnvironmentalEffectCreate)
@@ -834,6 +846,7 @@ class RuleExecution:
                         changes,
                         command_id=command.command_id,
                         snapshot=request.state_snapshot,
+                        cast_spell_id=rule_command.payload.spell_id if exploration_spell else None,
                         turn_starts=tuple(
                             request.state_snapshot.combat_state.initiative_ids[
                                 operation.value.current_turn_index
@@ -936,6 +949,10 @@ class RuleExecution:
                         for event in result.proposed_events
                     ]
                     events.extend(effects_events)
+                    events.extend(
+                        effect_time.spell_end_event(row["session_id"], package, ending)
+                        for ending in spell_ends
+                    )
                     if mechanism_check:
                         events.extend(
                             self.world.objects.mechanisms.service(

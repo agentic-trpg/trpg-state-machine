@@ -39,7 +39,7 @@ def magic_world(timed_spell_world, request):
     return _magic_world(timed_spell_world, opaque_case=getattr(request, "param", False))
 
 
-def _magic_world(timed_spell_world, *, opaque_case=False, growth=0):
+def _magic_world(timed_spell_world, *, opaque_case=False, growth=0, additional_spells=()):
     """Make a fixed spatial cast scene with optional unrelated placed objects."""
 
     def configure(data):
@@ -127,7 +127,7 @@ def _magic_world(timed_spell_world, *, opaque_case=False, growth=0):
                 scene["grid"]["width"] = 14
 
     return timed_spell_world(
-        additional_spells=("light", "darkness", "dispel-magic"),
+        additional_spells=("light", "darkness", "dispel-magic", *additional_spells),
         database=f"magic-{growth}.sqlite" if growth else "timed-spell.sqlite",
         configure=configure,
     )

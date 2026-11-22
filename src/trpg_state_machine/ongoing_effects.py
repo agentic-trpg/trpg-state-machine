@@ -17,6 +17,10 @@ from dnd5e_engine.evaluation_region_effect import (
     region_effect_identity,
 )
 from dnd5e_engine.evaluation_ruleset import RulesetBindingError
+from dnd5e_engine.evaluation_spell_termination import (
+    SpellApplicationFacts,
+    spell_preserves_observer_sight,
+)
 from dnd5e_engine.evaluation_state import ConditionLink, LifecycleRecord
 from dnd5e_engine.types.conditions import ActiveCondition
 
@@ -95,6 +99,9 @@ class OngoingEffects:
                     conditions=member.get("conditions"),
                     lifecycle=member.get("lifecycle"),
                     expires_tick=member.get("expires_tick"),
+                    cast_by=member.get("cast_by"),
+                    cast_spell_id=member.get("cast_spell_id"),
+                    cast_command_id=member.get("cast_command_id"),
                 )
 
     def create_casting_focus(self, sid, caster_id, activity_id):
@@ -118,6 +125,9 @@ class OngoingEffects:
         conditions=None,
         lifecycle=None,
         expires_tick=None,
+        cast_by=None,
+        cast_spell_id=None,
+        cast_command_id=None,
     ):
         """Persist one target effect and its links, assigning an ordinal when omitted."""
         self.store.require_write()
@@ -140,8 +150,8 @@ class OngoingEffects:
         self._conn.execute(
             "INSERT INTO ongoing_effects(session_id,target_id,effect_id,origin,ordinal,"
             "payload_json,concentration_id,chain_ordinal,conditions_json,"
-            "lifecycle_json,expires_tick) "
-            "VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+            "lifecycle_json,expires_tick,cast_by,cast_spell_id,cast_command_id) "
+            "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
             (
                 sid,
                 target,
@@ -154,12 +164,22 @@ class OngoingEffects:
                 canonical_json(conditions) if conditions is not None else None,
                 canonical_json(lifecycle) if lifecycle is not None else None,
                 expires_tick,
+                cast_by,
+                cast_spell_id,
+                cast_command_id,
             ),
         )
 
-    def add_world_effect(self, sid, proposal, *, expires_tick):
+    def add_world_effect(self, sid, proposal, *, expires_tick, spell_id):
         """Persist an elapsed-time effect and its optional one-member concentration."""
-        effect = proposal.effect.model_dump(mode="json")
+        entry = {
+            "effect": proposal.effect.model_dump(mode="json"),
+            "expires_tick": expires_tick,
+            "conditions": sorted(proposal.effect.statuses) or None,
+            "cast_by": proposal.source_id,
+            "cast_spell_id": spell_id,
+            "cast_command_id": proposal.command_id,
+        }
         if proposal.concentration:
             self.create_concentration(
                 sid,
@@ -167,10 +187,73 @@ class OngoingEffects:
                 proposal.source_id,
                 proposal.effect.id,
                 0,
-                ({"effect": effect, "expires_tick": expires_tick},),
+                (entry,),
             )
         else:
-            self.add_effect(sid, effect, expires_tick=expires_tick)
+            self.add_effect(sid, **entry)
+
+    def _spell_application(self, row):
+        """Project the persisted original cast and active effect from one owner row."""
+        if row is None or row["cast_by"] is None:
+            return None
+        return SpellApplicationFacts(
+            effect=EffectState.model_validate_json(
+                canonical_json(
+                    {
+                        "target_id": row["target_id"],
+                        "id": row["effect_id"],
+                        "origin": row["origin"],
+                        **self.store.memory.json(row["payload_json"]),
+                    }
+                )
+            ),
+            caster_id=row["cast_by"],
+            spell_id=row["cast_spell_id"],
+            cast_command_id=row["cast_command_id"],
+            expires_tick=row["expires_tick"],
+            concentration_id=row["concentration_id"],
+        )
+
+    def spell_application(self, sid, identity):
+        """Read one cast application by its full key."""
+        return self._spell_application(
+            self._conn.execute(
+                "SELECT * FROM ongoing_effects WHERE session_id=? AND target_id=? "
+                "AND effect_id=? AND origin=?",
+                (sid, *identity),
+            ).fetchone()
+        )
+
+    def target_spell_applications(self, sid, target_id, need):
+        """Read only applications of the declared trigger definition on this target."""
+        return tuple(
+            self._spell_application(row)
+            for row in self._conn.execute(
+                "SELECT * FROM ongoing_effects WHERE session_id=? AND target_id=? "
+                "AND effect_id=? AND cast_spell_id=? ORDER BY origin",
+                (sid, target_id, need.effect_id, need.spell_id),
+            )
+        )
+
+    def apply_spell_end(self, sid, proposal):
+        """Recheck the exact application before deleting its row and empty group."""
+        self.store.require_write()
+        expected = proposal.expected
+        if self.spell_application(sid, expected.identity) != expected:
+            raise StateMachineError("version_conflict", "Spell application changed")
+        if expected.concentration_id is not None:
+            group = self.concentration_group(sid, expected.caster_id)
+            if (
+                group is None
+                or group.concentration_id != expected.concentration_id
+                or group.effect_id != expected.effect.id
+                or group.rounds_remaining
+                or group.actor_members != (expected.identity,)
+                or group.spatial_member is not None
+                or group.casting_activity_id is not None
+            ):
+                raise StateMachineError("version_conflict", "Spell concentration changed")
+        self.remove_effect(sid, *expected.identity)
 
     def apply_combat_creation(self, sid, operation):
         """Insert one verified effect, clock and lineage under the keyed absence guard."""
@@ -667,11 +750,16 @@ class OngoingEffects:
         preserves = {
             "movement": region_conditions_preserve_movement,
             "visibility": region_conditions_preserve_visibility,
+            "observer_visibility": region_conditions_preserve_visibility,
         }.get(capability)
         for row in self._target_rows(sid, target_id):
             if row["conditions_json"] is None:
                 continue
             statuses = self.store.memory.json(row["conditions_json"])
+            if capability == "observer_visibility" and spell_preserves_observer_sight(
+                row["cast_spell_id"], row["effect_id"], statuses
+            ):
+                continue
             if statuses and (
                 preserves is None
                 or not _fixed_region_effect(row, statuses)

@@ -1,6 +1,7 @@
 """Versioned local state machine foundation."""
 
 from ._operations import (
+    DismissWorldSpell,
     DropItem,
     DropWorldConcentration,
     EnterScene,
@@ -151,6 +152,7 @@ __all__ = [
     "UnlockDoor",
     "LockDoor",
     "DropItem",
+    "DismissWorldSpell",
     "DropWorldConcentration",
     "PickupItem",
     "StartNavigation",

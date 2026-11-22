@@ -7,7 +7,8 @@ only RE's resolved effect and terminal removal policy, not a second rules clock.
 from dataclasses import asdict
 
 from dnd5e_engine.evaluation_effects import EffectState
-from dnd5e_engine.evaluation_ruleset import RulesetBinding
+from dnd5e_engine.evaluation_ruleset import RulesetBinding, RulesetBindingError
+from dnd5e_engine.evaluation_spell_termination import plan_spell_dismissal
 from dnd5e_engine.evaluation_world_effect import (
     WorldEffectApplicationRequest,
     plan_longstrider_application,
@@ -53,10 +54,10 @@ class EffectTimeConsumer:
             result.verify_request(request)
         except ValueError as exc:
             raise StateMachineError("invalid_rule_result", "World effect proposal differs") from exc
-        self.apply_verified(sid, result)
+        self.apply_verified(sid, result, spell_id="longstrider")
         return result
 
-    def apply_verified(self, sid, proposal):
+    def apply_verified(self, sid, proposal, *, spell_id):
         """Persist an admitted terminal effect at the current Session tick.
 
         The caller owns the write transaction. The effect table's primary key
@@ -66,7 +67,60 @@ class EffectTimeConsumer:
         if proposal.session_id != sid or proposal.expiry.action != "remove":
             raise StateMachineError("invalid_rule_result", "World effect proposal differs")
         deadline = self.world.time.seconds_deadline(sid, proposal.duration_seconds)
-        self.owner.add_world_effect(sid, proposal, expires_tick=deadline)
+        self.owner.add_world_effect(sid, proposal, expires_tick=deadline, spell_id=spell_id)
+
+    def spell_end_event(self, sid, package, proposal):
+        """Capture the verified exact ending after the command's other effects."""
+        application = proposal.expected
+        target = application.effect.target_id
+        return self.world._capture_event(
+            sid,
+            package,
+            "effect.spell_ended",
+            {
+                "identity": application.identity,
+                "cast_command_id": application.cast_command_id,
+                "actor_id": target,
+                "source_actor_id": application.caster_id,
+                "reason": proposal.reason,
+                "scene_id": self._actor_scene(sid, target),
+            },
+            phase="effects.after_spell_end",
+        )
+
+    def dismiss(self, row, package, actor_id, operation):
+        """End an authorized original cast without payment or a second transaction."""
+        self.store.require_write()
+        sid = row["session_id"]
+        identity = (operation.target_id, operation.effect_id, operation.origin)
+        application = self.owner.spell_application(sid, identity)
+        if (
+            application is None
+            or application.cast_command_id != operation.cast_command_id
+            or application.expires_tick <= self.world.facts.time_state(sid)[1]
+        ):
+            raise StateMachineError("spell.application", "The selected spell is not ongoing")
+        characters = self.world.characters
+        life = characters.life(sid, actor_id)
+        if life is None or not life["is_alive"]:
+            raise StateMachineError("spell.dismiss", "Dismissal requires a living caster")
+        conditions = characters.effects.actor_conditions(
+            sid, actor_id, characters.conditions(sid, actor_id)
+        )
+        try:
+            proposal = plan_spell_dismissal(
+                application,
+                actor_id=actor_id,
+                actor_conditions=tuple(condition["condition"] for condition in conditions),
+                binding=RulesetBinding(**asdict(package.ruleset_binding)),
+                loader=self.world.loader,
+            )
+        except RulesetBindingError as exc:
+            raise StateMachineError("ruleset_binding_mismatch", str(exc)) from exc
+        except ValueError as exc:
+            raise StateMachineError("spell.dismiss", str(exc)) from exc
+        self.owner.apply_spell_end(sid, proposal)
+        return self.spell_end_event(sid, package, proposal)
 
     def end_world_concentration(self, sid, package, caster_id, reason):
         """End the caster's current elapsed-time group inside the caller's write scope."""

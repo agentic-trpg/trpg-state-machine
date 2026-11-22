@@ -57,6 +57,11 @@ from dnd5e_engine.evaluation_speed_effects import (
     speed_with_effects,
     spell_attack_has_speed_effect,
 )
+from dnd5e_engine.evaluation_spell_termination import (
+    SPELL_TERMINATION_SCHEMA_VERSION,
+    SpellEndFacts,
+    cast_termination_needs,
+)
 from dnd5e_engine.evaluation_spells import ordinary_spell_mechanism
 from dnd5e_engine.evaluation_state import (
     CharacterStateV2,
@@ -1330,6 +1335,12 @@ def validate_dnd_result(request, result, *, loader=None):
                 _invalid("Proposed mechanical event refers to an actor outside the snapshot")
     if result.status != "accepted":
         return result, ()
+    if request.spell_end_facts is not None:
+        native_request = request.without_spell_ends()
+        _, changes = validate_dnd_result(
+            native_request, result.without_spell_ends(request), loader=loader
+        )
+        return result, changes
     if request.operation_kind == "rules.check":
         return result, check_changes(request, result)
     if request.operation_kind == "rules.rest":
@@ -2060,7 +2071,9 @@ class RulesAdapter:
                 return "unsupported_stat_block_action"
         return None
 
-    def _apply_dnd_changes(self, row, changes, *, command_id=None, snapshot=None, turn_starts=()):
+    def _apply_dnd_changes(
+        self, row, changes, *, command_id=None, snapshot=None, turn_starts=(), cast_spell_id=None
+    ):
         """Adopt verified rules changes through domain interfaces in the shared write
         scope.
         """
@@ -2115,7 +2128,9 @@ class RulesAdapter:
             elif component == "resource_restore":
                 self.characters.restore_resource(sid, identity, field, *value)
             elif component == "world_effect" and field == "create":
-                self.world.runtime.time.consumers["effects"].apply_verified(sid, value)
+                self.world.runtime.time.consumers["effects"].apply_verified(
+                    sid, value, spell_id=cast_spell_id
+                )
             elif component == "combat_effect":
                 self.characters.effects.apply_combat_creation(sid, value)
             elif component == "shield_graph":
@@ -2217,6 +2232,16 @@ class RulesAdapter:
                 self.world, row, snapshot, incoming, effect_updates=effect_updates
             )
 
+    def spell_end_applications(self, sid, actor_id):
+        """Read only this caster's relevant target facts under the snapshot's read scope."""
+        return tuple(
+            application
+            for need in cast_termination_needs(self.loader)
+            for application in self.characters.effects.target_spell_applications(
+                sid, actor_id, need
+            )
+        )
+
     def request(
         self,
         command,
@@ -2228,55 +2253,61 @@ class RulesAdapter:
         spell_positions=None,
         multi_spell_positions=None,
         exploration_charge=False,
+        spell_end_applications=(),
     ):
         """Build a rules request with durable Session identity and isolated fixed inputs."""
         row = row if row is not None else self._pinned_row(command.session_id, package)
-        return RuleEvaluationRequest(
-            schema_version=(
-                CAST_ACTIVITY_SCHEMA_VERSION
-                if type(command.payload) is ExplorationCastActivityPayload
-                else MULTI_SPELL_SCHEMA_VERSION
-                if type(command.payload) is ExplorationMultiSpellCastPayload
-                else SPATIAL_EFFECT_END_SCHEMA_VERSION
-                if type(command.payload) is ExplorationEnvironmentalSpellCastPayload
-                and isinstance(command.payload.target, EnvironmentalMagicEffectTarget)
-                else ENVIRONMENTAL_SPELL_SCHEMA_VERSION
-                if type(command.payload) is ExplorationEnvironmentalSpellCastPayload
-                else "engine-evaluation/30"
-                if command.command_type == "combat.intent"
-                and snapshot.snapshot_schema_version == "engine-snapshot/20"
-                and (
-                    command.payload.spell_id == "haste"
-                    or (
-                        command.payload.intent_type in {"pass", "drop_concentration", "attack"}
-                        and has_haste_effects(snapshot)
-                    )
-                    or (
-                        command.payload.intent_type == "cast_spell"
-                        and command.payload.spell_id is not None
-                        and spell_attack_has_speed_effect(self.loader, command.payload.spell_id)
-                    )
-                    or (
-                        command.payload.intent_type in {"move", "pass"}
-                        and has_speed_effects(snapshot)
-                    )
+        cast_version = (
+            CAST_ACTIVITY_SCHEMA_VERSION
+            if type(command.payload) is ExplorationCastActivityPayload
+            else MULTI_SPELL_SCHEMA_VERSION
+            if type(command.payload) is ExplorationMultiSpellCastPayload
+            else SPATIAL_EFFECT_END_SCHEMA_VERSION
+            if type(command.payload) is ExplorationEnvironmentalSpellCastPayload
+            and isinstance(command.payload.target, EnvironmentalMagicEffectTarget)
+            else ENVIRONMENTAL_SPELL_SCHEMA_VERSION
+            if type(command.payload) is ExplorationEnvironmentalSpellCastPayload
+            else "engine-evaluation/30"
+            if command.command_type == "combat.intent"
+            and snapshot.snapshot_schema_version == "engine-snapshot/20"
+            and (
+                command.payload.spell_id == "haste"
+                or (
+                    command.payload.intent_type in {"pass", "drop_concentration", "attack"}
+                    and has_haste_effects(snapshot)
                 )
-                else MATERIAL_SPELL_SCHEMA_VERSION
-                if type(command.payload) is ExplorationSpellCastPayload
-                and command.payload.material_instance_id is not None
-                else "engine-evaluation/29"
-                if type(command.payload) is ExplorationSpellCastPayload
-                else CHARGED_ITEM_SCHEMA_VERSION
-                if exploration_charge
-                else "engine-evaluation/28"
-                if type(command.payload) is ExplorationItemUsePayload
-                else "engine-evaluation/27"
-                if snapshot.snapshot_schema_version == "engine-snapshot/20"
-                else "engine-evaluation/26"
-                if snapshot.snapshot_schema_version == "engine-snapshot/19"
-                else "engine-evaluation/25"
-                if snapshot.snapshot_schema_version == "engine-snapshot/18"
-                else "engine-evaluation/24"
+                or (
+                    command.payload.intent_type == "cast_spell"
+                    and command.payload.spell_id is not None
+                    and spell_attack_has_speed_effect(self.loader, command.payload.spell_id)
+                )
+                or (command.payload.intent_type in {"move", "pass"} and has_speed_effects(snapshot))
+            )
+            else MATERIAL_SPELL_SCHEMA_VERSION
+            if type(command.payload) is ExplorationSpellCastPayload
+            and command.payload.material_instance_id is not None
+            else "engine-evaluation/29"
+            if type(command.payload) is ExplorationSpellCastPayload
+            else CHARGED_ITEM_SCHEMA_VERSION
+            if exploration_charge
+            else "engine-evaluation/28"
+            if type(command.payload) is ExplorationItemUsePayload
+            else "engine-evaluation/27"
+            if snapshot.snapshot_schema_version == "engine-snapshot/20"
+            else "engine-evaluation/26"
+            if snapshot.snapshot_schema_version == "engine-snapshot/19"
+            else "engine-evaluation/25"
+            if snapshot.snapshot_schema_version == "engine-snapshot/18"
+            else "engine-evaluation/24"
+        )
+        return RuleEvaluationRequest(
+            schema_version=SPELL_TERMINATION_SCHEMA_VERSION
+            if spell_end_applications
+            else cast_version,
+            spell_end_facts=(
+                SpellEndFacts(cast_schema_version=cast_version, applications=spell_end_applications)
+                if spell_end_applications
+                else None
             ),
             session_id=command.session_id,
             command_id=command.command_id,
