@@ -2221,6 +2221,8 @@ class RulesAdapter:
                 )
             elif component == "actor" and field == "hp_current":
                 self.characters.set_hp(sid, identity, value)
+            elif component == "actor" and field == "hp_pair":
+                self.characters.set_hp_pair(sid, identity, value)
             elif component == "actor":
                 self.characters.update_rule_metadata(
                     sid,

@@ -42,6 +42,7 @@ from ._execution import _WorldEffectKind, _WorldEffectOrigin
 from .choice_models import ChoiceFinalizeSpellOperationPayload, ChoiceRespondOperationPayload
 from .combat import process_id
 from .dnd_checks import world_effects_ready
+from .effect_hp_adoption import apply_world_spell_end
 from .errors import StateMachineError
 from .pending_multi_spell_choices import PendingMultiSpellChoices
 from .pending_spell_choices import PendingSpellChoices
@@ -889,7 +890,7 @@ class RuleExecution:
                     # effects. Adopt that edit before ending any of those effects.
                     conditions_update = any(type(op) is ConditionsUpdate for op in operations)
                     for ending in () if conditions_update else spell_ends:
-                        self.world.characters.effects.apply_spell_end(command.session_id, ending)
+                        apply_world_spell_end(self.world, command.session_id, ending)
                     spatial_proposal = (
                         spatial_operation.value
                         if isinstance(spatial_operation, WorldEnvironmentalEffectCreate)
@@ -974,7 +975,7 @@ class RuleExecution:
                         ),
                     )
                     for ending in spell_ends if conditions_update else ():
-                        self.world.characters.effects.apply_spell_end(command.session_id, ending)
+                        apply_world_spell_end(self.world, command.session_id, ending)
                     if spatial_proposal is not None:
                         spatial_effect_id, spatial_events = self.world.magic.apply(
                             row, package, command.command_id, spatial_proposal
