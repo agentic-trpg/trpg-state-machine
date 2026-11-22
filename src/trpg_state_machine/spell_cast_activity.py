@@ -362,7 +362,7 @@ class SpellCastActivities:
             raise StateMachineError("unauthorized", "Casting wait does not authorize this reply")
 
     def resolve_time_wait(self, row, package, command, wait, *, events):
-        """Transition and release focus after adopting the authorized completion in scope."""
+        """Finish the cast after its focus was released and its result adopted in scope."""
         sid = row["session_id"]
         record = self.get(sid, wait.wait_id)
         if self.world._active_combat(sid):
@@ -383,7 +383,4 @@ class SpellCastActivities:
         if record["target_object_id"] is not None and record["identification_json"] is None:
             raise StateMachineError("invalid_time_wait_result", "Identify result was not adopted")
         updated = self._transition(record, "completed", command.command_id, concentration_id=None)
-        self.world.characters.effects.remove_concentration(
-            record["session_id"], record["concentration_id"]
-        )
         return TimeWaitResolution("continue", (self._event(updated, package, "completed"),))

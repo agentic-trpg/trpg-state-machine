@@ -907,6 +907,23 @@ class RuleExecution:
                                 command_id=command.command_id,
                             )
                         )
+                    elif casting_finish:
+                        # The bound casting focus gives up the one concentration slot
+                        # before adopting the verified completed spell in this scope.
+                        focus = self.world.characters.effects.concentration_group(
+                            command.session_id, command.actor_id
+                        )
+                        if (
+                            focus is None
+                            or focus.concentration_id != cast_record["concentration_id"]
+                            or focus.casting_activity_id != cast_record["activity_id"]
+                        ):
+                            raise StateMachineError(
+                                "invalid_mechanical_state", "Casting focus changed"
+                            )
+                        self.world.characters.effects.remove_concentration(
+                            command.session_id, focus.concentration_id
+                        )
                     elif exploration_spell:
                         proposal = spatial_proposal or next(
                             (value for part, _, _field, value in changes if part == "world_effect"),

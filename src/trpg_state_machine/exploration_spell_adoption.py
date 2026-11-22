@@ -77,7 +77,10 @@ def casting_activity_changes(request, result, loader):
                 caster_id=request.actor_id,
                 casting_activity=True,
             )
-            if operations[-1].value.effect != effect_state(effect):
+            if (
+                operations[-1].value.effect != effect_state(effect)
+                or operations[-1].value.concentration != spell.concentration
+            ):
                 raise ValueError("Casting effect differs from its bound spell")
         else:
             if consequence.identification != expected:

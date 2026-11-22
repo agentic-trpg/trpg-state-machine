@@ -1,6 +1,10 @@
 """Public exploration casting duration, continuation and concentration interruption."""
 
+import json
+from dataclasses import asdict
+
 import pytest
+from dnd5e_srd_data.loader import BundledAssetLoader
 from dnd5e_srd_data.schema.spell import CastingTime, CastingTimeUnit
 from test_session_time_coordination import submit as submit_time
 from test_session_time_coordination import sync
@@ -17,6 +21,7 @@ from trpg_state_machine import (
     StateMachine,
     StateMachineError,
     TypedCommand,
+    world_command_from_data,
 )
 
 
@@ -74,6 +79,81 @@ def _effects(session):
     """Read the published effects from the actual NonCombatSnapshot consumer."""
     sm, sid, package, context = session
     return sm.read_noncombat_snapshot(sid, package, context=context).effect_states
+
+
+def _wire(command):
+    """Round-trip a public command with its optional wait through real JSON."""
+    data = {
+        "schema_version": "sm-command/1",
+        "session_id": command.session_id,
+        "command_id": command.command_id,
+        "actor_id": command.actor_id,
+        "command_type": command.command_type,
+        "payload": asdict(command.payload),
+        "expected_world_version": command.expected_world_version,
+    }
+    if command.time_wait is not None:
+        data["time_wait"] = asdict(command.time_wait)
+    return world_command_from_data(json.loads(json.dumps(data)))
+
+
+def test_canonical_detect_magic_ritual_hands_focus_to_effect(timed_spell_world, tmp_path):
+    """Finish the bound Action ritual through public commands after a saved wait."""
+    session = timed_spell_world(
+        spell_id="detect-magic",
+        first_level_slots=0,
+        additional_spells=("darkness",),
+        configure_spell=lambda _spell: BundledAssetLoader().get_spell("detect-magic"),
+    )
+    sm, sid, package, context = session
+    with sm:
+        start = _command(
+            session,
+            "detect-start",
+            "activity.start_spell_cast",
+            StartSpellCast("detect-ritual", "detect-magic", "class:wizard", as_ritual=True),
+        )
+        start = _wire(start)
+        assert sm.submit_command(start, package, context=context).status == "committed"
+        progress = _progress(session, start, "detect-ritual")
+        assert (progress.start_tick, progress.deadline_tick) == (0, 600)
+        assert not _effects(session)
+        assert first_level_balance(sm, start) == 0
+        assert submit_time(session, AdvanceSessionTime(617), "detect-time").status == "committed"
+        wait = sync(session).time_wait
+        assert wait is not None
+        loader = sm._rules.loader
+
+    with StateMachine(tmp_path / "timed-spell.sqlite", dnd_loader=loader) as sm:
+        session = (sm, sid, package, context)
+        finish = _command(
+            session,
+            "detect-finish",
+            "activity.finish_spell_cast",
+            FinishSpellCast("detect-ritual"),
+            wait=wait,
+        )
+        finish = _wire(finish)
+        receipt = sm.submit_command(finish, package, context=context)
+        assert receipt.status == "committed", receipt
+        assert sm.submit_command(finish, package, context=context) == receipt
+        effects = _effects(session)
+        assert len(effects) == 1
+        assert effects[0].flags["concentration"] is True
+        assert effects[0].duration.seconds == 600
+        group = sm._world.characters.effects.concentration_group(sid, start.actor_id)
+        assert group is not None
+        assert group.casting_activity_id is None
+        assert group.actor_members == ((start.actor_id, effects[0].id, effects[0].origin),)
+        assert first_level_balance(sm, start) == 0
+        assert _progress(session, start, "detect-ritual").status == "completed"
+        continued = submit_time(session, AdvanceSessionTime(617), "detect-continue")
+        assert continued.status == "committed", continued
+        drop = _command(
+            session, "detect-drop", "world.drop_concentration", DropWorldConcentration()
+        )
+        assert sm.submit_command(drop, package, context=context).status == "committed"
+        assert not _effects(session)
 
 
 @pytest.mark.parametrize(
