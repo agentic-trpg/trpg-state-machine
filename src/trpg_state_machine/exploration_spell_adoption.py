@@ -5,6 +5,7 @@ from dnd5e_engine.damage_rules import healing_balance
 from dnd5e_engine.evaluation_beacon import is_reviewed_beacon_effect
 from dnd5e_engine.evaluation_cast_activity import cast_activity_components, casting_activity_seconds
 from dnd5e_engine.evaluation_charged_item import exploration_charged_cast_profile
+from dnd5e_engine.evaluation_condition_choice import condition_choice_profile
 from dnd5e_engine.evaluation_effects import effect_state
 from dnd5e_engine.evaluation_exploration_healing import exploration_healing_activity
 from dnd5e_engine.evaluation_identify import identify_object
@@ -13,7 +14,13 @@ from dnd5e_engine.evaluation_payments import spell_payment
 from dnd5e_engine.evaluation_spell_materials import spell_material_payment
 from dnd5e_engine.evaluation_spells import spell_event
 from dnd5e_engine.evaluation_timed_spells import verify_timed_spell_effect
-from dnd5e_engine.events import EffectApplied, HealingApplied, IntentSubmitted, SpellCast
+from dnd5e_engine.events import (
+    ConditionRemoved,
+    EffectApplied,
+    HealingApplied,
+    IntentSubmitted,
+    SpellCast,
+)
 from dnd5e_engine.spellcasting import spell_component_metadata
 
 from .errors import StateMachineError
@@ -44,7 +51,67 @@ def exploration_spell_changes(request, result, loader):
     spell = loader.get_spell(request.payload.spell_id)
     if spell is not None and (activity := exploration_healing_activity(loader, spell)):
         return _healing_changes(request, result, spell, activity, loader)
+    if request.payload.selected_condition is not None:
+        return _condition_choice_changes(request, result, spell)
     return _timed_spell_changes(request, result, spell, loader)
+
+
+def _condition_choice_changes(request, result, spell):
+    """Bind one uniquely named independent removal; duplicate sources stay unsupported."""
+    profile = condition_choice_profile(spell) if spell is not None else None
+    target = next(
+        (
+            a
+            for a in request.state_snapshot.character_states
+            if a.entity_id == request.payload.target_id
+        ),
+        None,
+    )
+    choice = request.payload.selected_condition
+    if profile is None or target is None or choice not in profile[1]:
+        raise StateMachineError("invalid_rule_result", "Condition spell definition differs")
+    matches = [
+        i
+        for i, c in enumerate(target.conditions)
+        if c.condition == choice and c.source_effect_id is None
+    ]
+    if len(matches) != 1:
+        raise StateMachineError(
+            "invalid_rule_result", "Selected condition does not have one independent source"
+        )
+    index = matches[0]
+    expected = (*target.conditions[:index], *target.conditions[index + 1 :])
+    operations = result.state_delta.operations
+    if (
+        len(operations) != 2
+        or type(operations[0]) is not delta.ResourceUpdate
+        or operations[1]
+        != delta.ConditionsUpdate(
+            kind="actor.conditions_update",
+            target_id=target.entity_id,
+            expected=tuple(target.conditions),
+            value=expected,
+        )
+        or result.rng_transition.state_changed
+    ):
+        raise StateMachineError("invalid_rule_result", "Condition choice writes differ")
+    if result.proposed_events != (
+        IntentSubmitted(
+            actor_id=request.actor_id,
+            intent_type="cast_spell",
+            spell_id=spell.slug,
+            target_id=target.entity_id,
+            source_id=request.payload.spell_source_id,
+            activity_id=profile[0].id,
+        ),
+        spell_event(request.actor_id, spell, request.payload.slot_level),
+        ConditionRemoved(target_id=target.entity_id, condition=choice),
+    ):
+        raise StateMachineError("invalid_rule_result", "Condition choice evidence differs")
+    return (
+        _slot_change(request, operations[0]),
+        ("actor", target.entity_id, "conditions", [c.model_dump(mode="json") for c in expected]),
+    )
 
 
 def casting_activity_changes(request, result, loader):
