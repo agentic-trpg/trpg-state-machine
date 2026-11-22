@@ -5,7 +5,7 @@ from dataclasses import asdict
 from unittest.mock import patch
 
 import pytest
-from item_support import DAGGER, NPC, A
+from item_support import DAGGER, NPC, A, B
 from spatial_support import command as world_command
 from test_exploration_spell_cast_activity import _command, _wire
 from test_scoped_runtime_validation import measure
@@ -30,9 +30,11 @@ from trpg_state_machine import (
 from trpg_state_machine.perception import GameViewContext
 
 MAGIC = ("magic_present",)
+SHARED_DOOR = "object.workshop_door"
+NO_SHARED_DOOR = object()
 
 
-def _prepare(timed_spell_world, barrier, *, growth=0, screen=False):
+def _prepare(timed_spell_world, barrier, *, growth=0, screen=False, door=NO_SHARED_DOOR, ground=B):
     def configure(data):
         case = next(o for o in data["world_objects"] if o["object_id"] == CASE)
         case["material"] = "wood"  # Narrative material cannot establish thickness.
@@ -59,6 +61,26 @@ def _prepare(timed_spell_world, barrier, *, growth=0, screen=False):
                     "initial_cell": "1,1",
                 }
             )
+        if door is not NO_SHARED_DOOR:
+            passage = data["passages"][0]
+            passage["door_object_id"] = SHARED_DOOR
+            passage["endpoints"][0].update(standing_cell="2,1", threshold_cell="1,1")
+            platform, workshop = data["scenes"]
+            door_object = next(o for o in workshop["objects"] if o["object_id"] == SHARED_DOOR)
+            door_object.update(state="closed", initial_cell="0,1")
+            if ground == A:
+                workshop["objects"].remove(door_object)
+                platform["objects"].append({**door_object, "initial_cell": "1,1"})
+            definition = {
+                **case,
+                "object_id": SHARED_DOOR,
+                "definition_ref": "definition.detection_door",
+                "capabilities": [{"kind": "openable"}],
+                "detection_barrier": dict(zip(("material", "thickness_mils"), door, strict=True))
+                if door is not None
+                else None,
+            }
+            data["world_objects"].append(definition)
 
     return _magic_world(
         timed_spell_world,
@@ -200,6 +222,36 @@ def test_public_detect_magic_checks_a_crossed_world_footprint(timed_spell_world)
         _world(session, StepActor(A, "0,1", "1,1"), "near-screen")
         _world(session, StepActor(A, "1,1", "2,1"), "behind-screen")
         assert _view(session).detection_clues == ()
+
+
+@pytest.mark.parametrize("ground", [A, B], ids=["same-side", "opposite-side"])
+@pytest.mark.parametrize(
+    ("door", "closed_clue"), [(("lead", 1), ()), (("metal", 999), MAGIC), (None, ())]
+)
+def test_public_detect_magic_at_shared_door_threshold(
+    timed_spell_world, tmp_path, door, closed_clue, ground
+):
+    """Locate the current aperture on both sides even before the other Scene is visited."""
+    session = _prepare(timed_spell_world, ("wood", 5_000), door=door, ground=ground)
+    sm, sid, package, context = session
+    with sm:
+        _hide_enchanted_item(session)
+        _detect(session)
+        assert _view(session).detection_clues == MAGIC
+        positions = ("0,0", "0,1", "0,2", "1,2", "2,2", "2,1")
+        for index, (before, after) in enumerate(zip(positions[:-1], positions[1:], strict=True)):
+            _world(session, StepActor(A, before, after), f"around-door-{index}")
+        assert sm.read_session(sid, package, context=context).scenes[B].visited_count == 0
+        assert sm._world_facts.object(sid, SHARED_DOOR)["scene_id"] == ground
+        assert _view(session).detection_clues == closed_clue
+        _world(session, SetObjectState(A, SHARED_DOOR, ObjectState.OPEN), "open-remote-door")
+        assert _view(session).detection_clues == MAGIC
+        _world(session, SetObjectState(A, SHARED_DOOR, ObjectState.CLOSED), "close-remote-door")
+        assert _view(session).detection_clues == closed_clue
+        loader = sm._rules.loader
+    if ground == B and door == ("lead", 1):
+        with StateMachine(tmp_path / "timed-spell.sqlite", dnd_loader=loader) as reopened:
+            assert _view((reopened, sid, package, context)).detection_clues == ()
 
 
 def test_indeterminate_path_does_not_mask_a_separate_source(timed_spell_world):

@@ -169,8 +169,8 @@ class ObjectSpatialService:
         legacy_anchor = state.anchor if self._legacy(sid, oid).blocks_passage else None
         return None, legacy_anchor
 
-    def light_door_closed(self, sid, oid, package):
-        """Determine a shared door's opacity from closure and supported destruction."""
+    def door_shell_closed(self, sid, oid, package):
+        """Determine closure of a shared door from its opening and destruction policy."""
         state = self.state(sid, oid, package)
         return state.open_state == "closed" and self._property_state(sid, oid, state) != "destroyed"
 

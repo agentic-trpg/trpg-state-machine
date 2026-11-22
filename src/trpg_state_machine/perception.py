@@ -80,7 +80,7 @@ def visible_actor_in_range(world, sid, actor, target_id, target_cell, package, *
         for door in passages.doors_by_threshold.get((position.scene_id, cell), ())
     }
     spatial = world.objects.spatial
-    if any(spatial.light_door_closed(sid, door, package) for door in doors):
+    if any(spatial.door_shell_closed(sid, door, package) for door in doors):
         return False
     _, occupants = world.grid.reader.region_occupants(sid, position.scene_id, corridor)
     return not any(
@@ -1008,7 +1008,7 @@ class PerceptionRuntime:
                 own,
                 facts,
                 flags,
-                self._world.detection.clues(sid, scene, row["pc_actor_id"])
+                self._world.detection.clues(sid, scene, row["pc_actor_id"], package)
                 if context.role == "player"
                 else (),
             )

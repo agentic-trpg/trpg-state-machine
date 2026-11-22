@@ -879,7 +879,7 @@ class WorldHandler:
             version = self._conn.execute(
                 "SELECT world_version FROM sessions WHERE session_id=?", (session_id,)
             ).fetchone()[0]
-            clues = self.detection.clues(session_id, scene_id, actor_id)
+            clues = self.detection.clues(session_id, scene_id, actor_id, package)
             return SpatialView(position, version, tuple(objects), exits, doors, clues)
 
     def _operate_spatial(self, row, package, operation, actor_id, *, navigation_scope=None):

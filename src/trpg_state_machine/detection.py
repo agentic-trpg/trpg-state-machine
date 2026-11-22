@@ -6,6 +6,7 @@ from dnd5e_engine.passive_detection import PASSIVE_DETECTIONS, is_magic_item
 from dnd5e_engine.spatial import _bresenham_cells, parse_cell
 
 from .grid import cell_in_bounds, cells_within_range
+from .instance_data import passage_index
 from .world_openable import OpenableService
 
 
@@ -18,7 +19,7 @@ class PassiveDetection:
         self.facts = world.facts
         self.effects = world.characters.effects
 
-    def clues(self, sid, scene, observer):
+    def clues(self, sid, scene, observer, package):
         """Return only proven existence clues, without candidate identities or uncertainty."""
         active = tuple(
             profile
@@ -39,10 +40,10 @@ class PassiveDetection:
         return tuple(
             profile.clue
             for profile in active
-            if self._present(sid, scene, observer, position.cell, stored.grid, profile)
+            if self._present(sid, scene, observer, position.cell, stored.grid, profile, package)
         )
 
-    def _present(self, sid, scene, observer, origin, prepared, profile):
+    def _present(self, sid, scene, observer, origin, prepared, profile, package):
         """Evaluate indexed in-range actors, ground roots, and anchor cells through RE."""
         cells = cells_within_range(prepared, origin, profile.range_ft)
         actors, objects = self.world.grid.reader.region_occupants(
@@ -59,7 +60,9 @@ class PassiveDetection:
         def detectable(source, cell, enclosing=()):
             """Reuse the same current ray for all candidate facts in one cell."""
             if cell not in paths:
-                paths[cell] = self._path(sid, origin, cell, topology, footprints, blockers)
+                paths[cell] = self._path(
+                    sid, scene, origin, cell, topology, footprints, blockers, package
+                )
             return profile.detects(
                 source, topology.distance_ft(origin, cell), paths[cell] + enclosing
             )
@@ -81,23 +84,26 @@ class PassiveDetection:
                     return True
         return False
 
-    def _path(self, sid, origin, cell, topology, footprints, blockers):
-        """Resolve static unknown barriers and current intermediate object footprints.
+    def _path(self, sid, scene, origin, cell, topology, footprints, blockers, package):
+        """Resolve static unknown barriers and current intermediate footprints or thresholds.
 
         The grid's existing center ray locates crossed cells. Endpoint objects do
         not imply an enclosure; independently verified ancestor shells supply that
         fact. Unclassified static walls/solid cover carry an unknown profile.
-        LF1123-D49-01 needs explicit local barrier evidence for static walls and
-        paired-door thresholds outside their object's indexed ground footprint.
+        LF1123-D49-01 needs explicit local barrier evidence for static wall segments
+        and solid terrain rather than treating ordinary sight failure as a rule threshold.
         """
         if (
             not topology.has_line_of_sight(origin, cell)
             or topology.cover_between(origin, cell) == "total"
         ):
             return (None,)
+        passages = passage_index(self.world.store, sid)
         result = []
         for intermediate in _bresenham_cells(*parse_cell(origin), *parse_cell(cell))[1:-1]:
             for oid, blocks in footprints.get(intermediate, ()):
+                if oid in passages.by_door:
+                    continue  # Shared apertures are located by the paired threshold relation.
                 if oid not in blockers:
                     barrier = self.facts.instances.detection_barrier(sid, oid)
                     sealed = (
@@ -107,7 +113,23 @@ class PassiveDetection:
                     )
                     blockers[oid] = (barrier,) if sealed else ()
                 result.extend(blockers[oid])
+            for oid in passages.doors_by_threshold.get((scene, intermediate), ()):
+                if oid not in blockers:
+                    blockers[oid] = self._door_barriers(sid, oid, package)
+                result.extend(blockers[oid])
         return tuple(result)
+
+    def _door_barriers(self, sid, oid, package):
+        """Read one shared door's current aperture and barrier at either endpoint.
+
+        Both fine Scenes are initialized together. A missing persisted door leaves
+        the path unknown, even when the other Scene has never been visited.
+        """
+        if self.facts.object(sid, oid) is None:
+            return (None,)
+        if not self.world.objects.spatial.door_shell_closed(sid, oid, package):
+            return ()
+        return (self.facts.instances.detection_barrier(sid, oid),)
 
     def _object_sources(self, sid, roots):
         """Read carried or ground roots and their exact (including hidden) contents."""

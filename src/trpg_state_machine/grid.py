@@ -679,7 +679,7 @@ class GridService:
                 doors.setdefault(oid, []).append(cell)
         spatial = self.h.objects.spatial
         for oid, thresholds in doors.items():
-            if spatial.light_door_closed(sid, oid, package):
+            if spatial.door_shell_closed(sid, oid, package):
                 opaque.update(thresholds)
         touching = {}
         actors, occupants = self.reader.region_occupants(
