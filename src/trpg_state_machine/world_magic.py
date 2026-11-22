@@ -262,6 +262,13 @@ class WorldMagic:
             for record in self._records(sid, scene)
         )
 
+    @scoped_read
+    def may_have_obscurement(self, sid, scene):
+        """Detect active spell obscuration before a scene-wide clear-sight shortcut."""
+        return any(
+            self.owner.spec(record).obscurement != "none" for record in self._records(sid, scene)
+        )
+
     def has_exploration_concentration(self, sid):
         """Check the selected caster's elapsed group even when its effect is in another Scene."""
         actor = self.store.connection.execute(
@@ -299,6 +306,21 @@ class WorldMagic:
     def active_magic_sources(self, sid, scene, package):
         """Return current spell applications with their RE rules footprints."""
         return self._project_sources(sid, scene, package, self._records(sid, scene))
+
+    def obscuring_cells(self, sid, scene, package, cells=None):
+        """Project active spell obscuration without replacing independent map sources."""
+        selected = None if cells is None else frozenset(cells)
+        records = tuple(
+            record
+            for record in self._records(sid, scene)
+            if self.owner.spec(record).obscurement != "none"
+        )
+        return {
+            cell: source.spec.obscurement
+            for source in self._project_sources(sid, scene, package, records)
+            for cell in source.cells
+            if selected is None or cell in selected
+        }
 
     def _project_sources(self, sid, scene, package, records):
         """Build rules footprints for overlap and dispels from the current candidate facts."""
