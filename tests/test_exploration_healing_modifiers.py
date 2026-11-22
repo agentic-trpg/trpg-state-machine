@@ -21,6 +21,7 @@ from trpg_state_machine import AdvanceSessionTime, StateMachine, StateMachineErr
 BEACON = "beacon-of-hope"
 CURE_WOUNDS = "cure-wounds"
 CHANNEL_DIVINITY = "channel-divinity-cleric"
+CHANNEL_DIVINITY_POOL = f"feature:{CHANNEL_DIVINITY}"
 DATABASE = "exploration-healing-modifiers.sqlite"
 SEED = 1
 
@@ -42,15 +43,16 @@ def life_cleric_world(timed_spell_world, *, target_hp=2, additional_spells=()):
         target.update(hp_current=target_hp, hp_max=60, ac=14)
         spells = snapshot["casting_state"]["actors"][0]["sources"][0]["spells"]
         spells[:] = [spell for spell in spells if spell["spell_id"] in (BEACON, CURE_WOUNDS)]
-        snapshot["resource_state"]["pools"].append(
-            {
-                "kind": "feature_uses",
-                "owner_id": caster["entity_id"],
-                "pool_id": CHANNEL_DIVINITY,
-                "feature_slug": CHANNEL_DIVINITY,
-                "current": 2,
-                "maximum": 2,
-            }
+        (pool,) = (
+            pool
+            for pool in snapshot["resource_state"]["pools"]
+            if pool["pool_id"] == CHANNEL_DIVINITY_POOL
+        )
+        assert (pool["owner_id"], pool["feature_slug"], pool["current"], pool["maximum"]) == (
+            caster["entity_id"],
+            CHANNEL_DIVINITY,
+            2,
+            2,
         )
 
     return timed_spell_world(
@@ -185,7 +187,7 @@ def test_beacon_persists_and_maximizes_an_upcast_life_cleric_heal(
         recipient = actor(after_ordinary, NPC)
         assert actor(healed, NPC).hp_current == min(recipient.hp_max, recipient.hp_current + amount)
         assert balance(healed, "spell:2") == balance(after_ordinary, "spell:2") - 1
-        assert balance(healed, CHANNEL_DIVINITY) == balance(before, CHANNEL_DIVINITY)
+        assert balance(healed, CHANNEL_DIVINITY_POOL) == balance(before, CHANNEL_DIVINITY_POOL)
         assert healed.effect_states == (effect,)
         evidence = committed_events(reopened, sid, package, context, paid)
         assert [event["type"] for event in evidence] == [
