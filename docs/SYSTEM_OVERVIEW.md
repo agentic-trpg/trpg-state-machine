@@ -70,6 +70,8 @@ Effects 和 SessionTime 共同保存及消费到期时间。`drop_concentration`
 [Session Management 进度](SESSION_MANAGEMENT_PROGRESS.md#2026-11-18-effect-03-定时施法和主动结束专注)。
 探索期间，获准的新专注施法与旧专注组释放共同提交。Effects 按原身份结束旧角色效果或
 空间效果，再安装新组。角色定时专注沿 SessionTime 到期，也可以通过 `world.drop_concentration` 解除。
+SessionTime 处理同一角色在同一个探索时点的自然到期时，Effects 按该角色效果列表的保存顺序逐条结束，
+并在同一次时间推进中采用终止事件。不同消费者之间有依赖时沿已确认的顺序或等待处理。
 
 探索的普通长施法和仪式由 `activity.start_spell_cast` 建立可重开的 Activity。Effects 持有施法期间的专注，SessionTime 到达期限时保存完成等待。授权 `activity.finish_spell_cast` 沿同一规则采用与回执事务支付、施放并释放等待。获准开始时结束原专注，主动放弃施法专注会中断正在进行的活动。首批验收为完成后无需专注的自身定时效果。
 
