@@ -78,9 +78,13 @@ def cure_world(
     timed=False,
     exploration=False,
     target_cell="1,0",
+    loader=None,
+    configure=None,
 ):
     """Create a bound exploration session or initialize combat for the same cast."""
-    loader = cure_loader(equipped=equipped, extra_spells=extra_spells, with_potion=with_potion)
+    loader = loader or cure_loader(
+        equipped=equipped, extra_spells=extra_spells, with_potion=with_potion
+    )
     data = item_data()
     data["manifest"]["ruleset_binding"] = ruleset_binding(loader).model_dump(mode="json")
     data["manifest"]["package_version"] = "spell-01/1"
@@ -287,6 +291,8 @@ def cure_world(
         data["time_binding"] = asdict(TimeBinding())
         for person in data["actors"]:
             person.pop("npc_state", None)
+    if configure is not None:
+        configure(data, loader)
     package = _validate(data)
     db = tmp_path / "cure-wounds.sqlite"
     sm = StateMachine(db, dnd_loader=loader)

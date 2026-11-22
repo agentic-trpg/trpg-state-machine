@@ -16,20 +16,22 @@ from test_cure_wounds import SOURCE, SPELL, actor, cure_world, pool
 from trpg_state_machine import StateMachine, StateMachineError, TypedCommand
 
 
-def cast_command(sm, sid, package, context, target):
+def cast_command(
+    sm, sid, package, context, target, *, spell=SPELL, slot_level=1, key="exploration.cure"
+):
     """Select the authorized caster, supplied creature, and the prepared ordinary slot."""
     state = sm.read_session(sid, package, context=context)
     return TypedCommand(
         sid,
-        "exploration.cure",
+        key,
         state.pc_actor_id,
         "world.cast_spell",
         ExplorationSpellCastPayload(
             kind="world.cast_spell",
-            spell_id=SPELL,
+            spell_id=spell,
             spell_source_id=SOURCE,
             target_id=target or state.pc_actor_id,
-            slot_level=1,
+            slot_level=slot_level,
         ),
         state.world_version,
     )

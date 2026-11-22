@@ -20,11 +20,13 @@ from dnd5e_engine.evaluation_environmental_contracts import (
     WorldEnvironmentalEffectCreate,
     WorldEnvironmentalEffectEnd,
 )
+from dnd5e_engine.evaluation_exploration_healing import exploration_healing_requires_sight
 from dnd5e_engine.evaluation_openable import OpenableCheckRequest, evaluate_openable
 from dnd5e_engine.evaluation_resources import HitDieSpend
 from dnd5e_engine.evaluation_ruleset import EVALUATOR_VERSION, RulesetBindingError
 from dnd5e_engine.evaluation_shield_window import answer_shield, evaluate_for_shield
 from dnd5e_engine.evaluation_speed_effects import spell_attack_has_speed_effect
+from dnd5e_engine.spellcasting import spell_range_ft
 from pydantic import ValidationError
 
 from ._execution import _WorldEffectKind, _WorldEffectOrigin
@@ -34,6 +36,7 @@ from .dnd_checks import world_effects_ready
 from .errors import StateMachineError
 from .pending_multi_spell_choices import PendingMultiSpellChoices
 from .pending_spell_choices import PendingSpellChoices
+from .perception import visible_actor_in_range
 from .rest_activity import LongRest, ShortRest, advance_rest, prepare_rest
 from .rules_adapter import UnsupportedEffectConsequence, validate_dnd_result
 from .shield_adoption import UnsupportedShieldKnockout, UnsupportedShieldTerminal
@@ -71,22 +74,50 @@ class RuleExecution:
         """Return the shared rule-execution connection."""
         return self.store.connection
 
-    def _spell_positions(self, row, command, *, willing_target_id=None):
-        """Project current participant placement and any authenticated affirmative response."""
+    def _spell_positions(self, row, command, package, *, willing_target_id=None, sight_range=None):
+        """Project fixed participant placement, plus current authorized sight when required."""
+        sid, scene = row["session_id"], row["current_scene_id"]
         source_id, target_id = command.actor_id, command.payload.target_id
         ids = tuple(dict.fromkeys((source_id, target_id)))
-        placements = [self.world.facts.carrier_position(row["session_id"], actor) for actor in ids]
-        if any(place is None or place[0] != row["current_scene_id"] for place in placements):
-            return "spell.target", ids, None
-        if source_id == target_id:
+        placements = [self.world.facts.carrier_position(sid, actor) for actor in ids]
+        target_error = "target_invalid" if sight_range is not None else "spell.target"
+        if any(place is None or place[0] != scene for place in placements):
+            return target_error, ids, None
+        if sight_range is None and source_id == target_id:
             return None, ids, None
-        source, target = placements
+        source, target = placements[0], placements[-1]
         if source[1] is None or target[1] is None:
-            return "spell.target", ids, None
+            return target_error, ids, None
+        if sight_range is not None and (
+            not visible_actor_in_range(
+                self.world, sid, source_id, target_id, target[1], package, range_ft=sight_range
+            )
+            or self._conn.execute(
+                "SELECT 1 FROM mechanical_actors WHERE session_id=? AND actor_id=?",
+                (sid, target_id),
+            ).fetchone()
+            is None
+        ):
+            return target_error, ids, None
         positions = ExplorationSpellPositions(
-            source_cell=source[1], target_cell=target[1], willing_target_id=willing_target_id
+            source_cell=source[1],
+            target_cell=target[1],
+            willing_target_id=willing_target_id,
+            visible_target_id=target_id if sight_range is not None else None,
         )
         return None, ids, positions
+
+    def _spell_sight_range(self, command):
+        """Return the bound range only for the supported visible-creature spell."""
+        payload = command.payload
+        if type(payload) is not ExplorationSpellCastPayload or payload.spell_id != "healing-word":
+            return None
+        spell = self.rules.loader.get_spell(payload.spell_id)
+        return (
+            spell_range_ft(spell)
+            if spell is not None and exploration_healing_requires_sight(spell)
+            else None
+        )
 
     def _prepare_cast_activity(self, row, command):
         """Freeze the selected spell at start or its exact deadline continuation."""
@@ -234,6 +265,7 @@ class RuleExecution:
         cast_record = None
         spell_actor_ids, spell_positions = None, None
         multi_spell_positions = None
+        sight_range = self._spell_sight_range(command)
         charged_item = None
 
         def project_multi_spell_positions(value):
@@ -351,7 +383,7 @@ class RuleExecution:
                 charged_item, prepare_error = prepare_charged_item(row)
                 if charged_item is not None:
                     prepare_error, spell_actor_ids, spell_positions = self._spell_positions(
-                        row, command
+                        row, command, package
                     )
                 elif prepare_error is None and command.payload.target_id != command.actor_id:
                     raise StateMachineError(
@@ -392,9 +424,16 @@ class RuleExecution:
                     project_multi_spell_positions(row)
                 )
             elif exploration_spell and prepare_error is None:
-                prepare_error, spell_actor_ids, spell_positions = self._spell_positions(
-                    row, command, willing_target_id=willing_target_id
-                )
+                if sight_range is not None and self.runtime.version_conflict(row, command):
+                    prepare_error = "version_conflict"
+                else:
+                    prepare_error, spell_actor_ids, spell_positions = self._spell_positions(
+                        row,
+                        command,
+                        package,
+                        willing_target_id=willing_target_id,
+                        sight_range=sight_range,
+                    )
             material = None
             if (
                 prepare_error is None
@@ -635,7 +674,7 @@ class RuleExecution:
                     and prepare_error is None
                     and (
                         prepare_charged_item(row) != (charged_item, None)
-                        or self._spell_positions(row, command)
+                        or self._spell_positions(row, command, package)
                         != (None, spell_actor_ids, spell_positions)
                     )
                 )
@@ -647,9 +686,19 @@ class RuleExecution:
                 )
                 or (
                     not multi_spell
-                    and ((response is not None and shield_prompt is None) or choice_requested)
+                    and (
+                        sight_range is not None
+                        or (response is not None and shield_prompt is None)
+                        or choice_requested
+                    )
                     and prepare_error is None
-                    and self._spell_positions(row, command, willing_target_id=willing_target_id)
+                    and self._spell_positions(
+                        row,
+                        command,
+                        package,
+                        willing_target_id=willing_target_id,
+                        sight_range=sight_range,
+                    )
                     != (prepare_error, spell_actor_ids, spell_positions)
                 )
                 or (snapshot is not None and build_snapshot(row) != snapshot)

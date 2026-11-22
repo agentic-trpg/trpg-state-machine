@@ -6,8 +6,11 @@ from dataclasses import asdict, dataclass
 from itertools import chain
 from typing import NamedTuple
 
+from dnd5e_engine.spatial import parse_cell
+
 from .errors import StateMachineError
 from .grid import cell_in_bounds
+from .instance_data import passage_index
 from .models import CharacterState
 from .npc_state import KnownFact
 from .package import AdventurePackage, Signal, canonical_json
@@ -18,6 +21,72 @@ from .perception_conditions import (
     signal_environment,
 )
 from .runtime_instances import resolve_field
+from .world_lights import _corridor_cells
+
+
+def _sight_conditions_unknown(characters, sid, actor):
+    """Check the named actor for conditions outside the supported sight rules."""
+    return characters.has_conditions(sid, actor) or characters.effects.has_linked_conditions(
+        sid, actor, capability="visibility"
+    )
+
+
+def _object_sight_unresolved(spatial, sid, target, package):
+    """Check the object's live vision and total cover channels."""
+    if spatial.config(sid, target) is None:
+        return False
+    projection = spatial.project(sid, target, package)
+    return bool(projection.vision_occlusion_cells) or any(
+        degree == "total" for _, degree in projection.cover_cells
+    )
+
+
+def visible_actor_in_range(world, sid, actor, target_id, target_cell, package, *, range_ft):
+    """Prove disclosure from one authorized observer to a currently placed creature.
+
+    The caller supplies the target cell from the same Store scope. Match scene
+    view sight rules for the selected ray and its nearby fixtures. Unknown sight
+    mechanics, out-of-range cells and unproven visibility have the same result.
+    """
+    try:
+        position = world._public_scope(sid, actor, package)
+        topology = world.grid.base_topology(sid, position.scene_id)
+    except StateMachineError as exc:
+        if exc.code in (
+            "incomplete_session",
+            "spatial_unconfigured",
+            "unsupported_interaction_scope",
+            "unsupported_target_visibility",
+        ):
+            return False
+        raise
+    if not (
+        cell_in_bounds(topology, position.cell)
+        and cell_in_bounds(topology, target_cell)
+        and topology.within_range(position.cell, target_cell, range_ft)
+    ):
+        return False
+    sight = world._prepare_visibility(sid, actor, position, package, cells=(target_cell,))
+    if not sight.can_see(target_cell) or (
+        actor != target_id and _sight_conditions_unknown(world.characters, sid, target_id)
+    ):
+        return False
+
+    corridor = frozenset(_corridor_cells(((position.cell, (parse_cell(target_cell),)),)))
+    passages = passage_index(world.store, sid)
+    doors = {
+        door
+        for cell in corridor
+        for door in passages.doors_by_threshold.get((position.scene_id, cell), ())
+    }
+    spatial = world.objects.spatial
+    if any(spatial.light_door_closed(sid, door, package) for door in doors):
+        return False
+    _, occupants = world.grid.reader.region_occupants(sid, position.scene_id, corridor)
+    return not any(
+        _object_sight_unresolved(spatial, sid, fixture, package)
+        for fixture in {oid for oid, _, _ in occupants} | doors
+    )
 
 
 class _SceneDisclosure(NamedTuple):
@@ -747,12 +816,6 @@ class PerceptionRuntime:
         )
         return _SceneDisclosure("resolved", actors, objects)
 
-    def _sight_conditions_unknown(self, sid, actor):
-        """Use actor-owned condition projections for unsupported sight rules."""
-        return bool(self._characters.condition_names(sid, actor)) or (
-            self._characters.effects.has_linked_conditions(sid, actor, capability="visibility")
-        )
-
     def _fine_scene_disclosure(self, sid, position, actor, package):
         """Collect bounded scene sight dependencies in the current Store candidate.
 
@@ -764,7 +827,7 @@ class PerceptionRuntime:
         Explicit object occlusion and total cover remain unresolved until dynamic
         sight composition is supported.
         """
-        if self._sight_conditions_unknown(sid, actor):
+        if _sight_conditions_unknown(self._characters, sid, actor):
             return _SceneDisclosure("unresolved")
         scene = position.scene_id
         actors = dict(
@@ -792,12 +855,8 @@ class PerceptionRuntime:
         for target in chain(objects, sorted(doors - objects.keys())):
             if target not in objects and self._world_facts.object(sid, target) is None:
                 return _SceneDisclosure("unresolved")
-            if spatial.config(sid, target) is not None:
-                projection = spatial.project(sid, target, package)
-                if projection.vision_occlusion_cells or any(
-                    degree == "total" for _, degree in projection.cover_cells
-                ):
-                    return _SceneDisclosure("unresolved")
+            if _object_sight_unresolved(spatial, sid, target, package):
+                return _SceneDisclosure("unresolved")
         for target in objects.keys() & doors:
             objects[target] = spatial.target_cells(sid, scene, target, package)
         cells = tuple(
@@ -818,7 +877,7 @@ class PerceptionRuntime:
             if cell is None:
                 status = "unresolved"
             elif cell in visible:
-                if target != actor and self._sight_conditions_unknown(sid, target):
+                if target != actor and _sight_conditions_unknown(self._characters, sid, target):
                     status = "unresolved"
                 else:
                     visible_actors.append(target)
