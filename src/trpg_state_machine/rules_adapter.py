@@ -38,7 +38,10 @@ from dnd5e_engine.evaluation_contracts import (
     RuleEvaluationResult,
     SpellWillingnessChoice,
 )
-from dnd5e_engine.evaluation_environmental_contracts import EnvironmentalMagicEffectTarget
+from dnd5e_engine.evaluation_environmental_contracts import (
+    EnvironmentalCreatureTarget,
+    EnvironmentalMagicEffectTarget,
+)
 from dnd5e_engine.evaluation_environmental_spells import environmental_spell_schema_version
 from dnd5e_engine.evaluation_haste import has_haste_effects, haste_speed
 from dnd5e_engine.evaluation_movement import timed_walk_bonuses, walk_speed
@@ -2081,7 +2084,15 @@ class RulesAdapter:
         return None
 
     def _apply_dnd_changes(
-        self, row, changes, *, command_id=None, snapshot=None, turn_starts=(), cast_spell_id=None
+        self,
+        row,
+        changes,
+        *,
+        command_id=None,
+        snapshot=None,
+        turn_starts=(),
+        cast_spell_id=None,
+        cast_slot_level=None,
     ):
         """Adopt verified rules changes through domain interfaces in the shared write
         scope.
@@ -2144,7 +2155,7 @@ class RulesAdapter:
                 self.characters.restore_resource(sid, identity, field, *value)
             elif component == "world_effect" and field == "create":
                 self.world.runtime.time.consumers["effects"].apply_verified(
-                    sid, value, spell_id=cast_spell_id
+                    sid, value, spell_id=cast_spell_id, cast_slot_level=cast_slot_level
                 )
             elif component == "combat_effect":
                 self.characters.effects.apply_combat_creation(sid, value)
@@ -2284,7 +2295,10 @@ class RulesAdapter:
             else environmental_spell_schema_version(
                 command.payload.spell_id,
                 self.loader,
-                ending=isinstance(command.payload.target, EnvironmentalMagicEffectTarget),
+                ending=isinstance(
+                    command.payload.target,
+                    (EnvironmentalCreatureTarget, EnvironmentalMagicEffectTarget),
+                ),
             )
             if type(command.payload) is ExplorationEnvironmentalSpellCastPayload
             else "engine-evaluation/30"

@@ -225,6 +225,11 @@ def test_exploration_casting_reopens_and_finishes_once(
         assert sm.submit_command(finish, package, context=context) == receipt
         assert first_level_balance(sm, started) == finished_slots
         assert len(_effects(session)) == 1
+        effect = _effects(session)[0]
+        application = sm._characters.effects.spell_application(
+            sid, (effect.target_id, effect.id, effect.origin)
+        )
+        assert application.cast_slot_level == 1
         assert _progress(session, started).status == "completed"
 
         assert (

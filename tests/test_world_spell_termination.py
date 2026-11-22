@@ -98,6 +98,30 @@ def test_cast_light_ends_invisibility_in_same_retriable_commit(
         ]
 
 
+def test_cast_fog_ends_invisibility_through_the_new_public_spell_version(timed_spell_world):
+    session = _magic_world(timed_spell_world, additional_spells=("invisibility", "fog-cloud"))
+    sm, sid, package, context = session
+    with sm:
+        invisible = cast_command(session, spell_id="invisibility", slot_level=2, command_id="hide")
+        receipt = sm.submit_command(invisible, package, context=context)
+        assert receipt.status == "committed", receipt
+        fog = prepare_cast(
+            session, "fog-after-hide", "fog-cloud", 1, {"kind": "point", "cell_id": "2,0"}
+        )
+        receipt = sm.submit_command(fog, package, context=context)
+        assert receipt.status == "committed", receipt
+        endings = [
+            event
+            for event in sm.read_events(sid, package, context=context)
+            if event.event_seq in receipt.event_seqs and event.event_type == "effect.spell_ended"
+        ]
+        assert len(endings) == 1
+        assert endings[0].payload["cast_command_id"] == invisible.command_id
+        assert endings[0].payload["reason"] == "spell_cast"
+        assert [source.spec.kind for source in sources(session)] == ["fog"]
+        assert not sm.read_noncombat_snapshot(sid, package, context=context).effect_states
+
+
 def test_dismiss_longstrider_selects_one_original_cast_without_payment(timed_spell_world):
     session = timed_spell_world()
     sm, sid, package, context = session

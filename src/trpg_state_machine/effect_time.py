@@ -57,7 +57,7 @@ class EffectTimeConsumer:
         self.apply_verified(sid, result, spell_id="longstrider")
         return result
 
-    def apply_verified(self, sid, proposal, *, spell_id):
+    def apply_verified(self, sid, proposal, *, spell_id, cast_slot_level=None):
         """Persist an admitted terminal effect at the current Session tick.
 
         The caller owns the write transaction. The effect table's primary key
@@ -67,7 +67,13 @@ class EffectTimeConsumer:
         if proposal.session_id != sid or proposal.expiry.action != "remove":
             raise StateMachineError("invalid_rule_result", "World effect proposal differs")
         deadline = self.world.time.seconds_deadline(sid, proposal.duration_seconds)
-        self.owner.add_world_effect(sid, proposal, expires_tick=deadline, spell_id=spell_id)
+        self.owner.add_world_effect(
+            sid,
+            proposal,
+            expires_tick=deadline,
+            spell_id=spell_id,
+            cast_slot_level=cast_slot_level,
+        )
 
     def spell_end_event(self, sid, package, proposal):
         """Capture the verified exact ending after the command's other effects."""
