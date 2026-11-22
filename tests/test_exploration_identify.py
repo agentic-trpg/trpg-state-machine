@@ -1,10 +1,14 @@
 """Public Identify casts bind the exact pearl and the authorized touched item."""
 
-from dataclasses import replace
+from dataclasses import asdict, replace
 
 import pytest
+from dnd5e_engine.evaluation_effects import effect_state
+from dnd5e_engine.evaluation_ruleset import RulesetBinding
+from dnd5e_engine.evaluation_timed_spells import _passive_profile
+from dnd5e_engine.evaluation_world_effect import EffectExpiryPolicy, WorldEffectApplication
 from dnd5e_srd_data import BundledAssetLoader
-from item_support import A
+from item_support import NPC, A
 from spatial_support import submit as submit_world
 from test_exploration_spell_cast_activity import _command, _progress
 from test_scoped_runtime_validation import measure
@@ -28,6 +32,61 @@ PEARL = "object.identify_pearl"
 SECOND_PEARL = "object.second_pearl"
 WAND = "object.touched_wand"
 SECOND_WAND = "object.unrelated_wand"
+
+
+def test_identify_completion_keeps_private_result_when_it_ends_foreign_invisibility(
+    timed_spell_world,
+):
+    """Finish one authorized object cast and end the same caster's active condition."""
+
+    def factory(**options):
+        return timed_spell_world(**options, additional_spells=("invisibility",))
+
+    session = _world(factory)
+    sm, sid, package, context = session
+    with sm:
+        _pickup_pearl(session)
+        start = _start_identify(session)
+        spell = sm._world.loader.get_spell("invisibility")
+        _, active, _ = _passive_profile(spell, target_id=start.actor_id, caster_id=NPC)
+        application = WorldEffectApplication(
+            session_id=sid,
+            command_id="foreign-invisibility",
+            source_id=NPC,
+            effect=effect_state(active),
+            expiry=EffectExpiryPolicy(action="remove"),
+            concentration=True,
+            ruleset_binding=RulesetBinding(**asdict(package.ruleset_binding)),
+        )
+        with sm._transaction(write=True):
+            sm._session_runtime.time.consumers["effects"].apply_verified(
+                sid, application, spell_id=spell.slug
+            )
+        assert _submit(session, start).status == "committed"
+        assert submit_time(session, AdvanceSessionTime(60), "identify-reach").status == "committed"
+        assert sm.read_noncombat_snapshot(sid, package, context=context).effect_states == (
+            application.effect,
+        )
+        wait = sync(session).time_wait
+        assert wait is not None
+        finish = _command(
+            session,
+            "identify-finish",
+            "activity.finish_spell_cast",
+            FinishSpellCast(start.payload.activity_id),
+            wait=wait,
+        )
+        committed = _submit(session, finish)
+        assert committed.status == "committed", committed
+        assert _submit(session, finish) == committed
+        assert _progress(session, start).identification.target_id == WAND
+        assert first_level_balance(sm, start) == 3
+        assert sm.read_noncombat_snapshot(sid, package, context=context).effect_states == ()
+        events = sm.read_events(sid, package, context=context)
+        (ending,) = [event for event in events if event.event_type == "effect.spell_ended"]
+        assert ending.source_command_id == finish.command_id
+        assert ending.payload["cast_command_id"] == application.command_id
+        assert all("properties_and_use" not in str(event.payload) for event in events)
 
 
 def _world(factory, *, slots=4, pearl_price=100, target_cell="0,1", growth=0):

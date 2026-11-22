@@ -1329,6 +1329,12 @@ def validate_dnd_result(request, result, *, loader=None):
         if type(result.choice) not in (SpellWillingnessChoice, MultiSpellWillingnessChoice):
             _invalid("Unexpected choice after explicit command capability admission")
         return result, ()
+    if request.spell_end_facts is not None:
+        native_request = request.without_spell_ends()
+        _, changes = validate_dnd_result(
+            native_request, result.without_spell_ends(request), loader=loader
+        )
+        return result, changes
     actors = {a.entity_id for a in request.state_snapshot.character_states}
     for event in result.proposed_events:
         for field in ("actor_id", "target_id", "source_actor_id", "attacker_id", "killer_id"):
@@ -1344,12 +1350,6 @@ def validate_dnd_result(request, result, *, loader=None):
                 _invalid("Proposed mechanical event refers to an actor outside the snapshot")
     if result.status != "accepted":
         return result, ()
-    if request.spell_end_facts is not None:
-        native_request = request.without_spell_ends()
-        _, changes = validate_dnd_result(
-            native_request, result.without_spell_ends(request), loader=loader
-        )
-        return result, changes
     if request.operation_kind == "rules.check":
         return result, check_changes(request, result)
     if request.operation_kind == "rules.rest":
