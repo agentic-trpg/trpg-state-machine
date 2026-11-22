@@ -323,6 +323,7 @@ class WorldMagic:
             sid, actor[0]
         )
 
+    @scoped_read(stage_only=True, maintained="light_sources")
     @instance_read("scene", "lighting", "magic_anchors", maintained="light_sources")
     def illumination_anchors(self, sid, scene):
         """Resolve effective spell anchors once for the current source version."""
@@ -512,9 +513,9 @@ class WorldMagic:
     def reconcile_scene(self, sid, scene, package):
         """Apply RE's overlap decisions only on a candidate mutation stage."""
         self.store.require_write()
-        records = self._records(sid, scene, illuminating=True)
-        if len(records) < 2:
+        if len(self.illumination_anchors(sid, scene)) < 2:
             return []
+        records = self._records(sid, scene, illuminating=True)
         positions = tuple(
             source
             for source in self._project_sources(sid, scene, package, records)
