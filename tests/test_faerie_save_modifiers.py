@@ -8,6 +8,7 @@ from dnd5e_engine.evaluation_effects import effect_state
 from dnd5e_engine.evaluation_rng import RNGState
 from dnd5e_engine.evaluation_state import ConditionRecord
 from dnd5e_engine.evaluation_world_effect import EffectExpiryPolicy, WorldEffectApplication
+from dnd5e_engine.rules.conditions import CONDITION_IMPLIES, Condition
 from dnd5e_srd_data import BundledAssetLoader
 from item_support import NPC
 from spatial_support import submit as submit_world
@@ -25,6 +26,9 @@ def _session(
     second_target=False,
     magic_resistance=False,
     bind_trait=False,
+    condition_definition=None,
+    item_definition=None,
+    exhaustion_level=1,
     seed=80,
     database="faerie-save-modifiers.sqlite",
 ):
@@ -57,12 +61,44 @@ def _session(
                 duration_rounds=None,
                 save_dc=None,
                 applied_round=0,
-                exhaustion_level=1,
+                exhaustion_level=exhaustion_level,
                 source_effect_id=None,
             ).model_dump(mode="json")
         ]
         if magic_resistance:
             npc["trait_mechanics"] = ["magic_resistance"]
+        if item_definition is not None:
+            npc["carried_item_slugs"].append(item_definition.slug)
+            if item_definition.slug == "leather-armor":
+                npc.update(
+                    worn_armor="light",
+                    worn_armor_instance_id="inventory.npc_bound_item",
+                )
+            elif item_definition.slug == "shield":
+                npc.update(
+                    shield_equipped=True,
+                    other_hand_occupied=True,
+                    equipped_shield_instance_id="inventory.npc_bound_item",
+                )
+            foundation["snapshot"]["inventory_state"]["entries"].append(
+                {
+                    "instance_id": "inventory.npc_bound_item",
+                    "owner_id": NPC,
+                    "item_slug": item_definition.slug,
+                    "quantity": 1,
+                    "charges_remaining_per_unit": 0,
+                    "accessible": True,
+                }
+            )
+
+    canonical = BundledAssetLoader()
+    names = {
+        condition,
+        *(implied.value for implied in CONDITION_IMPLIES.get(Condition(condition), [])),
+    }
+    definitions = {name: canonical.get_condition(name) for name in sorted(names)}
+    if condition_definition is not None:
+        definitions[condition_definition.slug] = condition_definition
 
     return timed_spell_world(
         database=database,
@@ -71,6 +107,8 @@ def _session(
         additional_spells=("faerie-fire",),
         additional_unprepared_spells=("bless", "bane"),
         additional_traits=("magic-resistance",) if bind_trait else (),
+        additional_conditions=tuple(definitions.values()),
+        additional_items=(item_definition,) if item_definition is not None else (),
         configure=configure,
         seed=seed,
     )
@@ -276,6 +314,80 @@ def test_faerie_paralyzed_save_draws_neither_d20_nor_active_bless_d4(timed_spell
         assert sm.read_rng_context(sid, package, context=context) == before
         assert _slot(session) == prior_slot - 1
         assert _creature_targets(session, command) == (NPC,)
+
+
+def test_faerie_exhaustion_reduces_save_without_an_extra_draw(timed_spell_world):
+    """A level-one Exhaustion penalty is visible in the public save evidence."""
+    session = _session(timed_spell_world, condition="exhaustion", seed=0)
+    sm, sid, package, context = session
+    with sm:
+        before = sm.read_rng_context(sid, package, context=context)
+        slot = _slot(session)
+        command, receipt = _cast(session, "exhaustion")
+        assert receipt.status == "committed", receipt
+        (event,) = _saves(session, command)
+        assert event["roll_detail"]["d20"] == {"faces": [13], "kept_index": 0, "origin": "rng"}
+        assert event["roll_total"] == 11
+        assert event["succeeded"] is False
+        assert {"kind": "fixed", "source": "exhaustion", "value": -2} in event["roll_detail"][
+            "modifiers"
+        ]
+        expected = before.state.restore()
+        assert expected.randint(1, 20) == 13
+        assert sm.read_rng_context(sid, package, context=context).state == RNGState.capture(
+            expected
+        )
+        assert _slot(session) == slot - 1
+        assert _creature_targets(session, command) == (NPC,)
+
+
+@pytest.mark.parametrize("level", (-1, 0, 6))
+def test_faerie_rejects_invalid_living_exhaustion_before_payment(timed_spell_world, level):
+    """Invalid levels cannot turn the penalty into a bonus or save a dead target."""
+    session = _session(timed_spell_world, condition="exhaustion", exhaustion_level=level)
+    sm, sid, package, context = session
+    with sm:
+        before_rng = sm.read_rng_context(sid, package, context=context)
+        before_slot = _slot(session)
+        command, receipt = _cast(session, f"bad-exhaustion-{level}")
+        assert (receipt.status, receipt.error_code) == ("rejected", "spell.visual_targets")
+        assert _saves(session, command) == ()
+        assert _creature_targets(session, command) == ()
+        assert _slot(session) == before_slot
+        assert sm.read_rng_context(sid, package, context=context) == before_rng
+
+
+@pytest.mark.parametrize("changed", ("condition", "item", "armor", "shield"))
+def test_faerie_rejects_bound_rule_mismatch_before_payment(timed_spell_world, changed):
+    """The exact bound condition or carried item definition gates a save."""
+    canonical = BundledAssetLoader()
+    item_slug = {"item": "rope", "armor": "leather-armor", "shield": "shield"}.get(changed)
+    options = (
+        {
+            "condition_definition": canonical.get_condition("restrained").model_copy(
+                update={"effects": []}
+            )
+        }
+        if changed == "condition"
+        else {
+            "item_definition": canonical.get_item(item_slug).model_copy(
+                update={"requires_attunement": True}
+            )
+        }
+    )
+    session = _session(timed_spell_world, **options)
+    sm, sid, package, context = session
+    with sm:
+        before_rng = sm.read_rng_context(sid, package, context=context)
+        before_slot = _slot(session)
+        before_events = sm.read_events(sid, package, context=context)
+        command, receipt = _cast(session, f"bound-{changed}")
+        assert (receipt.status, receipt.error_code) == ("rejected", "spell.visual_targets")
+        assert _saves(session, command) == ()
+        assert _creature_targets(session, command) == ()
+        assert _slot(session) == before_slot
+        assert sm.read_rng_context(sid, package, context=context) == before_rng
+        assert sm.read_events(sid, package, context=context) == before_events
 
 
 def test_faerie_rejects_unreviewed_save_effect_without_publishing(timed_spell_world):

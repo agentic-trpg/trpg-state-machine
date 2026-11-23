@@ -3,6 +3,7 @@
 import json
 
 from dnd5e_engine.evaluation_world_effect import EffectExpiryPolicy, WorldEffectApplication
+from dnd5e_srd_data import BundledAssetLoader
 from item_support import NPC
 from spatial_support import submit as submit_world
 from test_timed_spell_cast import cast_command
@@ -24,6 +25,7 @@ def test_distinct_caster_invisibility_faerie_overlap(timed_spell_world):
         caster_class="bard",
         caster_subclass="lore",
         additional_spells=("invisibility", "faerie-fire"),
+        additional_conditions=(BundledAssetLoader().get_condition("invisible"),),
         configure=configure,
         seed=2,
     )
@@ -118,6 +120,7 @@ def test_faerie_cast_ends_casters_own_invisibility(timed_spell_world):
         caster_class="bard",
         caster_subclass="lore",
         additional_spells=("invisibility", "faerie-fire"),
+        additional_conditions=(BundledAssetLoader().get_condition("invisible"),),
         seed=2,
         configure=lambda data: data["rule_bindings"].pop("combat_foundation"),
     )

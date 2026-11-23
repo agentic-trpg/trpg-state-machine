@@ -65,6 +65,7 @@ def timed_spell_world(tmp_path, context):
         proficiency_override=None,
         additional_spells=(),
         additional_items=(),
+        additional_conditions=(),
         additional_unprepared_spells=(),
         additional_traits=(),
         caster_class="wizard",
@@ -134,6 +135,7 @@ def timed_spell_world(tmp_path, context):
                 *(canonical.get_spell(slug) for slug in additional_unprepared_spells),
             ],
             traits=[canonical.get_trait(slug) for slug in additional_traits],
+            conditions=list(additional_conditions),
         )
         data = item_data()
         if region_mechanism:

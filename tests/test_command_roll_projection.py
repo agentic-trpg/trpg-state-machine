@@ -5,6 +5,7 @@ import sqlite3
 
 import pytest
 from dnd5e_engine.types.conditions import ActiveCondition
+from dnd5e_srd_data import BundledAssetLoader
 from item_support import NPC
 from lock_support import CRED, DOOR, A
 from spatial_support import create
@@ -125,6 +126,7 @@ def test_faerie_rolls_follow_two_creature_targets(timed_spell_world):
         caster_class="druid",
         caster_subclass="land",
         additional_spells=("faerie-fire",),
+        additional_conditions=(BundledAssetLoader().get_condition("restrained"),),
         hit_rider="ray-of-frost",
         configure=configure,
     )
