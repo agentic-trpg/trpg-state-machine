@@ -21,14 +21,14 @@ from .perception_conditions import (
     signal_environment,
 )
 from .runtime_instances import resolve_field
+from .visual_observer_state import sight_conditions_unknown
+from .visual_target_state import target_is_invisible
 from .world_lights import _corridor_cells
 
 
 def _sight_conditions_unknown(characters, sid, actor):
     """Check the named actor for conditions outside the supported sight rules."""
-    return characters.has_conditions(sid, actor) or characters.effects.has_linked_conditions(
-        sid, actor, capability="visibility"
-    )
+    return sight_conditions_unknown(characters, sid, actor)
 
 
 def _object_sight_unresolved(spatial, sid, target, package):
@@ -67,9 +67,9 @@ def visible_actor_in_range(world, sid, actor, target_id, target_cell, package, *
     ):
         return False
     sight = world._prepare_visibility(sid, actor, position, package, cells=(target_cell,))
-    if not sight.can_see(target_cell) or (
-        actor != target_id and _sight_conditions_unknown(world.characters, sid, target_id)
-    ):
+    if not sight.can_see_creature(
+        target_cell, invisible=target_is_invisible(world, sid, target_id)
+    ) or (actor != target_id and _sight_conditions_unknown(world.characters, sid, target_id)):
         return False
 
     corridor = frozenset(_corridor_cells(((position.cell, (parse_cell(target_cell),)),)))
@@ -763,7 +763,11 @@ class PerceptionRuntime:
         if mode and mode[0] and not self._active_combat(sid):
             if npc:
                 definition = self._world_facts.instances.actor(sid, actor)
-                if definition.senses is not None and not dict(definition.senses)["visual"]:
+                if (
+                    definition.senses is not None
+                    and not dict(definition.senses)["visual"]
+                    and self._characters.effective_senses(sid, actor).blindsight is None
+                ):
                     return _SceneDisclosure("resolved")
             try:
                 position = self._world._public_scope(sid, actor, package)
@@ -880,6 +884,10 @@ class PerceptionRuntime:
             elif cell in visible:
                 if target != actor and _sight_conditions_unknown(self._characters, sid, target):
                     status = "unresolved"
+                elif target != actor and not sight.can_see_creature(
+                    cell, invisible=target_is_invisible(self._world, sid, target)
+                ):
+                    continue
                 else:
                     visible_actors.append(target)
         visible_objects = tuple(

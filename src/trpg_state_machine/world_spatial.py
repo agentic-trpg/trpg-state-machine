@@ -397,9 +397,14 @@ class ObjectSpatialService:
     @scoped_read
     def _object_visibility(self, sid, actor, position, oid, package):
         """Read local target cells and the subset visible to the authorized actor."""
+        from .visual_target_state import target_is_invisible
+
         targets = self.target_cells(sid, position.scene_id, oid, package)
         visibility = self.h._prepare_visibility(sid, actor, position, package, cells=targets)
-        return targets, tuple(cell for cell in targets if visibility.can_see(cell))
+        invisible = target_is_invisible(self.h, sid, oid)
+        return targets, tuple(
+            cell for cell in targets if visibility.can_see_creature(cell, invisible=invisible)
+        )
 
     def visible_cells(self, sid, actor, oid, package, *, position=None):
         """Filter target cells using the actor's authorized position in the current read scope."""

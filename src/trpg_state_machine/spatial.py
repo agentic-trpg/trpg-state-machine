@@ -9,6 +9,7 @@ from typing import NamedTuple
 
 from dnd5e_engine.activities.passive_stats import CombatantSenses
 from dnd5e_engine.evaluation_state import InventoryEntry
+from dnd5e_engine.visual_sight import can_see_creature
 
 from ._execution import _execution_data
 from ._operations import (
@@ -35,6 +36,7 @@ from .grid_maps import ObserverTopology
 from .models import TrustedContext
 from .package import AdventurePackage
 from .scoped_reads import scoped_read
+from .visual_observer_state import can_see_invisible, observer_blinded, sight_conditions_unknown
 from .world_commands import WORLD_CAPABILITY_OPERATIONS, PutItem, TakeItem
 
 
@@ -52,10 +54,28 @@ class ObserverVisibility(NamedTuple):
     position: SpatialPosition
     topology: ObserverTopology
     senses: CombatantSenses
+    blinded: bool = False
+    can_see_invisible: bool = False
 
     def can_see(self, cell: str | None) -> bool:
         """Check ordinary sight for a target in the prepared scope."""
-        return self.topology.can_see_target(cell, self.senses)
+        return self.can_see_creature(cell)
+
+    def can_see_creature(self, cell: str | None, *, invisible: bool = False) -> bool:
+        """Use RE sight with this observer's typed grant and supplied target state."""
+        return (
+            cell is not None
+            and cell in self.topology._clear_rays
+            and can_see_creature(
+                self.topology,
+                self.position.cell,
+                cell,
+                self.senses,
+                blinded=self.blinded,
+                invisible=invisible,
+                can_see_invisible=self.can_see_invisible,
+            )
+        )
 
 
 @dataclass(frozen=True, slots=True)
@@ -261,7 +281,11 @@ class WorldHandler:
                 "unsupported_interaction_scope", "Public spatial scope is required"
             )
         definition = self.facts.instances.actor(sid, actor_id)
-        if definition and (definition.senses is None or not dict(definition.senses)["visual"]):
+        if definition and (
+            definition.senses is None
+            or not dict(definition.senses)["visual"]
+            and self.characters.effective_senses(sid, actor_id).blindsight is None
+        ):
             raise StateMachineError(
                 "unsupported_target_visibility", "Target authorization is unproven"
             )
@@ -269,12 +293,7 @@ class WorldHandler:
             "SELECT actor_id FROM mechanical_actors WHERE session_id=? AND actor_id=?",
             (sid, actor_id),
         ).fetchone()
-        if mechanical and (
-            self.characters.has_conditions(sid, actor_id)
-            or self.characters.effects.has_linked_conditions(
-                sid, actor_id, capability="observer_visibility"
-            )
-        ):
+        if mechanical and sight_conditions_unknown(self.characters, sid, actor_id):
             raise StateMachineError(
                 "unsupported_target_visibility",
                 "Condition-aware target authorization is unavailable",
@@ -292,7 +311,11 @@ class WorldHandler:
             sid, position.scene_id, package, position.cell, cells
         )
         return ObserverVisibility(
-            position, topology, self.characters.effective_senses(sid, actor_id)
+            position,
+            topology,
+            self.characters.effective_senses(sid, actor_id),
+            observer_blinded(self.characters, sid, actor_id),
+            can_see_invisible(self.characters, sid, actor_id),
         )
 
     def _visible_target(self, sid, actor_id, cell, package, *, prepared=None):

@@ -111,7 +111,7 @@ def test_fine_scene_views_filter_current_members_and_reuse_observer_disclosure(
         assert denied.value.code == "unauthorized" and len(prepared) == 3
 
 
-def test_fine_scene_view_keeps_an_unsupported_target_identity_private(tmp_path, context):
+def test_fine_scene_view_hides_invisible_target_without_hiding_its_own_view(tmp_path, context):
     data = lighting_data()
     data["actors"][0]["initial_cell"] = "2,0"
     sm, sid, package, _ = setup(tmp_path, context, data)
@@ -135,11 +135,11 @@ def test_fine_scene_view_keeps_an_unsupported_target_identity_private(tmp_path, 
                 },
             )
         view = sm.get_scene_view(sid, package, context=player)
-        assert view.status == "unresolved" and NPC not in view.visible_actor_ids
+        assert view.status == "resolved" and NPC not in view.visible_actor_ids
         assert view.visible_objects == before.visible_objects
         observer = sm.get_scene_view(sid, package, context=npc)
-        assert observer.status == "unresolved" and observer.visible_actor_ids == ()
-        assert observer.visible_objects == ()
+        assert observer.status == "resolved" and NPC in observer.visible_actor_ids
+        assert observer.visible_objects
         gm = sm.get_scene_view(sid, package, context=viewer(context, sid, "gm"))
         assert gm.status == "resolved" and NPC in gm.visible_actor_ids
 
