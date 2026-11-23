@@ -404,18 +404,25 @@ class WorldMagic:
 
     @scoped_read(stage_only=True, maintained="light_sources")
     @instance_read("scene", "lighting", "magic_anchors", maintained="light_sources")
-    def illumination_anchors(self, sid, scene):
-        """Resolve effective spell anchors once for the current source version."""
-        return tuple(
+    def _illumination_anchor_sets(self, sid, scene):
+        """Resolve spell and target light from one maintained source stamp."""
+        spell_anchors = tuple(
             anchor
             for record in self._records(sid, scene, illuminating=True)
             if (anchor := self._illumination_anchor(sid, scene, record)) is not None
         )
+        return spell_anchors, self._visual_illumination_anchors_uncached(sid, scene)
 
-    @scoped_read(stage_only=True, maintained="light_sources")
-    @instance_read("scene", "lighting", "visual_anchors", capacity=2, maintained="light_sources")
+    def illumination_anchors(self, sid, scene):
+        """Return spatial spell anchors from the shared current light selection."""
+        return self._illumination_anchor_sets(sid, scene)[0]
+
     def visual_illumination_anchors(self, sid, scene):
-        """Resolve only source-owned scene members from the maintained light index."""
+        """Return selected target anchors from the shared current light selection."""
+        return self._illumination_anchor_sets(sid, scene)[1]
+
+    def _visual_illumination_anchors_uncached(self, sid, scene):
+        """Resolve indexed visual members only while building the shared selection."""
         db = self.store.connection
         tick = self.h.facts.time_state(sid)[1]
         anchors = []
