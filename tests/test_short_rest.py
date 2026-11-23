@@ -139,6 +139,7 @@ def test_short_rest_rolls_and_spends_two_chosen_dice_once(tmp_path, context):
             assert denied.value.code == "unauthorized"
         assert short_state(sm, sid, package, host) == before
         assert sm.get_command_receipt(sid, command.command_id, package, context=host) is None
+        assert sm.get_command_rolls(sid, command.command_id, package, context=host) is None
 
         receipt = sm.submit_command(command, package, context=host)
         assert receipt.status == "committed", receipt
@@ -191,6 +192,16 @@ def test_short_rest_rolls_and_spends_two_chosen_dice_once(tmp_path, context):
             {"pool_id": DICE, "amount": 2, "die_size": 10, "healing_rolls": rolled}
         ]
         assert evidence["hp_regained"] == pc.hp_current - old_pc.hp_current
+        projected = sm.get_command_rolls(sid, command.command_id, package, context=host)
+        assert projected["rolls"] == [
+            {
+                "event_seq": committed[1].event_seq,
+                "type": "hit_dice_healing",
+                "actor_id": command.actor_id,
+                "hit_dice": evidence["hit_dice"],
+                "hp_regained": pc.hp_current - old_pc.hp_current,
+            }
+        ]
         assert evidence["pact_slots_restored"] == {"1": 1}
         assert evidence["feature_uses_restored"] == {"second-wind": 1}
         assert sm._activity_records.last_long_rest(sid, command.actor_id) is None
@@ -199,6 +210,7 @@ def test_short_rest_rolls_and_spends_two_chosen_dice_once(tmp_path, context):
         sm.resume_session(sid, package, context=host)
         assert sm.submit_command(command, package, context=host) == receipt
         assert short_state(sm, sid, package, host) == after
+        assert sm.get_command_rolls(sid, command.command_id, package, context=host) == projected
 
 
 def test_short_rest_without_dice_recovers_features_without_healing_or_cooldown(tmp_path, context):
@@ -222,6 +234,31 @@ def test_short_rest_without_dice_recovers_features_without_healing_or_cooldown(t
                 PACT: 1,
                 WIND: index,
             }
+
+
+def test_short_rest_projection_keeps_two_pool_order_and_one_hp_total(tmp_path, context):
+    """A rest's aggregate HP belongs to the ordered set of spent pools once."""
+    package, loader = short_rest_package()
+    host = replace(context, can_authorize_short_rest=True)
+    with StateMachine(tmp_path / "two-pools.sqlite", dnd_loader=loader) as sm:
+        sid = create(sm, package, host)
+        command = short_command(
+            sm,
+            sid,
+            package,
+            host,
+            "rest.two-pools",
+            HitDiceSpend(DICE, 1),
+            HitDiceSpend(OTHER_DICE, 1),
+        )
+        receipt = sm.submit_command(command, package, context=host)
+        assert receipt.status == "committed"
+        (roll,) = sm.get_command_rolls(sid, command.command_id, package, context=host)["rolls"]
+        assert roll["type"] == "hit_dice_healing"
+        assert [spend["pool_id"] for spend in roll["hit_dice"]] == [DICE, OTHER_DICE]
+        assert [spend["die_size"] for spend in roll["hit_dice"]] == [10, 8]
+        assert all(len(spend["healing_rolls"]) == 1 for spend in roll["hit_dice"])
+        assert roll["hp_regained"] <= sum(sum(spend["healing_rolls"]) for spend in roll["hit_dice"])
 
 
 def test_short_rest_keeps_ordinary_spell_slots_unchanged(tmp_path, context):

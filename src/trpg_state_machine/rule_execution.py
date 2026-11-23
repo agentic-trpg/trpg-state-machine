@@ -1301,6 +1301,23 @@ class RuleExecution:
                                 ),
                                 "scene_id": snapshot.scene_state.scene_id,
                                 "engine_event": event.model_dump(mode="json"),
+                                **(
+                                    {
+                                        "hp_gained": next(
+                                            (
+                                                op.amount
+                                                for op in result.state_delta.operations
+                                                if op.kind == "actor.hp_delta"
+                                                and op.target_id == event.target_id
+                                            ),
+                                            0,
+                                        )
+                                    }
+                                    if exploration_spell
+                                    and event.type == "healing_applied"
+                                    and event.roll_detail is not None
+                                    else {}
+                                ),
                             },
                             phase="engine.intermediate_phase_unavailable",
                             unresolved=True,

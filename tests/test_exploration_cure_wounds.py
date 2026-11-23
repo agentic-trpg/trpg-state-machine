@@ -77,12 +77,31 @@ def test_public_heal_commits_payment_and_hp(tmp_path, context, target, target_hp
             "healing_applied",
         ]
         expected_rng = Random(0)
-        amount = expected_rng.randint(1, 8) + expected_rng.randint(1, 8) + 3
+        faces = [expected_rng.randint(1, 8), expected_rng.randint(1, 8)]
+        amount = sum(faces) + 3
         assert events[2].payload["engine_event"] == {
             "type": "healing_applied",
             "target_id": target_id,
             "amount": amount,
+            "roll_detail": {
+                "dice": [{"die_size": 8, "face": face} for face in faces],
+                "fixed_addends": [
+                    {"kind": "fixed", "source": "spell_bonus", "value": 3},
+                    {"kind": "fixed", "source": "recipient_bonus", "value": 0},
+                ],
+            },
         }
+        projected = sm.get_command_rolls(sid, command.command_id, package, context=context)
+        assert projected["rolls"] == [
+            {
+                "event_seq": events[2].event_seq,
+                "type": "healing_applied",
+                "target_id": target_id,
+                "amount": amount,
+                "hp_gained": healed_hp - target_hp,
+                "roll_detail": events[2].payload["engine_event"]["roll_detail"],
+            }
+        ]
         successor = sm.read_rng_context(sid, package, context=context)
         assert successor.version == rng.version + 1
         assert successor.state == RNGState.capture(expected_rng)
@@ -93,6 +112,9 @@ def test_public_heal_commits_payment_and_hp(tmp_path, context, target, target_hp
         assert reopened.read_rng_context(sid, package, context=context) == successor
         assert reopened.get_command_receipt(sid, command.command_id, package, context=context) == (
             receipt
+        )
+        assert reopened.get_command_rolls(sid, command.command_id, package, context=context) == (
+            projected
         )
 
 
@@ -108,6 +130,9 @@ def test_full_hp_keeps_life_unchanged_and_pays_cast(tmp_path, context):
         assert actor(after, NPC) == actor(before, NPC)
         assert pool(after).current == pool(before).current - 1
         assert sm.read_rng_context(sid, package, context=context).version == rng.version + 1
+        rolls = sm.get_command_rolls(sid, command.command_id, package, context=context)["rolls"]
+        assert len(rolls) == 1 and len(rolls[0]["roll_detail"]["dice"]) == 2
+        assert rolls[0]["hp_gained"] == 0
 
 
 @pytest.mark.parametrize("unknown_modifier", [False, True])
@@ -212,6 +237,7 @@ def test_late_receipt_failure_reverts_hp_slot_events_and_rng(tmp_path, context):
             sm.submit_command(command, package, context=context)
         assert exc.value.code == "storage_error"
         assert sm.get_command_receipt(sid, command.command_id, package, context=context) is None
+        assert sm.get_command_rolls(sid, command.command_id, package, context=context) is None
         assert sm.read_noncombat_snapshot(sid, package, context=context) == before
         assert sm.read_rng_context(sid, package, context=context) == rng
         assert sm.read_events(sid, package, context=context) == events
@@ -219,6 +245,10 @@ def test_late_receipt_failure_reverts_hp_slot_events_and_rng(tmp_path, context):
         receipt = sm.submit_command(command, package, context=context)
         assert receipt.status == "committed"
         assert sm.submit_command(command, package, context=context) == receipt
+        assert (
+            len(sm.get_command_rolls(sid, command.command_id, package, context=context)["rolls"])
+            == 1
+        )
 
 
 def test_wrong_healing_target_is_rejected_before_adoption(tmp_path, context, monkeypatch):

@@ -697,13 +697,14 @@ class CommandRuntime:
             raise StateMachineError("unauthorized", "Actor control grant has been revoked")
 
     def get_command_rolls(self, session_id, command_id, package, *, context):
-        """Project committed check/save dice evidence for one authorized command.
+        """Project committed check, save, rest and Cure Wounds dice evidence.
 
         Return None for an unknown command, otherwise a JSON-ready mapping with
         receipt status and rolls in committed event order. A roll_detail of None
         means that the stored event lacks detailed dice evidence, whether from an
-        older event or a path without that evidence; an empty rolls list means
-        the receipt has no check/save event. This read never evaluates rules or
+        older event or a path without that evidence. Rest hit-die values are
+        adjusted per-die healing, while Cure Wounds dice are raw faces. An empty
+        rolls list means the receipt has no supported dice event. This read never evaluates rules or
         RNG and only follows event identities in the durable receipt. The selected
         PC's neutral Bardic marker links to private original dice evidence.
         """
@@ -731,7 +732,34 @@ class CommandRuntime:
                 if not isinstance(engine, dict) or engine.get("type") not in (
                     "check_rolled",
                     "save_rolled",
+                    "rest_resolved",
+                    "healing_applied",
                 ):
+                    continue
+                if engine["type"] == "rest_resolved":
+                    if engine.get("hit_dice"):
+                        rolls.append(
+                            {
+                                "event_seq": seq,
+                                "type": "hit_dice_healing",
+                                "actor_id": engine["actor_id"],
+                                "hit_dice": engine["hit_dice"],
+                                "hp_regained": engine["hp_regained"],
+                            }
+                        )
+                    continue
+                if engine["type"] == "healing_applied":
+                    if engine.get("roll_detail") is not None:
+                        rolls.append(
+                            {
+                                "event_seq": seq,
+                                "type": "healing_applied",
+                                "target_id": engine["target_id"],
+                                "amount": engine["amount"],
+                                "hp_gained": event.payload.get("hp_gained"),
+                                "roll_detail": engine["roll_detail"],
+                            }
+                        )
                     continue
                 rolls.append(
                     {
