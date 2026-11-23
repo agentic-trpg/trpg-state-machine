@@ -3,6 +3,11 @@
 import copy
 from dataclasses import asdict, replace
 
+from dnd5e_engine.evaluation_bardic_grant import (
+    BardicGrantRequest,
+    ExplorationFeaturePayload,
+    plan_bardic_grant,
+)
 from dnd5e_engine.evaluation_charged_item import (
     exploration_charged_cast_profile,
     is_healing_staff,
@@ -54,6 +59,7 @@ from .pending_multi_spell_choices import PendingMultiSpellChoices
 from .pending_spell_choices import PendingSpellChoices
 from .perception import visible_actor_in_range
 from .rest_activity import LongRest, ShortRest, advance_rest, prepare_rest
+from .rule_sight import read_creature_sight
 from .rules_adapter import UnsupportedEffectConsequence, validate_dnd_result
 from .shield_adoption import UnsupportedShieldKnockout, UnsupportedShieldTerminal
 from .shield_window import ShieldWindows, guard_shield_window
@@ -63,7 +69,7 @@ from .spell_cast_activity import (
     FinishSpellCast,
     StartSpellCast,
 )
-from .time_binding import TimeBinding
+from .time_binding import TimeBinding, deadline_after_seconds
 from .world_commands import OPENABLE_CHECK_OPERATIONS, CheckMechanism, PickLock
 
 
@@ -372,6 +378,8 @@ class RuleExecution:
         A failed independent check with a held Bardic die saves its original roll
         for the selected PC to finalize through the same choice response entry.
         """
+        if type(command.payload) is ExplorationFeaturePayload:
+            return self._submit_bardic_grant(command, package, context, fingerprint)
         response = shield_prompt = shield_pending = shield_original = None
         confirmation = None
         if type(command.payload) is ChoiceFinalizeSpellOperationPayload:
@@ -1463,6 +1471,160 @@ class RuleExecution:
                 error,
                 pending_choice=pending_choice,
                 pending_choices=pending_choices,
+            )
+        self.runtime.refresh_time_drivers()
+        return receipt
+
+    def _bardic_grant_request(self, row, command, package):
+        """Freeze the two actors, current clock, positions and recipient-to-Bard sight."""
+        sid = command.session_id
+        if (
+            command.payload.target_id != row["pc_actor_id"]
+            or command.payload.target_id == command.actor_id
+        ):
+            return None, "target_invalid"
+        error = self._exploration_error(row, command, exploration_spell=False)
+        if error is not None:
+            return None, error
+        binding, tick = self.world.facts.time_state(sid)
+        if not isinstance(binding, TimeBinding):
+            return None, "unsupported_time_protocol"
+        ids = (command.actor_id, command.payload.target_id)
+        places = [self.world.facts.carrier_position(sid, identity) for identity in ids]
+        if any(
+            place is None or place[0] != row["current_scene_id"] or place[1] is None
+            for place in places
+        ):
+            return None, "target_invalid"
+        snapshot = self.rules._noncombat_snapshot(row, actor_ids=ids)
+        sight = read_creature_sight(
+            self.world, sid, command.payload.target_id, (command.actor_id,), package
+        )
+        payload = command.payload
+        return BardicGrantRequest(
+            kind="world.use_feature",
+            session_id=sid,
+            command_id=command.command_id,
+            actor_id=command.actor_id,
+            target_id=payload.target_id,
+            feature_id=payload.feature_id,
+            source_cell=places[0][1],
+            target_cell=places[1][1],
+            visible_source_id=command.actor_id if sight.get(command.actor_id) else None,
+            tick=tick,
+            snapshot=snapshot,
+            ruleset_binding=self.rules.session_binding(row),
+        ), None
+
+    def _submit_bardic_grant(self, command, package, context, fingerprint):
+        """Adopt a canonical paid Inspiration grant in the ordinary shared commit scope."""
+        command = self.runtime.prepare_timed_command(command, package, context, fingerprint)
+        with self.store.transaction():
+            row = self.sessions._session(command.session_id, package, context)
+            self.sessions._authorize_command(row, command.actor_id, command.payload, context)
+            self.sessions._npc_handoff_command_guard(command)
+            if replay := self.runtime._command_replay(command, fingerprint):
+                return replay
+            guard_shield_window(self._conn, row)
+            request, error = self._bardic_grant_request(row, command, package)
+        proposal = None
+        if error is None:
+            try:
+                proposal = plan_bardic_grant(request, loader=self.rules.loader)
+            except ValueError:
+                error = "feature_ineligible"
+        with self.store.transaction(write=True):
+            row = self.sessions._session(command.session_id, package, context)
+            self.sessions._authorize_command(row, command.actor_id, command.payload, context)
+            self.sessions._npc_handoff_command_guard(command)
+            if replay := self.runtime._command_replay(command, fingerprint):
+                return replay
+            guard_shield_window(self._conn, row)
+            version = row["world_version"]
+            status = "committed"
+            if self.runtime.version_conflict(row, command):
+                status, error = "conflict", "version_conflict"
+            elif error is not None:
+                status = "rejected"
+            else:
+                current, current_error = self._bardic_grant_request(row, command, package)
+                if current_error is not None or current != request:
+                    status, error = "conflict", "version_conflict"
+                else:
+                    sid = command.session_id
+                    payment = proposal.payment
+                    if (
+                        payment.owner_id != command.actor_id
+                        or payment.amount != -1
+                        or payment.expected not in current.snapshot.resource_state.pools
+                        or proposal.effect.target_id != command.payload.target_id
+                        or proposal.effect.id != "effect:inspired"
+                        or proposal.effect.origin != f"cast:inspired:{command.actor_id}"
+                        or proposal.effect.duration.seconds != proposal.duration_seconds
+                        or payment.expected.kind != "feature_uses"
+                        or payment.expected.feature_slug != "bardic-inspiration"
+                        or proposal.effect.flags.get("bardic_inspiration", {}).get("grant_id")
+                        != command.command_id
+                    ):
+                        raise StateMachineError("invalid_rule_result", "Feature plan differs")
+                    if (
+                        self.world.characters.effects.held_bardic_inspiration(
+                            sid, command.payload.target_id, current.tick
+                        )
+                        is not None
+                    ):
+                        status, error = "rejected", "feature_ineligible"
+                    else:
+                        binding, tick = self.world.facts.time_state(sid)
+                        if tick != current.tick:
+                            raise StateMachineError("version_conflict", "Feature clock changed")
+                        deadline = deadline_after_seconds(binding, tick, proposal.duration_seconds)
+                        self._conn.execute("SAVEPOINT bardic_grant")
+                        try:
+                            self.world.characters.spend_resource(
+                                sid,
+                                command.actor_id,
+                                payment.pool_id,
+                                1,
+                                expected_current=payment.expected.current,
+                            )
+                            self.world.characters.effects.add_effect(
+                                sid,
+                                proposal.effect.model_dump(mode="json"),
+                                expires_tick=deadline,
+                            )
+                            events = [
+                                self.capture._capture_event(
+                                    sid,
+                                    package,
+                                    "world.feature_used",
+                                    {
+                                        "actor_id": command.actor_id,
+                                        "target_id": command.payload.target_id,
+                                        "feature_id": command.payload.feature_id,
+                                        "grant_id": command.command_id,
+                                        "die_sides": proposal.effect.flags["bardic_inspiration"][
+                                            "die_sides"
+                                        ],
+                                        "expires_tick": deadline,
+                                        "scene_id": row["current_scene_id"],
+                                    },
+                                    phase="engine.intermediate_phase_unavailable",
+                                    unresolved=True,
+                                )
+                            ]
+                            events = self.effects._expand_events(
+                                row, package, events, command.command_id
+                            )
+                            version = self.runtime.stage_outcome(command, row, package, events)
+                        except Exception:
+                            self._conn.execute("ROLLBACK TO bardic_grant")
+                            self.store._scope.read_memo.clear()
+                            raise
+                        finally:
+                            self._conn.execute("RELEASE bardic_grant")
+            receipt = self.runtime.finish(
+                command, context, fingerprint, row, status, version, error
             )
         self.runtime.refresh_time_drivers()
         return receipt

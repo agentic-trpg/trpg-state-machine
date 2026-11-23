@@ -7,6 +7,7 @@ apply facts; this component coordinates versions, RNG, events and receipts.
 import hashlib
 from dataclasses import asdict, replace
 
+from dnd5e_engine.evaluation_bardic_grant import ExplorationFeaturePayload
 from dnd5e_engine.evaluation_contracts import (
     CheckPayload,
     CombatClosePayload,
@@ -60,6 +61,7 @@ def _fingerprint(command, digest, binding, context):
         ExplorationMultiSpellCastPayload,
         ExplorationEnvironmentalSpellCastPayload,
         ExplorationSpellCastPayload,
+        ExplorationFeaturePayload,
     ):
         data["payload"] = command.payload.model_dump(mode="json")
     return hashlib.sha256(

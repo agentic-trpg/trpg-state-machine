@@ -5,6 +5,7 @@ import re
 from copy import deepcopy
 from dataclasses import asdict, dataclass
 
+from dnd5e_engine.evaluation_bardic_grant import ExplorationFeaturePayload
 from dnd5e_engine.evaluation_contracts import (
     MAX_EXPLORATION_SPELL_TARGETS,
     CheckPayload,
@@ -117,6 +118,7 @@ OPERATIONS = {
     "combat.item": ItemUsePayload,
     "world.use_item": ExplorationItemUsePayload,
     "world.cast_spell": ExplorationSpellCastPayload,
+    "world.use_feature": ExplorationFeaturePayload,
     "world.cast_spell_many": ExplorationMultiSpellCastPayload,
     "choice.respond": ChoiceRespondOperationPayload,
     "choice.finalize_spell": ChoiceFinalizeSpellOperationPayload,
@@ -194,6 +196,7 @@ class TypedCommand:
         | ExplorationItemUsePayload
         | ExplorationEnvironmentalSpellCastPayload
         | ExplorationSpellCastPayload
+        | ExplorationFeaturePayload
         | ExplorationMultiSpellCastPayload
         | ChoiceRespondOperationPayload
         | ChoiceFinalizeSpellOperationPayload
@@ -284,6 +287,7 @@ def validate_command(command: TypedCommand) -> None:
             ExplorationItemUsePayload,
             ExplorationEnvironmentalSpellCastPayload,
             ExplorationSpellCastPayload,
+            ExplorationFeaturePayload,
             ExplorationMultiSpellCastPayload,
             ChoiceRespondOperationPayload,
             ChoiceFinalizeSpellOperationPayload,
@@ -449,6 +453,7 @@ def validate_command(command: TypedCommand) -> None:
         ExplorationItemUsePayload,
         ExplorationEnvironmentalSpellCastPayload,
         ExplorationSpellCastPayload,
+        ExplorationFeaturePayload,
         ExplorationMultiSpellCastPayload,
     ):
         try:
@@ -556,6 +561,7 @@ class CommandRuntime:
             ExplorationItemUsePayload,
             ExplorationEnvironmentalSpellCastPayload,
             ExplorationSpellCastPayload,
+            ExplorationFeaturePayload,
             ExplorationMultiSpellCastPayload,
             ChoiceRespondOperationPayload,
             ChoiceFinalizeSpellOperationPayload,
@@ -821,6 +827,7 @@ def world_command_from_data(data):
         "world.use_item",
         "rules.save",
         "world.cast_spell",
+        "world.use_feature",
         "world.cast_spell_many",
         "choice.respond",
         "choice.finalize_spell",

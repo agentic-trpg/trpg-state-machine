@@ -2,6 +2,7 @@
 
 import json
 
+from dnd5e_engine.evaluation_bardic_grant import ExplorationFeaturePayload
 from dnd5e_engine.evaluation_contracts import (
     CheckPayload,
     CombatClosePayload,
@@ -224,6 +225,7 @@ class CombatHandler:
             ExplorationItemUsePayload,
             ExplorationEnvironmentalSpellCastPayload,
             ExplorationSpellCastPayload,
+            ExplorationFeaturePayload,
             ExplorationMultiSpellCastPayload,
             ChoiceRespondOperationPayload,
             ChoiceFinalizeSpellOperationPayload,

@@ -3,6 +3,7 @@
 import json
 import sqlite3
 
+from dnd5e_engine.evaluation_bardic_grant import ExplorationFeaturePayload
 from dnd5e_engine.evaluation_contracts import (
     CheckPayload,
     CombatClosePayload,
@@ -175,6 +176,7 @@ class SessionAccess:
                     payload,
                     (
                         CombatIntentPayload,
+                        ExplorationFeaturePayload,
                         CombatClosePayload,
                         CheckPayload,
                         ChoiceRespondOperationPayload,
