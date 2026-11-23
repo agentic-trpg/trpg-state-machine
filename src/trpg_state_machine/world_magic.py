@@ -1,5 +1,6 @@
 """Resolve World anchors and hand actual rule footprints back to Effects."""
 
+import json
 from dataclasses import dataclass, replace
 from math import ceil
 from typing import Literal
@@ -12,6 +13,7 @@ from dnd5e_engine.evaluation_environmental_contracts import (
     EnvironmentalCreatureTarget,
     EnvironmentalMagicEffectFacts,
     EnvironmentalMagicEffectTarget,
+    VisualTargetFact,
 )
 from dnd5e_engine.spatial import cell_id, parse_cell
 from dnd5e_engine.spellcasting import spell_range_ft
@@ -200,12 +202,81 @@ class WorldMagic:
                 and not has_line_of_effect(grid.topology.with_blocked(blocked), source[1], cell)
             ):
                 return None
+        visual_occupants = ()
+        if command.payload.spell_id == "faerie-fire":
+            if target.kind != "point":
+                return None
+            template = AreaTemplate("cube", "square", 20, "target", True)
+            geometry = grid.topology
+            candidate_cells = geometry.cells_in_template(cell, "square", 20)
+            for covered in self._total_cover_cells(sid, scene, package, candidate_cells):
+                geometry = geometry.with_cover_at(covered, "total")
+            cells = area_cells(geometry, template, cell, None)
+            actors, objects = self.h.grid.reader.region_occupants(
+                sid, scene, cells, include_actors=True
+            )
+            occupants = {("creature", actor_id): actor_cell for actor_id, actor_cell in actors}
+            occupants.update(
+                (("object", object_id), object_cell) for object_id, object_cell, _ in objects
+            )
+            # Ordinary placed objects need no spatial fixture capability.
+            # The indexed cell range includes those missed by object_spatial_cells.
+            for object_id, object_cell in self.store.connection.execute(
+                "SELECT object_id,cell FROM objects WHERE session_id=? AND scene_id=? "
+                "AND cell IN (SELECT value FROM json_each(?))",
+                (sid, scene, json.dumps(sorted(cells))),
+            ):
+                occupants.setdefault(("object", object_id), object_cell)
+            for actor_id, actor_cell in actors:
+                for (object_id,) in self.store.connection.execute(
+                    "SELECT object_id FROM objects WHERE session_id=? AND carrier_id=?",
+                    (sid, actor_id),
+                ):
+                    occupants.setdefault(("object", object_id), actor_cell)
+            pending = [identity for kind, identity in occupants if kind == "object"]
+            visited = set()
+            while pending:
+                oid = pending.pop()
+                if oid in visited:
+                    continue
+                visited.add(oid)
+                placement = facts.placement(sid, oid)
+                enclosed = False
+                for parent_id in placement["ancestry"]:
+                    parent_state = facts.object(sid, parent_id)["state"]
+                    if parent_state == "closed":
+                        enclosed = True
+                        break
+                    if parent_state != "open":
+                        # RUO-54-F2: unknown enclosure accessibility cannot
+                        # prove that an area reaches its contents.
+                        raise StateMachineError(
+                            "unsupported_visual_container_access",
+                            "RUO-54-F2: Faerie Fire needs known container accessibility",
+                        )
+                if enclosed:
+                    occupants.pop(("object", oid), None)
+                    continue
+                if placement["scene_id"] == scene and placement["cell"] in cells:
+                    occupants.setdefault(("object", oid), placement["cell"])
+                    pending.extend(
+                        child_id
+                        for (child_id,) in self.store.connection.execute(
+                            "SELECT object_id FROM objects WHERE session_id=? AND container_id=?",
+                            (sid, oid),
+                        )
+                    )
+            visual_occupants = tuple(
+                VisualTargetFact(target_kind=kind, target_id=identity, cell_id=place)
+                for (kind, identity), place in sorted(occupants.items())
+            )
         return ExplorationSpellPositions(
             source_cell=source[1],
             target_cell=cell,
             target_item=item_facts,
             target_effect=effect_facts,
             target_applications=applications,
+            visual_occupants=visual_occupants,
             visible_target_id=target.target_id
             if isinstance(target, EnvironmentalCreatureTarget)
             else None,
@@ -288,8 +359,16 @@ class WorldMagic:
         return (*fixed, *(record for oid in objects for record in self.owner.attached(sid, oid)))
 
     def has_scene_effects(self, sid, scene):
-        """Guard entry to combat, whose snapshot has no spatial Effects state."""
-        return bool(self._records(sid, scene))
+        """Guard combat entry while unsupported spatial or visual effects remain."""
+        if self._records(sid, scene):
+            return True
+        return (
+            self.store.connection.execute(
+                "SELECT 1 FROM visual_light_anchors WHERE session_id=? AND scene_id=? LIMIT 1",
+                (sid, scene),
+            ).fetchone()
+            is not None
+        )
 
     @scoped_read
     def may_have_darkness(self, sid, scene):
@@ -332,6 +411,51 @@ class WorldMagic:
             for record in self._records(sid, scene, illuminating=True)
             if (anchor := self._illumination_anchor(sid, scene, record)) is not None
         )
+
+    @scoped_read(stage_only=True, maintained="light_sources")
+    @instance_read("scene", "lighting", "visual_anchors", capacity=2, maintained="light_sources")
+    def visual_illumination_anchors(self, sid, scene):
+        """Resolve only source-owned scene members from the maintained light index."""
+        db = self.store.connection
+        tick = self.h.facts.time_state(sid)[1]
+        anchors = []
+        for anchor in db.execute(
+            "SELECT * FROM visual_light_anchors WHERE session_id=? AND scene_id=? "
+            "ORDER BY source_id,target_id",
+            (sid, scene),
+        ):
+            kind, identity = anchor["target_kind"], anchor["target_id"]
+            target = db.execute(
+                "SELECT dim_radius_ft FROM target_visual_effects WHERE session_id=? "
+                "AND source_id=? AND effect_id=? AND target_kind=? AND target_id=?",
+                (sid, anchor["source_id"], anchor["effect_id"], kind, identity),
+            ).fetchone()
+            source = db.execute(
+                "SELECT expires_tick FROM visual_effect_sources WHERE session_id=? AND source_id=?",
+                (sid, anchor["source_id"]),
+            ).fetchone()
+            if target is None or source is None or source[0] <= tick:
+                continue
+            if kind == "creature":
+                position = self.h.facts.carrier_position(sid, identity)
+                actual_scene, cell = position if position is not None else (None, None)
+                transmission = "transmit"
+            else:
+                placement = self.h.facts.placement(sid, identity)
+                actual_scene, cell = placement["scene_id"], placement["cell"]
+                transmission = self._transmission(sid, identity, placement)
+            if actual_scene == scene and cell is not None and transmission != "block":
+                anchors.append(
+                    (
+                        anchor["source_id"],
+                        identity,
+                        cell,
+                        kind,
+                        target[0],
+                        transmission == "unknown",
+                    )
+                )
+        return tuple(sorted(anchors))
 
     def _illumination_anchor(self, sid, scene, record):
         """Resolve a stored application to its present, transmissive World anchor."""
@@ -586,6 +710,39 @@ class WorldMagic:
         if proposal.environment.light is not None:
             ended.extend(self.reconcile_scene(sid, scene, package))
         return identity, ended
+
+    def apply_visual(self, row, package, command_id, proposal):
+        """Adopt a verified target visual product in the caller's shared write."""
+        sid = row["session_id"]
+        deadline = self.h.time.seconds_deadline(sid, proposal.duration_seconds)
+        identity = self.h.characters.effects.add_visual_source(
+            sid, command_id, proposal, expires_tick=deadline
+        )
+        return identity, []
+
+    def end_visual_event(self, sid, package, source, reason):
+        """End one exact target source and publish its concentration release."""
+        ended = self.h.characters.effects.remove_visual_source(
+            sid, source["source_id"], expires_tick=source["expires_tick"]
+        )
+        scene = self.store.connection.execute(
+            "SELECT current_scene_id FROM actors WHERE session_id=? AND actor_id=?",
+            (sid, ended["caster_id"]),
+        ).fetchone()
+        return self.h._capture_event(
+            sid,
+            package,
+            "effect.visual_ended",
+            {
+                "effect_id": ended["source_id"],
+                "actor_id": ended["caster_id"],
+                "scene_id": scene[0] if scene else None,
+                "spell_id": ended["spell_id"],
+                "reason": reason,
+                "boundary_tick": ended["expires_tick"],
+            },
+            phase="effects.after_visual_end",
+        )
 
     def apply_end(self, row, package, proposal):
         """End a verified application within the caster's existing write transaction."""

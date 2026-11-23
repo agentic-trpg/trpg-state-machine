@@ -227,6 +227,7 @@ class LightingFields:
     sources: tuple = ()
     magic_records: tuple = ()
     magic_anchors: tuple = ()
+    visual_anchors: tuple = ()
     obscuring_radius: tuple = ()
     silence_radius: tuple = ()
     geometry: tuple = ()

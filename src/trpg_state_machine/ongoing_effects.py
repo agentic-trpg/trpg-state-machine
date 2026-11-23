@@ -51,6 +51,7 @@ class ConcentrationGroup:
     actor_members: tuple[tuple[str, str, str], ...]
     spatial_member: dict | None
     casting_activity_id: str | None = None
+    visual_source: dict | None = None
 
 
 class OngoingEffects:
@@ -195,6 +196,86 @@ class OngoingEffects:
             )
         else:
             self.add_effect(sid, **entry)
+
+    def add_visual_source(self, sid, command_id, proposal, *, expires_tick):
+        """Persist one verified visual source and its selected targets atomically.
+
+        The source survives an empty target set, retaining concentration and
+        expiry. Target placement stays authoritative in World after this write.
+        """
+        self.store.require_write()
+        source_id = f"visual:{command_id}"
+        concentration = source_id if proposal.concentration else None
+        if concentration is not None:
+            self._conn.execute(
+                "INSERT INTO effect_concentrations VALUES (?,?,?,?,0)",
+                (sid, concentration, proposal.source_id, source_id),
+            )
+        self._conn.execute(
+            "INSERT INTO visual_effect_sources VALUES (?,?,?,?,?,?,?,?)",
+            (
+                sid,
+                source_id,
+                "spell",
+                proposal.source_id,
+                proposal.spell_id,
+                proposal.spell_source_id,
+                expires_tick,
+                concentration,
+            ),
+        )
+        for target in proposal.targets:
+            table, column = (
+                ("mechanical_actors", "actor_id")
+                if target.target_kind == "creature"
+                else ("objects", "object_id")
+            )
+            if (
+                self._conn.execute(
+                    f"SELECT 1 FROM {table} WHERE session_id=? AND {column}=?",
+                    (sid, target.target_id),
+                ).fetchone()
+                is None
+            ):
+                raise StateMachineError("invalid_target", "Visual effect target disappeared")
+            self._conn.execute(
+                "INSERT INTO target_visual_effects VALUES (?,?,?,?,?,?,?,?)",
+                (
+                    sid,
+                    "outlined",
+                    source_id,
+                    target.target_kind,
+                    target.target_id,
+                    target.dim_radius_ft,
+                    int(target.suppresses_invisible),
+                    int(target.visible_attack_advantage),
+                ),
+            )
+        return source_id
+
+    def remove_visual_source(self, sid, source_id, *, expires_tick=None):
+        """Remove one expected source and every target before releasing its group."""
+        self.store.require_write()
+        source = self._conn.execute(
+            "SELECT * FROM visual_effect_sources WHERE session_id=? AND source_id=?",
+            (sid, source_id),
+        ).fetchone()
+        if source is None or (expires_tick is not None and source["expires_tick"] != expires_tick):
+            raise StateMachineError("invalid_effect", "Visual source identity or deadline changed")
+        self._conn.execute(
+            "DELETE FROM target_visual_effects WHERE session_id=? AND source_id=?",
+            (sid, source_id),
+        )
+        self._conn.execute(
+            "DELETE FROM visual_effect_sources WHERE session_id=? AND source_id=?",
+            (sid, source_id),
+        )
+        if source["concentration_id"] is not None:
+            self._conn.execute(
+                "DELETE FROM effect_concentrations WHERE session_id=? AND concentration_id=?",
+                (sid, source["concentration_id"]),
+            )
+        return source
 
     def _spell_application(self, row):
         """Project the persisted original cast and active effect from one owner row."""
@@ -476,6 +557,12 @@ class OngoingEffects:
     def remove_concentration(self, sid, concentration_id):
         """Remove one concentration group and only its linked target effects."""
         self.store.require_write()
+        for (source_id,) in self._conn.execute(
+            "SELECT source_id FROM visual_effect_sources WHERE session_id=? AND concentration_id=?",
+            (sid, concentration_id),
+        ):
+            self.remove_visual_source(sid, source_id)
+            return
         self._conn.execute(
             "DELETE FROM ongoing_effects WHERE session_id=? AND concentration_id=?",
             (sid, concentration_id),
@@ -701,6 +788,10 @@ class OngoingEffects:
                 raise StateMachineError("invalid_mechanical_state", "Casting focus differs")
             return ConcentrationGroup(group_id, caster_id, effect_id, 0, (), None, activity[0])
         spatial = self.spatial_lights.for_concentration(sid, group_id)
+        visual = self._conn.execute(
+            "SELECT * FROM visual_effect_sources WHERE session_id=? AND concentration_id=?",
+            (sid, group_id),
+        ).fetchone()
         members = tuple(
             tuple(member)
             for member in self._conn.execute(
@@ -709,21 +800,39 @@ class OngoingEffects:
                 (sid, group_id),
             )
         )
-        if spatial is None:
+        if spatial is None and visual is None:
             if not members:
                 raise StateMachineError("invalid_mechanical_state", "Empty concentration")
-        elif members or (spatial["caster_id"], spatial["concentration_id"], effect_id, rounds) != (
-            caster_id,
-            group_id,
-            spatial["effect_id"],
-            0,
+        elif spatial is not None and (
+            visual is not None
+            or members
+            or (spatial["caster_id"], spatial["concentration_id"], effect_id, rounds)
+            != (
+                caster_id,
+                group_id,
+                spatial["effect_id"],
+                0,
+            )
         ):
             raise StateMachineError("invalid_mechanical_state", "Spatial concentration differs")
+        elif visual is not None and (
+            members
+            or visual["caster_id"] != caster_id
+            or visual["source_id"] != effect_id
+            or rounds != 0
+        ):
+            raise StateMachineError("invalid_mechanical_state", "Visual concentration differs")
         return ConcentrationGroup(
-            group_id, caster_id, effect_id, rounds, members, dict(spatial) if spatial else None
+            group_id,
+            caster_id,
+            effect_id,
+            rounds,
+            members,
+            dict(spatial) if spatial else None,
+            visual_source=dict(visual) if visual else None,
         )
 
-    def apply_damage_concentration(self, sid, group, resolution, *, end_spatial):
+    def apply_damage_concentration(self, sid, group, resolution, *, end_spatial, end_visual=None):
         """Adopt the verified outcome while its exact member set still matches."""
         self.store.require_write()
         if resolution.target_id != group.caster_id or group != self.concentration_group(
@@ -741,6 +850,10 @@ class OngoingEffects:
             )
         if group.spatial_member is not None:
             return (end_spatial(group.spatial_member),)
+        if group.visual_source is not None:
+            if end_visual is None:
+                raise StateMachineError("invalid_effect", "Visual concentration end is unavailable")
+            return (end_visual(group.visual_source),)
         self.remove_concentration(sid, group.concentration_id)
         return ()
 
@@ -754,8 +867,14 @@ class OngoingEffects:
         ).fetchone()
         if row is None:
             return None
-        if row["effect_id"].startswith(CASTING_FOCUS_PREFIX) or (
-            self.spatial_lights.for_concentration(sid, row["concentration_id"]) is not None
+        if (
+            row["effect_id"].startswith(CASTING_FOCUS_PREFIX)
+            or (self.spatial_lights.for_concentration(sid, row["concentration_id"]) is not None)
+            or self._conn.execute(
+                "SELECT 1 FROM visual_effect_sources WHERE session_id=? AND concentration_id=?",
+                (sid, row["concentration_id"]),
+            ).fetchone()
+            is not None
         ):
             # The actor effect wire field only accepts actor-target concentration chains.
             return None

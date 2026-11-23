@@ -737,6 +737,12 @@ class SessionMemory:
             "SELECT object_id FROM object_lights WHERE session_id=? AND object_id=?", (sid, oid)
         ).fetchone():
             return True
+        if self.select(
+            "SELECT target_id FROM target_visual_effects WHERE session_id=? "
+            "AND target_kind=? AND target_id=? AND dim_radius_ft>0",
+            (sid, "object", oid),
+        ).fetchone():
+            return True
         tables = ("object_lights",)
         if "magic_light_anchors" in self.columns:
             tables = (*tables, "magic_light_anchors")
@@ -810,10 +816,31 @@ class SessionMemory:
                     if scene is not None:
                         self._advance_field("light_sources", sid, scene)
             return
+        if table == "target_visual_effects":
+            for row in (old, new):
+                if row is None or row["dim_radius_ft"] == 0:
+                    continue
+                sid, target_id = row["session_id"], row["target_id"]
+                if row["target_kind"] == "creature":
+                    actor = self.select(
+                        "SELECT current_scene_id FROM actors WHERE session_id=? AND actor_id=?",
+                        (sid, target_id),
+                    ).fetchone()
+                    scene = actor[0] if actor else None
+                else:
+                    scene = self._scene_for(self._object(sid, target_id))
+                if scene is not None:
+                    self._advance_field("light_sources", sid, scene)
+            return
         if table == "spatial_light_effects":
             self._spatial_light_changes(row for row in (old, new) if row is not None)
             return
         if table == "magic_light_anchors":
+            for row in (old, new):
+                if row is not None and row["scene_id"] is not None:
+                    self._advance_field("light_sources", row["session_id"], row["scene_id"])
+            return
+        if table == "visual_light_anchors":
             for row in (old, new):
                 if row is not None and row["scene_id"] is not None:
                     self._advance_field("light_sources", row["session_id"], row["scene_id"])
@@ -926,6 +953,13 @@ class SessionMemory:
             for row in (old, new)
             if row is not None and row["cell"] is not None
         }
+        if self.select(
+            "SELECT target_id FROM target_visual_effects WHERE session_id=? "
+            "AND target_kind=? AND target_id=? AND dim_radius_ft>0",
+            (sid, "creature", actor_id),
+        ).fetchone():
+            for scene in scenes:
+                self._advance_field("light_sources", sid, scene)
         versions = self.store._scope.memory_versions
         observed = {scene for scene in scenes if (f"light_candidates:{scene!r}", sid) in versions}
         if not observed:

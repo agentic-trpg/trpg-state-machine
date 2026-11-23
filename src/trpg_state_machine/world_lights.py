@@ -235,6 +235,24 @@ class LightService:
                     spec.sunlight_in_dim,
                 )
             )
+        for (
+            source_id,
+            target_id,
+            cell,
+            kind,
+            radius,
+            unknown,
+        ) in self.h.magic.visual_illumination_anchors(sid, scene):
+            if cell_in_bounds(grid.topology, cell):
+                magical.append(
+                    _LightSource(
+                        f"{source_id}:{kind}:{target_id}",
+                        target_id if kind == "object" else None,
+                        LightGeometry(cell, None, radius),
+                        unknown,
+                        "spell_light",
+                    )
+                )
         return _SceneLightSources((*self.sources(sid, scene, package), *magical), ambient)
 
     @staticmethod

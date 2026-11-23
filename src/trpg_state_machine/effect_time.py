@@ -142,6 +142,8 @@ class EffectTimeConsumer:
             raise StateMachineError("spell.concentration", "Combat concentration is active")
         if group.spatial_member is not None:
             return [self.world.magic.end_event(sid, package, group.spatial_member, reason)]
+        if group.visual_source is not None:
+            return [self.world.magic.end_visual_event(sid, package, group.visual_source, reason)]
         self.owner.remove_concentration(sid, group.concentration_id)
         return [
             self.world._capture_event(
@@ -169,7 +171,19 @@ class EffectTimeConsumer:
             (session_id,),
         ).fetchone()[0]
         spatial = self.owner.spatial_lights.next_deadline(session_id)
-        return min((value for value in (actor, spatial) if value is not None), default=None)
+        visual = self.db.execute(
+            "SELECT expires_tick FROM visual_effect_sources WHERE session_id=? "
+            "ORDER BY expires_tick,source_id LIMIT 1",
+            (session_id,),
+        ).fetchone()
+        return min(
+            (
+                value
+                for value in (actor, spatial, visual[0] if visual else None)
+                if value is not None
+            ),
+            default=None,
+        )
 
     def _due_actor(self, sid, tick):
         """Read the first deadline, using effect-list order for ties on one actor."""
@@ -214,6 +228,13 @@ class EffectTimeConsumer:
         spatial_tick = self.owner.spatial_lights.next_deadline(sid)
         if spatial_tick is not None and spatial_tick < tick:
             return None
+        visual = self.db.execute(
+            "SELECT expires_tick FROM visual_effect_sources WHERE session_id=? "
+            "ORDER BY expires_tick,source_id LIMIT 1",
+            (sid,),
+        ).fetchone()
+        if visual is not None and visual[0] < tick:
+            return None
         return self._actor_scene(sid, due["target_id"])
 
     def settle_one(self, row, package, command_id):
@@ -225,6 +246,17 @@ class EffectTimeConsumer:
         tick = self.world.facts.time_state(sid)[1]
         due = self._due_actor(sid, tick)
         spatial = self.owner.spatial_lights.due(sid, tick)
+        visual = self.db.execute(
+            "SELECT * FROM visual_effect_sources WHERE session_id=? AND expires_tick<=? "
+            "ORDER BY expires_tick,source_id LIMIT 1",
+            (sid, tick),
+        ).fetchone()
+        if visual is not None and (
+            (due is None or visual["expires_tick"] < due["expires_tick"])
+            and (spatial is None or visual["expires_tick"] <= spatial["expires_tick"])
+        ):
+            event = self.world.magic.end_visual_event(sid, package, visual, "duration")
+            return DueResult((event,))
         if spatial is not None and (due is None or spatial["expires_tick"] < due["expires_tick"]):
             event = self.world.magic.end_event(sid, package, spatial, "duration")
             return DueResult((event,))

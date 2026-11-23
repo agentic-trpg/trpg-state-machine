@@ -27,6 +27,7 @@ from dnd5e_engine.evaluation_environmental_contracts import (
     EnvironmentalMagicEffectTarget,
     WorldEnvironmentalEffectCreate,
     WorldEnvironmentalEffectEnd,
+    WorldVisualEffectCreate,
 )
 from dnd5e_engine.evaluation_exploration_healing import exploration_healing_requires_sight
 from dnd5e_engine.evaluation_identify import IDENTIFY_SPELL_ID
@@ -621,6 +622,17 @@ class RuleExecution:
                         )
                         else "spell.target"
                     )
+                elif command.payload.spell_id == "faerie-fire":
+                    spell_actor_ids = tuple(
+                        dict.fromkeys(
+                            (command.actor_id,)
+                            + tuple(
+                                occupant.target_id
+                                for occupant in spell_positions.visual_occupants
+                                if occupant.target_kind == "creature"
+                            )
+                        )
+                    )
             elif multi_spell and prepare_error is None:
                 prepare_error, spell_actor_ids, multi_spell_positions = (
                     project_multi_spell_positions(row)
@@ -1025,6 +1037,11 @@ class RuleExecution:
                         if isinstance(spatial_operation, WorldEnvironmentalEffectCreate)
                         else None
                     )
+                    visual_proposal = (
+                        spatial_operation
+                        if isinstance(spatial_operation, WorldVisualEffectCreate)
+                        else None
+                    )
                     if casting_start:
                         effects_events = self.runtime.time.consumers[
                             "effects"
@@ -1066,9 +1083,17 @@ class RuleExecution:
                             command.session_id, focus.concentration_id
                         )
                     elif exploration_spell:
-                        proposal = spatial_proposal or next(
-                            (value for part, _, _field, value in changes if part == "world_effect"),
-                            None,
+                        proposal = (
+                            spatial_proposal
+                            or visual_proposal
+                            or next(
+                                (
+                                    value
+                                    for part, _, _field, value in changes
+                                    if part == "world_effect"
+                                ),
+                                None,
+                            )
                         )
                         if proposal is not None and proposal.concentration:
                             effects_events = self.runtime.time.consumers[
@@ -1116,6 +1141,11 @@ class RuleExecution:
                             row, package, command.command_id, spatial_proposal
                         )
                         effects_events.extend(spatial_events)
+                    elif visual_proposal is not None:
+                        spatial_effect_id, visual_events = self.world.magic.apply_visual(
+                            row, package, command.command_id, visual_proposal
+                        )
+                        effects_events.extend(visual_events)
                     elif isinstance(spatial_operation, WorldEnvironmentalEffectEnd):
                         spatial_effect_id = spatial_operation.expected.effect_id
                         effects_events.append(

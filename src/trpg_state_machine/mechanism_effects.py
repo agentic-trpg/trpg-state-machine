@@ -688,6 +688,9 @@ class MechanismEffectRunner:
                     end_spatial=lambda member: self.h.magic.end_event(
                         sid, package, member, "concentration_ended"
                     ),
+                    end_visual=lambda source: self.h.magic.end_visual_event(
+                        sid, package, source, "concentration_ended"
+                    ),
                 )
             )
         if checks:
