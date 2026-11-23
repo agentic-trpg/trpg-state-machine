@@ -279,3 +279,33 @@ their owners; no mechanism damage formula or status timer was added.
 逐项能力、读取范围、存档兼容、实际计数及本批验证结果见
 [系统性重构验收](reviews/SCOPED_RUNTIME_VALIDATION_REFACTOR.md)。
 上文历史测试数字与旧 Schema/待办保持原批次语境，不作为本轮验证结果。
+
+## mechanism/4 探索豁免
+
+在 Package /10 中声明 `mechanism/4`。命名操作的 `save_gate` 可为 null，
+或由 `source_ref`、`ability`、`dc`、`is_magical` 明确指定豁免。门槛操作要求
+`consume_on_noop: true`。由当前 PC 的直接启灯事件触发，选择器为
+`object_operation`、`object.light_changed`、`value: true`。
+
+例如操作可在豁免失败时用下面已有的 World 动作打开一扇门。这是 Package 自定义规则示例。
+
+```json
+{
+  "operation_id": "ward",
+  "actions": [
+    {"kind": "set_open_state", "target_object_id": "object.door", "value": "open"}
+  ],
+  "consume_on_noop": true,
+  "save_gate": {
+    "source_ref": "mechanism.ward",
+    "ability": "dex",
+    "dc": 12,
+    "is_magical": false
+  }
+}
+```
+
+豁免成功时照常记一次激活，门保持原状态。失败时沿既有机制采用配置的对象动作。
+启灯、豁免证据、RNG、对象变化与激活记账共用源命令的事务。授权调用方可从源命令
+的 `get_command_rolls()` 取得这次豁免。同命令重放返回原回执。
+当前配置不开放嵌套豁免的诗人激励选择或通用机关伤害。

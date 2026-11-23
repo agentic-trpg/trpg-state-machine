@@ -245,6 +245,10 @@ class MechanismService:
         c = self._manual(row, actor, op, package)
         self._eligible(row["session_id"], op.object_id, c, actor, package)
         operation = c.operation(op.operation_id)
+        if operation.save_gate is not None:
+            raise StateMachineError(
+                "unsupported_mechanism_operation", "Authored save gates require a light trigger"
+            )
         self.preflight(row["session_id"], operation.actions, package)
         return c
 
@@ -258,7 +262,59 @@ class MechanismService:
         )
         return "activation." + hashlib.sha256(raw.encode()).hexdigest()
 
-    def _activate(self, row, oid, actor, operation_id, package, command_id, source_seq):
+    def _resolve_save_gate(self, row, package, actor, gate, command_id):
+        """Evaluate one authored save against this activation's current candidate facts.
+
+        The light change has already been staged in the command savepoint. The
+        Engine owns admission and the roll; this method adopts only its RNG.
+        """
+        from dnd5e_engine.evaluation import evaluate_bound_save
+        from dnd5e_engine.evaluation_contracts import SavePayload
+
+        from .commands import TypedCommand
+        from .rules_adapter import validate_dnd_result
+
+        rules = self.h.objects.openable.rules
+        rules._verify_dnd_binding(package, row)
+        snapshot = rules._noncombat_snapshot(row, actor_ids=(actor,))
+        rng = rules._rng_context(row)
+        request = rules.request(
+            TypedCommand(
+                row["session_id"],
+                command_id,
+                actor,
+                "rules.save",
+                SavePayload(
+                    kind="rules.save",
+                    target_id=actor,
+                    ability=gate.ability,
+                    dc=gate.dc,
+                    advantage=(),
+                    disadvantage=(),
+                    is_magical=gate.is_magical,
+                ),
+                row["world_version"],
+            ),
+            package,
+            snapshot,
+            rng,
+            row=row,
+        )
+        result = evaluate_bound_save(request, loader=rules.loader)
+        result, changes = validate_dnd_result(request, result, loader=rules.loader)
+        if result.status != "accepted":
+            raise StateMachineError(
+                result.error.code if result.error else "unsupported_mechanism_save",
+                result.error.reason if result.error else "Mechanism save was not accepted",
+            )
+        if changes:
+            raise StateMachineError("invalid_rule_result", "Mechanism save cannot change actors")
+        self.h.runtime.advance_rule_rng(row["session_id"], result.rng_transition, rng)
+        return result.proposed_events[0]
+
+    def _activate(
+        self, row, oid, actor, operation_id, package, command_id, source_seq, *, source_event=None
+    ):
         """Apply one admitted, idempotently identified mechanism activation.
 
         Check activation replay and eligibility, preflight configured actions, then
@@ -270,6 +326,18 @@ class MechanismService:
         if type(command_id) is not str or not command_id:
             raise StateMachineError("invalid_execution_origin", "Admitted source command required")
         c = self.config(row["session_id"], oid)
+        operation = c.operation(operation_id)
+        if operation.save_gate is not None and (
+            source_event is None
+            or source_event.event_type != "object.light_changed"
+            or source_event.mechanical_phase != "world.after_light_update"
+            or source_event.payload.get("execution")
+            or source_event.payload.get("actor_id") != actor
+            or actor != row["pc_actor_id"]
+        ):
+            raise StateMachineError(
+                "unsupported_mechanism_source", "Save gate requires the current PC light action"
+            )
         activation = self.activation_id(oid, command_id, source_seq, operation_id)
         if h._conn.execute(
             "SELECT 1 FROM mechanism_activations WHERE session_id=? AND activation_id=?",
@@ -277,7 +345,6 @@ class MechanismService:
         ).fetchone():
             return []
         state = self._eligible(sid, oid, c, actor, package)
-        operation = c.operation(operation_id)
         changed = self.preflight(sid, operation.actions, package)
         if not changed and not operation.consume_on_noop:
             return []
@@ -301,7 +368,32 @@ class MechanismService:
                 source_actor_id=actor,
             )
         ]
+        save_succeeded = None
+        if operation.save_gate is not None:
+            save_event = self._resolve_save_gate(
+                row, package, actor, operation.save_gate, command_id
+            )
+            save_succeeded = save_event.succeeded
+            events.append(
+                h._capture_event(
+                    sid,
+                    package,
+                    "rules.save_rolled",
+                    {
+                        "scene_id": location["scene_id"],
+                        "actor_id": actor,
+                        "source_ref": operation.save_gate.source_ref,
+                        "mechanism_object_id": oid,
+                        "activation_id": activation,
+                        "engine_event": save_event.model_dump(mode="json"),
+                    },
+                    phase="world.after_mechanism_save",
+                    source_actor_id=actor,
+                )
+            )
         for index, action in enumerate(operation.actions):
+            if save_succeeded is True:
+                break
             origin = _WorldEffectOrigin(
                 _WorldEffectKind.MECHANISM, oid, activation, activation + "." + str(index)
             )
@@ -773,7 +865,14 @@ class MechanismService:
                 raise
             events.extend(
                 self._activate(
-                    row, oid, actor, trigger.operation_id, package, command_id, source_seq
+                    row,
+                    oid,
+                    actor,
+                    trigger.operation_id,
+                    package,
+                    command_id,
+                    source_seq,
+                    source_event=event,
                 )
             )
             fired.add(oid)

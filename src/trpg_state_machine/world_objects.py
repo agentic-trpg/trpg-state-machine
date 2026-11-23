@@ -3,6 +3,7 @@
 from dataclasses import asdict
 
 from dnd5e_engine.evaluation_charged_item import is_healing_staff
+from dnd5e_engine.evaluation_saves import reviewed_held_save_weapon
 from dnd5e_engine.rules.character import (
     armor_class,
     armor_training_from_changes,
@@ -271,7 +272,7 @@ class WorldObjectService:
         weapon = self.handler.loader.get_weapon(self._equipment_slug(sid, actor_id, iid, equipment))
         if not isinstance(weapon, Weapon):
             raise StateMachineError("invalid_target", "Selected instance is not a weapon")
-        if not is_healing_staff(weapon) and (
+        if not (is_healing_staff(weapon) or reviewed_held_save_weapon(weapon)) and (
             weapon.requires_attunement or weapon.passive_effects or weapon.uses is not None
         ):
             raise StateMachineError("unsupported_item_binding", "Weapon lifecycle is unsupported")

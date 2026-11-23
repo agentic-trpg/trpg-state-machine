@@ -1,5 +1,6 @@
 """Closed, immutable mechanism declarations and WorldFacts runtime projection."""
 
+import re
 from dataclasses import dataclass
 from typing import Literal, get_args
 
@@ -19,12 +20,23 @@ class MechanismAction:
 
 
 @dataclass(frozen=True, slots=True)
+class MechanismSaveGate:
+    """Bind an authored saving throw to an operation's failure-only world actions."""
+
+    source_ref: str
+    ability: Literal["str", "dex", "con", "int", "wis", "cha"]
+    dc: int
+    is_magical: bool
+
+
+@dataclass(frozen=True, slots=True)
 class MechanismOperation:
     """Group actions and activation parameters under a stable operation identity."""
 
     operation_id: str
     actions: tuple[MechanismAction | RuleEffectAction, ...]
     consume_on_noop: bool
+    save_gate: MechanismSaveGate | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -64,7 +76,9 @@ class Mechanism:
     reset_policy: Literal["none", "manual", "after_seconds"]
     actions: tuple[MechanismAction, ...]
     kind: str = "mechanism"
-    schema_version: Literal["mechanism/1", "mechanism/2", "mechanism/3"] = "mechanism/1"
+    schema_version: Literal["mechanism/1", "mechanism/2", "mechanism/3", "mechanism/4"] = (
+        "mechanism/1"
+    )
     operations: tuple[MechanismOperation, ...] = ()
     triggers: tuple[MechanismTrigger, ...] = ()
     methods: tuple[MechanismMethod, ...] = ()
@@ -116,14 +130,17 @@ def parse_mechanism(config, objects, scenes, *, enabled):
     if not enabled:
         _fail("schema_error", p, "mechanism/2 requires Package /10")
     version = config.get("schema_version")
+    if version == "mechanism/4" and "rule_effects" not in config:
+        config = {**config, "rule_effects": []}
     c = _mapping(
         config,
         "kind schema_version initial_status operations triggers methods "
         "max_uses reset_policy reset_delay_seconds frequency placement_policy "
-        "components destruction_policy" + (" rule_effects" if version == "mechanism/3" else ""),
+        "components destruction_policy"
+        + (" rule_effects" if version in ("mechanism/3", "mechanism/4") else ""),
         p,
     )
-    if c["schema_version"] not in ("mechanism/2", "mechanism/3"):
+    if c["schema_version"] not in ("mechanism/2", "mechanism/3", "mechanism/4"):
         _fail("unsupported_mechanism", p, "Unknown mechanism definition version")
     from pydantic import TypeAdapter, ValidationError
 
@@ -162,17 +179,40 @@ def parse_mechanism(config, objects, scenes, *, enabled):
         _fail("unsupported_mechanism", p, "Only explicit disable on component destruction")
     operations = []
     for value in _list(c["operations"], p, nonempty=True):
-        op = _mapping(value, "operation_id actions consume_on_noop", p)
+        if version == "mechanism/4" and isinstance(value, dict) and "save_gate" not in value:
+            value = {**value, "save_gate": None}
+        op = _mapping(
+            value,
+            "operation_id actions consume_on_noop"
+            + (" save_gate" if version == "mechanism/4" else ""),
+            p,
+        )
         _text(op["operation_id"], p)
         if len(op["operation_id"]) > 64 or type(op["consume_on_noop"]) is not bool:
             _fail("schema_error", p, "Invalid operation identity or noop policy")
+        gate = op.get("save_gate")
+        if gate is not None:
+            fields = _mapping(gate, "source_ref ability dc is_magical", p)
+            if (
+                type(fields["source_ref"]) is not str
+                or not re.fullmatch(r"mechanism\.[a-zA-Z0-9_.-]{1,120}", fields["source_ref"])
+                or fields["ability"] not in ("str", "dex", "con", "int", "wis", "cha")
+                or type(fields["dc"]) is not int
+                or not 0 <= fields["dc"] <= 100
+                or type(fields["is_magical"]) is not bool
+                or not op["consume_on_noop"]
+            ):
+                _fail("unsupported_mechanism", p, "Invalid authored save gate")
+            gate = MechanismSaveGate(**fields)
         actions = []
         for value in _list(op["actions"], p, nonempty=True):
             if (
-                version == "mechanism/3"
+                version in ("mechanism/3", "mechanism/4")
                 and isinstance(value, dict)
                 and value.get("kind") == "rule_effect"
             ):
+                if gate is not None:
+                    _fail("unsupported_mechanism", p, "Save gate requires object actions")
                 try:
                     action = TypeAdapter(RuleEffectAction).validate_json(canonical_json(value))
                 except (ValidationError, TypeError, ValueError) as exc:
@@ -206,7 +246,9 @@ def parse_mechanism(config, objects, scenes, *, enabled):
             actions.append(MechanismAction(**a))
         if len(actions) > 8:
             _fail("unsupported_mechanism", p, "At most eight synchronous consequences")
-        operations.append(MechanismOperation(**{**op, "actions": tuple(actions)}))
+        operations.append(
+            MechanismOperation(**{**op, "actions": tuple(actions), "save_gate": gate})
+        )
     if len(operations) > 16:
         _fail("schema_error", p, "At most sixteen operations")
     ids = [op.operation_id for op in operations]
@@ -283,6 +325,20 @@ def parse_mechanism(config, objects, scenes, *, enabled):
         triggers.append(MechanismTrigger(**{**t, "cells": tuple(cells)}))
     if len(triggers) > 16:
         _fail("schema_error", p, "At most sixteen triggers")
+    gated = {op.operation_id for op in operations if op.save_gate is not None}
+    if gated and (
+        not {trigger.operation_id for trigger in triggers} >= gated
+        or any(
+            trigger.operation_id in gated
+            and (
+                trigger.kind != "object_operation"
+                or trigger.event_type != "object.light_changed"
+                or trigger.value is not True
+            )
+            for trigger in triggers
+        )
+    ):
+        _fail("unsupported_mechanism", p, "Save gate requires an enabled-light trigger")
     methods = []
     for value in _list(c["methods"], p):
         m = _mapping(
@@ -307,6 +363,8 @@ def parse_mechanism(config, objects, scenes, *, enabled):
             _fail("schema_error", p, "Deterministic method has unexpected check fields")
         if m["trigger_on_failure"] is not None:
             _reference(m["trigger_on_failure"], ids, p)
+            if m["trigger_on_failure"] in gated:
+                _fail("schema_error", p, "Save-gated operations require a light-change trigger")
         methods.append(MechanismMethod(**m))
     if len(methods) > 16:
         _fail("schema_error", p, "At most sixteen methods")
