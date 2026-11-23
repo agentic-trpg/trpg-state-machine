@@ -20,6 +20,12 @@ def test_real_rng_transition_commit_fault_and_original_receipt_replay(
     with sm:
         operation = check_command(sm, sid, package, context, key="rng.fault")
         fixed = sm.read_noncombat_snapshot(sid, package, context=context)
+        with sm._store.transaction():
+            row = sm._world.sessions._session(sid, package, context)
+            expected = sm._rules._noncombat_snapshot(row, package, actor_ids=(operation.actor_id,))
+        assert expected.character_states == tuple(
+            actor for actor in fixed.character_states if actor.entity_id == operation.actor_id
+        )
         rng = sm.read_rng_context(sid, package, context=context)
         disk_before = stored_state(database)
         evaluate = sm._rules._evaluate_dnd
@@ -62,7 +68,7 @@ def test_real_rng_transition_commit_fault_and_original_receipt_replay(
                 "after_publish": "committed_publication_pending",
             }[failure]
         )
-        assert len(evaluations) == 1 and evaluations[0][0].state_snapshot == fixed
+        assert len(evaluations) == 1 and evaluations[0][0].state_snapshot == expected
         proposed = evaluations[0][1]
         with sqlite3.connect(database) as disk:
             disk_rng_version = disk.execute(
@@ -87,10 +93,11 @@ def test_real_rng_transition_commit_fault_and_original_receipt_replay(
         assert current_rng.version == rng.version + 1
         assert current_rng.state == proposed.rng_transition.next_state
         assert receipt.world_version == fixed.world_version + 1
-        assert evaluations[0][0].state_snapshot == fixed
+        assert evaluations[0][0].state_snapshot == expected
         assert rng != current_rng
         if failure == "before":
             assert len(evaluations) == 2
+            assert evaluations[1][0].state_snapshot == expected
             assert evaluations[1][1].rng_transition == proposed.rng_transition
         else:
             assert len(evaluations) == 1
