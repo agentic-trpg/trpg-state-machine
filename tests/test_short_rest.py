@@ -160,7 +160,8 @@ def test_short_rest_rolls_and_spends_two_chosen_dice_once(tmp_path, context):
         assert old_pc.hp_current == 2
         rng_copy = old_rng.state.restore()
         con_modifier = (old_pc.constitution - 10) // 2
-        rolled = [max(1, rng_copy.randint(1, 10) + con_modifier) for _ in range(2)]
+        raw_faces = [rng_copy.randint(1, 10) for _ in range(2)]
+        rolled = [max(1, face + con_modifier) for face in raw_faces]
         assert pc.hp_current == min(pc.hp_max, old_pc.hp_current + sum(rolled))
         assert rng.state == RNGState.capture(rng_copy)
         assert rng.version == old_rng.version + 1
@@ -189,7 +190,14 @@ def test_short_rest_rolls_and_spends_two_chosen_dice_once(tmp_path, context):
         assert (payload["started_tick"], payload["completed_tick"]) == (0, 3600)
         evidence = payload["engine_event"]
         assert evidence["hit_dice"] == [
-            {"pool_id": DICE, "amount": 2, "die_size": 10, "healing_rolls": rolled}
+            {
+                "pool_id": DICE,
+                "amount": 2,
+                "die_size": 10,
+                "healing_rolls": rolled,
+                "raw_faces": raw_faces,
+                "constitution_modifier": con_modifier,
+            }
         ]
         assert evidence["hp_regained"] == pc.hp_current - old_pc.hp_current
         projected = sm.get_command_rolls(sid, command.command_id, package, context=host)
@@ -251,6 +259,14 @@ def test_short_rest_projection_keeps_two_pool_order_and_one_hp_total(tmp_path, c
             HitDiceSpend(DICE, 1),
             HitDiceSpend(OTHER_DICE, 1),
         )
+        before_rng = sm.read_rng_context(sid, package, context=host)
+        before_snapshot = sm.read_noncombat_snapshot(sid, package, context=host)
+        actor_before = next(
+            a for a in before_snapshot.character_states if a.entity_id == command.actor_id
+        )
+        con_modifier = (actor_before.constitution - 10) // 2
+        expected_rng = before_rng.state.restore()
+        expected_faces = [expected_rng.randint(1, 10), expected_rng.randint(1, 8)]
         receipt = sm.submit_command(command, package, context=host)
         assert receipt.status == "committed"
         (roll,) = sm.get_command_rolls(sid, command.command_id, package, context=host)["rolls"]
@@ -258,6 +274,17 @@ def test_short_rest_projection_keeps_two_pool_order_and_one_hp_total(tmp_path, c
         assert [spend["pool_id"] for spend in roll["hit_dice"]] == [DICE, OTHER_DICE]
         assert [spend["die_size"] for spend in roll["hit_dice"]] == [10, 8]
         assert all(len(spend["healing_rolls"]) == 1 for spend in roll["hit_dice"])
+        assert [spend["raw_faces"][0] for spend in roll["hit_dice"]] == expected_faces
+        assert [spend["constitution_modifier"] for spend in roll["hit_dice"]] == [
+            con_modifier,
+            con_modifier,
+        ]
+        assert [spend["healing_rolls"][0] for spend in roll["hit_dice"]] == [
+            max(1, face + con_modifier) for face in expected_faces
+        ]
+        assert sm.read_rng_context(sid, package, context=host).state == RNGState.capture(
+            expected_rng
+        )
         assert roll["hp_regained"] <= sum(sum(spend["healing_rolls"]) for spend in roll["hit_dice"])
 
 
