@@ -309,6 +309,7 @@ class InstanceData:
                     "definition": canonical_json(definition),
                     "movable": obj.movable,
                     "blocks_passage": obj.blocks_passage,
+                    "invisible": obj.invisible,
                     "portable_policy": portable.get(obj.object_id),
                 },
             )
@@ -439,6 +440,7 @@ class InstanceData:
             object_id=oid,
             movable=data["movable"],
             blocks_passage=data["blocks_passage"],
+            invisible=data.get("invisible", False),
             state=obj["state"],
             initial_cell=obj["cell"],
             initial_orientation=obj["orientation"],

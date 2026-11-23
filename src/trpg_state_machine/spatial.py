@@ -37,6 +37,7 @@ from .models import TrustedContext
 from .package import AdventurePackage
 from .scoped_reads import scoped_read
 from .visual_observer_state import can_see_invisible, observer_blinded, sight_conditions_unknown
+from .visual_target_state import target_is_invisible
 from .world_commands import WORLD_CAPABILITY_OPERATIONS, PutItem, TakeItem
 
 
@@ -868,7 +869,10 @@ class WorldHandler:
             visible = frozenset(cell for cell in dict.fromkeys(cells) if sight.can_see(cell))
             objects = []
             for obj in object_rows:
-                if obj[1] in visible:
+                if obj[1] in visible and sight.can_see_creature(
+                    obj[1],
+                    invisible=target_is_invisible(self, session_id, obj[0], target_kind="object"),
+                ):
                     definition = self.facts.instances.legacy_object(session_id, obj[0])
                     blocking = self.objects.spatial.blocks(session_id, obj[0], package)
                     objects.append(
@@ -898,6 +902,12 @@ class WorldHandler:
                 )
                 for p, e in door_targets
                 if e.threshold_cell in visible
+                and sight.can_see_creature(
+                    e.threshold_cell,
+                    invisible=target_is_invisible(
+                        self, session_id, p.door_object_id, target_kind="object"
+                    ),
+                )
             )
             version = self._conn.execute(
                 "SELECT world_version FROM sessions WHERE session_id=?", (session_id,)

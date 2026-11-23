@@ -2115,6 +2115,10 @@ class WorldFacts:
         """Read the object's current definition through persisted instance configuration."""
         return self.instances.object_definition(sid, oid)
 
+    def object_invisible(self, sid, oid) -> bool:
+        """Read one object's optional creation-time Invisible fact from its instance."""
+        return self.instances.get(sid, "object", oid).get("invisible", False)
+
     def __init__(self, store):
         """Bind world storage and initialize its instance accessor."""
         from .instance_data import InstanceData

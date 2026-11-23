@@ -688,6 +688,8 @@ class WorldObjectService:
 
     def list_objects(self, sid, actor_id, package, *, context):
         """List actual visible scene/door-associated objects using shared read inputs."""
+        from .visual_target_state import target_is_invisible
+
         h = self.handler
         with h._transaction():
             h._spatial_reader(sid, actor_id, package, context)
@@ -713,13 +715,18 @@ class WorldObjectService:
                     or self.facts.instances.is_portable(sid, obj["object_id"])
                 )
             }
-            visible = frozenset()
+            visible = {}
             if targets:
                 cells = tuple(
                     dict.fromkeys(cell for footprint in targets.values() for cell in footprint)
                 )
                 sight = h._prepare_visibility(sid, actor_id, position, package, cells=cells)
-                visible = frozenset(cell for cell in cells if sight.can_see(cell))
+                for oid, footprint in targets.items():
+                    if any(sight.can_see(cell) for cell in footprint):
+                        invisible = target_is_invisible(h, sid, oid, target_kind="object")
+                        visible[oid] = any(
+                            sight.can_see_creature(cell, invisible=invisible) for cell in footprint
+                        )
             for obj in candidates:
                 try:
                     cells = targets.get(obj["object_id"])
@@ -729,7 +736,7 @@ class WorldObjectService:
                         position,
                         obj,
                         package,
-                        visible=None if cells is None else not visible.isdisjoint(cells),
+                        visible=None if cells is None else visible.get(obj["object_id"], False),
                     )
                     result.append(self._view(sid, actor_id, position, obj, package))
                 except StateMachineError as exc:

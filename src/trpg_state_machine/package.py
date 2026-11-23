@@ -64,7 +64,7 @@ SYNTHETIC_EVALUATION_RULESET = RulesetBinding(
 
 @dataclass(frozen=True, slots=True)
 class ObjectDefinition:
-    """Define a foundation scene object's creation properties."""
+    """Define creation placement and optional Invisible status for one scene object."""
 
     object_id: str
     state: Literal["closed", "open"] | None
@@ -72,6 +72,7 @@ class ObjectDefinition:
     blocks_passage: bool = False
     initial_cell: str | None = None
     initial_orientation: str = "north"
+    invisible: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -613,12 +614,15 @@ def _validate(data: dict, *, allow_legacy_audit=False) -> AdventurePackage:
         objects = []
         for j, value in enumerate(_list(s["objects"], path + ".objects")):
             ob = _mapping(
-                {"initial_orientation": "north", **value}
+                {"initial_orientation": "north", "invisible": False, **value}
                 if m["schema_version"] in (OBJECT_SPATIAL_SCHEMA_VERSION, MECHANISM_SCHEMA_VERSION)
                 and isinstance(value, dict)
+                else {"invisible": False, **value}
+                if isinstance(value, dict)
                 else value,
                 "object_id state"
                 + (" movable blocks_passage initial_cell" if interactions else "")
+                + " invisible"
                 + (
                     " initial_orientation"
                     if m["schema_version"]
@@ -647,7 +651,12 @@ def _validate(data: dict, *, allow_legacy_audit=False) -> AdventurePackage:
             orientation = ob.get("initial_orientation", "north")
             if orientation not in ("north", "east", "south", "west"):
                 _fail("schema_error", path + ".objects", "Invalid initial orientation")
-            objects.append(ObjectDefinition(oid, ob["state"], movable, blocks, cell, orientation))
+            invisible = ob.get("invisible", False)
+            if type(invisible) is not bool:
+                _fail("schema_error", path + ".objects", "Invisible must be boolean")
+            objects.append(
+                ObjectDefinition(oid, ob["state"], movable, blocks, cell, orientation, invisible)
+            )
         scenes.append(
             SceneDefinition(
                 key,

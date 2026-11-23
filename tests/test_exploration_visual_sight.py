@@ -2,15 +2,18 @@
 
 import json
 
+import pytest
 from dnd5e_engine.evaluation_effects import effect_state
 from dnd5e_engine.evaluation_timed_spells import _passive_profile
 from dnd5e_srd_data.loader import BundledAssetLoader
 from item_support import NPC
-from lock_support import CRED, A
+from lock_support import CRED, A, lock_loader
+from test_object_spatial_service import changed_grid, oriented_data
 from test_session_time_coordination import submit
 from test_timed_spell_cast import cast_command
 from test_timed_spell_cast import timed_spell_world as timed_spell_world
 from test_world_lights import lighting_data
+from test_world_spatial import OBSTACLE
 from world_support import setup
 from world_support import submit as submit_world
 
@@ -18,6 +21,7 @@ from trpg_state_machine import (
     AdvanceSessionTime,
     SetLightEnabled,
     StateMachine,
+    StateMachineError,
     world_command_from_data,
 )
 from trpg_state_machine.perception import GameViewContext, NPCContext, visible_actor_in_range
@@ -134,3 +138,64 @@ def test_declared_nonvisual_observer_can_use_mechanical_blindsight(tmp_path, con
         sm.grant_npc_access(sid, NPC, "agent:blind-observer", package, context=context)
         observer = NPCContext("agent:blind-observer", sid, NPC)
         assert pc in sm.get_scene_view(sid, package, context=observer).visible_actor_ids
+
+
+def test_authored_invisible_object_has_one_shared_visual_disclosure(tmp_path, context):
+    data = oriented_data(anchor="2,0", footprint=[[0, 0]], blocking=False)
+    changed_grid(data, default_lighting="bright")
+    next(obj for obj in data["scenes"][0]["objects"] if obj["object_id"] == OBSTACLE)[
+        "invisible"
+    ] = True
+    sm, sid, package, db = setup(tmp_path, context, data)
+    with sm:
+        pc = sm.read_session(sid, package, context=context).pc_actor_id
+        sm.grant_npc_access(sid, NPC, "agent:object-observer", package, context=context)
+        npc = NPCContext("agent:object-observer", sid, NPC)
+        player = GameViewContext(context.principal_id, sid, context.player_id, "player")
+        with sm._transaction(write=True):
+            spell = BundledAssetLoader().get_spell("see-invisibility")
+            _, active, _ = _passive_profile(spell, target_id=pc, caster_id=pc)
+            sm._characters.effects.add_effect(sid, effect_state(active).model_dump(mode="json"))
+        assert sm._world.facts.object_invisible(sid, OBSTACLE)
+        ordinary_object = next(
+            obj.object_id for obj in package.scenes[0].objects if obj.object_id != OBSTACLE
+        )
+        assert not sm._world.facts.object_invisible(sid, ordinary_object)
+
+        assert sm.get_object(sid, pc, OBSTACLE, package, context=context)["object_id"] == OBSTACLE
+        assert OBSTACLE in {
+            row["object_id"] for row in sm.list_scene_objects(sid, pc, package, context=context)
+        }
+        assert OBSTACLE in {
+            row[0] for row in sm.get_spatial_view(sid, pc, package, context=context).objects
+        }
+        assert OBSTACLE in dict(sm.get_scene_view(sid, package, context=player).visible_objects)
+
+        with pytest.raises(StateMachineError) as hidden:
+            sm.get_object(sid, NPC, OBSTACLE, package, context=npc)
+        assert hidden.value.code == "invalid_target"
+        assert OBSTACLE not in {
+            row["object_id"] for row in sm.list_scene_objects(sid, NPC, package, context=npc)
+        }
+        assert OBSTACLE not in {
+            row[0] for row in sm.get_spatial_view(sid, NPC, package, context=npc).objects
+        }
+        assert OBSTACLE not in dict(sm.get_scene_view(sid, package, context=npc).visible_objects)
+    with StateMachine(db, dnd_loader=lock_loader()) as reopened:
+        assert reopened._world.facts.object_invisible(sid, OBSTACLE)
+        assert (
+            reopened.get_object(sid, pc, OBSTACLE, package, context=context)["object_id"]
+            == OBSTACLE
+        )
+
+
+def test_authored_invisible_carried_item_keeps_owner_access(tmp_path, context):
+    data = lighting_data()
+    next(obj for obj in data["scenes"][0]["objects"] if obj["object_id"] == CRED)["invisible"] = (
+        True
+    )
+    sm, sid, package, _ = setup(tmp_path, context, data)
+    with sm:
+        pc = sm.read_session(sid, package, context=context).pc_actor_id
+        assert sm._world.facts.object_invisible(sid, CRED)
+        assert sm.get_object(sid, pc, CRED, package, context=context)["object_id"] == CRED

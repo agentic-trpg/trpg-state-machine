@@ -890,6 +890,15 @@ class PerceptionRuntime:
                     continue
                 else:
                     visible_actors.append(target)
+
+        def object_visible(target, footprint):
+            """Use one target fact for all of this object's prepared cells."""
+            selected = tuple(cell for cell in footprint if cell in visible)
+            if not selected:
+                return False
+            invisible = target_is_invisible(self._world, sid, target, target_kind="object")
+            return any(sight.can_see_creature(cell, invisible=invisible) for cell in selected)
+
         visible_objects = tuple(
             (
                 target,
@@ -898,7 +907,7 @@ class PerceptionRuntime:
                 ).fetchone()[0],
             )
             for target, footprint in objects.items()
-            if not visible.isdisjoint(footprint)
+            if object_visible(target, footprint)
         )
         return _SceneDisclosure(status, tuple(visible_actors), visible_objects)
 

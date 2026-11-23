@@ -401,7 +401,7 @@ class ObjectSpatialService:
 
         targets = self.target_cells(sid, position.scene_id, oid, package)
         visibility = self.h._prepare_visibility(sid, actor, position, package, cells=targets)
-        invisible = target_is_invisible(self.h, sid, oid)
+        invisible = target_is_invisible(self.h, sid, oid, target_kind="object")
         return targets, tuple(
             cell for cell in targets if visibility.can_see_creature(cell, invisible=invisible)
         )
