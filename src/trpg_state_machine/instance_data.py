@@ -276,6 +276,7 @@ class InstanceData:
                     "exit_passages": scene.exit_passages,
                     "public_interactions": scene.public_interactions,
                     "grid_json": scene.grid_json,
+                    "surfaces_json": scene.surfaces_json,
                     "daylight": scene.daylight,
                 },
             )

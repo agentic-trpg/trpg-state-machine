@@ -107,6 +107,7 @@ class SceneDefinition:
     public_interactions: bool = False
     grid_json: str | None = None
     daylight: str | tuple[str, ...] | None = None
+    surfaces_json: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -575,7 +576,8 @@ def _validate(data: dict, *, allow_legacy_audit=False) -> AdventurePackage:
             "scene_id location_id description exits initial_state actor_ids objects "
             "event_definition_ids access_policy"
             + (" grid" if interactions else "")
-            + (" daylight" if isinstance(value, dict) and "daylight" in value else ""),
+            + (" daylight" if isinstance(value, dict) and "daylight" in value else "")
+            + (" surfaces" if isinstance(value, dict) and "surfaces" in value else ""),
             path,
         )
         key = _identifier(s["scene_id"], path + ".scene_id", "scene")
@@ -657,6 +659,18 @@ def _validate(data: dict, *, allow_legacy_audit=False) -> AdventurePackage:
             objects.append(
                 ObjectDefinition(oid, ob["state"], movable, blocks, cell, orientation, invisible)
             )
+        surfaces_json = None
+        if "surfaces" in s:
+            if grid_json is None:
+                _fail("schema_error", path + ".surfaces", "Surface facts require a grid")
+            from .world_surfaces import validate_surface_config
+
+            try:
+                surfaces_json = validate_surface_config(
+                    s["surfaces"], grid_json, actors, {o.object_id for o in objects}
+                )
+            except (TypeError, ValueError, KeyError) as exc:
+                _fail("schema_error", path + ".surfaces", f"Invalid surface facts: {exc}")
         scenes.append(
             SceneDefinition(
                 key,
@@ -669,6 +683,7 @@ def _validate(data: dict, *, allow_legacy_audit=False) -> AdventurePackage:
                 s["access_policy"] == "public_interactions",
                 grid_json,
                 daylight,
+                surfaces_json,
             )
         )
     scene_ids = {s.scene_id for s in scenes}

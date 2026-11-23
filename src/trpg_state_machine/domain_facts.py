@@ -928,6 +928,18 @@ class CharacterFacts:
         when authorized by the caller. Effect lifetime and precedence remain with
         the Effects owner and the pinned rules engine.
         """
+        return self._project_senses(sid, actor_id)
+
+    def senses_excluding_effect(self, sid, actor_id, identity) -> CombatantSenses:
+        """Project current senses without one exact active effect identity.
+
+        Used when a conditional source has a narrower contact rule than the
+        actor's other concurrent tremorsense grants. No fact is changed.
+        """
+        return self._project_senses(sid, actor_id, excluded=identity)
+
+    def _project_senses(self, sid, actor_id, *, excluded=None) -> CombatantSenses:
+        """Interpret base and target-local effect changes through the pinned RE."""
         row = self._sense_attributes(sid, actor_id)
         if row is None:
             if self._conn.execute(
@@ -938,6 +950,12 @@ class CharacterFacts:
             return CombatantSenses()
         base = {field: row[field] for field in self.SENSE_FIELDS}
         states = self.effects.for_targets(sid, (actor_id,))
+        if excluded is not None:
+            states = [
+                state
+                for state in states
+                if (state["target_id"], state["id"], state["origin"]) != excluded
+            ]
         if not states:
             return CombatantSenses(**base)
         effects = self.store.memory.model_json(_EFFECTS, canonical_json(states))

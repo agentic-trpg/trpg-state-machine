@@ -102,7 +102,7 @@ class SpatialDoor:
 
 @dataclass(frozen=True, slots=True)
 class SpatialView:
-    """Expose authorized scene geometry, occupants, objects and exits."""
+    """Expose authorized geometry and separate anonymous vibration cells."""
 
     actor_position: SpatialPosition
     world_version: int
@@ -110,6 +110,7 @@ class SpatialView:
     exits: tuple[tuple[str, str, str, str], ...]
     doors: tuple[SpatialDoor, ...] = ()
     detection_clues: tuple[str, ...] = ()
+    tremor_cells: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -913,7 +914,16 @@ class WorldHandler:
                 "SELECT world_version FROM sessions WHERE session_id=?", (session_id,)
             ).fetchone()[0]
             clues = self.detection.clues(session_id, scene_id, actor_id, package)
-            return SpatialView(position, version, tuple(objects), exits, doors, clues)
+            from .world_surfaces import location_clues
+
+            tremor_cells = location_clues(
+                self,
+                session_id,
+                actor_id,
+                position,
+                sight.senses,
+            )
+            return SpatialView(position, version, tuple(objects), exits, doors, clues, tremor_cells)
 
     def _operate_spatial(self, row, package, operation, actor_id, *, navigation_scope=None):
         """Apply validated movement, placement or transfer and coordinate scene-entry

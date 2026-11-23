@@ -67,6 +67,14 @@ class SceneLifecycleService:
             if actor.initial_scene_id == scene_id and self.characters.initialize_npc_actor(
                 sid, actor
             ):
+                from .world_surfaces import initialize_actor_stance
+
+                initialize_actor_stance(
+                    self.store.connection,
+                    sid,
+                    actor.actor_id,
+                    self.facts.instances.scene(sid, scene_id).surfaces_json,
+                )
                 self.npc_bootstrap.initialize(sid, actor)
         self.facts.initialize_mechanical_scene(sid, scene_id, package)
         self.facts.instances.finish_scene(sid, scene_id)
