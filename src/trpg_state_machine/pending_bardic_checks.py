@@ -1,4 +1,4 @@
-"""Persist failed exploration check evidence and adopt a holder's Bardic choice."""
+"""Persist failed standalone D20 evidence and adopt a holder's Bardic choice."""
 
 import json
 
@@ -7,9 +7,10 @@ from dnd5e_engine.evaluation_bardic_check import (
     check_bardic_fingerprint,
     resolve_bardic_check_choice,
 )
-from dnd5e_engine.evaluation_contracts import CheckPayload
+from dnd5e_engine.evaluation_contracts import CheckPayload, SavePayload
 from dnd5e_engine.evaluation_ruleset import RulesetBindingError
-from dnd5e_engine.events import CheckRolled, RollDieModifier
+from dnd5e_engine.evaluation_saves import resolve_bardic_save_choice, save_bardic_fingerprint
+from dnd5e_engine.events import CheckRolled, RollDieModifier, SaveRolled
 
 from .choice_models import PendingChoice
 from .commands import TypedCommand
@@ -74,11 +75,11 @@ def pending_bardic_roll(connection, receipt, event):
 
 
 class PendingBardicChecks:
-    """Coordinate one continuation through the existing Check, Effects and receipt owners.
+    """Coordinate check and standalone save choices through Effects and receipts.
 
     A prompt records its original roll privately behind a neutral audit event. The response
     authenticates the holder and uses its own OCC version. It compares the
-    check's bounded dependencies and exact grant against the saved checkpoint,
+    roll's bounded dependencies and exact grant against the saved checkpoint,
     then commits a result calculated from the old roll and the current RNG.
     """
 
@@ -101,8 +102,10 @@ class PendingBardicChecks:
         )
 
     def fingerprint(self, request):
-        """Use RE's draw-free relevant-facts digest; unsupported checks open no window."""
+        """Use RE's draw-free rule digest; unsupported rolls open no window."""
         try:
+            if request.operation_kind == "rules.save":
+                return save_bardic_fingerprint(request, self.rules.loader)
             return check_bardic_fingerprint(request, self.rules.loader)
         except RulesetBindingError as exc:
             raise StateMachineError(
@@ -112,20 +115,28 @@ class PendingBardicChecks:
             return None
 
     def candidate(self, command, request, result):
-        """Read a failed check's exact held grant before computing its dependency digest."""
+        """Read a failed eligible roll's held grant before hashing its dependencies."""
+        is_save = command.command_type == "rules.save" and type(command.payload) is SavePayload
         if (
-            command.command_type != "rules.check"
+            command.command_type not in {"rules.check", "rules.save"}
             or command.check_world_effects is not None
             or command.time_wait is not None
-            or type(command.payload) is not CheckPayload
+            or (not is_save and type(command.payload) is not CheckPayload)
             or command.payload.dc is None
-            or command.payload.target_id is not None
+            or (not is_save and command.payload.target_id is not None)
+            or (is_save and command.payload.target_id != command.actor_id)
             or result is None
             or result.status != "accepted"
+            or len(result.proposed_events) != 1
         ):
             return None
         event = result.proposed_events[0]
-        if type(event) is not CheckRolled or event.succeeded is not False:
+        if (
+            type(event) is not (SaveRolled if is_save else CheckRolled)
+            or event.succeeded is not False
+        ):
+            return None
+        if is_save and (event.roll_detail is None or event.roll_detail.status != "rolled"):
             return None
         with self.store.transaction():
             grant = self._held_grant(command.session_id, command.actor_id)
@@ -140,7 +151,7 @@ class PendingBardicChecks:
         return self.grants.held_bardic_inspiration(session_id, actor_id, tick)
 
     def open_if_held(self, row, package, command, context, request, result, candidate):
-        """Stage the original d20 and a prompt atomically if the PC holds a timed grant."""
+        """Stage the original roll and a prompt atomically if the PC holds a timed grant."""
         if command.actor_id != row["pc_actor_id"]:
             return None
         sid = command.session_id
@@ -161,7 +172,9 @@ class PendingBardicChecks:
             package,
             BARDIC_CHECK_PENDING_EVENT,
             {},
-            phase="rules.check_awaiting_bardic_choice",
+            phase="rules.save_awaiting_bardic_choice"
+            if type(command.payload) is SavePayload
+            else "rules.check_awaiting_bardic_choice",
         )
         self.runtime.advance_rule_rng(sid, result.rng_transition, request.rng_context)
         version = self.runtime.stage_outcome(command, row, package, [event])
@@ -226,19 +239,35 @@ class PendingBardicChecks:
         event = self.persistence._read_event(sid, seq)
         evidence = _original_evidence(self.store.connection, pending, receipt, event)
         try:
-            payload = CheckPayload.model_validate_json(
+            event_type = evidence["engine_event"]["type"]
+            if event_type not in {"check_rolled", "save_rolled"}:
+                raise ValueError("Unknown Bardic roll kind")
+            payload_type = SavePayload if event_type == "save_rolled" else CheckPayload
+            roll_type = SaveRolled if event_type == "save_rolled" else CheckRolled
+            payload = payload_type.model_validate_json(
                 canonical_json(evidence["adjudication"]["payload"])
             )
-            roll = CheckRolled.model_validate_json(canonical_json(evidence["engine_event"]))
+            roll = roll_type.model_validate_json(canonical_json(evidence["engine_event"]))
+            if event_type == "save_rolled" and (
+                payload.target_id != pending["actor_id"]
+                or roll.target_id != pending["actor_id"]
+                or (roll.ability, roll.dc) != (payload.ability, payload.dc)
+            ):
+                raise ValueError("Save identity differs from saved choice")
         except (KeyError, ValueError) as exc:
             raise StateMachineError("storage_error", "Malformed Bardic check evidence") from exc
         command = TypedCommand(
-            sid, source_id, pending["actor_id"], "rules.check", payload, row["world_version"]
+            sid,
+            source_id,
+            pending["actor_id"],
+            "rules.save" if event_type == "save_rolled" else "rules.check",
+            payload,
+            row["world_version"],
         )
         return command, roll, evidence
 
     def _current_rng(self, row, package, source, pending):
-        """Compare only the original rule dependency digest and the exact active grant."""
+        """Compare the original rule dependency digest and exact active grant."""
         sid, holder = source.session_id, source.actor_id
         saved_grant = BardicInspirationGrant(
             pending["grant_origin"],
@@ -251,9 +280,10 @@ class PendingBardicChecks:
         rng = self.rules._rng_context(row)
         snapshot = self.rules._noncombat_snapshot(row, actor_ids=(holder,))
         request = self.rules.request(source, package, snapshot, rng, row=row)
-        _, facts = self.rules.prepare_check_sight(request, package)
-        if facts:
-            request = request.model_copy(update={"creature_sight_facts": facts})
+        if source.command_type == "rules.check":
+            _, facts = self.rules.prepare_check_sight(request, package)
+            if facts:
+                request = request.model_copy(update={"creature_sight_facts": facts})
         return rng if self.fingerprint(request) == pending["facts_fingerprint"] else None
 
     def _close(self, response, status):
@@ -286,9 +316,12 @@ class PendingBardicChecks:
         use = response.payload.selected_option_id == "accept"
         if rng is not None:
             try:
-                final, transition = resolve_bardic_check_choice(
-                    original, pending["die_sides"], rng, use=use
+                resolver = (
+                    resolve_bardic_save_choice
+                    if source.command_type == "rules.save"
+                    else resolve_bardic_check_choice
                 )
+                final, transition = resolver(original, pending["die_sides"], rng, use=use)
             except ValueError as exc:
                 raise StateMachineError(
                     "invalid_rule_result", "Bardic continuation failed"
@@ -321,7 +354,8 @@ class PendingBardicChecks:
                     type(bonus) is not RollDieModifier
                     or bonus.source != BARDIC_INSPIRATION_SOURCE
                     or bonus.sides != pending["die_sides"]
-                    or bonus.face != final.inspiration_bonus
+                    or bonus.face != bonus.value
+                    or (isinstance(final, CheckRolled) and bonus.face != final.inspiration_bonus)
                     or not transition.state_changed
                 ):
                     raise StateMachineError("invalid_rule_result", "Bardic spend evidence differs")
@@ -336,7 +370,9 @@ class PendingBardicChecks:
             event = self.capture._capture_event(
                 sid,
                 package,
-                "rules.check_rolled",
+                "rules.save_rolled"
+                if source.command_type == "rules.save"
+                else "rules.check_rolled",
                 {
                     **evidence,
                     "engine_event": final.model_dump(mode="json"),

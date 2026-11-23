@@ -6,6 +6,8 @@ from dataclasses import asdict, replace
 import pytest
 from dnd5e_engine.build_spec import derive_multiclass_slots, proficiency_grants
 from dnd5e_engine.evaluation_bardic_grant import ExplorationFeaturePayload
+from dnd5e_engine.evaluation_contracts import SavePayload
+from dnd5e_engine.evaluation_rng import RNGState
 from dnd5e_engine.evaluation_ruleset import get_default_ruleset, ruleset_binding
 from dnd5e_srd_data import MemoryAssetLoader
 from dnd_support import create
@@ -39,6 +41,7 @@ def make_bard_world(tmp_path, context, *, uses=3, hidden=False, npc_cell="2,0"):
         classes=[bard],
         subclasses=[lore],
         features=[canonical.get_feature(slug) for slug in features],
+        conditions=[canonical.get_condition(slug) for slug in ("paralyzed", "restrained")],
         items=list(base._items.values()),
         monsters=list(base._monsters.values()),
     )
@@ -199,6 +202,247 @@ def test_controlled_bard_grants_die_then_pc_spends_it(bard_world):
             ).current
             == 3
         )
+
+
+@pytest.mark.parametrize("option", ["accept", "decline"])
+def test_controlled_bard_grant_continues_standalone_save(bard_world, option):
+    """Use the real public grant, save and response entries with fixed original evidence."""
+    db, sid, package, loader, context = bard_world
+    with StateMachine(db, dnd_loader=loader) as sm:
+        assert (
+            sm.submit_command(
+                grant_command(sm, sid, package, context), package, context=context
+            ).status
+            == "committed"
+        )
+        state = sm.read_session(sid, package, context=context)
+        current_rng = sm.read_rng_context(sid, package, context=context)
+        expected = current_rng.state.restore()
+        natural = expected.randint(1, 20)
+        unassisted_total = natural + 4  # The fixture has Dexterity 18.
+        source = TypedCommand(
+            sid,
+            "save-with-grant",
+            state.pc_actor_id,
+            "rules.save",
+            SavePayload(
+                kind="rules.save",
+                target_id=state.pc_actor_id,
+                ability="dex",
+                dc=unassisted_total + 1,
+                advantage=(),
+                disadvantage=(),
+                is_magical=False,
+            ),
+            state.world_version,
+        )
+        pending = sm.submit_command(source, package, context=context)
+        assert pending.status == "pending_choice", pending
+        original = sm.get_command_rolls(sid, source.command_id, package, context=context)
+        assert original and original["rolls"][0]["type"] == "save_rolled"
+        assert original["rolls"][0]["natural"] == natural
+        assert original["rolls"][0]["succeeded"] is False
+        state = sm.read_session(sid, package, context=context)
+        answer = TypedCommand(
+            sid,
+            f"{option}-save",
+            state.pc_actor_id,
+            "choice.respond",
+            ChoiceRespondOperationPayload(source.command_id, option),
+            state.world_version,
+        )
+        receipt = sm.submit_command(answer, package, context=context)
+        assert receipt.status == "committed", receipt
+        (roll,) = sm.get_command_rolls(sid, answer.command_id, package, context=context)["rolls"]
+        bonus = expected.randint(1, 8) if option == "accept" else 0
+        assert roll["natural"] == natural
+        assert roll["roll_total"] == unassisted_total + bonus
+        assert roll["succeeded"] is (option == "accept")
+        assert sm.submit_command(answer, package, context=context) == receipt
+        effects = sm.read_noncombat_snapshot(sid, package, context=context).effect_states
+        assert bool(effects) is (option == "decline")
+
+
+def test_bardic_save_uses_current_rng_after_other_roll_and_reopen(bard_world):
+    """An unrelated roll can advance RNG while the save's d20 remains fixed."""
+    db, sid, package, loader, context = bard_world
+    with StateMachine(db, dnd_loader=loader) as sm:
+        assert (
+            sm.submit_command(
+                grant_command(sm, sid, package, context), package, context=context
+            ).status
+            == "committed"
+        )
+        state = sm.read_session(sid, package, context=context)
+        source = TypedCommand(
+            sid,
+            "save-pending",
+            state.pc_actor_id,
+            "rules.save",
+            SavePayload(
+                kind="rules.save",
+                target_id=state.pc_actor_id,
+                ability="dex",
+                dc=99,
+                advantage=(),
+                disadvantage=(),
+                is_magical=False,
+            ),
+            state.world_version,
+        )
+        assert sm.submit_command(source, package, context=context).status == "pending_choice"
+        original = sm.get_command_rolls(sid, source.command_id, package, context=context)["rolls"][
+            0
+        ]
+        other = check_command(sm, sid, package, context, key="unrelated-check", dc=1)
+        assert sm.submit_command(other, package, context=context).status == "committed"
+        rng = sm.read_rng_context(sid, package, context=context)
+    with StateMachine(db, dnd_loader=loader) as sm:
+        sm.resume_session(sid, package, context=context)
+        state = sm.read_session(sid, package, context=context)
+        answer = TypedCommand(
+            sid,
+            "answer-pending",
+            state.pc_actor_id,
+            "choice.respond",
+            ChoiceRespondOperationPayload(source.command_id, "accept"),
+            state.world_version,
+        )
+        assert sm.submit_command(answer, package, context=context).status == "committed"
+        final = sm.get_command_rolls(sid, answer.command_id, package, context=context)["rolls"][0]
+        stream = rng.state.restore()
+        face = stream.randint(1, 8)
+        assert final["roll_detail"]["d20"] == original["roll_detail"]["d20"]
+        assert final["roll_total"] == original["roll_total"] + face
+        assert final["roll_detail"]["modifiers"][-1]["source"] == "feature_grant:bardic-inspiration"
+        assert sm.read_rng_context(sid, package, context=context).state == RNGState.capture(stream)
+
+
+@pytest.mark.parametrize(
+    ("condition", "status"), [("restrained", "pending_choice"), ("paralyzed", "committed")]
+)
+def test_bardic_save_condition_change_and_auto_failure(bard_world, condition, status):
+    """A selected save dependency stales a window; auto-failure opens none."""
+    db, sid, package, loader, context = bard_world
+    with StateMachine(db, dnd_loader=loader) as sm:
+        assert (
+            sm.submit_command(
+                grant_command(sm, sid, package, context), package, context=context
+            ).status
+            == "committed"
+        )
+        state = sm.read_session(sid, package, context=context)
+        if condition == "paralyzed":
+            with sm._store.transaction(write=True):
+                sm._world.characters.add_condition(
+                    sid,
+                    state.pc_actor_id,
+                    {
+                        "condition": condition,
+                        "source_entity_id": "implied:test",
+                        "scope": "session",
+                    },
+                )
+        source = TypedCommand(
+            sid,
+            "save-condition",
+            state.pc_actor_id,
+            "rules.save",
+            SavePayload(
+                kind="rules.save",
+                target_id=state.pc_actor_id,
+                ability="dex",
+                dc=99,
+                advantage=(),
+                disadvantage=(),
+                is_magical=False,
+            ),
+            state.world_version,
+        )
+        before = sm.read_rng_context(sid, package, context=context)
+        opened = sm.submit_command(source, package, context=context)
+        assert opened.status == status, opened
+        if condition == "paralyzed":
+            assert sm.read_rng_context(sid, package, context=context) == before
+            return
+        with sm._store.transaction(write=True):
+            sm._world.characters.add_condition(
+                sid,
+                state.pc_actor_id,
+                {"condition": condition, "source_entity_id": "implied:test", "scope": "session"},
+            )
+        rng = sm.read_rng_context(sid, package, context=context)
+        latest = sm.read_events(sid, package, context=context)
+        state = sm.read_session(sid, package, context=context)
+        answer = TypedCommand(
+            sid,
+            "answer-stale",
+            state.pc_actor_id,
+            "choice.respond",
+            ChoiceRespondOperationPayload(source.command_id, "accept"),
+            state.world_version,
+        )
+        rejected = sm.submit_command(answer, package, context=context)
+        assert (rejected.status, rejected.error_code) == ("rejected", "choice_stale")
+        assert sm.read_events(sid, package, context=context) == latest
+        assert sm.read_rng_context(sid, package, context=context) == rng
+
+
+def test_bardic_save_reply_late_receipt_failure_rolls_back(bard_world, monkeypatch):
+    """A late receipt error restores the grant, RNG, event and pending choice."""
+    db, sid, package, loader, context = bard_world
+    with StateMachine(db, dnd_loader=loader) as sm:
+        assert (
+            sm.submit_command(
+                grant_command(sm, sid, package, context), package, context=context
+            ).status
+            == "committed"
+        )
+        state = sm.read_session(sid, package, context=context)
+        source = TypedCommand(
+            sid,
+            "save-fault",
+            state.pc_actor_id,
+            "rules.save",
+            SavePayload(
+                kind="rules.save",
+                target_id=state.pc_actor_id,
+                ability="dex",
+                dc=99,
+                advantage=(),
+                disadvantage=(),
+                is_magical=False,
+            ),
+            state.world_version,
+        )
+        assert sm.submit_command(source, package, context=context).status == "pending_choice"
+        state = sm.read_session(sid, package, context=context)
+        answer = TypedCommand(
+            sid,
+            "answer-fault",
+            state.pc_actor_id,
+            "choice.respond",
+            ChoiceRespondOperationPayload(source.command_id, "accept"),
+            state.world_version,
+        )
+        rng = sm.read_rng_context(sid, package, context=context)
+        events = sm.read_events(sid, package, context=context)
+        effects = sm.read_noncombat_snapshot(sid, package, context=context).effect_states
+        stored = sm._session_runtime.record_receipt
+
+        def fail_after_receipt(*args):
+            stored(*args)
+            raise RuntimeError("late save receipt failure")
+
+        with monkeypatch.context() as patch:
+            patch.setattr(sm._session_runtime, "record_receipt", fail_after_receipt)
+            with pytest.raises(RuntimeError, match="late save receipt failure"):
+                sm.submit_command(answer, package, context=context)
+        assert sm.get_command_receipt(sid, answer.command_id, package, context=context) is None
+        assert sm.read_rng_context(sid, package, context=context) == rng
+        assert sm.read_events(sid, package, context=context) == events
+        assert sm.read_noncombat_snapshot(sid, package, context=context).effect_states == effects
+        assert sm.submit_command(answer, package, context=context).status == "committed"
 
 
 @pytest.mark.parametrize(
