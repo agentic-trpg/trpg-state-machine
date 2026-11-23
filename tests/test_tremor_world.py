@@ -1,5 +1,6 @@
 """Public location clues from authored and live World surface facts."""
 
+import json
 from copy import deepcopy
 from dataclasses import replace
 
@@ -118,14 +119,76 @@ def test_explicit_wall_contact_clears_on_actor_move(tmp_path, context):
         assert sm.get_spatial_view(sid, actor, package, context=context).tremor_cells == ()
 
 
+def test_empty_authored_wall_contact_is_omitted_and_reopens(tmp_path, context):
+    """An empty wall declaration leaves ordinary floor contact available."""
+    data, _ = surface_data()
+    cell = next(actor["initial_cell"] for actor in data["actors"] if actor["actor_id"] == NPC)
+    data["scenes"][0]["surfaces"]["wall_contacts"] = {NPC: {"cell": cell, "surface_ids": []}}
+    sm, sid, package, db = setup(tmp_path, context, data)
+    assert NPC not in json.loads(package.scene(A).surfaces_json)["wall_contacts"]
+    with sm:
+        actor = sm.read_session(sid, package, context=context).pc_actor_id
+        assert sm.get_spatial_view(sid, actor, package, context=context).tremor_cells == (cell,)
+        assert (
+            sm._conn.execute(
+                "SELECT 1 FROM actor_surface_stance WHERE session_id=? AND actor_id=?", (sid, NPC)
+            ).fetchone()
+            is None
+        )
+        sm.save_session(sid, package, context=context)
+    with StateMachine(db, dnd_loader=lock_loader()) as reopened:
+        reopened.resume_session(sid, package, context=context)
+        assert reopened.get_spatial_view(sid, actor, package, context=context).tremor_cells == (
+            cell,
+        )
+
+
 def test_authored_airborne_target_has_no_contact(tmp_path, context):
     data, _ = surface_data()
     cell = next(actor["initial_cell"] for actor in data["actors"] if actor["actor_id"] == NPC)
-    data["scenes"][0]["surfaces"]["airborne_actors"][NPC] = cell
-    sm, sid, package, _ = setup(tmp_path, context, data)
+    facts = data["scenes"][0]["surfaces"]
+    facts["airborne_actors"][NPC] = cell
+    facts["floor_cells"]["1,2"] = "c"
+    sm, sid, package, db = setup(tmp_path, context, data)
     with sm:
         actor = sm.read_session(sid, package, context=context).pc_actor_id
         assert sm.get_spatial_view(sid, actor, package, context=context).tremor_cells == ()
+        moved = sm.submit_command(
+            command(sm, sid, package, context, StepActor(A, cell, "1,2"), "air.land", NPC),
+            package,
+            context=context,
+        )
+        assert moved.status == "committed", moved
+        assert sm.get_spatial_view(sid, actor, package, context=context).tremor_cells == ("1,2",)
+        sm.save_session(sid, package, context=context)
+    with StateMachine(db, dnd_loader=lock_loader()) as reopened:
+        reopened.resume_session(sid, package, context=context)
+        assert reopened.get_spatial_view(sid, actor, package, context=context).tremor_cells == (
+            "1,2",
+        )
+
+
+@pytest.mark.parametrize("stance", ("wall", "airborne"))
+def test_missing_required_stance_row_is_rejected(tmp_path, context, stance):
+    """A lost nonempty authored stance cannot silently become floor contact."""
+    data, _ = surface_data()
+    cell = next(actor["initial_cell"] for actor in data["actors"] if actor["actor_id"] == NPC)
+    facts = data["scenes"][0]["surfaces"]
+    if stance == "wall":
+        facts["wall_contacts"][NPC] = {"cell": cell, "surface_ids": ["b"]}
+    else:
+        facts["airborne_actors"][NPC] = cell
+    sm, sid, package, _ = setup(tmp_path, context, data)
+    with sm:
+        actor = sm.read_session(sid, package, context=context).pc_actor_id
+        with sm._store.transaction(write=True):
+            sm._conn.execute(
+                "DELETE FROM actor_surface_stance WHERE session_id=? AND actor_id=?",
+                (sid, NPC),
+            )
+        with pytest.raises(StateMachineError) as exc:
+            sm.get_spatial_view(sid, actor, package, context=context)
+        assert exc.value.code == "incomplete_session"
 
 
 def test_active_stonecunning_requires_connected_stone(tmp_path, context):

@@ -102,7 +102,14 @@ def validate_surface_config(raw, grid_json, actor_ids, object_ids):
             raise ValueError("invalid connection object anchor")
         edges.append(edge)
     SurfaceTopology(0, tuple(surfaces), tuple(edges))
-    return canonical_json(raw)
+    # An empty declaration grants no wall contact and needs no durable stance row.
+    normalized = {
+        **raw,
+        "wall_contacts": {
+            actor_id: value for actor_id, value in contacts.items() if value["surface_ids"]
+        },
+    }
+    return canonical_json(normalized)
 
 
 @lru_cache(maxsize=128)

@@ -11,7 +11,7 @@ CREATE TRIGGER clear_actor_wall_contact_after_move
 AFTER UPDATE OF current_scene_id,cell ON actors
 WHEN OLD.current_scene_id IS NOT NEW.current_scene_id OR OLD.cell IS NOT NEW.cell
 BEGIN
-    UPDATE actor_surface_stance SET wall_contact_json='[]'
+    UPDATE actor_surface_stance SET wall_contact_json='[]',airborne=0
     WHERE session_id=NEW.session_id AND actor_id=NEW.actor_id;
 END;
 PRAGMA user_version = 71;
