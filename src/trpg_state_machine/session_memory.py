@@ -717,29 +717,55 @@ class SessionMemory:
     def _light_source_changes(self, rows):
         """Maintain source-collection versions for affected light contributions and scenes."""
         rows = [row for row in rows if row is not None]
+        scenes_by_object = {}
+        for row in rows:
+            scenes_by_object.setdefault((row["session_id"], row["object_id"]), set()).add(
+                self._scene_for(row)
+            )
         checked, contributors = set(), set()
         for row in rows:
             sid, oid = row["session_id"], row["object_id"]
             if (sid, oid) not in checked:
                 checked.add((sid, oid))
-                if self._has_subtree_light(sid, oid):
+                scenes = scenes_by_object[(sid, oid)]
+                no_visual = (
+                    len(scenes) == 1
+                    and None not in scenes
+                    and all(self._cached_no_visual_members(sid, scene) for scene in scenes)
+                )
+                if self._has_subtree_light(sid, oid, visual_possible=not no_visual):
                     contributors.add(sid)
         if contributors:
             for sid, scene in {(r["session_id"], self._scene_for(r)) for r in rows}:
                 if sid in contributors and scene is not None:
                     self._advance_field("light_sources", sid, scene)
 
-    def _has_subtree_light(self, sid, oid):
-        # Negative empty-container checks use two indexed buckets; do not start
+    def _cached_no_visual_members(self, sid, scene):
+        """Use a valid scene source field only when it proves zero visual members."""
+        cached = self.get(("instance", sid, "scene", scene))
+        if cached is None:
+            return False
+        for entry in cached[0].lighting.magic_anchors:
+            if entry.parameter == ((), ()):
+                return (
+                    entry.stamps == tuple(self.version(d) for d in entry.dependencies)
+                    and not entry.value[1].has_members
+                )
+        return False
+
+    def _has_subtree_light(self, sid, oid, *, visual_possible=True):
+        # Negative empty-container checks use indexed point buckets; do not start
         # a subtree walk or inspect any Scene members to rediscover no emitter.
         """Check object/subtree capability indices for a light source."""
         if self.select(
             "SELECT object_id FROM object_lights WHERE session_id=? AND object_id=?", (sid, oid)
         ).fetchone():
             return True
-        if self._has_visual_emitter(sid, "object", oid):
+        if visual_possible and self._has_visual_emitter(sid, "object", oid):
             return True
         tables = ("object_lights",)
+        if visual_possible:
+            tables = (*tables, "target_visual_effects")
         if "magic_light_anchors" in self.columns:
             tables = (*tables, "magic_light_anchors")
             if self.select(
@@ -1075,10 +1101,15 @@ class SessionMemory:
             seen.add(current)
             self.stats["capability_nodes"] += 1
             for table, members in found.items():
-                if self.select(
-                    f"SELECT object_id FROM {table} WHERE session_id=? AND object_id=?",
-                    (sid, current),
-                ).fetchone():
+                present = (
+                    self._has_visual_emitter(sid, "object", current)
+                    if table == "target_visual_effects"
+                    else self.select(
+                        f"SELECT object_id FROM {table} WHERE session_id=? AND object_id=?",
+                        (sid, current),
+                    ).fetchone()
+                )
+                if present:
                     members.add(current)
             pending.extend(
                 r[0]
@@ -1122,19 +1153,32 @@ class SessionMemory:
         """Resolve only a changed row's position chain; no JSON or entity scan."""
         if row is None:
             return None
+        memo = getattr(self, "_change_scenes", None)
+        key = tuple(
+            row[column]
+            for column in ("session_id", "object_id", "scene_id", "carrier_id", "container_id")
+        )
+        if memo is not None and key in memo:
+            return memo[key]
         sid, seen = row["session_id"], set()
         while row is not None and row["object_id"] not in seen:
             seen.add(row["object_id"])
             if row["scene_id"] is not None:
-                return row["scene_id"]
+                scene = row["scene_id"]
+                break
             if row["carrier_id"] is not None:
                 actor = self.select(
                     "SELECT current_scene_id FROM actors WHERE session_id=? AND actor_id=?",
                     (sid, row["carrier_id"]),
                 ).fetchone()
-                return actor[0] if actor else None
+                scene = actor[0] if actor else None
+                break
             row = self._object(sid, row["container_id"]) if row["container_id"] else None
-        return None
+        else:
+            scene = None
+        if memo is not None:
+            memo[key] = scene
+        return scene
 
     def _association_changes(self, table, old, new):
         """Maintain scene membership after object, carrier or capability changes."""
@@ -1447,10 +1491,12 @@ class SessionMemory:
             return 0
         collectors, self.collectors = self.collectors, []
         previous_objects = getattr(self, "_change_objects", None)
+        previous_scenes = getattr(self, "_change_scenes", None)
         # The synchronous callback does no domain writes. Share immutable point
         # reads between its source/ancestor maintenance passes, never across a
         # statement or candidate stage. Nested trigger callbacks get their own memo.
         self._change_objects = {}
+        self._change_scenes = {}
         try:
             self._passage_changes(table, old, new)
             self._weight_changes(table, old, new)
@@ -1463,6 +1509,7 @@ class SessionMemory:
         finally:
             self.collectors = collectors
             self._change_objects = previous_objects
+            self._change_scenes = previous_scenes
         sessions = {
             row["session_id"] if "session_id" in self.columns[table] else None
             for row in (old, new)

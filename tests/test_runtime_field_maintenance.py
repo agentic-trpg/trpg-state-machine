@@ -392,6 +392,62 @@ def test_empty_bag_does_not_rediscover_scene(tmp_path, context, monkeypatch, gro
         assert counts["dependency_checks"] <= 1000
 
 
+def test_nested_visual_emitter_shading_motion_and_rollback(tmp_path, context):
+    """An indexed target light follows nested carriers and savepoint restoration."""
+    from lock_support import B
+
+    from trpg_state_machine import EnterScene, ObjectState, SetObjectState
+
+    sm, sid, package, _ = setup(tmp_path, context, lighting_data())
+    with sm:
+        actor = sm.read_session(sid, package, context=context).pc_actor_id
+        with sm._transaction(write=True):
+            sm._conn.execute(
+                "INSERT INTO visual_effect_sources"
+                "(session_id,source_id,source_kind,caster_id,expires_tick) VALUES (?,?,?,?,?)",
+                (sid, "visual:nested-fixture", "activity", actor, 60),
+            )
+            sm._conn.execute(
+                "INSERT INTO target_visual_effects"
+                "(session_id,effect_id,source_id,target_kind,target_id,dim_radius_ft,"
+                "suppresses_invisible,visible_attack_advantage) VALUES (?,?,?,?,?,?,?,?)",
+                (sid, "visual:nested", "visual:nested-fixture", "object", CRED, 10, 1, 0),
+            )
+
+        def emitted(scene):
+            """Read the selected target's current effective light anchor."""
+            return any(
+                target_id == CRED
+                for _, target_id, *_ in sm._world.magic.visual_illumination_anchors(sid, scene)
+            )
+
+        def commit(op, command_id):
+            """Apply one public container or scene command in this fixture."""
+            receipt = submit(sm, sid, package, context, op, command_id)
+            assert receipt.status == "committed", receipt
+
+        assert emitted(A)
+        commit(PickupItem(BAG, A, "1,0"), "bag")
+        commit(PickupItem(BOX, A, "1,0"), "box")
+        commit(PutItem(A, CRED, BAG, "0,0"), "child")
+        commit(PutItem(A, BAG, BOX, "0,0"), "nested")
+        assert emitted(A)
+        commit(SetObjectState(A, BOX, ObjectState.CLOSED), "close")
+        assert not emitted(A)
+        commit(SetObjectState(A, BOX, ObjectState.OPEN), "open")
+        assert emitted(A)
+        with sm._transaction(write=True):
+            sm.scene_lifecycle.ensure_scene(sid, B, package)
+        commit(EnterScene(B), "cross")
+        assert emitted(B) and not emitted(A)
+        with sm._transaction(write=True), pytest.raises(ValueError), sm._store.savepoint():
+            facts = sm._world_facts
+            facts.transfer_item(sid, facts.object(sid, BOX), scene_id=A, cell="1,0")
+            assert emitted(A) and not emitted(B)
+            raise ValueError("rollback")
+        assert emitted(B) and not emitted(A)
+
+
 def change_weight(sm, sid, oid, weight):
     import json
 

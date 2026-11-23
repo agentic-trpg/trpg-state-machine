@@ -44,6 +44,14 @@ class SpellLightAnchor:
 
 
 @dataclass(frozen=True, slots=True)
+class VisualLightAnchors:
+    """Current visual emitters and indexed membership, including blocked targets."""
+
+    anchors: tuple
+    has_members: bool
+
+
+@dataclass(frozen=True, slots=True)
 class MagicLightSource(EnvironmentalSource):
     """An immutable contribution with the full Effects application and spell provenance."""
 
@@ -419,7 +427,7 @@ class WorldMagic:
 
     def visual_illumination_anchors(self, sid, scene):
         """Return selected target anchors from the shared current light selection."""
-        return self._illumination_anchor_sets(sid, scene)[1]
+        return self._illumination_anchor_sets(sid, scene)[1].anchors
 
     def _visual_illumination_anchors_uncached(self, sid, scene):
         """Resolve indexed visual members only while building the shared selection."""
@@ -430,7 +438,7 @@ class WorldMagic:
             (sid, scene),
         ).fetchall()
         if not records:
-            return ()
+            return VisualLightAnchors((), False)
         tick = self.h.facts.time_state(sid)[1]
         anchors = []
         for anchor in records:
@@ -465,7 +473,7 @@ class WorldMagic:
                         transmission == "unknown",
                     )
                 )
-        return tuple(sorted(anchors))
+        return VisualLightAnchors(tuple(sorted(anchors)), True)
 
     def _illumination_anchor(self, sid, scene, record):
         """Resolve a stored application to its present, transmissive World anchor."""
