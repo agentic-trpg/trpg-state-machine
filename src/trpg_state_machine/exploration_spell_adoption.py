@@ -323,7 +323,7 @@ def _healing_changes(request, result, spell, activity, loader):
 
 
 def _timed_spell_changes(request, result, spell, loader):
-    """Return candidate writes for one paid cast and one terminal world effect.
+    """Return candidate writes for one cast and one terminal world effect.
 
     The caller validates the shared result envelope and rechecks the version
     and resource pre-value in its write transaction. The effect's relative
@@ -333,7 +333,10 @@ def _timed_spell_changes(request, result, spell, loader):
     snapshot = request.state_snapshot
     operations = result.state_delta.operations
     material_changes = ()
-    expected_types = {delta.ResourceUpdate, delta.WorldEffectCreate}
+    cantrip = spell is not None and spell.level == 0 and payload.slot_level == 0
+    expected_types = {delta.WorldEffectCreate}
+    if not cantrip:
+        expected_types.add(delta.ResourceUpdate)
     if payload.material_instance_id is not None:
         expected_types.add(delta.SpellMaterialConsume)
     if len(operations) != len(expected_types) or {type(op) for op in operations} != expected_types:
@@ -361,7 +364,13 @@ def _timed_spell_changes(request, result, spell, loader):
         material_changes = (
             ("item", material.expected.instance_id, "consume", material.expected.model_dump()),
         )
-    spend = _slot_change(request, next(op for op in operations if type(op) is delta.ResourceUpdate))
+    spend = (
+        None
+        if cantrip
+        else _slot_change(
+            request, next(op for op in operations if type(op) is delta.ResourceUpdate)
+        )
+    )
     create = next(op for op in operations if type(op) is delta.WorldEffectCreate)
     if result.rng_transition.state_changed:
         raise StateMachineError("invalid_rule_result", "Timed spell RNG differs")
@@ -394,7 +403,7 @@ def _timed_spell_changes(request, result, spell, loader):
         or not any(activity.id == intent.activity_id for activity in spell.activities)
         or cast.actor_id != request.actor_id
         or cast.spell_id != payload.spell_id
-        or cast.slot_level != payload.slot_level
+        or cast.slot_level != (payload.slot_level if spell.level else None)
         or cast.ritual
         or cast.material_consumed != bool(material_changes)
         or (
@@ -426,7 +435,7 @@ def _timed_spell_changes(request, result, spell, loader):
         )
         hp_changes = (("actor", payload.target_id, "hp_pair", transition),)
     return (
-        spend,
+        *((spend,) if spend is not None else ()),
         *material_changes,
         *hp_changes,
         ("world_effect", payload.target_id, "create", proposal),
