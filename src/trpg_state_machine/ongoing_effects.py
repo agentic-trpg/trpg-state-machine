@@ -904,8 +904,11 @@ class OngoingEffects:
             )
         return [condition.model_dump(mode="json") for condition in current]
 
+    @instance_read(
+        "actor", None, "linked_condition_names", capacity=3, maintained="linked_conditions"
+    )
     def linked_condition_names(self, sid, target_id):
-        """Read effect-linked condition names without parsing independent actor records."""
+        """Cache exact linked names across changes to effects without conditions."""
         names, seen = [], set()
         rows = self._conn.execute(
             "SELECT effect_id,conditions_json,ordinal FROM ongoing_effects "

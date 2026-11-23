@@ -27,9 +27,9 @@ def target_is_invisible(
         ).fetchone()
         if not actor:
             return False
-        independent = world.characters.conditions(sid, target_id)
-        conditions = world.characters.effects.actor_conditions(sid, target_id, independent)
-        base_invisible = any(condition["condition"] == "invisible" for condition in conditions)
+        base_invisible = "invisible" in world.characters.condition_names(
+            sid, target_id
+        ) or "invisible" in world.characters.effects.linked_condition_names(sid, target_id)
     if not base_invisible:
         return False
     tick = world.facts.time_state(sid)[1]

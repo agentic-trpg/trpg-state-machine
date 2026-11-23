@@ -360,6 +360,7 @@ class CharacterRuntime:
     prepared_spells: tuple = ()
     effective_senses: tuple = ()
     linked_conditions: tuple = ()
+    linked_condition_names: tuple = ()
     scene_visibility: tuple = ()
 
 

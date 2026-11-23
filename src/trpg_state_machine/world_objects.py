@@ -721,12 +721,20 @@ class WorldObjectService:
                     dict.fromkeys(cell for footprint in targets.values() for cell in footprint)
                 )
                 sight = h._prepare_visibility(sid, actor_id, position, package, cells=cells)
+                visible_cells = frozenset(cell for cell in cells if sight.can_see(cell))
+                special_cells = {}
                 for oid, footprint in targets.items():
-                    if any(sight.can_see(cell) for cell in footprint):
+                    if not visible_cells.isdisjoint(footprint):
                         invisible = target_is_invisible(h, sid, oid, target_kind="object")
-                        visible[oid] = any(
-                            sight.can_see_creature(cell, invisible=invisible) for cell in footprint
-                        )
+                        if not invisible:
+                            visible[oid] = True
+                        else:
+                            for cell in footprint:
+                                if cell in visible_cells and cell not in special_cells:
+                                    special_cells[cell] = sight.can_see_creature(
+                                        cell, invisible=True
+                                    )
+                            visible[oid] = any(special_cells.get(cell, False) for cell in footprint)
             for obj in candidates:
                 try:
                     cells = targets.get(obj["object_id"])
