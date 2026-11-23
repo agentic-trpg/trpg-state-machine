@@ -282,9 +282,13 @@ def test_nonmatching_mechanism_records(tmp_path, context, monkeypatch, n, family
             == counts[("ongoing_effects", (("session_id", sid), ("target_id", motion.actor_id)))]
             == 1
         )
-        # Count the maintained version separately from the underlying effect read.
+        # Movement and observer admission keep their original four checks. The
+        # disclosure checks Blinded for the PC and Invisible for the one NPC
+        # target using maintained actor-local names, without another effect read.
         linked_condition_checks = counts["linked_conditions_checks"]
-        assert linked_condition_checks == counts[("linked_conditions", repr(motion.actor_id))] == 4
+        assert linked_condition_checks == 6
+        assert counts[("linked_conditions", repr(motion.actor_id))] == 5
+        assert counts[("linked_conditions", repr(NPC))] == 1
         # Movement evidence reuses this Scene's lamp collection, spell records,
         # and resolved spell anchors. It does not validate a cached projection.
         assert counts["unscoped_magic_anchor_checks"] == 0
