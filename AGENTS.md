@@ -6,6 +6,8 @@ logical parallel workspace. -->
 
 ## Project Architecture Authority
 
+**规则求值必读。** 每次接手检定、豁免、攻击、施法、骰子、效果修正或 SM／RE 接口任务，先读逻辑同级 DOC 的 [Module Contracts §4.2a](../agentic-trpg/docs/MODULE_CONTRACTS.md#42a-按规则声明补齐求值事实)。RE 声明规则需要的事实并计算，SM 按权限和事实所有权取齐、固定输入并提交结果。设计或重构前沿真实公开入口核对已有共用读取、计算、提交和重放，只迁移需要接入的专用逻辑。平行 worktree 先定位本任务配对的 DOC。
+
 2026-10-22 runtime instance ownership: read the paired [MC §2.3a](https://github.com/agentic-trpg/agentic-trpg/blob/docs/runtime-instance-ownership/docs/MODULE_CONTRACTS.md#23a-实例字段关联与局部准入-decided) and the [local inventory and acceptance](docs/reviews/RUNTIME_INSTANCE_OWNERSHIP.md). The paired docs branch is not main; in this task its logical sibling is `.worktrees/runtime-instance-ownership/agentic-trpg`. Follow target-instance fields/associations/indices and affected candidate dependencies; ordinary queries and operations must not replace these with Session/Scene scans or Full Audit. Runtime fields belong to the existing SessionMemory/UnitOfWork publication, with immutable owner replacements, bounded retention, rollback isolation and per-connection recovery invalidation. Check real consumers before claiming completion; do not introduce another Session/transaction authority.
 
 This repository is part of the Agentic TRPG project.

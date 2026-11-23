@@ -72,12 +72,18 @@ def test_real_check_empty_delta_exact_engine_parity_and_private_event(
             disadvantage=("flag",) if mode in ("disadvantage", "cancelled") else (),
         )
         original = sm.read_noncombat_snapshot(sid, package, context=context)
+        with sm._store.transaction():
+            row = sm._world.sessions._session(sid, package, context)
+            fixed = sm._rules._noncombat_snapshot(row, package, actor_ids=(command.actor_id,))
+        assert fixed.character_states == tuple(
+            actor for actor in original.character_states if actor.entity_id == command.actor_id
+        )
         rng = sm.read_rng_context(sid, package, context=context)
         real = sm._rules._evaluate_dnd
         captured = []
 
         async def capture(request):
-            assert not sm._conn.in_transaction and request.state_snapshot == original
+            assert not sm._conn.in_transaction and request.state_snapshot == fixed
             result = await real(request)
             captured.append(result)
             return result

@@ -7,6 +7,7 @@ remain with the bound Rule Engine; every mutation uses the caller's UnitOfWork.
 from dataclasses import dataclass
 
 from dnd5e_engine.effect_lifecycle import conditions_after_effect_application
+from dnd5e_engine.evaluation_bardic_check import BARDIC_INSPIRATION_DIE_SIDES
 from dnd5e_engine.evaluation_effects import EffectState
 from dnd5e_engine.evaluation_region_effect import (
     is_fixed_region_effect,
@@ -52,6 +53,19 @@ class ConcentrationGroup:
     spatial_member: dict | None
     casting_activity_id: str | None = None
     visual_source: dict | None = None
+
+
+BARDIC_INSPIRATION_EFFECT_ID = "effect:inspired"
+
+
+@dataclass(frozen=True, slots=True)
+class BardicInspirationGrant:
+    """Identity, size and deadline fixed when an Inspired effect is issued."""
+
+    origin: str
+    grant_id: str
+    die_sides: int
+    expires_tick: int
 
 
 class OngoingEffects:
@@ -717,6 +731,54 @@ class OngoingEffects:
             }
             for row in rows
         ]
+
+    def held_bardic_inspiration(self, sid, target_id, tick):
+        """Read one active timed Inspired grant by holder and effect ID.
+
+        A standalone grant carries an immutable issuance ID and die size in
+        its effect flags. An ambiguous, disabled or expired effect provides no
+        die. The Session clock and this Effects row remain the only owners.
+        """
+        rows = self._conn.execute(
+            "SELECT origin,expires_tick,payload_json,concentration_id,"
+            "lifecycle_json,conditions_json "
+            "FROM ongoing_effects WHERE session_id=? AND target_id=? AND effect_id=? LIMIT 2",
+            (sid, target_id, BARDIC_INSPIRATION_EFFECT_ID),
+        ).fetchall()
+        if len(rows) != 1:
+            return None
+        row = rows[0]
+        expiry = row["expires_tick"]
+        prefix = "cast:inspired:"
+        if (
+            expiry is None
+            or tick >= expiry
+            or not row["origin"].startswith(prefix)
+            or row["origin"] == prefix
+            or any(
+                row[field] is not None
+                for field in ("concentration_id", "lifecycle_json", "conditions_json")
+            )
+        ):
+            return None
+        effect = self.store.memory.json(row["payload_json"])
+        grant = effect["flags"].get("bardic_inspiration")
+        if (
+            effect["disabled"]
+            or effect["transfer"]
+            or effect["changes"]
+            or effect["statuses"]
+            or effect["end_effects"]
+            or effect["lifecycle"] is not None
+            or effect["action_policy"] is not None
+            or type(grant) is not dict
+            or type(grant.get("grant_id")) is not str
+            or not grant["grant_id"]
+            or type(grant.get("die_sides")) is not int
+            or grant["die_sides"] not in BARDIC_INSPIRATION_DIE_SIDES
+        ):
+            return None
+        return BardicInspirationGrant(row["origin"], grant["grant_id"], grant["die_sides"], expiry)
 
     @scoped_read
     def visible_for_target(self, sid, target_id):

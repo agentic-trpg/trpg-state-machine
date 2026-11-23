@@ -72,6 +72,11 @@ def visible_actor_in_range(world, sid, actor, target_id, target_cell, package, *
     ) or (actor != target_id and _sight_conditions_unknown(world.characters, sid, target_id)):
         return False
 
+    return not sight_ray_occlusion_unresolved(world, sid, position, target_cell, package)
+
+
+def sight_ray_occlusion_unresolved(world, sid, position, target_cell, package):
+    """Find current fixtures along one ray whose visual blockage is unproven."""
     corridor = frozenset(_corridor_cells(((position.cell, (parse_cell(target_cell),)),)))
     passages = passage_index(world.store, sid)
     doors = {
@@ -81,9 +86,9 @@ def visible_actor_in_range(world, sid, actor, target_id, target_cell, package, *
     }
     spatial = world.objects.spatial
     if any(spatial.door_shell_closed(sid, door, package) for door in doors):
-        return False
+        return True
     _, occupants = world.grid.reader.region_occupants(sid, position.scene_id, corridor)
-    return not any(
+    return any(
         _object_sight_unresolved(spatial, sid, fixture, package)
         for fixture in {oid for oid, _, _ in occupants} | doors
     )

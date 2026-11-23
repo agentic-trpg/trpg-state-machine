@@ -27,7 +27,10 @@ class PendingChoice:
     pending_operation_id: str
     authorized_responder: str
     choice_kind: Literal[
-        "spell.target_willingness", "spell.targets_willingness", "combat.shield_reaction"
+        "spell.target_willingness",
+        "spell.targets_willingness",
+        "combat.shield_reaction",
+        "rules.bardic_inspiration",
     ]
     allowed_options: tuple[str, ...]
     expires_at_tick: int | None

@@ -15,6 +15,8 @@ from dnd5e_engine.evaluation_availability import (
     ActionAvailabilityResult,
     query_action_availability,
 )
+from dnd5e_engine.evaluation_check_facts import CreatureSightFact
+from dnd5e_engine.evaluation_checks import check_fact_needs
 from dnd5e_engine.evaluation_contracts import (
     CAST_ACTIVITY_SCHEMA_VERSION,
     CHARGED_ITEM_SCHEMA_VERSION,
@@ -120,6 +122,7 @@ from .haste_adoption import (
 )
 from .package import canonical_json
 from .rest_activity import rest_changes
+from .rule_sight import read_creature_sight
 from .scoped_reads import scoped_read
 from .session_access import _binding
 from .shield_adoption import (
@@ -1572,6 +1575,29 @@ class RulesAdapter:
         """Get RE's required actor IDs and schema from the fixed loader and World facts."""
         return prepare_environmental_spell(
             command.payload, command.actor_id, positions, self.loader
+        )
+
+    def prepare_check_sight(self, request, package):
+        """Ask RE which World relationships this bound check still requires."""
+        try:
+            needs = check_fact_needs(request, self.loader)
+        except RulesetBindingError as exc:
+            raise StateMachineError(
+                "ruleset_binding_mismatch", "Evaluator data/configuration differ"
+            ) from exc
+        return needs, self.check_sight_facts(request.session_id, request.actor_id, needs, package)
+
+    def check_sight_facts(self, sid, actor_id, needs, package):
+        """Read only the declared pairs and preserve unknown as an absent fact."""
+        if not needs:
+            return ()
+        visibility = read_creature_sight(
+            self.world, sid, actor_id, (need.source_id for need in needs), package
+        )
+        return tuple(
+            CreatureSightFact(need=need, visible=visibility[need.source_id])
+            for need in needs
+            if need.source_id in visibility
         )
 
     def _pinned_row(self, session_id, package):

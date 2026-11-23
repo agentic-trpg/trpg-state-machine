@@ -697,8 +697,11 @@ class CommandRuntime:
         means that the stored event lacks detailed dice evidence, whether from an
         older event or a path without that evidence; an empty rolls list means
         the receipt has no check/save event. This read never evaluates rules or
-        RNG and only follows event identities in the durable receipt.
+        RNG and only follows event identities in the durable receipt. The selected
+        PC's neutral Bardic marker links to private original dice evidence.
         """
+        from .pending_bardic_checks import BARDIC_CHECK_PENDING_EVENT, pending_bardic_roll
+
         with self._transaction():
             row = self._session(session_id, package, context)
             receipt = self._session_runtime.receipt(session_id, command_id)
@@ -712,7 +715,12 @@ class CommandRuntime:
                     raise StateMachineError(
                         "invalid_event", "Receipt event has another command source"
                     )
-                engine = event.payload.get("engine_event")
+                if event.event_type == BARDIC_CHECK_PENDING_EVENT:
+                    if receipt.actor_id != row["pc_actor_id"]:
+                        raise StateMachineError("unauthorized", "Bardic choice holder changed")
+                    engine = pending_bardic_roll(self._conn, receipt, event)
+                else:
+                    engine = event.payload.get("engine_event")
                 if not isinstance(engine, dict) or engine.get("type") not in (
                     "check_rolled",
                     "save_rolled",

@@ -48,6 +48,7 @@ from .dnd_checks import world_effects_ready
 from .effect_hp_adoption import apply_world_spell_ends
 from .errors import StateMachineError
 from .models import SpellConditionOption, SpellConditionOptions
+from .pending_bardic_checks import PendingBardicChecks
 from .pending_multi_spell_choices import PendingMultiSpellChoices
 from .pending_spell_choices import PendingSpellChoices
 from .perception import visible_actor_in_range
@@ -86,6 +87,7 @@ class RuleExecution:
             self.store, self.runtime, self.sessions, self.world.facts
         )
         self.shield_windows = ShieldWindows(self.store, self.runtime, self.sessions)
+        self.bardic_checks = PendingBardicChecks(self)
 
     @property
     def _conn(self):
@@ -366,6 +368,8 @@ class RuleExecution:
         A willingness answer resumes the original spell with fresh facts and commits
         its own receipt together with the single adopted cast and prompt outcome.
         Multi-target replies collect consent, then the caster may confirm a subset.
+        A failed independent check with a held Bardic die saves its original roll
+        for the selected PC to finalize through the same choice response entry.
         """
         response = shield_prompt = shield_pending = shield_original = None
         confirmation = None
@@ -386,6 +390,11 @@ class RuleExecution:
                 command = pending_cast
         if type(command.payload) is ChoiceRespondOperationPayload:
             response = command
+            with self.store.transaction():
+                self.sessions._session(response.session_id, package, context)
+                bardic_prompt = self.bardic_checks.for_response(response)
+            if bardic_prompt is not None:
+                return self.bardic_checks.respond(response, package, context, fingerprint)
             with self.store.transaction(write=True):
                 row = self.sessions._session(response.session_id, package, context)
                 shield_prompt = self.shield_windows.for_response(response)
@@ -447,6 +456,7 @@ class RuleExecution:
         object_check = type(command.payload) in OPENABLE_CHECK_OPERATIONS
         mechanism_check = type(command.payload) is CheckMechanism
         domain_check = object_check or mechanism_check
+        public_check = type(command.payload) is CheckPayload
         check_service = (
             self.world.objects.mechanisms if mechanism_check else self.world.objects.openable
         )
@@ -459,6 +469,8 @@ class RuleExecution:
         multi_spell_positions = None
         sight_range = self._spell_sight_range(command)
         charged_item, item_area_facts = None, None
+        check_request = None
+        check_sight_needs, check_sight_facts = (), ()
 
         def project_multi_spell_positions(value):
             """Project the selected positions and confirmation-specific willingness."""
@@ -533,7 +545,22 @@ class RuleExecution:
                         snapshot, value, package, command.actor_id
                     )
                 return snapshot
-            if type(command.payload) is CheckPayload or domain_check or exploration_item:
+            if public_check and command.payload.dc is not None:
+                actor_ids = tuple(
+                    actor_id
+                    for (actor_id,) in self._conn.execute(
+                        "SELECT actor_id FROM actors WHERE session_id=? "
+                        "AND actor_id IN (?,?) AND current_scene_id=? ORDER BY actor_id",
+                        (
+                            command.session_id,
+                            command.actor_id,
+                            command.payload.target_id,
+                            value["current_scene_id"],
+                        ),
+                    )
+                )
+                return self.rules._noncombat_snapshot(value, package, actor_ids=actor_ids)
+            if public_check or domain_check or exploration_item:
                 return self.rules._noncombat_snapshot(value, package)
             intent_type = getattr(command.payload, "intent_type", None)
             projects_walk = intent_type == "move" or (
@@ -676,6 +703,15 @@ class RuleExecution:
             )
             rng = self.rules._rng_context(row)
             if (
+                public_check
+                and command.payload.dc is not None
+                and row["world_version"] == command.expected_world_version
+            ):
+                check_request = self.rules.request(command, package, snapshot, rng, row=row)
+                check_sight_needs, check_sight_facts = self.rules.prepare_check_sight(
+                    check_request, package
+                )
+            if (
                 type(command.payload) is not CheckPayload
                 and not domain_check
                 and not (exploration_rule or rest)
@@ -696,7 +732,7 @@ class RuleExecution:
             request = None
             capability = prepare_error
         else:
-            request = self.rules.request(
+            request = check_request or self.rules.request(
                 shield_original or rule_command,
                 package,
                 snapshot,
@@ -710,6 +746,8 @@ class RuleExecution:
                 item_area_facts=item_area_facts,
                 independent_condition=independent_condition,
             )
+            if check_sight_facts:
+                request = request.model_copy(update={"creature_sight_facts": check_sight_facts})
             capability = (
                 None
                 if rest or casting_activity
@@ -820,6 +858,11 @@ class RuleExecution:
                         capability = "combat.shield_knockout_unsupported"
             self.rules._verify_dnd_binding(package, row)
         choice_requested = result is not None and result.status == "needs_choice"
+        bardic_candidate = (
+            self.bardic_checks.candidate(command, request, result)
+            if command.actor_id == row["pc_actor_id"] and capability is None
+            else None
+        )
         with self.store.transaction(write=True):
             row = self.sessions._session(command.session_id, package, context)
             if shield_prompt is not None:
@@ -924,6 +967,13 @@ class RuleExecution:
                     != (prepare_error, spell_actor_ids, spell_positions)
                 )
                 or (snapshot is not None and build_snapshot(row) != snapshot)
+                or (
+                    check_sight_needs
+                    and self.rules.check_sight_facts(
+                        command.session_id, command.actor_id, check_sight_needs, package
+                    )
+                    != check_sight_facts
+                )
                 or self.rules._rng_context(row) != rng
             ):
                 status, error = "conflict", "version_conflict"
@@ -956,6 +1006,17 @@ class RuleExecution:
                 status = "pending_choice" if pending_choice is not None else "rejected"
             elif result.status != "accepted":
                 status, error = "rejected", result.error.code
+            elif (
+                bardic_candidate is not None
+                and (
+                    bardic_prompt := self.bardic_checks.open_if_held(
+                        row, package, command, context, request, result, bardic_candidate
+                    )
+                )
+                is not None
+            ):
+                pending_choice, version = bardic_prompt
+                status = "pending_choice"
             else:
                 if not (exploration_spell or rest):
                     self.sessions._npc_combat_target_guard(

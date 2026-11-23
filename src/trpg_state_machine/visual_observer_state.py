@@ -3,10 +3,13 @@
 from dnd5e_engine.visual_sight import SEE_INVISIBLE_KEY
 
 
-def sight_conditions_unknown(characters, sid, actor_id):
-    """Reject unreviewed sight conditions on one actor while admitting known names."""
+def sight_conditions_unknown(characters, sid, actor_id, *, neutral_conditions=frozenset()):
+    """Reject unreviewed sight conditions, with any caller-proven neutral conditions."""
     independent = characters.condition_names(sid, actor_id)
-    if any(name not in {"blinded", "deafened", "invisible"} for name in independent):
+    if any(
+        name not in {"blinded", "deafened", "invisible"} and name not in neutral_conditions
+        for name in independent
+    ):
         return True
     linked = characters.effects
     if not linked.has_linked_conditions(sid, actor_id, capability="observer_visibility"):
@@ -14,7 +17,8 @@ def sight_conditions_unknown(characters, sid, actor_id):
     # Keep the established RE proof for neutral linked region conditions and
     # reviewed Invisibility; only the newly supported Blinded gate needs more.
     return any(
-        name not in {"blinded", "deafened"} for name in linked.linked_condition_names(sid, actor_id)
+        name not in {"blinded", "deafened"} and name not in neutral_conditions
+        for name in linked.linked_condition_names(sid, actor_id)
     )
 
 
