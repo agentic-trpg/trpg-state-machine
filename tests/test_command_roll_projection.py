@@ -4,6 +4,7 @@ import json
 import sqlite3
 
 import pytest
+from dnd5e_engine.evaluation_rng import RNGState
 from dnd5e_engine.types.conditions import ActiveCondition
 from dnd5e_srd_data import BundledAssetLoader
 from item_support import NPC
@@ -104,6 +105,87 @@ def test_force_roll_is_persisted_projected_reopened_and_replayed(tmp_path, conte
             reopened.get_command_rolls(sid, command.command_id, package, context=context)
             == projected
         )
+
+
+def test_pick_lock_tool_and_skill_advantage_survives_reopen_and_replay(tmp_path, context):
+    """Project both RE dice from an authorized JSON lock pick and its durable receipt."""
+    data, loader = check_data(dc=0)
+    for foundation in ("combat_foundation", "noncombat_foundation"):
+        pc = data["rule_bindings"][foundation]["snapshot"]["character_states"][0]
+        pc["skill_proficiencies"] = [*pc["skill_proficiencies"], "sleight_of_hand"]
+        pc["tool_proficiencies"] = [*pc["tool_proficiencies"], "thieves-tools"]
+    package = _validate(data)
+    path = tmp_path / "pick-rolls.sqlite"
+    with StateMachine(path, dnd_loader=loader) as sm:
+        sid = create(sm, package, context)
+        acquire(sm, sid, package, context, iid=CRED, key="pick-tool")
+        state = sm.read_session(sid, package, context=context)
+        command = world_command_from_data(
+            json.loads(
+                json.dumps(
+                    {
+                        "schema_version": "sm-command/1",
+                        "session_id": sid,
+                        "command_id": "pick.roll",
+                        "actor_id": state.pc_actor_id,
+                        "command_type": "world.pick_lock",
+                        "expected_world_version": state.world_version,
+                        "payload": {
+                            "scene_id": A,
+                            "object_id": DOOR,
+                            "lock_id": "lock.outer",
+                            "tool_instance_id": CRED,
+                            "expected_cell": "0,0",
+                        },
+                    }
+                )
+            )
+        )
+        before = sm.read_rng_context(sid, package, context=context)
+        receipt = sm.submit_command(command, package, context=context)
+        assert receipt.status == "committed", receipt
+        projected = sm.get_command_rolls(sid, command.command_id, package, context=context)
+        assert projected["status"] == "committed"
+        (roll,) = projected["rolls"]
+        event = sm._read_event(sid, roll["event_seq"])
+        assert event.event_type == "rules.check_rolled"
+        assert roll["roll_detail"] == event.payload["engine_event"]["roll_detail"]
+        engine = event.payload["engine_event"]
+        assert (roll["type"], roll["advantage"], roll["sources"]) == (
+            "check_rolled",
+            "advantage",
+            ["flag"],
+        )
+        assert engine["advantage_sources"] == ["flag"]
+        assert engine["disadvantage_sources"] == []
+        expected = before.state.restore()
+        faces = [expected.randint(1, 20) for _ in range(2)]
+        assert faces[0] != faces[1]
+        die = roll["roll_detail"]["d20"]
+        assert die == {"faces": faces, "kept_index": faces.index(max(faces)), "origin": "rng"}
+        assert roll["natural"] == max(faces)
+        assert roll["roll_total"] == roll["natural"] + roll["modifier"]
+        assert roll["succeeded"] is True
+        locks = sm.get_object(sid, state.pc_actor_id, DOOR, package, context=context)[
+            "locks_for_object"
+        ]
+        lock_states = {entry["lock_id"]: entry["locked"] for entry in locks}
+        assert lock_states == {"lock.outer": False, "lock.inner": True}
+        after = sm.read_rng_context(sid, package, context=context)
+        assert after.state == RNGState.capture(expected)
+        other = TrustedContext("authenticated:bob", "player.bob", ())
+        with pytest.raises(StateMachineError, match="Context does not control"):
+            sm.get_command_rolls(sid, command.command_id, package, context=other)
+        assert sm.submit_command(command, package, context=context) == receipt
+        assert sm.get_command_rolls(sid, command.command_id, package, context=context) == projected
+        assert sm.read_rng_context(sid, package, context=context) == after
+    with StateMachine(path, dnd_loader=loader) as reopened:
+        assert (
+            reopened.get_command_rolls(sid, command.command_id, package, context=context)
+            == projected
+        )
+        assert reopened.submit_command(command, package, context=context) == receipt
+        assert reopened.read_rng_context(sid, package, context=context) == after
 
 
 def test_faerie_rolls_follow_two_creature_targets(timed_spell_world):
