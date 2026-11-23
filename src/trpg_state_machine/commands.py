@@ -678,11 +678,75 @@ class CommandRuntime:
             receipt = self._session_runtime.receipt(session_id, command_id)
             if receipt is None:
                 return None
-            if receipt.actor_id != row["pc_actor_id"] and (
-                receipt.actor_id not in context.controlled_npc_ids
-            ):
-                raise StateMachineError("unauthorized", "Actor control grant has been revoked")
+            self._authorize_receipt_actor(row, receipt, context)
             return receipt
+
+    @staticmethod
+    def _authorize_receipt_actor(row, receipt, context):
+        """Enforce the current PC or controlled-NPC grant on a persisted receipt."""
+        if receipt.actor_id != row["pc_actor_id"] and (
+            receipt.actor_id not in context.controlled_npc_ids
+        ):
+            raise StateMachineError("unauthorized", "Actor control grant has been revoked")
+
+    def get_command_rolls(self, session_id, command_id, package, *, context):
+        """Project committed check/save dice evidence for one authorized command.
+
+        Return None for an unknown command, otherwise a JSON-ready mapping with
+        receipt status and rolls in committed event order. A roll_detail of None
+        means that the stored event lacks detailed dice evidence, whether from an
+        older event or a path without that evidence; an empty rolls list means
+        the receipt has no check/save event. This read never evaluates rules or
+        RNG and only follows event identities in the durable receipt.
+        """
+        with self._transaction():
+            row = self._session(session_id, package, context)
+            receipt = self._session_runtime.receipt(session_id, command_id)
+            if receipt is None:
+                return None
+            self._authorize_receipt_actor(row, receipt, context)
+            rolls = []
+            for seq in receipt.event_seqs:
+                event = self._read_event(session_id, seq)
+                if event.source_command_id != command_id:
+                    raise StateMachineError(
+                        "invalid_event", "Receipt event has another command source"
+                    )
+                engine = event.payload.get("engine_event")
+                if not isinstance(engine, dict) or engine.get("type") not in (
+                    "check_rolled",
+                    "save_rolled",
+                ):
+                    continue
+                rolls.append(
+                    {
+                        "event_seq": seq,
+                        "type": engine["type"],
+                        **{
+                            field: engine[field]
+                            for field in (
+                                "actor_id",
+                                "target_id",
+                                "ability",
+                                "dc",
+                                "advantage",
+                                "natural",
+                                "modifier",
+                                "roll_total",
+                                "succeeded",
+                                "sources",
+                            )
+                            if field in engine
+                        },
+                        "roll_detail": engine.get("roll_detail"),
+                    }
+                )
+            return {
+                "session_id": session_id,
+                "command_id": command_id,
+                "status": receipt.status,
+                "rolls": rolls,
+            }
 
 
 def world_command_from_data(data):
