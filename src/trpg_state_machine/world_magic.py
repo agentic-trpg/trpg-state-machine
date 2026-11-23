@@ -424,13 +424,16 @@ class WorldMagic:
     def _visual_illumination_anchors_uncached(self, sid, scene):
         """Resolve indexed visual members only while building the shared selection."""
         db = self.store.connection
-        tick = self.h.facts.time_state(sid)[1]
-        anchors = []
-        for anchor in db.execute(
+        records = db.execute(
             "SELECT * FROM visual_light_anchors WHERE session_id=? AND scene_id=? "
             "ORDER BY source_id,target_id",
             (sid, scene),
-        ):
+        ).fetchall()
+        if not records:
+            return ()
+        tick = self.h.facts.time_state(sid)[1]
+        anchors = []
+        for anchor in records:
             kind, identity = anchor["target_kind"], anchor["target_id"]
             target = db.execute(
                 "SELECT dim_radius_ft FROM target_visual_effects WHERE session_id=? "

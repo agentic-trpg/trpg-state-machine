@@ -83,6 +83,15 @@ def work(sm, monkeypatch):
                         counts["sense_point_queries"] += 1
                     else:
                         counts["unscoped_sense_queries"] += 1
+                if _label == "ram_queries" and "FROM target_visual_effects" in args[0]:
+                    if args[0] == (
+                        "SELECT dim_radius_ft FROM target_visual_effects WHERE session_id=? "
+                        "AND target_kind=? AND target_id=?"
+                    ):
+                        counts["visual_effect_point_queries"] += 1
+                        counts[("visual_effect_point_queries", args[1])] += 1
+                    else:
+                        counts["unscoped_visual_effect_queries"] += 1
                 if _label == "dependency_checks":
                     key, _ = args[0]
                     if key == "character_conditions":
@@ -93,7 +102,11 @@ def work(sm, monkeypatch):
                         predicates = literal_eval(key.removeprefix("instance_configs#"))
                         counts[("instance_config_range", predicates)] += 1
                     table, _, projection = key.partition("@")
-                    if projection and table in ("scene_environments", "ongoing_effects"):
+                    if projection and table in (
+                        "character_conditions",
+                        "scene_environments",
+                        "ongoing_effects",
+                    ):
                         predicates, _ = literal_eval(projection)
                         counts[f"{table}_checks"] += 1
                         counts[(table, predicates)] += 1
@@ -248,10 +261,12 @@ def test_nonmatching_mechanism_records(tmp_path, context, monkeypatch, n, family
         assert counts["represented_trigger_records"] == 0
         assert counts["index_candidate_records"] == 0
         assert counts["mechanism_index_checks"] == 1
-        # Scene record/version lookup now replaces content-key map lookup.
-        # Four point condition probes now guard mechanical actors at admission
-        # and evidence capture. They are fixed target dependencies, not scene scans.
-        assert counts["condition_checks"] == 4
+        # Movement and sight share the actor's actual condition names. The sight
+        # projection replaces repeated existence probes with one actor-local read.
+        assert counts["condition_checks"] == 2
+        projected_conditions = counts["character_conditions_checks"]
+        condition_scope = (("actor_id", motion.actor_id), ("session_id", sid))
+        assert projected_conditions == counts[("character_conditions", condition_scope)] == 1
         # Region membership resolves the source and destination from this Scene.
         scene_environment_checks = counts["scene_environments_checks"]
         assert (
@@ -278,6 +293,16 @@ def test_nonmatching_mechanism_records(tmp_path, context, monkeypatch, n, family
         assert source_checks == counts[("light_sources", repr(A))] == 3
         # Only the two spell facts are additional to the existing emitter stamp.
         spell_source_checks = source_checks - 1
+        # Position publication checks emitters on the moving actor and its carried item.
+        moving_actor = (sid, "creature", motion.actor_id)
+        carried_item = (sid, "object", "inventory.lantern_blade")
+        assert counts["visual_effect_point_queries"] == 2
+        assert (
+            counts[("visual_effect_point_queries", moving_actor)]
+            == counts[("visual_effect_point_queries", carried_item)]
+            == 1
+        )
+        assert counts["unscoped_visual_effect_queries"] == 0
         # A cold cache can recheck this same Session configuration point at
         # separate stages. Bound it independently of the mechanism budget.
         session_config_checks = counts[
@@ -290,6 +315,7 @@ def test_nonmatching_mechanism_records(tmp_path, context, monkeypatch, n, family
         assert (
             counts["dependency_checks"]
             - counts["condition_checks"]
+            - projected_conditions
             - scene_environment_checks
             - actor_effect_checks
             - linked_condition_checks

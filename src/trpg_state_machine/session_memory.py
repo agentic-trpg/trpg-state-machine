@@ -737,11 +737,7 @@ class SessionMemory:
             "SELECT object_id FROM object_lights WHERE session_id=? AND object_id=?", (sid, oid)
         ).fetchone():
             return True
-        if self.select(
-            "SELECT target_id FROM target_visual_effects WHERE session_id=? "
-            "AND target_kind=? AND target_id=? AND dim_radius_ft>0",
-            (sid, "object", oid),
-        ).fetchone():
+        if self._has_visual_emitter(sid, "object", oid):
             return True
         tables = ("object_lights",)
         if "magic_light_anchors" in self.columns:
@@ -953,11 +949,7 @@ class SessionMemory:
             for row in (old, new)
             if row is not None and row["cell"] is not None
         }
-        if self.select(
-            "SELECT target_id FROM target_visual_effects WHERE session_id=? "
-            "AND target_kind=? AND target_id=? AND dim_radius_ft>0",
-            (sid, "creature", actor_id),
-        ).fetchone():
+        if self._has_visual_emitter(sid, "creature", actor_id):
             for scene in scenes:
                 self._advance_field("light_sources", sid, scene)
         versions = self.store._scope.memory_versions
@@ -969,6 +961,17 @@ class SessionMemory:
         if actor_light_opaque(self.store, sid, actor_id):
             for scene in observed:
                 self._advance_field("light_candidates", sid, scene)
+
+    def _has_visual_emitter(self, sid, kind, target_id):
+        """Read emitter membership through the exact visual target's effect range."""
+        return any(
+            radius > 0
+            for (radius,) in self.select(
+                "SELECT dim_radius_ft FROM target_visual_effects WHERE session_id=? "
+                "AND target_kind=? AND target_id=?",
+                (sid, kind, target_id),
+            )
+        )
 
     def _light_actor_config_changed(self, sid, actor_id, old, new):
         """Dirty the actual occupied scene when its Actor opacity is configured or removed."""
