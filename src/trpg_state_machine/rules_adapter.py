@@ -38,11 +38,10 @@ from dnd5e_engine.evaluation_contracts import (
     RuleEvaluationResult,
     SpellWillingnessChoice,
 )
-from dnd5e_engine.evaluation_environmental_contracts import (
-    EnvironmentalCreatureTarget,
-    EnvironmentalMagicEffectTarget,
+from dnd5e_engine.evaluation_environmental_spells import (
+    EnvironmentalSpellPreparation,
+    prepare_environmental_spell,
 )
-from dnd5e_engine.evaluation_environmental_spells import environmental_spell_schema_version
 from dnd5e_engine.evaluation_haste import has_haste_effects, haste_speed
 from dnd5e_engine.evaluation_movement import timed_walk_bonuses, walk_speed
 from dnd5e_engine.evaluation_preflight import template_support_failure
@@ -1569,6 +1568,12 @@ class RulesAdapter:
         """Translate SM's durable identity to the pinned RE contract."""
         return RulesetBinding(**asdict(_binding(row)))
 
+    def prepare_environmental_spell(self, command, positions) -> EnvironmentalSpellPreparation:
+        """Get RE's required actor IDs and schema from the fixed loader and World facts."""
+        return prepare_environmental_spell(
+            command.payload, command.actor_id, positions, self.loader
+        )
+
     def _pinned_row(self, session_id, package):
         """Read the Session and verify its fixed Package pin."""
         row = self._conn.execute(
@@ -2291,14 +2296,20 @@ class RulesAdapter:
         *,
         row=None,
         spell_positions=None,
+        environmental_schema_version=None,
         multi_spell_positions=None,
         exploration_charge=False,
         spell_end_applications=(),
         item_area_facts=None,
         independent_condition=None,
     ):
-        """Build a rules request with durable Session identity and isolated fixed inputs."""
+        """Build a rules request with the Session binding and isolated fixed inputs.
+
+        Environmental casts use the schema chosen when RE declared their required actors.
+        """
         row = row if row is not None else self._pinned_row(command.session_id, package)
+        if type(command.payload) is ExplorationEnvironmentalSpellCastPayload:
+            assert environmental_schema_version is not None
         cast_version = (
             IDENTIFY_ACTIVITY_SCHEMA_VERSION
             if type(command.payload) is ExplorationCastActivityPayload
@@ -2307,14 +2318,7 @@ class RulesAdapter:
             if type(command.payload) is ExplorationCastActivityPayload
             else MULTI_SPELL_SCHEMA_VERSION
             if type(command.payload) is ExplorationMultiSpellCastPayload
-            else environmental_spell_schema_version(
-                command.payload.spell_id,
-                self.loader,
-                ending=isinstance(
-                    command.payload.target,
-                    (EnvironmentalCreatureTarget, EnvironmentalMagicEffectTarget),
-                ),
-            )
+            else environmental_schema_version
             if type(command.payload) is ExplorationEnvironmentalSpellCastPayload
             else "engine-evaluation/30"
             if command.command_type == "combat.intent"

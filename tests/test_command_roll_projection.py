@@ -4,12 +4,15 @@ import json
 import sqlite3
 
 import pytest
+from dnd5e_engine.types.conditions import ActiveCondition
+from item_support import NPC
 from lock_support import CRED, DOOR, A
 from spatial_support import create
 from test_faerie_fire import _cast
 from test_lockable_passages import acquire
 from test_openable_checks import check_data
 from test_scoped_runtime_validation import measure
+from test_spell_attack_cast import OTHER_ENEMY
 from test_timed_spell_cast import timed_spell_world as timed_spell_world
 
 from trpg_state_machine import (
@@ -104,9 +107,18 @@ def test_force_roll_is_persisted_projected_reopened_and_replayed(tmp_path, conte
 
 def test_faerie_rolls_follow_two_creature_targets(timed_spell_world):
     def configure(data):
-        """Admit the fixture's second NPC within the selected cube."""
+        """Admit two targets in the cube, with one under the Restrained condition."""
         data["rule_bindings"].pop("combat_foundation")
         data["actors"][0]["initial_cell"] = "2,0"
+        for actor in data["rule_bindings"]["noncombat_foundation"]["snapshot"]["character_states"]:
+            if actor["entity_id"] == OTHER_ENEMY:
+                actor["conditions"] = [
+                    ActiveCondition(
+                        condition="restrained",
+                        source_entity_id="implied:condition",
+                        scope="session",
+                    ).model_dump(mode="json")
+                ]
 
     session = timed_spell_world(
         database="faerie-projection.sqlite",
@@ -118,19 +130,22 @@ def test_faerie_rolls_follow_two_creature_targets(timed_spell_world):
     )
     sm, sid, package, context = session
     with sm:
+        rng_before = sm.read_rng_context(sid, package, context=context)
         command, receipt = _cast(session, "faerie.roll")
         assert receipt.status == "committed"
         projected = sm.get_command_rolls(sid, command.command_id, package, context=context)
         rolls = projected["rolls"]
         assert len(rolls) == 2
         assert all(roll["type"] == "save_rolled" for roll in rolls)
-        assert len({roll["target_id"] for roll in rolls}) >= 2
+        assert [roll["target_id"] for roll in rolls] == [OTHER_ENEMY, NPC]
+        assert [roll["advantage"] for roll in rolls] == ["disadvantage", "normal"]
+        assert [roll["roll_detail"]["d20"]["faces"] for roll in rolls] == [[13, 14], [2]]
+        assert [roll["natural"] for roll in rolls] == [13, 2]
         assert [roll["event_seq"] for roll in rolls] == sorted(roll["event_seq"] for roll in rolls)
         for roll in rolls:
             stored = sm._read_event(sid, roll["event_seq"])
             assert roll["roll_detail"] == stored.payload["engine_event"].get("roll_detail")
             assert roll["roll_detail"]["status"] == "rolled"
-            assert len(roll["roll_detail"]["d20"]["faces"]) == 1
         failed = {roll["target_id"] for roll in rolls if not roll["succeeded"]}
         with sm._transaction():
             affected = {
@@ -143,6 +158,7 @@ def test_faerie_rolls_follow_two_creature_targets(timed_spell_world):
             }
         assert affected == failed
         rng_after = sm.read_rng_context(sid, package, context=context)
+        assert rng_after.version == rng_before.version + 1
         assert sm.submit_command(command, package, context=context) == receipt
         assert sm.read_rng_context(sid, package, context=context) == rng_after
         assert sm.get_command_rolls(sid, command.command_id, package, context=context) == projected

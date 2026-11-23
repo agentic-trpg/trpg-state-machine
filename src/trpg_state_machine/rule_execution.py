@@ -455,6 +455,7 @@ class RuleExecution:
         rest_plan = None
         cast_record = None
         spell_actor_ids, spell_positions = None, None
+        environmental_schema_version = None
         multi_spell_positions = None
         sight_range = self._spell_sight_range(command)
         charged_item, item_area_facts = None, None
@@ -607,11 +608,6 @@ class RuleExecution:
                     row, command, package
                 )
             elif environmental_spell and prepare_error is None:
-                spell_actor_ids = (
-                    tuple(dict.fromkeys((command.actor_id, command.payload.target.target_id)))
-                    if isinstance(command.payload.target, EnvironmentalCreatureTarget)
-                    else (command.actor_id,)
-                )
                 spell_positions = self.world.magic.cast_positions(row, package, command)
                 if spell_positions is None:
                     prepare_error = (
@@ -622,17 +618,12 @@ class RuleExecution:
                         )
                         else "spell.target"
                     )
-                elif command.payload.spell_id == "faerie-fire":
-                    spell_actor_ids = tuple(
-                        dict.fromkeys(
-                            (command.actor_id,)
-                            + tuple(
-                                occupant.target_id
-                                for occupant in spell_positions.visual_occupants
-                                if occupant.target_kind == "creature"
-                            )
-                        )
+                else:
+                    environmental_preparation = self.rules.prepare_environmental_spell(
+                        command, spell_positions
                     )
+                    spell_actor_ids = environmental_preparation.actor_ids
+                    environmental_schema_version = environmental_preparation.schema_version
             elif multi_spell and prepare_error is None:
                 prepare_error, spell_actor_ids, multi_spell_positions = (
                     project_multi_spell_positions(row)
@@ -712,6 +703,7 @@ class RuleExecution:
                 rng,
                 row=row,
                 spell_positions=spell_positions,
+                environmental_schema_version=environmental_schema_version,
                 multi_spell_positions=multi_spell_positions,
                 exploration_charge=charged_item is not None,
                 spell_end_applications=spell_end_applications,

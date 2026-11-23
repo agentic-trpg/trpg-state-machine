@@ -1,6 +1,7 @@
 """Public Faerie Fire cast and source-linked visual effect smoke tests."""
 
 import json
+from dataclasses import replace
 
 from item_support import NPC, ROPE, A, B
 from spatial_support import submit as submit_world
@@ -69,7 +70,7 @@ def _session(
     )
 
 
-def _cast(session, command_id="faerie", *, cell="2,0"):
+def _cast_command(session, command_id, *, cell):
     """Decode the same JSON command accepted by the public entry point."""
     sm, sid, package, context = session
     state = sm.read_session(sid, package, context=context)
@@ -88,7 +89,12 @@ def _cast(session, command_id="faerie", *, cell="2,0"):
             "target": {"kind": "point", "cell_id": cell},
         },
     }
-    command = world_command_from_data(json.loads(json.dumps(wire)))
+    return world_command_from_data(json.loads(json.dumps(wire)))
+
+
+def _cast(session, command_id="faerie", *, cell="2,0"):
+    sm, _, package, context = session
+    command = _cast_command(session, command_id, cell=cell)
     return command, sm.submit_command(command, package, context=context)
 
 
@@ -173,16 +179,22 @@ def test_faerie_fire_object_light_follows_carrier(timed_spell_world):
 
 
 def test_visual_light_anchors_do_not_scan_unrelated_world_growth(timed_spell_world):
-    """Selected source reads stay fixed as other-scene actors and objects grow."""
+    """Cast and selected source reads stay fixed as other-scene instances grow."""
     observed = []
+    casts = []
     for growth in (0, 25):
         session = _session(timed_spell_world, database=f"faerie-scale-{growth}.sqlite")
-        sm, sid, package, _ = session
+        sm, sid, package, context = session
         with sm:
             if growth:
                 _grow_remote(sm, sid, growth)
-            _, receipt = _cast(session, "scale", cell="0,0")
+            command = _cast_command(session, "scale", cell="2,0")
+            with measure(sm) as (counts, _):
+                receipt = sm.submit_command(command, package, context=context)
             assert receipt.status == "committed", receipt
+            casts.append(
+                tuple(counts[key] for key in ("sql_selects", "sql_rows", "returned_bytes"))
+            )
             with sm._store.transaction():
                 with measure(sm) as (counts, _):
                     anchors = sm._world.magic.visual_illumination_anchors(sid, A)
@@ -191,6 +203,38 @@ def test_visual_light_anchors_do_not_scan_unrelated_world_growth(timed_spell_wor
                     tuple(counts[key] for key in ("sql_selects", "sql_rows", "returned_bytes"))
                 )
     assert observed[0] == observed[1]
+    assert casts[0] == casts[1]
+
+
+def test_environmental_cast_uses_prepared_actor_order(timed_spell_world, monkeypatch):
+    """The public cast builds and rechecks the snapshot in RE's declared order."""
+    session = _session(timed_spell_world)
+    sm, _, _, _ = session
+    prepare = sm._rules.prepare_environmental_spell
+    snapshot = sm._rules._noncombat_snapshot
+    prepared = []
+    assembled = []
+
+    def reverse_prepared_order(command, positions):
+        result = prepare(command, positions)
+        assert result.actor_ids == (command.actor_id, NPC)
+        result = replace(result, actor_ids=result.actor_ids[::-1])
+        prepared.append(result.actor_ids)
+        return result
+
+    def record_snapshot(*args, **kwargs):
+        result = snapshot(*args, **kwargs)
+        assembled.append(tuple(actor.entity_id for actor in result.character_states))
+        return result
+
+    with sm:
+        monkeypatch.setattr(sm._rules, "prepare_environmental_spell", reverse_prepared_order)
+        monkeypatch.setattr(sm._rules, "_noncombat_snapshot", record_snapshot)
+        command, receipt = _cast(session)
+        assert receipt.status == "committed", receipt
+    assert prepared == [(NPC, command.actor_id)]
+    assert len(assembled) == 2
+    assert assembled == prepared * 2
 
 
 def test_unadmitted_save_trait_rejects_before_payment_or_rng(timed_spell_world):
