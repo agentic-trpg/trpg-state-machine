@@ -16,6 +16,7 @@ from dnd5e_engine.evaluation_contracts import (
     ExplorationMultiSpellCastPayload,
     ExplorationSpellCastPayload,
     ItemUsePayload,
+    SavePayload,
 )
 from dnd5e_engine.evaluation_rng import RNGContext, RNGState
 from pydantic import ValidationError
@@ -53,6 +54,7 @@ def _fingerprint(command, digest, binding, context):
         CombatIntentPayload,
         CombatClosePayload,
         CheckPayload,
+        SavePayload,
         ItemUsePayload,
         ExplorationItemUsePayload,
         ExplorationMultiSpellCastPayload,
@@ -223,6 +225,7 @@ class SessionRuntime:
             or command.command_type
             in (
                 "rules.check",
+                "rules.save",
                 "combat.initialize",
                 "combat.intent",
                 "combat.item",

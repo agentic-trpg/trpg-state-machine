@@ -15,6 +15,7 @@ from dnd5e_engine.evaluation_contracts import (
     ExplorationMultiSpellCastPayload,
     ExplorationSpellCastPayload,
     ItemUsePayload,
+    SavePayload,
 )
 from pydantic import ValidationError
 
@@ -110,6 +111,7 @@ OPERATIONS = {
     "session.advance_time": AdvanceSessionTime,
     "session.set_time_running": SetTimeRunning,
     "rules.check": CheckPayload,
+    "rules.save": SavePayload,
     "combat.close": CombatClosePayload,
     "combat.intent": CombatIntentPayload,
     "combat.item": ItemUsePayload,
@@ -201,6 +203,7 @@ class TypedCommand:
         | FinishSpellCast
         | CombatClosePayload
         | CheckPayload
+        | SavePayload
         | AdvanceGameTime
         | AdvanceSessionTime
         | SetTimeRunning
@@ -441,6 +444,7 @@ def validate_command(command: TypedCommand) -> None:
         CombatIntentPayload,
         CombatClosePayload,
         CheckPayload,
+        SavePayload,
         ItemUsePayload,
         ExplorationItemUsePayload,
         ExplorationEnvironmentalSpellCastPayload,
@@ -466,6 +470,8 @@ def validate_command(command: TypedCommand) -> None:
             and command.payload.actor_id != command.actor_id
         ):
             raise StateMachineError("invalid_actor", "Check subject differs from trusted actor")
+        if type(command.payload) is SavePayload and command.payload.target_id != command.actor_id:
+            raise StateMachineError("invalid_actor", "Save subject differs from trusted actor")
         return
     if type(command.payload) is RuleOperation:
         operation = command.payload
@@ -559,6 +565,7 @@ class CommandRuntime:
             FinishSpellCast,
             CombatClosePayload,
             CheckPayload,
+            SavePayload,
             *OPENABLE_CHECK_OPERATIONS,
             CheckMechanism,
         ):
@@ -784,6 +791,7 @@ def world_command_from_data(data):
         "world.pickup_item",
         "world.drop_item",
         "world.use_item",
+        "rules.save",
         "world.cast_spell",
         "world.cast_spell_many",
         "choice.respond",
@@ -831,6 +839,8 @@ def world_command_from_data(data):
             if kind in ENVIRONMENT_COMMANDS
             else ExplorationEnvironmentalSpellCastPayload(**payload)
             if kind == "world.cast_spell" and "target" in payload
+            else SavePayload.model_validate_json(json.dumps(payload))
+            if kind == "rules.save"
             else OPERATIONS[kind](**payload)
         )
         ref = data.get("time_wait")

@@ -20,6 +20,7 @@ from dnd5e_engine.evaluation_contracts import (
     IndependentConditionSelection,
     ItemUsePayload,
     RestPayload,
+    SavePayload,
 )
 from dnd5e_engine.evaluation_delta import ConditionsUpdate, TurnUpdate
 from dnd5e_engine.evaluation_environmental_contracts import (
@@ -457,6 +458,7 @@ class RuleExecution:
         mechanism_check = type(command.payload) is CheckMechanism
         domain_check = object_check or mechanism_check
         public_check = type(command.payload) is CheckPayload
+        public_save = type(command.payload) is SavePayload
         check_service = (
             self.world.objects.mechanisms if mechanism_check else self.world.objects.openable
         )
@@ -560,6 +562,8 @@ class RuleExecution:
                     )
                 )
                 return self.rules._noncombat_snapshot(value, package, actor_ids=actor_ids)
+            if public_save:
+                return self.rules._noncombat_snapshot(value, actor_ids=(command.actor_id,))
             if public_check or domain_check or exploration_item:
                 return self.rules._noncombat_snapshot(value, package)
             intent_type = getattr(command.payload, "intent_type", None)
@@ -582,6 +586,10 @@ class RuleExecution:
                 if replay := self.runtime._command_replay(command, fingerprint):
                     return replay
                 guard_shield_window(self._conn, row)
+            if public_save and self.world._active_combat(command.session_id):
+                raise StateMachineError(
+                    "unsupported_operation", "Standalone saves require exploration"
+                )
             self.sessions._npc_combat_location_guard(shield_original or command)
             if row["evaluator_version"] != EVALUATOR_VERSION:
                 raise StateMachineError(
@@ -712,7 +720,7 @@ class RuleExecution:
                     check_request, package
                 )
             if (
-                type(command.payload) is not CheckPayload
+                type(command.payload) not in (CheckPayload, SavePayload)
                 and not domain_check
                 and not (exploration_rule or rest)
             ):
@@ -907,6 +915,10 @@ class RuleExecution:
                 if replay := self.runtime._command_replay(command, fingerprint):
                     return replay
                 guard_shield_window(self._conn, row)
+            if public_save and self.world._active_combat(command.session_id):
+                raise StateMachineError(
+                    "unsupported_operation", "Standalone saves require exploration"
+                )
             self.sessions._npc_combat_location_guard(shield_original or command)
             version = row["world_version"]
             status, error = "committed", None
@@ -1219,7 +1231,9 @@ class RuleExecution:
                             command.session_id,
                             package,
                             "rules.check_rolled"
-                            if type(command.payload) is CheckPayload or domain_check
+                            if public_check or domain_check
+                            else "rules.save_rolled"
+                            if public_save
                             else "world.item_used"
                             if exploration_item
                             else "world.spell_cast"
@@ -1258,7 +1272,7 @@ class RuleExecution:
                                             ),
                                         }
                                     }
-                                    if type(command.payload) is CheckPayload or domain_check
+                                    if public_check or public_save or domain_check
                                     else {"item_instance_id": command.payload.instance_id}
                                     if exploration_item
                                     else {

@@ -38,6 +38,7 @@ from dnd5e_engine.evaluation_contracts import (
     RuleError,
     RuleEvaluationRequest,
     RuleEvaluationResult,
+    SavePayload,
     SpellWillingnessChoice,
 )
 from dnd5e_engine.evaluation_environmental_spells import (
@@ -106,6 +107,7 @@ from .damage_adoption import (
 )
 from .dnd_checks import check_changes
 from .dnd_closure import closure_changes
+from .dnd_saves import save_changes
 from .errors import StateMachineError
 from .exploration_spell_adoption import (
     casting_activity_changes,
@@ -1357,6 +1359,8 @@ def validate_dnd_result(request, result, *, loader=None):
         return result, ()
     if request.operation_kind == "rules.check":
         return result, check_changes(request, result)
+    if request.operation_kind == "rules.save":
+        return result, save_changes(request, result)
     if request.operation_kind == "rules.rest":
         return result, rest_changes(request, result)
     if type(request.payload) is ExplorationCastActivityPayload:
@@ -1925,6 +1929,8 @@ class RulesAdapter:
 
     def _dnd_capability(self, payload, actor_id, snapshot):
         """Determine command support from actual actor, monster and operation state."""
+        if type(payload) is SavePayload:
+            return None
         if type(payload) is CheckPayload:
             return "pending_choice_unsupported" if payload.dc is None else None
         if type(payload) is CombatClosePayload:

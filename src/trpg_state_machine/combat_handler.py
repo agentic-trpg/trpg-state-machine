@@ -11,6 +11,7 @@ from dnd5e_engine.evaluation_contracts import (
     ExplorationMultiSpellCastPayload,
     ExplorationSpellCastPayload,
     ItemUsePayload,
+    SavePayload,
 )
 
 from .combat import (
@@ -232,6 +233,7 @@ class CombatHandler:
             FinishSpellCast,
             CombatClosePayload,
             CheckPayload,
+            SavePayload,
             *OPENABLE_CHECK_OPERATIONS,
             CheckMechanism,
         ):

@@ -12,6 +12,7 @@ from dnd5e_engine.evaluation_contracts import (
     ExplorationMultiSpellCastPayload,
     ExplorationSpellCastPayload,
     ItemUsePayload,
+    SavePayload,
 )
 
 from ._operations import (
@@ -161,8 +162,10 @@ class SessionAccess:
             and not context.can_advance_time
         ):
             raise StateMachineError("unauthorized", "Trusted game-time grant required")
-        if isinstance(payload, CheckPayload) and not context.can_adjudicate_checks:
+        if isinstance(payload, (CheckPayload, SavePayload)) and not context.can_adjudicate_checks:
             raise StateMachineError("unauthorized", "Trusted GM adjudication grant required")
+        if type(payload) is SavePayload and actor_id != row["pc_actor_id"]:
+            raise StateMachineError("unauthorized", "Only the selected PC can make this save")
         if (
             (type(payload) in WORLD_CAPABILITY_OPERATIONS and actor_id != row["pc_actor_id"])
             or isinstance(payload, MoveActor)
