@@ -205,6 +205,11 @@ SM 按这些角色组装快照。选中目标后由同一确切效果提供随�
 World 在同一次提交采用条件后果、机关生命周期和回执。见
 [规则事实与探索验收](../../agentic-trpg/docs/MODULE_CONTRACTS.md#42a-按规则声明补齐求值事实)。
 
+`/68` 的妖火逐目标豁免复用确切持握装备加值。规则求值及两端结果校验使用 Session 绑定。
+机关可从当前 PC 的直接启灯或获准对象开关产生豁免，在 SQLite 写事务前准备并计算判定，
+随后共同提交源对象变化、选定后果、激活、骰点与 RNG。见
+[mechanism/4 探索豁免](MECHANISM_SERVICE.md#mechanism4-探索豁免)。
+
 `get_spatial_view` 的 `tremor_cells` 在授权读取中提供地点线索。`world_surfaces.py`
 读取当前角色接触、地图连续表面与可由物体位置切断的连接，通过局部范围查询收集候选；
 RE 判定能否定位。目睹目标仍按视野路径判断。已在效的 Stonecunning 使用石面限制，

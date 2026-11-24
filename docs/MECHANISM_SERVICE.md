@@ -284,8 +284,10 @@ their owners; no mechanism damage formula or status timer was added.
 
 在 Package /10 中声明 `mechanism/4`。命名操作的 `save_gate` 可为 null，
 或由 `source_ref`、`ability`、`dc`、`is_magical` 明确指定豁免。门槛操作要求
-`consume_on_noop: true`。由当前 PC 的直接启灯事件触发，选择器为
-`object_operation`、`object.light_changed`、`value: true`。
+`consume_on_noop: true`。选择器使用 `object_operation`。当前 PC 的直接启灯
+可用 `object.light_changed` 和 `value: true` 匹配。公开
+`set_object_state` 的状态转移可用 `object.state_changed` 和所需的开关状态匹配。
+灯光模式切换不会触发启灯豁免，派生对象事件不得冒用当前 PC 的直接交互。
 
 例如操作可在豁免失败时用下面已有的 World 动作打开一扇门。这是 Package 自定义规则示例。
 
@@ -306,6 +308,7 @@ their owners; no mechanism damage formula or status timer was added.
 ```
 
 豁免成功时照常记一次激活，门保持原状态。失败时沿既有机制采用配置的对象动作。
-启灯、豁免证据、RNG、对象变化与激活记账共用源命令的事务。授权调用方可从源命令
+SM 在短写事务前固定规则输入，RE 按触发顺序计算并产生骰点和 RNG 候选。
+源对象变化、豁免证据、RNG、分支后果与激活记账共用源命令的事务。授权调用方可从源命令
 的 `get_command_rolls()` 取得这次豁免。同命令重放返回原回执。
 当前配置不开放嵌套豁免的诗人激励选择或通用机关伤害。
