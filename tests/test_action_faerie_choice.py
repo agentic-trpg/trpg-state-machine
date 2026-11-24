@@ -9,6 +9,7 @@ from test_timed_spell_cast import timed_spell_world as timed_spell_world
 
 from trpg_state_machine import TypedCommand, world_command_from_data
 from trpg_state_machine.choice_models import ChoiceRespondOperationPayload
+from trpg_state_machine.errors import StateMachineError
 
 
 def bard_faerie_world(timed_spell_world, *, seed=1):
@@ -141,3 +142,32 @@ def test_faerie_answer_receipt_failure_rolls_back_and_keeps_candidate(
         assert sm._session_runtime.receipt(sid, answer.command_id) is None
         monkeypatch.setattr(sm._session_runtime, "record_receipt", original)
         assert sm.submit_command(answer, package, context=context).status == "committed"
+
+
+def test_faerie_decline_rechecks_grant_and_releases_stale_candidate(timed_spell_world):
+    sm, sid, package, context = bard_faerie_world(timed_spell_world, seed=2)
+    with sm:
+        actor = sm.read_session(sid, package, context=context).pc_actor_id
+        grant(sm, sid, actor)
+        source = cast(sm, sid, package, context)
+        pending = sm.submit_command(source, package, context=context)
+        assert pending.status == "pending_choice"
+        current = sm._world.characters.effects.held_bardic_inspiration(sid, actor, 0)
+        with sm._transaction(write=True):
+            sm._world.characters.effects.remove_effect(
+                sid, actor, "effect:inspired", current.origin
+            )
+        answer = TypedCommand(
+            sid,
+            "faerie-decline-stale",
+            actor,
+            "choice.respond",
+            ChoiceRespondOperationPayload(source.command_id, "decline"),
+            pending.world_version,
+        )
+        with pytest.raises(StateMachineError) as error:
+            sm.submit_command(answer, package, context=context)
+        assert error.value.code == "choice_stale"
+        assert not sm._has_pending_action_choice(sid)
+        assert sm._session_runtime.receipt(sid, source.command_id) is None
+        assert sm.submit_command(source, package, context=context).status == "committed"

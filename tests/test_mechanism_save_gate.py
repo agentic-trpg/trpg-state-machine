@@ -649,3 +649,32 @@ def test_overlapping_action_evaluations_publish_one_choice(tmp_path, context, mo
             == second_receipt[0]
         )
         assert state_rows(sm) == before
+
+
+def test_stale_decline_releases_mechanism_action(tmp_path, context):
+    """An externally removed grant closes the live choice without trapping the session."""
+    sm, sid, package, _ = setup_bardic_mechanism(tmp_path, context)
+    with sm:
+        actor = sm.read_session(sid, package, context=context).pc_actor_id
+        grant_bardic(sm, sid, actor)
+        source = command(sm, sid, package, context, SetLightEnabled(A, CRED, "0,0", True), "stale")
+        pending = sm.submit_command(source, package, context=context)
+        assert pending.status == "pending_choice"
+        current = sm._world.characters.effects.held_bardic_inspiration(sid, actor, 0)
+        with sm._transaction(write=True):
+            sm._world.characters.effects.remove_effect(
+                sid, actor, "effect:inspired", current.origin
+            )
+        answer = TypedCommand(
+            sid,
+            "stale-decline",
+            actor,
+            "choice.respond",
+            ChoiceRespondOperationPayload(source.command_id, "decline"),
+            pending.world_version,
+        )
+        with pytest.raises(StateMachineError) as error:
+            sm.submit_command(answer, package, context=context)
+        assert error.value.code == "choice_stale"
+        assert not sm._has_pending_action_choice(sid)
+        assert sm.get_command_receipt(sid, source.command_id, package, context=context) is None

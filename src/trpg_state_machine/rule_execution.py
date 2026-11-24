@@ -455,6 +455,9 @@ class RuleExecution:
                     if self.runtime._command_replay(pending.command, pending.fingerprint):
                         self.action_choices._discard_pending_action_choice(command.session_id)
                         raise StateMachineError("choice_closed", "Original cast already completed")
+                    if not self.action_choices._current_faerie_grant(pending):
+                        self.action_choices._discard_pending_action_choice(command.session_id)
+                        raise StateMachineError("choice_stale", "Faerie grant changed or expired")
                 return await self.submit(
                     pending.command,
                     package,
@@ -1057,6 +1060,9 @@ class RuleExecution:
                 if self.runtime._command_replay(command, fingerprint):
                     self.action_choices._discard_pending_action_choice(command.session_id)
                     raise StateMachineError("choice_closed", "Original cast already completed")
+                if not self.action_choices._current_faerie_grant(_faerie_resume[0]):
+                    self.action_choices._discard_pending_action_choice(command.session_id)
+                    raise StateMachineError("choice_stale", "Faerie grant changed or expired")
             if self.action_choices is not None:
                 self.action_choices._guard_pending_action_owner(
                     command.session_id,

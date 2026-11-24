@@ -466,6 +466,30 @@ class StateMachine(
         ):
             raise StateMachineError("action_choice_pending", "Resolve the current action")
 
+    def _current_faerie_grant(self, pending) -> bool:
+        """Match the exact fixed Inspired row and its live deadline for either reply."""
+        from .ongoing_effects import BARDIC_INSPIRATION_EFFECT_ID
+
+        sid = pending.command.session_id
+        target = pending.progress.pending_target_id
+        expected = tuple(
+            effect
+            for effect in pending.request.state_snapshot.effect_states
+            if effect.target_id == target and effect.id == BARDIC_INSPIRATION_EFFECT_ID
+        )
+        if len(expected) != 1:
+            return False
+        tick = self._world_facts.time_state(sid)[1]
+        return (
+            tick < pending.grant.expires_tick
+            and self._world.characters.effects.held_bardic_inspiration(sid, target, tick)
+            == pending.grant
+            and self._world.characters.effects.for_target_effect(
+                sid, target, BARDIC_INSPIRATION_EFFECT_ID
+            )
+            == [expected[0].model_dump(mode="json")]
+        )
+
     def _register_pending_action_choice(self, pending, package, context, rng):
         """Publish one provisional action under the shared file gate after fresh admission."""
         from .action_pending import PendingActionChoice, PendingFaerieChoice
