@@ -452,6 +452,49 @@ def test_nested_visual_emitter_shading_motion_and_rollback(tmp_path, context):
         assert emitted(B) and not emitted(A)
 
 
+def test_step_save_discovery_uses_the_current_candidate_trigger(tmp_path, context, monkeypatch):
+    """A candidate trigger change must reach actual post-move save discovery."""
+    import json
+
+    from test_mechanism_region_save_gate import step_gated_data
+
+    from trpg_state_machine.instance_data import encode
+    from trpg_state_machine.package import canonical_json
+
+    data = step_gated_data(dc=0, cells=("2,0",))
+    sm, sid, package, _ = setup(tmp_path, context, data)
+    with sm:
+        mechanisms = sm._objects.mechanisms
+        old_index = mechanisms._scene_index(sid, A)
+        move = sm.scene_lifecycle.move_admitted
+
+        def update_trigger(*args, **kwargs):
+            """Simulate a candidate instance change after the original motion is staged."""
+            events = move(*args, **kwargs)
+            instance = sm._world_facts.instances.get(sid, "object", LEVER)
+            definition = json.loads(instance["definition"])
+            mechanism = definition["fields"]["capabilities"]["tuple"][0]["fields"]
+            mechanism["triggers"]["tuple"][0]["fields"]["cells"]["tuple"] = ["1,0"]
+            instance["definition"] = canonical_json(definition)
+            sm._conn.execute(
+                "UPDATE instance_configs SET config_json=? "
+                "WHERE session_id=? AND domain='object' AND instance_id=?",
+                (canonical_json(encode(instance)), sid, LEVER),
+            )
+            return events
+
+        monkeypatch.setattr(sm.scene_lifecycle, "move_admitted", update_trigger)
+        cmd = command(sm, sid, package, context, StepActor(A, "0,0", "1,0"), "motion")
+        with work(sm, monkeypatch) as counts:
+            receipt = sm.submit_command(cmd, package, context=context)
+        assert receipt.status == "committed", receipt
+        assert counts["compute:mechanisms.index"] == counts["index_candidate_records"] == 2
+        assert not old_index.get(("enter_region", A, "1,0"))
+        assert sm._world_facts.mechanism_state(sid, LEVER).activation_count == 1
+        rolls = sm.get_command_rolls(sid, "motion", package, context=context)["rolls"]
+        assert len(rolls) == 1 and rolls[0]["succeeded"] is True
+
+
 def change_weight(sm, sid, oid, weight):
     import json
 

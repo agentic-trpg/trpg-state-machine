@@ -8,7 +8,7 @@ import hashlib
 import json
 from contextvars import ContextVar
 from dataclasses import asdict, replace
-from itertools import pairwise
+from itertools import pairwise, tee
 
 from ._execution import _WorldEffectKind, _WorldEffectOrigin
 from ._operations import ObjectState, SetObjectState, StepActor
@@ -17,6 +17,16 @@ from .events import _ActorMotion
 from .mechanism_effects import MechanismEffectRunner
 from .runtime_instances import MechanismLinks, TriggerIndex, instance_read, world_read
 from .world_commands import CheckMechanism, SetLightEnabled
+
+
+class _StepSaveCandidate(Exception):
+    """Return fixed save inputs only by aborting the entire movement candidate."""
+
+    def __init__(self, requests, grant):
+        """Carry the detached rules inputs and any exact Inspiration grant."""
+        super().__init__("Regional save prepared")
+        self.requests = requests
+        self.grant = grant
 
 
 class MechanismService:
@@ -396,31 +406,22 @@ class MechanismService:
             raise
         return True
 
-    def _step_save_gates(self, row, package, motion):
+    def _step_save_gates(self, row, package, motion, entries):
         """Select save-gated operations by indexed region entry and exact actor eligibility."""
         sid, scene, actor = row["session_id"], motion.to_scene_id, motion.actor_id
         fired = set()
-        for oid, _, trigger in self._region_entries(
-            self._scene_index(sid, scene), scene, motion.from_cell, motion.to_cell
-        ):
+        for oid, _, trigger in entries:
             if oid in fired:
                 continue
+            # Automatic matching selects the first matching operation for each
+            # mechanism. Eligibility is identical for its remaining selectors.
+            fired.add(oid)
             config = self.config(sid, oid)
-            if self._eligible_automatic(sid, scene, oid, config, actor, package):
-                fired.add(oid)
-                gate = config.operation(trigger.operation_id).save_gate
-                if gate is not None:
-                    yield oid, trigger.operation_id, gate
-
-    def may_trigger_step_save(self, row, package, command):
-        """Prefilter potential direct PC gates without staging unrelated movement."""
-        if command.actor_id != row["pc_actor_id"] or self.h._active_combat(command.session_id):
-            return False
-        step = command.payload
-        endpoints = _ActorMotion(
-            command.actor_id, step.scene_id, step.expected_cell, step.scene_id, step.to_cell
-        )
-        return next(self._step_save_gates(row, package, endpoints), None) is not None
+            gate = config.operation(trigger.operation_id).save_gate
+            if gate is not None and self._eligible_automatic(
+                sid, scene, oid, config, actor, package
+            ):
+                yield oid, trigger.operation_id, gate
 
     @staticmethod
     def _direct_step_motion(row, command, event, command_id):
@@ -453,13 +454,21 @@ class MechanismService:
         motion = self._direct_step_motion(row, command, event, command.command_id)
         if motion is None:
             raise StateMachineError("invalid_execution_origin", "Missing admitted step event")
+        sid, scene = row["session_id"], motion.to_scene_id
+        entries = self._region_entries(
+            self._scene_index(sid, scene), scene, motion.from_cell, motion.to_cell
+        )
+        return self._step_save_requests(row, package, motion, command.command_id, entries)
+
+    def _step_save_requests(self, row, package, motion, command_id, entries):
+        """Fix only indexed, eligible gates against the actual post-move facts."""
         return tuple(
             (
                 oid,
                 operation_id,
-                self._save_request(row, package, motion.actor_id, gate, command.command_id, oid),
+                self._save_request(row, package, motion.actor_id, gate, command_id, oid),
             )
-            for oid, operation_id, gate in self._step_save_gates(row, package, motion)
+            for oid, operation_id, gate in self._step_save_gates(row, package, motion, entries)
         )
 
     def evaluate_direct_saves(
@@ -1112,6 +1121,17 @@ class MechanismService:
             origin = motion.from_cell if motion.from_scene_id == scene else None
             candidates = self._region_entries(index, scene, origin, motion.to_cell)
             target_kind = "enter_region"
+            if (
+                self._prepared_saves.get() is None
+                and self._direct_step_motion(row, self._source_command.get(), event, command_id)
+                is not None
+            ):
+                candidates, gates = tee(candidates)
+                requests = self._step_save_requests(row, package, motion, command_id, gates)
+                if requests:
+                    tick = self.h.facts.time_state(sid)[1]
+                    grant = self.h.characters.effects.held_bardic_inspiration(sid, actor, tick)
+                    raise _StepSaveCandidate(requests, grant)
         elif kind == "rules.check_rolled":
             adjudication = payload.get("adjudication", {})
             admitted = adjudication.get("openable_operation") or adjudication.get(

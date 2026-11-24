@@ -544,25 +544,13 @@ class CommandRuntime:
         return self._session_runtime._command_replay(command, fingerprint)
 
     def _prepare_step_saves(self, command, package, context, fingerprint):
-        """Fix the actual post-move save inputs in a rollback-only candidate.
+        """Revalidate a waiting step's post-move inputs in a rollback-only candidate.
 
-        A local trigger lookup avoids staging a step if no eligible save can
-        fire. The candidate runs shared movement and pre-trigger reconciliation
-        only. The outer rollback discards all SQL and SessionMemory changes
-        before any bound save evaluation takes place.
+        The candidate runs shared movement and pre-trigger reconciliation only.
+        The outer rollback discards all SQL and SessionMemory changes.
         """
         sid, actor = command.session_id, command.actor_id
         mechanisms = self._objects.mechanisms
-        with self._transaction():
-            row = self._session(sid, package, context)
-            self._authorize_command(row, actor, command.payload, context)
-            self._npc_handoff_command_guard(command)
-            if (
-                self._command_replay(command, fingerprint)
-                or self._session_runtime.version_conflict(row, command)
-                or not mechanisms.may_trigger_step_save(row, package, command)
-            ):
-                return (), None
         requests, grant = (), None
         try:
             with self._transaction(write=True):
@@ -800,30 +788,33 @@ class CommandRuntime:
         mechanism_saves = _action_resume[3] if _action_resume is not None else {}
         requests = ()
         grant = None
-        if _action_resume is None and type(command.payload) in (
-            SetLightEnabled,
-            SetObjectState,
-            StepActor,
-        ):
-            if type(command.payload) is StepActor:
-                requests, grant = self._prepare_step_saves(command, package, context, fingerprint)
-            else:
-                with self._transaction():
-                    row = self._session(command.session_id, package, context)
-                    self._authorize_command(row, command.actor_id, command.payload, context)
-                    if not self._command_replay(
-                        command, fingerprint
-                    ) and not self._session_runtime.version_conflict(row, command):
-                        try:
-                            requests = self._objects.mechanisms.prepare_direct_saves(
-                                row, command.actor_id, command.payload, package, command.command_id
-                            )
-                            tick = self._world_facts.time_state(command.session_id)[1]
-                            grant = self._world.characters.effects.held_bardic_inspiration(
-                                command.session_id, command.actor_id, tick
-                            )
-                        except StateMachineError:
-                            requests = ()  # The ordinary write path records the rejection.
+        if _action_resume is None and type(command.payload) is StepActor:
+            from .world_mechanisms import _StepSaveCandidate
+
+            try:
+                return self._commit_world_command(
+                    command, package, context, fingerprint, mechanism_saves=None
+                )
+            except _StepSaveCandidate as candidate:
+                requests, grant = candidate.requests, candidate.grant
+        elif _action_resume is None and type(command.payload) in (SetLightEnabled, SetObjectState):
+            with self._transaction():
+                row = self._session(command.session_id, package, context)
+                self._authorize_command(row, command.actor_id, command.payload, context)
+                if not self._command_replay(
+                    command, fingerprint
+                ) and not self._session_runtime.version_conflict(row, command):
+                    try:
+                        requests = self._objects.mechanisms.prepare_direct_saves(
+                            row, command.actor_id, command.payload, package, command.command_id
+                        )
+                        tick = self._world_facts.time_state(command.session_id)[1]
+                        grant = self._world.characters.effects.held_bardic_inspiration(
+                            command.session_id, command.actor_id, tick
+                        )
+                    except StateMachineError:
+                        requests = ()  # The ordinary write path records the rejection.
+        if requests:
             mechanism_saves, waiting, _ = self._objects.mechanisms.evaluate_direct_saves(
                 requests, stop_on_failure=grant is not None, action_choice=grant is not None
             )
@@ -859,6 +850,33 @@ class CommandRuntime:
                 if replay := self._command_replay(command, fingerprint):
                     return replay
                 prepared = self._prepare_combat(dict(row), package)
+        return self._commit_world_command(
+            command,
+            package,
+            context,
+            fingerprint,
+            mechanism_saves=mechanism_saves,
+            prepared=prepared,
+            _action_resume=_action_resume,
+        )
+
+    def _commit_world_command(
+        self,
+        command,
+        package,
+        context,
+        fingerprint,
+        *,
+        mechanism_saves,
+        prepared=None,
+        _action_resume=None,
+    ):
+        """Apply and commit one candidate, or roll back on regional save discovery.
+
+        A None mechanism input asks the actual Step event to fix any gate facts.
+        The private handoff escapes the outer transaction so no candidate state
+        reaches the caller before the bound save can be evaluated.
+        """
         with self._transaction(write=True):
             row = self._session(command.session_id, package, context)
             self._authorize_command(row, command.actor_id, command.payload, context)
@@ -921,7 +939,9 @@ class CommandRuntime:
                         SetTimeRunning,
                     ):
                         step_saves = (
-                            dict(mechanism_saves) if type(command.payload) is StepActor else None
+                            dict(mechanism_saves)
+                            if type(command.payload) is StepActor and mechanism_saves is not None
+                            else None
                         )
                         token = self._objects.mechanisms._prepared_saves.set(
                             mechanism_saves if step_saves is None else step_saves
