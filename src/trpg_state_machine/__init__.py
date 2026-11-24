@@ -80,6 +80,7 @@ from .world_commands import (
     EquipArmor,
     EquipShield,
     EquipWeapon,
+    EquipWearable,
     ForceOpen,
     LockObject,
     PickLock,
@@ -94,6 +95,7 @@ from .world_commands import (
     UnequipArmor,
     UnequipShield,
     UnequipWeapon,
+    UnequipWearable,
     UnlockObject,
 )
 from .world_time import (
@@ -145,6 +147,8 @@ __all__ = [
     "TakeItem",
     "SpendItemCharge",
     "EquipWeapon",
+    "EquipWearable",
+    "UnequipWearable",
     "CharacterAC",
     "EquipArmor",
     "UnequipArmor",

@@ -75,6 +75,7 @@ from .world_commands import (
     EquipArmor,
     EquipShield,
     EquipWeapon,
+    EquipWearable,
     ForceOpen,
     LockObject,
     PickLock,
@@ -89,6 +90,7 @@ from .world_commands import (
     UnequipArmor,
     UnequipShield,
     UnequipWeapon,
+    UnequipWearable,
     UnlockObject,
 )
 
@@ -178,6 +180,8 @@ class TypedCommand:
         | UnequipShield
         | EquipWeapon
         | UnequipWeapon
+        | EquipWearable
+        | UnequipWearable
         | LockObject
         | UnlockObject
         | BarObject
@@ -850,6 +854,8 @@ def world_command_from_data(data):
         "world.pickup_item",
         "world.drop_item",
         "world.use_item",
+        "world.equip_wearable",
+        "world.unequip_wearable",
         "rules.save",
         "world.cast_spell",
         "world.use_feature",

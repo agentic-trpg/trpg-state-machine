@@ -3,6 +3,11 @@
 from dataclasses import dataclass
 
 from dnd5e_engine.evaluation_delta import HPDelta, ResourceUpdate
+from dnd5e_engine.evaluation_wearables import (
+    attune_cloak_reason,
+    attunement_needs,
+    reviewed_protective_cloak,
+)
 
 from .errors import StateMachineError
 from .time_binding import MAX_TICK, TimeBinding
@@ -39,6 +44,8 @@ class ShortRest:
     """
 
     hit_dice: tuple[HitDiceSpend, ...] = ()
+    attune_instance_id: str | None = None
+    unattune_instance_id: str | None = None
 
 
 def validate_short_rest(operation: ShortRest) -> None:
@@ -59,6 +66,20 @@ def validate_short_rest(operation: ShortRest) -> None:
         raise StateMachineError("invalid_operation", "Invalid Unicode Hit Dice pool ID") from exc
     if len(pool_ids) != len(selections):
         raise StateMachineError("invalid_operation", "Each Hit Dice pool can only be selected once")
+    focus = (
+        operation.attune_instance_id
+        if operation.attune_instance_id is not None
+        else operation.unattune_instance_id
+    )
+    if focus is not None and (
+        type(focus) is not str
+        or not focus
+        or operation.hit_dice
+        or (operation.attune_instance_id is not None and operation.unattune_instance_id is not None)
+    ):
+        raise StateMachineError(
+            "invalid_operation", "Attunement needs one dedicated item-focused short rest"
+        )
 
 
 def prepare_rest(row, actor_id, world, records, operation):
@@ -98,6 +119,51 @@ def advance_rest(row, package, command_id, clock, plan):
     if clock.progress(row["session_id"])["status"] != "completed":
         raise StateMachineError("rest_time_unsettled", "Rest cannot finish in one advance")
     return events
+
+
+def prepare_attunement(row, actor_id, operation, world, snapshot):
+    """Fix the exact item contact, existing bonds and actor facts for one short rest."""
+    iid = (
+        operation.attune_instance_id
+        if operation.attune_instance_id is not None
+        else operation.unattune_instance_id
+    )
+    if iid is None:
+        return None, None
+    subject, target = attunement_needs(actor_id, iid)
+    actor = next((a for a in snapshot.character_states if a.entity_id == subject), None)
+    if actor is None:
+        return None, "invalid_actor"
+    sid = row["session_id"]
+    try:
+        entry = world.objects._direct_item(sid, subject, target)
+    except StateMachineError as exc:
+        return None, exc.code
+    asset = world.loader.get_item(entry["item_slug"])
+    if asset is None:
+        return None, "invalid_target"
+    bonds = tuple(
+        (r["object_id"], r["item_slug"])
+        for r in world.facts._conn.execute(
+            "SELECT object_id,item_slug FROM objects WHERE session_id=? "
+            "AND item_attuned_actor_id=? ORDER BY object_id",
+            (sid, subject),
+        )
+    )
+    if operation.attune_instance_id is not None:
+        if entry.get("attuned_actor_id") is not None:
+            return None, "item_attunement_conflict"
+        reason = attune_cloak_reason(actor, asset, tuple(slug for _, slug in bonds), world.loader)
+        if reason is not None:
+            return None, reason
+        mode = "attune"
+    else:
+        if not reviewed_protective_cloak(asset):
+            return None, "unsupported_item_binding"
+        if entry.get("attuned_actor_id") != subject:
+            return None, "item_attunement_conflict"
+        mode = "unattune"
+    return (mode, target, entry["item_slug"], bonds), None
 
 
 def rest_changes(request, result):

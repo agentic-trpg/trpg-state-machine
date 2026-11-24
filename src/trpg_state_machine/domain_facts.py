@@ -428,6 +428,48 @@ class CharacterFacts:
         if changed.rowcount != 1:
             raise StateMachineError("invalid_mechanical_state", "Actor equipment facts are missing")
 
+    def wear_item(self, sid, actor_id, instance_id, slug):
+        """Bind one validated wearable to its character in the current write scope."""
+        self.store.require_write()
+        self._conn.execute(
+            "INSERT INTO character_worn_items(session_id,actor_id,instance_id,item_slug) "
+            "VALUES(?,?,?,?)",
+            (sid, actor_id, instance_id, slug),
+        )
+
+    def unwear_item(self, sid, actor_id, instance_id):
+        """Remove an exact character-owned wearable binding without moving the item."""
+        self.store.require_write()
+        changed = self._conn.execute(
+            "DELETE FROM character_worn_items WHERE session_id=? AND actor_id=? AND instance_id=?",
+            (sid, actor_id, instance_id),
+        )
+        if changed.rowcount != 1:
+            raise StateMachineError("equipment_binding_conflict", "Selected item is not worn")
+
+    def worn_items(self, sid, actor_id):
+        """Read exact current wearable identities and their World-owned item rows."""
+        result = []
+        for binding in self._conn.execute(
+            "SELECT instance_id,item_slug FROM character_worn_items "
+            "WHERE session_id=? AND actor_id=? ORDER BY instance_id",
+            (sid, actor_id),
+        ):
+            item = self.world.object(sid, binding["instance_id"])
+            entry = self.world.item_entry(item) if item is not None else None
+            if (
+                item is None
+                or entry is None
+                or item["container_id"] is not None
+                or entry["owner_id"] != actor_id
+                or entry["item_slug"] != binding["item_slug"]
+                or not entry["accessible"]
+                or entry["quantity"] != 1
+            ):
+                raise StateMachineError("invalid_mechanical_state", "Worn item binding is stale")
+            result.append((item, entry))
+        return tuple(result)
+
     def set_equipment(self, sid, actor_id, *, armor, shield, offhand, weapon, grip, ac, stealth):
         """Persist exact equipment bindings and their rule AC in the shared write scope.
 
@@ -2012,6 +2054,28 @@ class CharacterFacts:
             ):
                 if data[field] is None:
                     data.pop(field)
+        if include_carried:
+            worn = []
+            for binding in self._conn.execute(
+                "SELECT instance_id,item_slug FROM character_worn_items "
+                "WHERE session_id=? AND actor_id=? ORDER BY instance_id",
+                (sid, actor_id),
+            ):
+                item = self.world.object(sid, binding["instance_id"])
+                entry = self.world.item_entry(item) if item is not None else None
+                if (
+                    entry is None
+                    or entry["owner_id"] != actor_id
+                    or entry["item_slug"] != binding["item_slug"]
+                    or not entry["accessible"]
+                    or entry["quantity"] != 1
+                    or item["container_id"] is not None
+                ):
+                    raise StateMachineError(
+                        "invalid_mechanical_state", "Worn item requires exact direct ownership"
+                    )
+                worn.append(binding["instance_id"])
+            data["worn_item_instance_ids"] = worn
         data.update(
             hp_current=core["current_hp"],
             hp_max=core["max_hp"],
@@ -2980,6 +3044,17 @@ class WorldFacts:
             data["attuned_actor_id"] = row["item_attuned_actor_id"]
         return {"instance_id": oid, "owner_id": placement["carrier_id"], **data}
 
+    def set_item_attunement(self, sid, instance_id, expected_actor, actor_id):
+        """Change one World-owned exact item bond inside the shared write scope."""
+        self.store.require_write()
+        changed = self._conn.execute(
+            "UPDATE objects SET item_attuned_actor_id=? WHERE session_id=? AND object_id=? "
+            "AND item_attuned_actor_id IS ?",
+            (actor_id, sid, instance_id, expected_actor),
+        )
+        if changed.rowcount != 1:
+            raise StateMachineError("item_attunement_conflict", "Item attunement changed")
+
     def require_item_unit(self, row):
         """Validate and return quantity data for one portable item instance."""
         data = item_unit_from_row(row)
@@ -3174,6 +3249,11 @@ class WorldFacts:
             equipped = any(equipment[slot] == oid for _, slot in EQUIPMENT_SLOTS)
         if equipped:
             raise StateMachineError("equipped_item_unsupported", "Item remains equipped")
+        if self._conn.execute(
+            "SELECT 1 FROM character_worn_items WHERE session_id=? AND instance_id=? LIMIT 1",
+            (sid, oid),
+        ).fetchone():
+            raise StateMachineError("equipped_item_unsupported", "Item remains worn")
         scenes = self._conn.execute(
             "SELECT scene_id FROM scene_integrity_dependencies "
             "WHERE session_id=? AND domain='objects' AND instance_id=?",

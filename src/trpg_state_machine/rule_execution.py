@@ -58,7 +58,13 @@ from .pending_bardic_checks import PendingBardicChecks
 from .pending_multi_spell_choices import PendingMultiSpellChoices
 from .pending_spell_choices import PendingSpellChoices
 from .perception import visible_actor_in_range
-from .rest_activity import LongRest, ShortRest, advance_rest, prepare_rest
+from .rest_activity import (
+    LongRest,
+    ShortRest,
+    advance_rest,
+    prepare_attunement,
+    prepare_rest,
+)
 from .rule_sight import read_creature_sight
 from .rules_adapter import UnsupportedEffectConsequence, validate_dnd_result
 from .shield_adoption import UnsupportedShieldKnockout, UnsupportedShieldTerminal
@@ -471,6 +477,7 @@ class RuleExecution:
             self.world.objects.mechanisms if mechanism_check else self.world.objects.openable
         )
         plan, prepare_error, rule_command = None, None, command
+        attune_plan = None
         initial_exploration_error = None
         rest_plan = None
         cast_record = None
@@ -696,6 +703,10 @@ class RuleExecution:
                 if material is None:
                     prepare_error = "spell.material"
             snapshot = None if prepare_error else build_snapshot(row)
+            if rest and snapshot is not None and not long_rest:
+                attune_plan, prepare_error = prepare_attunement(
+                    row, command.actor_id, command.payload, self.world, snapshot
+                )
             spell_end_applications = (
                 self.rules.spell_end_applications(command.session_id, command.actor_id)
                 if snapshot is not None and (exploration_spell or charged_item is not None)
@@ -933,10 +944,20 @@ class RuleExecution:
             pending_choice = None
             pending_choices = None
             current_exploration_error = exploration_error(row) if exploration_rule else None
-            changed_rest_plan = rest and prepare_rest_plan(row) != (rest_plan, prepare_error)
+            changed_rest_plan = rest and prepare_rest_plan(row) != (
+                rest_plan,
+                None if rest_plan is not None else prepare_error,
+            )
+            if rest and attune_plan is not None and prepare_error is None:
+                changed_attune_plan = prepare_attunement(
+                    row, command.actor_id, command.payload, self.world, build_snapshot(row)
+                ) != (attune_plan, None)
+            else:
+                changed_attune_plan = False
             if (
                 self.runtime.version_conflict(row, command)
                 or changed_rest_plan
+                or changed_attune_plan
                 or (exploration_rule and current_exploration_error != initial_exploration_error)
                 or (
                     casting_activity
@@ -1085,6 +1106,32 @@ class RuleExecution:
                         if long_rest:
                             self.activities.complete_long_rest(
                                 sid, command.actor_id, place[0], command.command_id, start, target
+                            )
+                        elif attune_plan is not None:
+                            if prepare_attunement(
+                                row,
+                                command.actor_id,
+                                command.payload,
+                                self.world,
+                                build_snapshot(row),
+                            ) != (attune_plan, None):
+                                raise StateMachineError(
+                                    "rest_interrupted", "Attunement contact or bond changed"
+                                )
+                            bond_before = None if attune_plan[0] == "attune" else command.actor_id
+                            bond_after = command.actor_id if attune_plan[0] == "attune" else None
+                            self.world.facts.set_item_attunement(
+                                sid, attune_plan[1], bond_before, bond_after
+                            )
+                            time_events.append(
+                                self.world._capture_event(
+                                    sid,
+                                    package,
+                                    "item.attuned" if bond_after else "item.unattuned",
+                                    {"actor_id": command.actor_id, "instance_id": attune_plan[1]},
+                                    phase="activity.after_attunement",
+                                    source_actor_id=command.actor_id,
+                                )
                             )
                     spatial_effect_id, effects_events = None, []
                     operations = result.state_delta.operations

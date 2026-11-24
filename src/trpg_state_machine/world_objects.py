@@ -4,6 +4,7 @@ from dataclasses import asdict
 
 from dnd5e_engine.evaluation_charged_item import is_healing_staff
 from dnd5e_engine.evaluation_saves import reviewed_held_save_weapon
+from dnd5e_engine.evaluation_wearables import reviewed_protective_cloak
 from dnd5e_engine.rules.character import (
     armor_class,
     armor_training_from_changes,
@@ -24,6 +25,7 @@ from .world_commands import (
     EquipArmor,
     EquipShield,
     EquipWeapon,
+    EquipWearable,
     LockObject,
     PickLock,
     PutItem,
@@ -37,6 +39,7 @@ from .world_commands import (
     UnequipArmor,
     UnequipShield,
     UnequipWeapon,
+    UnequipWearable,
     UnlockObject,
 )
 from .world_containers import ContainerService
@@ -87,6 +90,8 @@ class WorldObjectService:
             return self._weapon_plan(row, actor_id, operation, package)
         if type(operation) in (EquipArmor, UnequipArmor, EquipShield, UnequipShield):
             return self._armor_plan(row, actor_id, operation, package)
+        if type(operation) in (EquipWearable, UnequipWearable):
+            return self._wearable_plan(row, actor_id, operation, package)
         if type(operation) in (LockObject, UnlockObject):
             return self.openable.validate_lock(row, actor_id, operation, package)
         return self.openable.validate_bar(row, actor_id, operation, package)
@@ -113,6 +118,8 @@ class WorldObjectService:
                     UnequipArmor,
                     EquipShield,
                     UnequipShield,
+                    EquipWearable,
+                    UnequipWearable,
                 ):
                     h.sessions._authorize_command(row, actor_id, operation, context)
                     h._world_operation_capability(row, operation)
@@ -199,6 +206,25 @@ class WorldObjectService:
                     else "item.shield_unequipped",
                     {"actor_id": actor_id, "instance_id": operation.instance_id},
                     phase="world.after_equipment_binding",
+                    source_actor_id=actor_id,
+                )
+            ]
+        if type(operation) in (EquipWearable, UnequipWearable):
+            item = self._wearable_plan(row, actor_id, operation, package)
+            sid, iid = row["session_id"], operation.instance_id
+            if type(operation) is EquipWearable:
+                self.handler.characters.wear_item(sid, actor_id, iid, item["item_slug"])
+            else:
+                self.handler.characters.unwear_item(sid, actor_id, iid)
+            return [
+                self.handler._capture_event(
+                    sid,
+                    package,
+                    "item.wearable_equipped"
+                    if type(operation) is EquipWearable
+                    else "item.wearable_unequipped",
+                    {"actor_id": actor_id, "instance_id": iid},
+                    phase="world.after_wearable_binding",
                     source_actor_id=actor_id,
                 )
             ]
@@ -325,6 +351,37 @@ class WorldObjectService:
         ):
             raise StateMachineError("unsupported_actor_state", "Explicit weapon binding required")
         return state, equipment
+
+    def _wearable_plan(self, row, actor_id, operation, package):
+        """Admit exact direct ownership, binding and voluntary bond release."""
+        sid, iid = row["session_id"], operation.instance_id
+        self._equipment_actor(row, actor_id, package)
+        entry = self._direct_item(sid, actor_id, iid)
+        asset = self.handler.loader.get_item(entry["item_slug"])
+        # RUO-66-F1: the item corpus has no typed worn slot; only this verified
+        # cloak profile proves an exact wearable without parsing description.
+        if not reviewed_protective_cloak(asset):
+            raise StateMachineError(
+                "unsupported_item_binding", "RUO-66-F1: wearable item profile is unreviewed"
+            )
+        worn = self.handler._conn.execute(
+            "SELECT item_slug FROM character_worn_items "
+            "WHERE session_id=? AND actor_id=? AND instance_id=?",
+            (sid, actor_id, iid),
+        ).fetchone()
+        if type(operation) is EquipWearable:
+            if worn is not None:
+                raise StateMachineError("equipment_binding_conflict", "Item is already worn")
+            if self.handler._conn.execute(
+                "SELECT 1 FROM character_worn_items WHERE session_id=? AND actor_id=? "
+                "AND item_slug=? LIMIT 1",
+                (sid, actor_id, entry["item_slug"]),
+            ).fetchone():
+                raise StateMachineError("equipment_binding_conflict", "Same type is already worn")
+        elif type(operation) is UnequipWearable:
+            if worn is None or worn["item_slug"] != entry["item_slug"]:
+                raise StateMachineError("equipment_binding_conflict", "Item is not worn")
+        return entry
 
     def _direct_item(self, sid, actor_id, iid):
         """Return one owned, accessible and directly carried item entry by exact ID."""

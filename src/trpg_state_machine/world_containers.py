@@ -365,6 +365,13 @@ class ContainerService:
                 "offhand_item_instance_id",
             )
         }
+        bound.update(
+            r[0]
+            for r in h._conn.execute(
+                "SELECT instance_id FROM character_worn_items WHERE session_id=? AND actor_id=?",
+                (sid, actor),
+            )
+        )
         explicit_equipment = "worn_armor_instance_id" in state
         for oid in affected:
             obj = self.facts.object(sid, oid)

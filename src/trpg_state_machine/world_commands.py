@@ -118,6 +118,20 @@ class UnequipShield:
 
 
 @dataclass(frozen=True, slots=True)
+class EquipWearable:
+    """Wear one directly carried accessory by its exact item instance."""
+
+    instance_id: str
+
+
+@dataclass(frozen=True, slots=True)
+class UnequipWearable:
+    """Remove one currently worn accessory without ending attunement."""
+
+    instance_id: str
+
+
+@dataclass(frozen=True, slots=True)
 class RepositionObject:
     """Request privileged object placement or facing adjustment."""
 
@@ -242,6 +256,8 @@ WORLD_CAPABILITY_COMMANDS = {
     "world.unequip_armor": UnequipArmor,
     "world.equip_shield": EquipShield,
     "world.unequip_shield": UnequipShield,
+    "world.equip_wearable": EquipWearable,
+    "world.unequip_wearable": UnequipWearable,
     "world.lock_object": LockObject,
     "world.unlock_object": UnlockObject,
     "world.bar_object": BarObject,
@@ -262,6 +278,8 @@ WORLD_CAPABILITY_OPERATIONS = (
     UnequipArmor,
     EquipShield,
     UnequipShield,
+    EquipWearable,
+    UnequipWearable,
     RepositionObject,
     SetLightEnabled,
     SwitchLightMode,

@@ -540,6 +540,7 @@ class StateMachine(
         minimums. Unsupported formulas fail this narrow read alone.
         """
         from dnd5e_engine.evaluation_effects import EffectState
+        from dnd5e_engine.evaluation_wearables import protective_cloak_ac_bonus
         from dnd5e_engine.reaction_effect_rules import effective_armor_class
 
         with self._transaction():
@@ -551,8 +552,20 @@ class StateMachine(
                 EffectState.model_validate_json(canonical_json(value))
                 for value in self._characters.effects.visible_for_target(session_id, actor_id)
             ]
+            worn_bonus = 0
+            for _item, entry in self._characters.worn_items(session_id, actor_id):
+                try:
+                    worn_bonus += protective_cloak_ac_bonus(
+                        self._world.loader.get_item(entry["item_slug"]),
+                        worn=True,
+                        attuned_to_wearer=entry.get("attuned_actor_id") == actor_id,
+                    )
+                except ValueError as exc:
+                    raise StateMachineError(
+                        "unsupported_armor_class", "Worn item AC rule is unreviewed"
+                    ) from exc
             try:
-                effective = effective_armor_class(base, effects)
+                effective = effective_armor_class(base + worn_bonus, effects)
             except (TypeError, ValueError) as exc:
                 raise StateMachineError(
                     "unsupported_armor_class", "Active AC effect has no scalar value"
