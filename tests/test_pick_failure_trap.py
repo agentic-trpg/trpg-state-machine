@@ -15,12 +15,13 @@ from test_mechanism_save_gate import state_gated_data
 from test_mechanism_service import config, trigger
 from test_openable_checks import check_data
 from test_world_mechanisms import LEVER
-from world_support import create, submit
+from world_support import command, create, submit
 
 from trpg_state_machine import (
     ForceOpen,
     StateMachine,
     StateMachineError,
+    StepActor,
     TrustedContext,
     load_adventure_package,
     world_command_from_data,
@@ -38,7 +39,15 @@ def pick_failure_data(*, check_dc=100, save_dc=100, status="armed"):
         )
     )
     definition = deepcopy(mechanism["world_objects"][-1])
-    definition["capabilities"][0].update(triggers=[], initial_status=status)
+    definition["capabilities"][0].update(
+        triggers=[
+            {
+                **trigger("check_result", target_object_id=DOOR, succeeded=False),
+                "lock_id": "lock.outer",
+            }
+        ],
+        initial_status=status,
+    )
     data["world_objects"].append(definition)
     light = next(obj for obj in mechanism["world_objects"] if obj["object_id"] == CRED)
     target = next(obj for obj in data["world_objects"] if obj["object_id"] == CRED)
@@ -46,7 +55,6 @@ def pick_failure_data(*, check_dc=100, save_dc=100, status="armed"):
     locks = next(
         c["locks"] for c in data["world_objects"][0]["capabilities"] if c["kind"] == "locks"
     )
-    locks[0]["pick_failure_mechanism_id"] = LEVER
     locks[1].update(pick_policy="scenario", pick_dc=100)
     return data, loader
 
@@ -58,7 +66,7 @@ def write_package(tmp_path, data):
     return load_adventure_package(path)
 
 
-def test_authored_lock_reference_compiles_to_one_existing_trigger(tmp_path):
+def test_authored_exact_lock_trigger_loads_without_synthesis(tmp_path):
     data, _ = pick_failure_data()
     loaded = write_package(tmp_path, data)
     assert loaded.status == "valid", loaded.errors
@@ -216,25 +224,41 @@ def test_only_actual_failed_pick_of_configured_lock_opens_the_gate(
 
 
 @pytest.mark.parametrize(
-    "case", ["missing", "not_mechanism", "wrong_operation", "unconfigured", "side"]
+    "case",
+    [
+        "missing_lock",
+        "wrong_operation",
+        "unconfigured",
+        "side",
+        "scene",
+        "success",
+        "old_mechanism_field",
+        "old_operation_field",
+    ],
 )
-def test_invalid_failure_reference_is_rejected_in_package_load(tmp_path, case):
+def test_invalid_exact_lock_trigger_is_rejected_in_package_load(tmp_path, case):
     data, _ = pick_failure_data()
     locks = data["world_objects"][0]["capabilities"][1]["locks"]
     lock = locks[0]
-    if case == "missing":
-        lock["pick_failure_mechanism_id"] = "object.missing"
-    elif case == "not_mechanism":
-        lock["pick_failure_mechanism_id"] = DOOR
+    selector = data["world_objects"][-1]["capabilities"][0]["triggers"][0]
+    if case == "missing_lock":
+        selector["lock_id"] = "lock.missing"
     elif case == "wrong_operation":
-        lock["pick_failure_operation_id"] = "nonexistent"
+        selector["operation_id"] = "nonexistent"
     elif case == "unconfigured":
         lock.update(pick_policy="unconfigured", pick_dc=None)
-    else:
+    elif case == "side":
         lock["operable_sides"] = [data["scenes"][1]["scene_id"]]
+    elif case == "scene":
+        selector["scene_id"] = data["scenes"][1]["scene_id"]
+    elif case == "success":
+        selector["succeeded"] = True
+    elif case == "old_mechanism_field":
+        lock["pick_failure_mechanism_id"] = LEVER
+    else:
+        lock["pick_failure_operation_id"] = "up"
     loaded = write_package(tmp_path, data)
     assert loaded.status == "invalid"
-    assert loaded.errors[0].path.endswith("pick_failure_mechanism_id")
 
 
 def test_explicit_operation_disambiguates_existing_save_gates(tmp_path):
@@ -244,11 +268,14 @@ def test_explicit_operation_disambiguates_existing_save_gates(tmp_path):
     down.update(operation_id="down")
     trap["operations"].append(down)
     trap["triggers"].append(
-        trigger("object_operation", target_object_id=DOOR, event_type="object.state_changed")
+        trigger(
+            "object_operation",
+            target_object_id=DOOR,
+            event_type="object.state_changed",
+            operation_id="up",
+        )
     )
-    assert write_package(tmp_path, data).status == "invalid"
-    lock = data["world_objects"][0]["capabilities"][1]["locks"][0]
-    lock["pick_failure_operation_id"] = "down"
+    trap["triggers"][0]["operation_id"] = "down"
     loaded = write_package(tmp_path, data)
     assert loaded.status == "valid", loaded.errors
     (exact,) = [
@@ -259,6 +286,54 @@ def test_explicit_operation_disambiguates_existing_save_gates(tmp_path):
         if t.kind == "check_result"
     ]
     assert exact.operation_id == "down"
+
+
+@pytest.mark.parametrize("source", ["enter_region", "pick_lock"])
+def test_one_mechanism_operation_accepts_step_or_exact_failed_pick(tmp_path, context, source):
+    """Either public action activates the same authored save-gated operation."""
+    data, loader = pick_failure_data()
+    trap = data["world_objects"][-1]["capabilities"][0]
+    trap["triggers"].append(trigger("enter_region", cells=["1,0"]))
+    sm, sid, package, _ = setup_pick(tmp_path, context, data, loader)
+    with sm:
+        if source == "enter_region":
+            cmd = command(sm, sid, package, context, StepActor(A, "0,0", "1,0"), "source")
+        else:
+            cmd = pick_command(sm, sid, package, context, "source")
+        receipt = sm.submit_command(cmd, package, context=context)
+        assert receipt.status == "committed", receipt
+        events = [sm._read_event(sid, seq) for seq in receipt.event_seqs]
+        activation = next(e for e in events if e.event_type == "mechanism.activated")
+        save = next(e for e in events if e.event_type == "rules.save_rolled")
+        assert activation.payload["object_id"] == LEVER
+        assert activation.payload["actor_id"] == cmd.actor_id
+        assert save.payload["mechanism_object_id"] == LEVER
+        assert save.payload["actor_id"] == cmd.actor_id
+        assert sm._world_facts.mechanism_state(sid, LEVER).activation_count == 1
+        rolls = sm.get_command_rolls(sid, "source", package, context=context)["rolls"]
+        assert [roll["type"] for roll in rolls] == (
+            ["save_rolled"] if source == "enter_region" else ["check_rolled", "save_rolled"]
+        )
+        assert sm.submit_command(cmd, package, context=context) == receipt
+
+
+@pytest.mark.parametrize("case", ["duplicate", "overlap", "wrong_kind", "wrong_version", "ungated"])
+def test_unsupported_exact_lock_co_triggers_are_rejected(tmp_path, case):
+    data, _ = pick_failure_data()
+    trap = data["world_objects"][-1]["capabilities"][0]
+    exact = trap["triggers"][0]
+    if case == "duplicate":
+        trap["triggers"].append(deepcopy(exact))
+    elif case == "overlap":
+        trap["triggers"].append(trigger("check_result", target_object_id=DOOR, succeeded=False))
+    elif case == "wrong_kind":
+        exact["kind"] = "object_operation"
+    elif case == "wrong_version":
+        trap["schema_version"] = "mechanism/3"
+    else:
+        trap["operations"][0]["save_gate"] = None
+    loaded = write_package(tmp_path, data)
+    assert loaded.status == "invalid", case
 
 
 def test_failed_pick_save_and_consequence_roll_back_on_late_storage_fault(tmp_path, context):

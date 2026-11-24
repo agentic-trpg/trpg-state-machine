@@ -342,11 +342,27 @@ SM 固定该阶段的角色状态、区域效果和 RNG，再退出未提交的�
 可以用 `choice.respond` 决定是否追加激励骰。等待期间整步仍未提交，结算后一次提交
 移动、各机关后果、激励消费、骰点、RNG 和回执。
 
-在 Package /10 中，可为 `kind: locks` 能力中的一把锁声明
-`pick_failure_mechanism_id`。目标应具有 `mechanism/4` 和可选定的
-`save_gate` 操作。有多个这样的操作时，用 `pick_failure_operation_id` 选定。
-Package 验证器从这条配置生成带锁 ID 的检定结果触发器，沿场景机关索引匹配。
-只有确切锁的受权 `world.pick_lock` 实际失败且机关符合触发条件时才尝试豁免。
+在 Package /10 中，直接在 `mechanism/4.triggers` 声明确切锁的失败触发器：
+
+```yaml
+- kind: check_result
+  scene_id: scene.entry
+  operation_id: up
+  cells: []
+  target_object_id: object.door
+  event_type: null
+  succeeded: false
+  value: null
+  lock_id: lock.outer
+```
+
+`operation_id` 指向该机关已有的 `save_gate` 操作。Package 验证确切锁位于目标门、
+配置了开锁规则、机关与锁共享可操作场景，且同一机关没有覆盖它的泛型失败检定；
+同一场景、门和锁只能有一个确切豁免门槛。旧的锁字段
+`pick_failure_mechanism_id` 与 `pick_failure_operation_id` 不再接受。
+同一个机关操作可另有 `enter_region` 触发器，由踏板或确切锁的失败开锁分别触发。
+World 只把真实受权 `world.pick_lock` 的 RE 检定结果与场景、门和锁组成索引键；
+成功、另一把锁、强推及未布防状态均不会执行这个失败触发器。
 
 SM 按事件顺序固定机关阶段，在 SQLite 写作用域之外求值，再从同一撬锁尝试
 重验并提交检定、符合条件的机关激活、失败后果、骰点及 RNG。当前 PC 的真实

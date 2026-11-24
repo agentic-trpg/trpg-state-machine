@@ -90,7 +90,7 @@ class MechanismService:
                     targets = (
                         tuple(dict.fromkeys(trigger.cells))
                         if trigger.kind == "enter_region"
-                        else ((trigger.target_object_id, trigger.lock_id),)
+                        else ((trigger.target_object_id, trigger.lock_id, trigger.succeeded),)
                         if trigger.lock_id is not None
                         else (trigger.target_object_id,)
                     )
@@ -420,8 +420,8 @@ class MechanismService:
         return False
 
     @staticmethod
-    def _failed_pick_source(row, command, event, command_id):
-        """Match the exact failed RE check emitted by the authorized pick command."""
+    def _pick_check_source(row, command, event, command_id):
+        """Match an authorized pick command to its adopted RE check result."""
         if (
             command is None
             or type(command.payload) is not PickLock
@@ -437,7 +437,7 @@ class MechanismService:
             != {"command_type": "world.pick_lock", "payload": asdict(command.payload)}
             or adjudication.get("payload", {}).get("actor_id") != command.actor_id
             or event.payload.get("scene_id") != command.payload.scene_id
-            or event.payload.get("engine_event", {}).get("succeeded") is not False
+            or type(event.payload.get("engine_event", {}).get("succeeded")) is not bool
         ):
             return None
         return command.payload
@@ -572,7 +572,7 @@ class MechanismService:
         pick_source = (
             command is not None
             and actor == command.actor_id
-            and self._failed_pick_source(row, command, source_event, command_id) is not None
+            and self._pick_check_source(row, command, source_event, command_id) is not None
         )
         if operation.save_gate is not None and not (pc_source or pick_source):
             raise StateMachineError(
@@ -1079,9 +1079,12 @@ class MechanismService:
                 return []
             actor = adjudication["payload"]["actor_id"]
             candidates = index.get(("check_result", scene, admitted["payload"]["object_id"]), ())
-            pick = self._failed_pick_source(row, self._source_command.get(), event, command_id)
+            pick = self._pick_check_source(row, self._source_command.get(), event, command_id)
             if pick is not None:
-                exact = index.get(("check_result", scene, (pick.object_id, pick.lock_id)), ())
+                succeeded = payload["engine_event"]["succeeded"]
+                exact = index.get(
+                    ("check_result", scene, (pick.object_id, pick.lock_id, succeeded)), ()
+                )
                 candidates = merge(candidates, exact, key=itemgetter(0, 1))
             target_kind = "check_result"
         else:

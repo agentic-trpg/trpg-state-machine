@@ -1,6 +1,6 @@
 """Explicit immutable object definitions, pinned by the Session package digest."""
 
-from dataclasses import asdict, dataclass, replace
+from dataclasses import asdict, dataclass
 from typing import Literal
 
 from dnd5e_engine.passive_detection import DetectionBarrier
@@ -8,7 +8,6 @@ from dnd5e_engine.passive_detection import DetectionBarrier
 from .mechanism_models import (
     Mechanism,
     MechanismAction,
-    MechanismTrigger,
     parse_mechanism,
     validate_save_triggers,
 )
@@ -192,11 +191,10 @@ def validate_world_objects(
     Check identity/reference consistency, pose/footprint constraints, weights and the
     supported capability combinations, including opening, durability, containers, lights
     and mechanisms. Return admitted definitions; do not instantiate runtime state or
-    infer unsupported capabilities from narrative descriptions. A lock's optional
-    failure reference produces a mechanism trigger in the effective definition.
+    infer unsupported capabilities from narrative descriptions. Exact failed-pick
+    triggers are validated against the lock's declared picking rule.
     """
     result = []
-    pick_failure_links = []
     objects = {o.object_id: o for s in scenes for o in s.objects}
     for value in _list(raw, "world_objects"):
         p = "world_objects"
@@ -475,12 +473,10 @@ def validate_world_objects(
                         {
                             "pick_policy": "unconfigured",
                             "pick_dc": None,
-                            "pick_failure_mechanism_id": None,
-                            "pick_failure_operation_id": None,
                             **value,
                         },
                         "lock_id initial_locked credential_instance_ids operable_sides policy "
-                        "pick_policy pick_dc pick_failure_mechanism_id pick_failure_operation_id",
+                        "pick_policy pick_dc",
                         f"{p}.locks[{index}]",
                     )
                     _identifier(lock["lock_id"], p, "lock")
@@ -506,32 +502,6 @@ def validate_world_objects(
                             _fail("schema_error", p, "Scenario picking requires an explicit DC")
                     elif lock["pick_dc"] is not None:
                         _fail("schema_error", p, "DC override requires scenario policy")
-                    target = lock["pick_failure_mechanism_id"]
-                    operation = lock["pick_failure_operation_id"]
-                    path = f"{p}.{d['object_id']}.locks[{index}].pick_failure_mechanism_id"
-                    if not mechanisms and (
-                        "pick_failure_mechanism_id" in value or "pick_failure_operation_id" in value
-                    ):
-                        _fail(
-                            "unsupported_mechanism", path, "Pick failure links require Package /10"
-                        )
-                    if target is not None:
-                        _identifier(target, path, "object")
-                        if lock["pick_policy"] == "unconfigured":
-                            _fail(
-                                "unsupported_mechanism",
-                                path,
-                                "A configured picking rule is required",
-                            )
-                        if operation is not None:
-                            _text(operation, f"{p}.locks[{index}].pick_failure_operation_id")
-                        pick_failure_links.append(
-                            (d["object_id"], lock["lock_id"], sides, target, operation, path)
-                        )
-                    elif operation is not None:
-                        _fail(
-                            "invalid_reference", path, "Explicit operation requires a mechanism ID"
-                        )
                     locks.append(
                         LockDefinition(
                             lock["lock_id"],
@@ -719,22 +689,11 @@ def validate_world_objects(
             )
         references[definition.definition_ref] = template
     definitions = {d.object_id: d for d in result}
-    generated = _pick_failure_triggers(pick_failure_links, definitions, scenes, passages)
+    _validate_pick_failure_triggers(definitions, scenes, passages)
 
     for identity, definition in definitions.items():
         mechanism = definition.capability("mechanism")
         if mechanism:
-            if identity in generated:
-                mechanism = replace(
-                    mechanism, triggers=mechanism.triggers + tuple(generated[identity])
-                )
-                definitions[identity] = replace(
-                    definition,
-                    capabilities=tuple(
-                        mechanism if capability.kind == "mechanism" else capability
-                        for capability in definition.capabilities
-                    ),
-                )
             validate_save_triggers(mechanism)
             for component in mechanism.components:
                 if (
@@ -782,10 +741,8 @@ def validate_world_objects(
     return tuple(definitions.values())
 
 
-def _pick_failure_triggers(links, definitions, scenes, passages):
-    """Resolve authored lock links to effective check selectors on local mechanisms."""
-    if not links:
-        return {}
+def _validate_pick_failure_triggers(definitions, scenes, passages):
+    """Admit exact failed-pick selectors only for an operable configured lock."""
     scene_ids = {obj.object_id: scene.scene_id for scene in scenes for obj in scene.objects}
     door_scenes = {}
     for passage in passages:
@@ -793,41 +750,50 @@ def _pick_failure_triggers(links, definitions, scenes, passages):
             door_scenes.setdefault(passage.door_object_id, set()).update(
                 endpoint.scene_id for endpoint in passage.endpoints
             )
-    generated = {}
-    for object_id, lock_id, sides, target, operation, path in links:
-        definition = definitions.get(target)
-        mechanism = definition.capability("mechanism") if definition else None
-        if mechanism is None or mechanism.schema_version != "mechanism/4":
-            _fail("invalid_reference", path, "Target needs a mechanism/4 capability")
-        scene = scene_ids[target]
-        target_scenes = {scene_ids[object_id]}
-        target_scenes.update(door_scenes.get(object_id, ()))
-        if scene not in target_scenes or sides and scene not in sides:
-            _fail("invalid_reference", path, "Mechanism must share an operable lock scene")
-        operations = [
-            op
-            for op in mechanism.operations
-            if op.save_gate is not None and (operation is None or op.operation_id == operation)
-        ]
-        if len(operations) != 1:
-            _fail("invalid_reference", path, "Select one existing save-gated mechanism operation")
-        if any(
-            t.kind == "check_result"
-            and t.scene_id == scene
-            and t.target_object_id == object_id
-            and t.succeeded is False
-            for t in mechanism.triggers
-        ):
-            _fail("invalid_reference", path, "Target already declares an overlapping check failure")
-        generated.setdefault(target, []).append(
-            MechanismTrigger(
-                "check_result",
-                scene,
-                operations[0].operation_id,
-                target_object_id=object_id,
-                succeeded=False,
-                lock_id=lock_id,
+    used = set()
+    for owner_id, definition in definitions.items():
+        mechanism = definition.capability("mechanism")
+        if mechanism is None:
+            continue
+        for trigger in mechanism.triggers:
+            if trigger.lock_id is None:
+                continue
+            path = "world_objects.mechanism.triggers"
+            source = definitions.get(trigger.target_object_id)
+            locks = source.capability("locks") if source else None
+            lock = (
+                next((item for item in locks.locks if item.lock_id == trigger.lock_id), None)
+                if locks
+                else None
             )
-        )
-
-    return generated
+            if lock is None or lock.pick_policy == "unconfigured":
+                _fail("invalid_reference", path, "Exact lock needs a configured picking rule")
+            scene = trigger.scene_id
+            source_scenes = {scene_ids[trigger.target_object_id]}
+            source_scenes.update(door_scenes.get(trigger.target_object_id, ()))
+            if (
+                scene_ids[owner_id] != scene
+                or scene not in source_scenes
+                or lock.operable_sides
+                and scene not in lock.operable_sides
+            ):
+                _fail("invalid_reference", path, "Mechanism must share an operable lock scene")
+            operation = next(
+                (op for op in mechanism.operations if op.operation_id == trigger.operation_id), None
+            )
+            if operation is None or operation.save_gate is None:
+                _fail("invalid_reference", path, "Select an existing save-gated operation")
+            if any(
+                other is not trigger
+                and other.kind == "check_result"
+                and other.scene_id == scene
+                and other.target_object_id == trigger.target_object_id
+                and other.succeeded is False
+                and other.lock_id is None
+                for other in mechanism.triggers
+            ):
+                _fail("invalid_reference", path, "Overlapping generic check failure")
+            key = (scene, trigger.target_object_id, trigger.lock_id)
+            if key in used:
+                _fail("invalid_reference", path, "Duplicate exact lock save gate")
+            used.add(key)

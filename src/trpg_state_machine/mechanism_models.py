@@ -54,7 +54,7 @@ class MechanismOperation:
 class MechanismTrigger:
     """Describe an event and target condition that may activate a mechanism.
 
-    Package normalization sets lock_id for an authored lock failure reference.
+    A check_result lock_id selects only the matching failed world.pick_lock.
     """
 
     kind: Literal["enter_region", "object_operation", "check_result"]
@@ -291,8 +291,8 @@ def parse_mechanism(config, objects, scenes, *, enabled):
     )
     for value in _list(c["triggers"], p):
         t = _mapping(
-            {"value": None, **value} if type(value) is dict else value,
-            "kind scene_id operation_id cells target_object_id event_type succeeded value",
+            {"value": None, "lock_id": None, **value} if type(value) is dict else value,
+            "kind scene_id operation_id cells target_object_id event_type succeeded value lock_id",
             p,
         )
         _reference(t["scene_id"], scene_map, p)
@@ -319,13 +319,18 @@ def parse_mechanism(config, objects, scenes, *, enabled):
                     valid = False
                 if not valid:
                     _fail("schema_error", p, "Invalid region cell")
-            if any(
+            if t["lock_id"] is not None or any(
                 t[k] is not None for k in ("target_object_id", "event_type", "succeeded", "value")
             ):
                 _fail("schema_error", p, "Region has unexpected selectors")
         elif t["kind"] == "object_operation":
             _reference(t["target_object_id"], objects, p)
-            if t["event_type"] not in object_events or cells or t["succeeded"] is not None:
+            if (
+                t["event_type"] not in object_events
+                or cells
+                or t["succeeded"] is not None
+                or t["lock_id"] is not None
+            ):
                 _fail("unsupported_mechanism", p, "Unsupported object operation selector")
             if t["value"] is not None and not (
                 t["event_type"] == "object.state_changed"
@@ -337,6 +342,10 @@ def parse_mechanism(config, objects, scenes, *, enabled):
                 _fail("schema_error", p, "Invalid operation value selector")
         elif t["kind"] == "check_result":
             _reference(t["target_object_id"], objects, p)
+            if t["lock_id"] is not None:
+                if version != "mechanism/4" or t["succeeded"] is not False:
+                    _fail("unsupported_mechanism", p, "Lock selector needs mechanism/4 failure")
+                _text(t["lock_id"], p)
             if (
                 cells
                 or t["event_type"] is not None
@@ -406,7 +415,7 @@ def parse_mechanism(config, objects, scenes, *, enabled):
 
 
 def validate_save_triggers(mechanism: Mechanism) -> None:
-    """Validate effective triggers after resolving optional authored lock links."""
+    """Validate authored triggers against supported direct save gates."""
     from .package import _fail
 
     path = "world_objects.mechanism"
