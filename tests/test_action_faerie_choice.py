@@ -1,5 +1,7 @@
 """Live action choice during ordered public Faerie Fire saves."""
 
+import asyncio
+
 import pytest
 from dnd5e_engine.activities.effects import passive_effect_to_active_effect
 from dnd5e_engine.evaluation_effects import effect_state
@@ -95,6 +97,7 @@ def test_faerie_bardic_choice_uses_frozen_prior_rolls(timed_spell_world, decisio
             roll["natural"] for roll in original["rolls"]
         ]
         assert sm.submit_command(answer, package, context=context) == final
+        assert asyncio.run(sm.submit_command_async(answer, package, context=context)) == final
         assert sm.submit_command(source, package, context=context).command_id == source.command_id
         assert not sm._has_pending_action_choice(sid)
         assert bool(
