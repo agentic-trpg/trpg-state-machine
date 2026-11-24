@@ -106,6 +106,17 @@ def _save(sm, sid, package, context, key):
     )
 
 
+def _cloak_save_modifier(sm, sid, package, context, key):
+    """Commit a public save and report whether the exact cloak source applied."""
+    save = _save(sm, sid, package, context, key)
+    receipt = sm.submit_command(save, package, context=context)
+    assert receipt.status == "committed", receipt
+    roll = sm.get_command_rolls(sid, save.command_id, package, context=context)["rolls"][0]
+    return {"kind": "fixed", "source": f"equipment:{CLOAK}:{SLUG}", "value": 1} in roll[
+        "roll_detail"
+    ]["modifiers"]
+
+
 def test_cloak_requires_both_wear_and_attunement(tmp_path, context):
     """One exact bond survives removal and cold reopen; voluntary release removes both bonuses."""
     host = replace(context, can_authorize_short_rest=True, can_adjudicate_checks=True)
@@ -132,17 +143,21 @@ def test_cloak_requires_both_wear_and_attunement(tmp_path, context):
         )
         assert sm.submit_command(repeated, package, context=host).status == "rejected"
         assert sm.read_time_sync(sid, package, context=host).committed_tick == started_at + 3600
+        assert _cloak_save_modifier(sm, sid, package, host, "save-worn")
         off = _json(command(sm, sid, package, host, UnequipWearable(CLOAK), "off"))
         assert sm.submit_command(off, package, context=host).status == "committed"
         assert sm.read_character_ac(sid, actor, package, context=host).effective == base_ac
+        assert not _cloak_save_modifier(sm, sid, package, host, "save-off")
         on = _json(command(sm, sid, package, host, EquipWearable(CLOAK), "on"))
         assert sm.submit_command(on, package, context=host).status == "committed"
+        assert _cloak_save_modifier(sm, sid, package, host, "save-on")
         release = _json(
             command(sm, sid, package, host, ShortRest(unattune_instance_id=CLOAK), "release")
         )
         assert sm.submit_command(release, package, context=host).status == "committed"
         assert sm.read_time_sync(sid, package, context=host).committed_tick == started_at + 7200
         assert sm.read_character_ac(sid, actor, package, context=host).effective == base_ac
+        assert not _cloak_save_modifier(sm, sid, package, host, "save-released")
     with StateMachine(tmp_path / "cloak.sqlite", dnd_loader=loader) as reopened:
         assert reopened.submit_command(rest, package, context=host).status == "committed"
         assert reopened.submit_command(release, package, context=host).status == "committed"
@@ -194,6 +209,29 @@ def test_attunement_contact_interruption_and_late_rollback(tmp_path, context, mo
     with StateMachine(tmp_path / "cloak.sqlite", dnd_loader=loader) as reopened:
         assert reopened.submit_command(retry, package, context=host).status == "committed"
         assert reopened.read_time_sync(sid, package, context=host).committed_tick == start + 3600
+
+
+def test_attuned_worn_cloak_reopens_with_same_ac_and_save_receipt(tmp_path, context):
+    """Cold loading preserves the active bond, worn ID and authorized save evidence."""
+    host = replace(context, can_authorize_short_rest=True, can_adjudicate_checks=True)
+    sm, sid, package, loader = _world(tmp_path, host)
+    with sm:
+        actor = sm.read_session(sid, package, context=host).pc_actor_id
+        base = sm.read_character_ac(sid, actor, package, context=host).effective
+        wear = _json(command(sm, sid, package, host, EquipWearable(CLOAK), "cold-wear"))
+        assert sm.submit_command(wear, package, context=host).status == "committed"
+        rest = _json(
+            command(sm, sid, package, host, ShortRest(attune_instance_id=CLOAK), "cold-attune")
+        )
+        assert sm.submit_command(rest, package, context=host).status == "committed"
+        save = _save(sm, sid, package, host, "cold-save")
+        receipt = sm.submit_command(save, package, context=host)
+        assert receipt.status == "committed"
+        rolls = sm.get_command_rolls(sid, save.command_id, package, context=host)
+    with StateMachine(tmp_path / "cloak.sqlite", dnd_loader=loader) as reopened:
+        assert reopened.read_character_ac(sid, actor, package, context=host).effective == base + 1
+        assert reopened.submit_command(save, package, context=host) == receipt
+        assert reopened.get_command_rolls(sid, save.command_id, package, context=host) == rolls
 
 
 def test_same_type_second_cloak_cannot_attune(tmp_path, context):
