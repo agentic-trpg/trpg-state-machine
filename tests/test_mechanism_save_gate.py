@@ -617,3 +617,35 @@ def test_cold_runtime_drops_uncommitted_action_choice(tmp_path, context):
         assert (
             reopened.get_command_receipt(sid, source.command_id, package, context=context) is None
         )
+
+
+def test_overlapping_action_evaluations_publish_one_choice(tmp_path, context, monkeypatch):
+    """A second command can finish evaluation while the first is still outside SQL."""
+    from dnd5e_engine import evaluation
+
+    sm, sid, package, _ = setup_bardic_mechanism(tmp_path, context)
+    with sm:
+        actor = sm.read_session(sid, package, context=context).pc_actor_id
+        grant_bardic(sm, sid, actor)
+        first = command(sm, sid, package, context, SetLightEnabled(A, CRED, "0,0", True), "first")
+        second = command(sm, sid, package, context, SetLightEnabled(A, CRED, "0,0", True), "second")
+        before = state_rows(sm)
+        real = evaluation.evaluate_bound_action_save
+        second_receipt = []
+
+        def overlap(request, *, loader):
+            if request.command_id == first.command_id and not second_receipt:
+                second_receipt.append(sm.submit_command(second, package, context=context))
+            return real(request, loader=loader)
+
+        monkeypatch.setattr(evaluation, "evaluate_bound_action_save", overlap)
+        with pytest.raises(StateMachineError) as exc:
+            sm.submit_command(first, package, context=context)
+        assert exc.value.code == "action_choice_pending"
+        assert second_receipt[0].status == "pending_choice"
+        assert sm.get_command_receipt(sid, first.command_id, package, context=context) is None
+        assert (
+            sm.get_command_receipt(sid, second.command_id, package, context=context)
+            == second_receipt[0]
+        )
+        assert state_rows(sm) == before

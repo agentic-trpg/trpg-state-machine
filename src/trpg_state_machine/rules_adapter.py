@@ -21,6 +21,7 @@ from dnd5e_engine.evaluation_contracts import (
     CAST_ACTIVITY_SCHEMA_VERSION,
     CHARGED_ITEM_SCHEMA_VERSION,
     CONDITION_CHOICE_SCHEMA_VERSION,
+    FAERIE_FIRE_SCHEMA_VERSION,
     IDENTIFY_ACTIVITY_SCHEMA_VERSION,
     MATERIAL_SPELL_SCHEMA_VERSION,
     MULTI_SPELL_SCHEMA_VERSION,
@@ -1316,14 +1317,22 @@ def haste_effect_changes(request, result):
     return (*base, *adopted)
 
 
-def validate_dnd_result(request, result, *, loader=None):
-    """Strictly restore an RE result and validate request, binding, read version and Delta."""
+def validate_dnd_result(request, result, *, loader=None, preverified_faerie=False):
+    """Restore an RE result and validate request, binding, read version and Delta.
+
+    An assisted Faerie result is independently verified against its private
+    ordered continuation before this call, then rechecked structurally here.
+    """
     try:
         result = RuleEvaluationResult.model_validate(copy.deepcopy(result))
         # RE /24 verifies /2 stage coverage against this exact input. Uncovered
         # is a valid explicit limitation, never upgraded to sensory Evidence or
         # complete coverage by SM; existing operation admission remains unchanged.
-        result.verify_request(request, loader=loader)
+        if preverified_faerie:
+            if request.schema_version != FAERIE_FIRE_SCHEMA_VERSION or result.status != "accepted":
+                _invalid("Expected an independently verified Faerie Fire continuation")
+        else:
+            result.verify_request(request, loader=loader)
     except (ValidationError, ValueError, TypeError) as exc:
         raise StateMachineError(
             "invalid_rule_result", "Invalid Engine result envelope/binding/RNG"

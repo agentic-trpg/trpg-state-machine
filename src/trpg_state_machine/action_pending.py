@@ -21,3 +21,15 @@ class PendingActionChoice:
     waiting_key: tuple[str, str]
     grant: BardicInspirationGrant
     receipt: CommandReceipt
+
+
+@dataclass(slots=True)
+class PendingFaerieChoice:
+    """Hold RE-authored ordered saves and the original fixed cast request."""
+
+    command: TypedCommand
+    fingerprint: str
+    request: object
+    progress: object
+    grant: BardicInspirationGrant
+    receipt: CommandReceipt

@@ -28,6 +28,7 @@ class _Coordinator:
         self.recovery_generations = {}
         self.recovery_generation = 0
         self.commit_generation = 0
+        self.pending_action_owners = {}
 
 
 _coordinators = WeakValueDictionary()

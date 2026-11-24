@@ -12,7 +12,7 @@ from .activity_handler import ActivityHandler
 from .activity_records import ActivityRecords
 from .availability import AvailabilityRuntime
 from .combat_handler import CombatHandler
-from .commands import OPERATIONS, CommandRuntime, TypedCommand
+from .commands import OPERATIONS, CommandReceipt, CommandRuntime, TypedCommand
 from .domain_facts import CharacterFacts, CombatRecords, WorldFacts
 from .errors import StateMachineError
 from .event_capture import EventCapture
@@ -160,6 +160,7 @@ class StateMachine(
             self._event_persistence,
             self._activity_records,
         )
+        self._combat.action_choice_runtime = self
 
         self._creation = SessionCreation(
             self._store,
@@ -231,7 +232,8 @@ class StateMachine(
 
     def close(self) -> None:
         """Close drivers and Store and release rebuildable environment snapshots."""
-        self._pending_action_choices.clear()
+        for session_id in tuple(self._pending_action_choices):
+            self._discard_pending_action_choice(session_id)
         if not self._store._closed:
             for driver in tuple(self._session_runtime.time.drivers.values()):
                 driver.close()
@@ -446,7 +448,109 @@ class StateMachine(
 
     def _discard_pending_action_choice(self, session_id: str) -> None:
         """Forget provisional action work when the runtime is abandoned or reloaded."""
-        self._pending_action_choices.pop(session_id, None)
+        with self._store._coordinator.lock:
+            self._pending_action_choices.pop(session_id, None)
+            owners = self._store._coordinator.pending_action_owners
+            if owners.get(session_id) is self:
+                del owners[session_id]
+
+    def _guard_pending_action_owner(self, session_id: str, *, resume_id=None) -> None:
+        """Block a competing writer while this process holds a live action."""
+        owner = self._store._coordinator.pending_action_owners.get(session_id)
+        if resume_id is not None and owner is not self:
+            raise StateMachineError("choice_stale", "Live action owner changed")
+        if owner is not None and (
+            owner is not self
+            or resume_id is None
+            or self._pending_action_choices[session_id].command.command_id != resume_id
+        ):
+            raise StateMachineError("action_choice_pending", "Resolve the current action")
+
+    def _register_pending_action_choice(self, pending, package, context, rng):
+        """Publish one provisional action under the shared file gate after fresh admission."""
+        from .action_pending import PendingActionChoice, PendingFaerieChoice
+
+        command = pending.command
+        sid = command.session_id
+        with self._store._coordinator.lock, self._transaction():
+            row = self._session(sid, package, context)
+            self._authorize_command(row, command.actor_id, command.payload, context)
+            if replay := self._command_replay(command, pending.fingerprint):
+                return replay
+            if self._session_runtime.version_conflict(row, command):
+                raise StateMachineError("version_conflict", "Action changed before choice")
+            if self._rules._rng_context(row) != rng:
+                raise StateMachineError("version_conflict", "Action RNG changed before choice")
+            if isinstance(pending, PendingActionChoice):
+                requests = self._objects.mechanisms.prepare_direct_saves(
+                    row, command.actor_id, command.payload, package, command.command_id
+                )
+                tick = self._world_facts.time_state(sid)[1]
+                grant = self._world.characters.effects.held_bardic_inspiration(
+                    sid, command.actor_id, tick
+                )
+                if requests != pending.requests or grant != pending.grant:
+                    raise StateMachineError(
+                        "version_conflict", "Action source or grant changed before choice"
+                    )
+            elif isinstance(pending, PendingFaerieChoice):
+                tick = self._world_facts.time_state(sid)[1]
+                grant = self._world.characters.effects.held_bardic_inspiration(
+                    sid, pending.progress.pending_target_id, tick
+                )
+                if grant != pending.grant:
+                    raise StateMachineError(
+                        "version_conflict", "Faerie grant changed before choice"
+                    )
+            owner = self._store._coordinator.pending_action_owners.get(sid)
+            if owner is not None:
+                existing = owner._pending_action_choices.get(sid)
+                if (
+                    owner is self
+                    and existing is not None
+                    and existing.command.command_id == command.command_id
+                    and existing.fingerprint == pending.fingerprint
+                ):
+                    return existing.receipt
+                raise StateMachineError("action_choice_pending", "Resolve the current action")
+            self._pending_action_choices[sid] = pending
+            self._store._coordinator.pending_action_owners[sid] = self
+            return pending.receipt
+
+    def _open_faerie_choice(self, command, fingerprint, request, progress, package, context):
+        """Offer the selected PC one private, uncommitted Faerie Fire save choice."""
+        from .action_pending import PendingFaerieChoice
+        from .choice_models import PendingChoice
+
+        sid, target = command.session_id, progress.pending_target_id
+        with self._transaction():
+            row = self._session(sid, package, context)
+            if target != row["pc_actor_id"]:
+                raise StateMachineError(
+                    "unsupported_action_choice", "Only the selected PC may answer this save"
+                )
+            tick = self._world_facts.time_state(sid)[1]
+            grant = self._world.characters.effects.held_bardic_inspiration(sid, target, tick)
+            if grant is None:
+                raise StateMachineError("choice_stale", "Faerie grant is unavailable")
+        prompt = PendingChoice(
+            command.command_id,
+            target,
+            "rules.bardic_inspiration",
+            ("accept", "decline"),
+            grant.expires_tick,
+        )
+        receipt = CommandReceipt(
+            sid,
+            command.command_id,
+            command.actor_id,
+            "pending_choice",
+            command.expected_world_version,
+            (),
+            pending_choice=prompt,
+        )
+        pending = PendingFaerieChoice(command, fingerprint, request, progress, grant, receipt)
+        return self._register_pending_action_choice(pending, package, context, request.rng_context)
 
     def save_session(
         self, session_id: str, package: AdventurePackage, *, context: TrustedContext
@@ -591,6 +695,20 @@ class StateMachine(
     async def submit_command_async(self, command, package, *, context):
         """Delegate supported asynchronous rule command submission."""
         if self._has_pending_action_choice(command.session_id):
+            from .action_pending import PendingFaerieChoice
+            from .choice_models import ChoiceRespondOperationPayload
+
+            pending = self._pending_action_choices[command.session_id]
+            if (
+                isinstance(pending, PendingFaerieChoice)
+                and type(command.payload) is ChoiceRespondOperationPayload
+                and command.payload.pending_operation_id == pending.command.command_id
+            ):
+                with self._transaction():
+                    row = self._session(command.session_id, package, context)
+                    self._authorize_command(row, command.actor_id, command.payload, context)
+                    fingerprint = self._session_runtime.fingerprint(command, row, context)
+                return await self._combat._submit_dnd(command, package, context, fingerprint)
             return self.submit_command(command, package, context=context)
         return await self._combat.submit_command_async(command, package, context=context)
 

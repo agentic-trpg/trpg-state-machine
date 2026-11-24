@@ -652,10 +652,25 @@ class CommandRuntime:
                     type(command.payload) is ChoiceRespondOperationPayload
                     and command.payload.pending_operation_id == pending.command.command_id
                 ):
+                    from .action_pending import PendingFaerieChoice
+
+                    if isinstance(pending, PendingFaerieChoice):
+                        import asyncio
+
+                        try:
+                            asyncio.get_running_loop()
+                        except RuntimeError:
+                            return asyncio.run(
+                                self._submit_dnd(command, package, context, fingerprint)
+                            )
+                        raise StateMachineError(
+                            "async_context_required", "Use await submit_command_async"
+                        )
                     return self._respond_action_choice(
                         pending, command, package, context, fingerprint
                     )
                 raise StateMachineError("action_choice_pending", "Resolve the current action")
+            self._guard_pending_action_owner(command.session_id)
             if type(command.payload) is ChoiceRespondOperationPayload:
                 with self._transaction():
                     row = self._session(command.session_id, package, context)
@@ -743,10 +758,12 @@ class CommandRuntime:
                     (),
                     pending_choice=choice,
                 )
-                self._pending_action_choices[command.session_id] = PendingActionChoice(
+                candidate = PendingActionChoice(
                     command, fingerprint, requests, mechanism_saves, waiting, grant, receipt
                 )
-                return receipt
+                return self._register_pending_action_choice(
+                    candidate, package, context, requests[0][2].rng_context
+                )
         if type(command.payload) is InitializeCombat:
             with self._transaction():
                 row = self._session(command.session_id, package, context)
@@ -761,7 +778,20 @@ class CommandRuntime:
             self._npc_handoff_command_guard(command)
             replay = self._command_replay(command, fingerprint)
             if replay is not None:
+                if _action_resume is not None:
+                    _, response, response_fingerprint = _action_resume
+                    answer_replay = self._command_replay(response, response_fingerprint)
+                    if answer_replay is None:
+                        raise StateMachineError(
+                            "choice_closed", "Original action already completed"
+                        )
+                    self._discard_pending_action_choice(command.session_id)
+                    return answer_replay
                 return replay
+            self._guard_pending_action_owner(
+                command.session_id,
+                resume_id=command.command_id if _action_resume is not None else None,
+            )
             version = row["world_version"]
             error = None
             status = "committed"
@@ -874,7 +904,7 @@ class CommandRuntime:
             if pending is not None and pending.command.command_id != command_id:
                 pending = None
             if pending is not None:
-                if pending.command.actor_id != row["pc_actor_id"]:
+                if pending.receipt.pending_choice.authorized_responder != row["pc_actor_id"]:
                     raise StateMachineError("unauthorized", "Action choice holder changed")
                 return pending.receipt
             receipt = self._session_runtime.receipt(session_id, command_id)
@@ -911,36 +941,46 @@ class CommandRuntime:
             if pending is not None and pending.command.command_id != command_id:
                 pending = None
             if pending is not None:
-                if pending.command.actor_id != row["pc_actor_id"]:
+                from .action_pending import PendingFaerieChoice
+
+                if pending.receipt.pending_choice.authorized_responder != row["pc_actor_id"]:
                     raise StateMachineError("unauthorized", "Action choice holder changed")
                 rolls = []
-                for _, result, _ in pending.prepared.values():
-                    for event in result.proposed_events:
-                        if event.type != "save_rolled":
-                            continue
-                        data = event.model_dump(mode="json")
-                        rolls.append(
-                            {
-                                "event_seq": None,
-                                "type": data["type"],
-                                **{
-                                    key: data[key]
-                                    for key in (
-                                        "target_id",
-                                        "ability",
-                                        "dc",
-                                        "advantage",
-                                        "natural",
-                                        "modifier",
-                                        "roll_total",
-                                        "succeeded",
-                                        "sources",
-                                    )
-                                    if key in data
-                                },
-                                "roll_detail": data.get("roll_detail"),
-                            }
-                        )
+                events = (
+                    tuple(step.original for step in pending.progress.steps)
+                    if isinstance(pending, PendingFaerieChoice)
+                    else tuple(
+                        event
+                        for _, result, _ in pending.prepared.values()
+                        for event in result.proposed_events
+                    )
+                )
+                for event in events:
+                    if event.type != "save_rolled":
+                        continue
+                    data = event.model_dump(mode="json")
+                    rolls.append(
+                        {
+                            "event_seq": None,
+                            "type": data["type"],
+                            **{
+                                key: data[key]
+                                for key in (
+                                    "target_id",
+                                    "ability",
+                                    "dc",
+                                    "advantage",
+                                    "natural",
+                                    "modifier",
+                                    "roll_total",
+                                    "succeeded",
+                                    "sources",
+                                )
+                                if key in data
+                            },
+                            "roll_detail": data.get("roll_detail"),
+                        }
+                    )
                 return {
                     "session_id": session_id,
                     "command_id": command_id,
