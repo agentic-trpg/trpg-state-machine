@@ -494,10 +494,16 @@ class StateMachine(
 
     def _register_pending_action_choice(self, pending, package, context, rng):
         """Publish one provisional action under the shared file gate after fresh admission."""
+        from ._operations import StepActor
         from .action_pending import PendingActionChoice, PendingSpellSaveChoice
 
         command = pending.command
         sid = command.session_id
+        step_requests = None
+        if isinstance(pending, PendingActionChoice) and type(command.payload) is StepActor:
+            step_requests, _ = self._prepare_step_saves(
+                command, package, context, pending.fingerprint
+            )
         with self._store._coordinator.lock, self._transaction():
             row = self._session(sid, package, context)
             self._authorize_command(row, command.actor_id, command.payload, context)
@@ -508,8 +514,12 @@ class StateMachine(
             if self._rules._rng_context(row) != rng:
                 raise StateMachineError("version_conflict", "Action RNG changed before choice")
             if isinstance(pending, PendingActionChoice):
-                requests = self._objects.mechanisms.prepare_direct_saves(
-                    row, command.actor_id, command.payload, package, command.command_id
+                requests = (
+                    step_requests
+                    if step_requests is not None
+                    else self._objects.mechanisms.prepare_direct_saves(
+                        row, command.actor_id, command.payload, package, command.command_id
+                    )
                 )
                 tick = self._world_facts.time_state(sid)[1]
                 grant = self._world.characters.effects.held_bardic_inspiration(

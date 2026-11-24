@@ -330,6 +330,7 @@ def parse_mechanism(config, objects, scenes, *, enabled):
         not {trigger.operation_id for trigger in triggers} >= gated
         or any(
             trigger.operation_id in gated
+            and trigger.kind != "enter_region"
             and (
                 trigger.kind != "object_operation"
                 or not (
@@ -341,9 +342,7 @@ def parse_mechanism(config, objects, scenes, *, enabled):
             for trigger in triggers
         )
     ):
-        _fail(
-            "unsupported_mechanism", p, "Save gate requires a direct light or object-state trigger"
-        )
+        _fail("unsupported_mechanism", p, "Save gate requires a direct object or region trigger")
     methods = []
     for value in _list(c["methods"], p):
         m = _mapping(
@@ -369,7 +368,7 @@ def parse_mechanism(config, objects, scenes, *, enabled):
         if m["trigger_on_failure"] is not None:
             _reference(m["trigger_on_failure"], ids, p)
             if m["trigger_on_failure"] in gated:
-                _fail("schema_error", p, "Save-gated operations require a light-change trigger")
+                _fail("schema_error", p, "Save-gated operations require a direct action trigger")
         methods.append(MechanismMethod(**m))
     if len(methods) > 16:
         _fail("schema_error", p, "At most sixteen methods")

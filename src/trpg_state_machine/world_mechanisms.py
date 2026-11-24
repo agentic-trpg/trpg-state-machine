@@ -11,8 +11,9 @@ from dataclasses import asdict, replace
 from itertools import pairwise
 
 from ._execution import _WorldEffectKind, _WorldEffectOrigin
-from ._operations import ObjectState, SetObjectState
+from ._operations import ObjectState, SetObjectState, StepActor
 from .errors import StateMachineError
+from .events import _ActorMotion
 from .mechanism_effects import MechanismEffectRunner
 from .runtime_instances import MechanismLinks, TriggerIndex, instance_read, world_read
 from .world_commands import CheckMechanism, SetLightEnabled
@@ -27,7 +28,7 @@ class MechanismService:
         self._invocation = None
         self.effects = MechanismEffectRunner(handler)
         self._prepared_saves = ContextVar("prepared_mechanism_saves", default=None)
-        self._source_operation = ContextVar("source_mechanism_operation", default=None)
+        self._source_command = ContextVar("source_mechanism_command", default=None)
 
     def config(self, sid, oid):
         """Read the object's instance mechanism capability."""
@@ -347,10 +348,96 @@ class MechanismService:
             for oid, operation_id, gate in gates
         )
 
+    def _eligible_automatic(self, sid, scene, oid, config, actor, package):
+        """Test the same current placement and eligibility for automatic triggers."""
+        state = self.h.facts.mechanism_state(sid, oid)
+        if state is None or state.status != "armed":
+            return False
+        if self.h.facts.placement(sid, oid)["scene_id"] != scene:
+            return False
+        try:
+            self._eligible(sid, oid, config, actor, package)
+        except StateMachineError as exc:
+            if exc.code in (
+                "mechanism_frequency_limited",
+                "mechanism_unprepared",
+                "mechanism_broken",
+                "container_inaccessible",
+            ):
+                return False
+            raise
+        return True
+
+    def _step_save_gates(self, row, package, motion):
+        """Select save-gated operations by indexed region entry and exact actor eligibility."""
+        sid, scene, actor = row["session_id"], motion.to_scene_id, motion.actor_id
+        fired = set()
+        for oid, _, trigger in self._region_entries(
+            self._scene_index(sid, scene), scene, motion.from_cell, motion.to_cell
+        ):
+            if oid in fired:
+                continue
+            config = self.config(sid, oid)
+            if self._eligible_automatic(sid, scene, oid, config, actor, package):
+                fired.add(oid)
+                gate = config.operation(trigger.operation_id).save_gate
+                if gate is not None:
+                    yield oid, trigger.operation_id, gate
+
+    def may_trigger_step_save(self, row, package, command):
+        """Prefilter potential direct PC gates without staging unrelated movement."""
+        if command.actor_id != row["pc_actor_id"] or self.h._active_combat(command.session_id):
+            return False
+        step = command.payload
+        endpoints = _ActorMotion(
+            command.actor_id, step.scene_id, step.expected_cell, step.scene_id, step.to_cell
+        )
+        return next(self._step_save_gates(row, package, endpoints), None) is not None
+
+    @staticmethod
+    def _direct_step_motion(row, command, event, command_id):
+        """Bind the actual post-move event to the admitted direct PC step."""
+        if (
+            command is None
+            or type(command.payload) is not StepActor
+            or command.session_id != row["session_id"]
+            or command.command_id != command_id
+            or command.actor_id != row["pc_actor_id"]
+            or event is None
+            or event.event_type != "actor.stepped"
+            or event.mechanical_phase != "world.after_actor_move"
+        ):
+            return None
+        step = command.payload
+        actual = event.mechanical_motion
+        expected = _ActorMotion(
+            command.actor_id, step.scene_id, step.expected_cell, step.scene_id, step.to_cell
+        )
+        return actual if actual == expected else None
+
+    def prepare_step_saves(self, row, package, command, event):
+        """Fix ordered save requests from the isolated post-move World candidate.
+
+        RUO-72-F1: If an earlier activation changes a later gate's fixed input,
+        adoption conflicts. Resuming at a later candidate stage needs a separate
+        preparation boundary.
+        """
+        motion = self._direct_step_motion(row, command, event, command.command_id)
+        if motion is None:
+            raise StateMachineError("invalid_execution_origin", "Missing admitted step event")
+        return tuple(
+            (
+                oid,
+                operation_id,
+                self._save_request(row, package, motion.actor_id, gate, command.command_id),
+            )
+            for oid, operation_id, gate in self._step_save_gates(row, package, motion)
+        )
+
     def evaluate_direct_saves(
         self, requests, *, first_rng=None, stop_on_failure=False, action_choice=False
     ):
-        """Evaluate ordered direct-object saves until a possible player choice."""
+        """Evaluate ordered direct-action saves until a possible player choice."""
         from dnd5e_engine.evaluation import evaluate_bound_save
         from dnd5e_engine.evaluation_rng import RNGContext
 
@@ -437,13 +524,25 @@ class MechanismService:
 
     def _resolve_save_gate(self, row, package, actor, gate, command_id, oid, operation_id):
         """Adopt a pre-evaluated save only if its fixed facts still match current facts."""
-        prepared = self._prepared_saves.get()
-        item = prepared.get((oid, operation_id)) if prepared is not None else None
+        prepared = self._prepared_saves.get() or {}
+        command = self._source_command.get()
+        is_step = command is not None and type(command.payload) is StepActor
+        key = (oid, operation_id)
+        item = prepared.pop(key, None) if is_step else prepared.get(key)
         if item is None:
+            if is_step:
+                raise StateMachineError("version_conflict", "Regional save source was not fixed")
             raise StateMachineError("unsupported_mechanism_save", "Save was not prepared")
         request, result, spend_grant = item
         current = self._save_request(row, package, actor, gate, command_id)
-        if self._save_recheck_projection(current) != self._save_recheck_projection(request):
+        if not is_step:
+            current = self._save_recheck_projection(current)
+            expected = self._save_recheck_projection(request)
+        else:
+            expected = request
+        # RUO-72-F1: all Step gates are fixed at the post-move boundary. Conflict
+        # if an earlier activation changed this gate's input before adoption.
+        if current != expected:
             raise StateMachineError("version_conflict", "Mechanism save facts changed")
         if result.status != "accepted":
             raise StateMachineError(
@@ -495,8 +594,11 @@ class MechanismService:
             and source_event.mechanical_phase == "world.after_object_update"
             and source_event.payload.get("execution") == {"kind": "actor", "actor_id": actor}
         )
+        region_source = self._direct_step_motion(
+            row, self._source_command.get(), source_event, command_id
+        )
         if operation.save_gate is not None and (
-            actor != row["pc_actor_id"] or not (light_source or state_source)
+            actor != row["pc_actor_id"] or not (light_source or state_source or region_source)
         ):
             raise StateMachineError(
                 "unsupported_mechanism_source", "Save gate requires a direct current PC action"
@@ -1015,30 +1117,19 @@ class MechanismService:
                 continue
             c = self.config(row["session_id"], oid)
             gate = c.operation(trigger.operation_id).save_gate
-            source_type = type(self._source_operation.get())
-            if (
-                gate is not None
-                and kind == "object.light_changed"
-                and source_type is not SetLightEnabled
-            ):
-                continue
-            state = self.h.facts.mechanism_state(sid, oid)
-            if state is None or state.status != "armed":
-                continue
-            location = self.h.facts.placement(sid, oid)
-            if location["scene_id"] != scene:
-                continue
-            try:
-                self._eligible(sid, oid, c, actor, package)
-            except StateMachineError as exc:
-                if exc.code in (
-                    "mechanism_frequency_limited",
-                    "mechanism_unprepared",
-                    "mechanism_broken",
-                    "container_inaccessible",
+            if gate is not None:
+                command = self._source_command.get()
+                if kind == "object.light_changed" and (
+                    command is None or type(command.payload) is not SetLightEnabled
                 ):
                     continue
-                raise
+                if (
+                    target_kind == "enter_region"
+                    and self._direct_step_motion(row, command, event, command_id) is None
+                ):
+                    continue
+            if not self._eligible_automatic(sid, scene, oid, c, actor, package):
+                continue
             events.extend(
                 self._activate(
                     row,

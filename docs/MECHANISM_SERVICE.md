@@ -284,7 +284,7 @@ their owners; no mechanism damage formula or status timer was added.
 
 在 Package /10 中声明 `mechanism/4`。命名操作的 `save_gate` 可为 null，
 或由 `source_ref`、`ability`、`dc`、`is_magical` 明确指定豁免。门槛操作要求
-`consume_on_noop: true`。选择器使用 `object_operation`。当前 PC 的直接启灯
+`consume_on_noop: true`。直接对象交互使用 `object_operation`。当前 PC 的直接启灯
 可用 `object.light_changed` 和 `value: true` 匹配。公开
 `set_object_state` 的状态转移可用 `object.state_changed` 和所需的开关状态匹配。
 灯光模式切换不会触发启灯豁免，派生对象事件不得冒用当前 PC 的直接交互。
@@ -314,3 +314,15 @@ SM 在短写事务前固定规则输入，RE 按触发顺序计算并产生骰�
 当前 PC 的直接启灯豁免实际失败并持有有效吟游诗人激励时，可以通过
 `choice.respond` 使用或保留该骰。原操作与骰点暂放在当前进程，最终结算时连同
 选定后果提交。离开当前运行时会丢弃未提交尝试。通用机关伤害由 RUO-32 跟踪。
+
+压力板使用 `enter_region` 选择器，通过 `scene_id`、`cells` 和 `operation_id`
+指定区域和门槛操作。当前 PC 通过 `world.step_actor` 从区域外迈入时，World
+匹配实际移动事件和仍符合触发资格的机关。SM 在仅用于准备的隔离候选中采用同一移动，
+固定该阶段的角色状态及区域效果，然后回滚候选。RE 在 SQLite 写作用域之外计算绑定的
+普通豁免。正式采用时重验实际进入者、来源事件、机关资格和固定输入，一次提交移动、
+机关激活、分支后果、骰点、RNG 和回执。受领者也可通过 `choice.respond` 决定是否
+使用有效的吟游诗人激励，等待期间移动保持未提交。
+
+RUO-72-F1 记录同一步触发多个压力板的已知限制。较早结算改变后续豁免输入时，
+例如第一个压力板消耗了吟游诗人激励，严格重验报告版本冲突，整个动作回滚。
+后续支持需要为每次受影响的豁免固定对应的候选阶段。
