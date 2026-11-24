@@ -18,7 +18,15 @@ from trpg_state_machine import (
 from trpg_state_machine.commands import world_command_from_data
 
 
-def _session(timed_spell_world, spell_id, *, seed=0, npc_cell="2,0"):
+def _session(
+    timed_spell_world,
+    spell_id,
+    *,
+    seed=0,
+    npc_cell="2,0",
+    configure_save=None,
+    database="timed-spell.sqlite",
+):
     """Give a cleric one exact priced focus and both reviewed spells."""
     canonical = BundledAssetLoader()
 
@@ -62,14 +70,21 @@ def _session(timed_spell_world, spell_id, *, seed=0, npc_cell="2,0"):
                 "accessible": True,
             }
         )
+        if configure_save is not None:
+            configure_save(data)
 
     return timed_spell_world(
         caster_class="cleric",
         caster_subclass="life",
         additional_spells=("bless", "bane"),
         additional_items=(canonical.get_item("amulet"),),
+        additional_conditions=(
+            (canonical.get_condition("poisoned"),) if configure_save is not None else ()
+        ),
+        material=configure_save is None,
         configure=configure,
         seed=seed,
+        database=database,
     )
 
 
