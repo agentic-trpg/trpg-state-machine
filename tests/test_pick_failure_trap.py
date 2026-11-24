@@ -518,3 +518,64 @@ def test_pick_save_reply_replays_after_postcommit_driver_fault(tmp_path, context
         assert sm._world_facts.mechanism_state(sid, LEVER).activation_count == 1
         another = pick_command(sm, sid, package, context, "other")
         assert sm.submit_command(another, package, context=context).status == "committed"
+
+
+def test_controlled_npc_pick_failure_rolls_its_own_save(tmp_path, context):
+    from dataclasses import replace
+
+    from lock_support import NPC
+    from world_support import command
+
+    from trpg_state_machine import PickLock
+
+    data, loader = pick_failure_data()
+    data["pc_templates"][0]["initial_cell"] = "1,1"
+    next(actor for actor in data["actors"] if actor["actor_id"] == NPC)["initial_cell"] = "0,0"
+    next(item for item in data["item_transfers"] if item["instance_id"] == CRED)[
+        "initial_owner_id"
+    ] = NPC
+    for foundation in data["rule_bindings"].values():
+        snapshot = foundation["snapshot"]
+        next(actor for actor in snapshot["character_states"] if actor["entity_id"] == NPC)[
+            "carried_item_slugs"
+        ] = ["thieves-tools"]
+        snapshot["inventory_state"]["entries"].append(
+            {
+                "instance_id": CRED,
+                "owner_id": NPC,
+                "item_slug": "thieves-tools",
+                "quantity": 1,
+                "charges_remaining_per_unit": 0,
+                "accessible": True,
+            }
+        )
+
+    loaded = write_package(tmp_path, data)
+    assert loaded.status == "valid", loaded.errors
+    package = loaded.package
+    with StateMachine(tmp_path / "npc-pick.sqlite", dnd_loader=loader) as sm:
+        sid = create(sm, package, context)
+        cmd = command(
+            sm, sid, package, context, PickLock(A, DOOR, "lock.outer", CRED, "0,0"), "npc-pick", NPC
+        )
+        before = sm.read_rng_context(sid, package, context=context)
+        with pytest.raises(StateMachineError, match="Trusted NPC control"):
+            sm.submit_command(cmd, package, context=replace(context, controlled_npc_ids=()))
+        assert sm.get_command_receipt(sid, cmd.command_id, package, context=context) is None
+        assert sm.read_rng_context(sid, package, context=context) == before
+        receipt = sm.submit_command(cmd, package, context=context)
+        assert receipt.status == "committed", receipt
+        check, save = sm.get_command_rolls(sid, cmd.command_id, package, context=context)["rolls"]
+        assert (check["type"], check["actor_id"], check["succeeded"]) == (
+            "check_rolled",
+            NPC,
+            False,
+        )
+        assert (save["type"], save["target_id"], save["succeeded"]) == ("save_rolled", NPC, False)
+        events = [sm._read_event(sid, seq) for seq in receipt.event_seqs]
+        activation = next(e for e in events if e.event_type == "mechanism.activated")
+        assert activation.payload["actor_id"] == NPC
+        assert activation.payload["source_event_seq"] == check["event_seq"]
+        assert sm._world_facts.light_state(sid, CRED)["enabled"]
+        assert sm.read_rng_context(sid, package, context=context).version == before.version + 2
+        assert sm.submit_command(cmd, package, context=context) == receipt

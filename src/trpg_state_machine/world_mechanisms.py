@@ -35,10 +35,11 @@ class _StepSaveCandidate(Exception):
 class _PickFailureSaveCandidate(Exception):
     """Return the bound save input by aborting the failed pick's draft expansion."""
 
-    def __init__(self, request, grant):
-        """Keep the detached save and applicable grant until the draft scope exits."""
+    def __init__(self, request, grant, *, selected_pc):
+        """Keep the detached save and whether its actor can receive a private choice."""
         self.request = request
         self.grant = grant
+        self.selected_pc = selected_pc
         self.command = None
         self.check = None
 
@@ -451,7 +452,6 @@ class MechanismService:
             or type(command.payload) is not PickLock
             or command.session_id != row["session_id"]
             or command.command_id != command_id
-            or command.actor_id != row["pc_actor_id"]
             or event is None
             or event.event_type != "rules.check_rolled"
         ):
@@ -583,7 +583,9 @@ class MechanismService:
             grant = self.h.characters.effects.held_bardic_inspiration(sid, actor, tick)
             if is_step:
                 raise _StepSaveCandidate(key, current, grant)
-            raise _PickFailureSaveCandidate((*key, current), grant)
+            raise _PickFailureSaveCandidate(
+                (*key, current), grant, selected_pc=actor == row["pc_actor_id"]
+            )
         request, result, spend_grant = item
         if not staged:
             current = self._save_recheck_projection(current)
@@ -642,18 +644,17 @@ class MechanismService:
             and source_event.mechanical_phase == "world.after_object_update"
             and source_event.payload.get("execution") == {"kind": "actor", "actor_id": actor}
         )
-        region_source = self._direct_step_motion(
-            row, self._source_command.get(), source_event, command_id
+        command = self._source_command.get()
+        region_source = self._direct_step_motion(row, command, source_event, command_id)
+        pc_source = actor == row["pc_actor_id"] and (light_source or state_source or region_source)
+        pick_source = (
+            command is not None
+            and actor == command.actor_id
+            and self._failed_pick_source(row, command, source_event, command_id) is not None
         )
-        pick_source = self._failed_pick_source(
-            row, self._source_command.get(), source_event, command_id
-        )
-        if operation.save_gate is not None and (
-            actor != row["pc_actor_id"]
-            or not (light_source or state_source or region_source or pick_source)
-        ):
+        if operation.save_gate is not None and not (pc_source or pick_source):
             raise StateMachineError(
-                "unsupported_mechanism_source", "Save gate requires a direct current PC action"
+                "unsupported_mechanism_source", "Save gate requires an admitted direct action"
             )
         activation = self.activation_id(oid, command_id, source_seq, operation_id)
         if h._conn.execute(

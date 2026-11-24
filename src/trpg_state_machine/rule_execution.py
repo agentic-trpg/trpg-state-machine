@@ -436,9 +436,10 @@ class RuleExecution:
             )
         except _PickFailureSaveCandidate as draft:
             mechanisms = self.world.objects.mechanisms
-            can_choose = draft.grant is not None and self.action_choices is not None
+            inspired = draft.grant is not None
+            can_choose = inspired and draft.selected_pc and self.action_choices is not None
             prepared, waiting, _ = mechanisms.evaluate_direct_saves(
-                (draft.request,), stop_on_failure=can_choose, action_choice=can_choose
+                (draft.request,), stop_on_failure=can_choose, action_choice=inspired
             )
             if waiting is not None:
                 return self._open_pick_save_choice(
