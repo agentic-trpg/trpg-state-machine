@@ -6,15 +6,28 @@ from dataclasses import asdict, replace
 
 import pytest
 from dnd5e_engine.evaluation_contracts import SavePayload
-from dnd5e_engine.evaluation_ruleset import get_default_ruleset
+from dnd5e_engine.evaluation_ruleset import get_default_ruleset, ruleset_binding
 from dnd5e_srd_data import MemoryAssetLoader
 from dnd_support import create, initialize
 from item_support import B
+from lock_support import CRED, NPC, OTHER_DOOR, A, lock_loader
 from modern_support import modern_data, modern_loader
 from test_faerie_fire import _grow_remote
+from test_lockable_passages import acquire
+from test_mechanism_effects import state_rows
+from test_mechanism_save_gate import gated_data, grant_bardic
 from test_scoped_runtime_validation import measure
+from test_world_containers import BOX, container_data
+from test_world_mechanisms import LEVER
+from world_support import create as create_world
+from world_support import setup as setup_world
+from world_support import submit as submit_world
 
 from trpg_state_machine import (
+    ObjectState,
+    PickupItem,
+    PutItem,
+    SetObjectState,
     StateMachine,
     StateMachineError,
     TypedCommand,
@@ -81,18 +94,22 @@ def save_command(sm, sid, package, context, *, command_id="save.1", **fields):
     )
 
 
+def save_json(sm, sid, package, context, **fields):
+    """Read one adjudicated envelope through the public JSON parser."""
+    command = save_command(sm, sid, package, context, **fields)
+    envelope = asdict(command)
+    envelope.pop("check_world_effects")
+    envelope["payload"] = command.payload.model_dump(mode="json")
+    return world_command_from_data(json.loads(json.dumps(envelope)))
+
+
 def test_save_json_public_result_failure_replay_and_reopen(
     tmp_path, package_data, context, monkeypatch
 ):
     gm = replace(context, can_adjudicate_checks=True)
     sm, sid, package = setup_save(tmp_path, package_data, context)
     with sm:
-        command = save_command(sm, sid, package, gm, dc=99)
-        envelope = asdict(command)
-        envelope.pop("check_world_effects")
-        command = world_command_from_data(
-            json.loads(json.dumps({**envelope, "payload": command.payload.model_dump(mode="json")}))
-        )
+        command = save_json(sm, sid, package, gm, dc=99)
         real = sm._rules._evaluate_dnd
         rule_actors = sm._rules.characters.rule_actors
         owners_read = []
@@ -233,6 +250,195 @@ def test_save_actor_reads_stay_fixed_as_remote_state_grows(tmp_path, package_dat
             assert receipt.status == "committed", receipt
             counts.append((work["sql_selects"], work["sql_rows"]))
     assert counts[0] == counts[1]
+
+
+@pytest.mark.parametrize(
+    ("cover", "expected"), [("half", "pending_choice"), ("total", "committed")]
+)
+def test_mechanism_source_standalone_save_without_activation(tmp_path, context, cover, expected):
+    """The exact source stays inert, including when a held Inspiration could assist a roll."""
+    gm = replace(context, can_adjudicate_checks=True)
+    data = gated_data(dc=100)
+    next(obj for obj in data["scenes"][0]["objects"] if obj["object_id"] == LEVER)[
+        "initial_cell"
+    ] = "2,0"
+    data["scenes"][0]["grid"]["cover_cells"] = {"1,0": cover}
+    data["rule_bindings"]["noncombat_foundation"]["snapshot"]["scene_state"]["grid"][
+        "cover_cells"
+    ] = {"1,0": cover}
+    base = lock_loader()
+    loader = MemoryAssetLoader(
+        items=[base.get_item(slug) for slug in base.list_slugs("items")],
+        monsters=[base.get_monster(slug) for slug in base.list_slugs("monsters")],
+        features=[get_default_ruleset().get_feature("bardic-inspiration")],
+    )
+    data["manifest"]["ruleset_binding"] = ruleset_binding(loader).model_dump(mode="json")
+    package = _validate(data)
+    db = tmp_path / "standalone-ward.db"
+    with StateMachine(db, dnd_loader=loader) as sm:
+        sid = create_world(sm, package, context)
+        actor = sm.read_session(sid, package, context=gm).pc_actor_id
+        grant_bardic(sm, sid, actor)
+        command = save_json(
+            sm,
+            sid,
+            package,
+            gm,
+            dc=99,
+            source_id=LEVER,
+            source_kind="world_object",
+            effect_reach={"kind": "direct"},
+        )
+        before = state_rows(sm)
+        rng = sm.read_rng_context(sid, package, context=gm)
+        grant = sm._world.characters.effects.held_bardic_inspiration(sid, actor, 0)
+        assert grant is not None
+        with pytest.raises(StateMachineError) as denied:
+            sm.submit_command(command, package, context=context)
+        assert denied.value.code == "unauthorized"
+        if cover == "total":
+            unspecified = save_json(
+                sm,
+                sid,
+                package,
+                gm,
+                command_id="missing.reach",
+                source_id=LEVER,
+                source_kind="world_object",
+                requires_cover=True,
+            )
+            rejected = sm.submit_command(unspecified, package, context=gm)
+            assert (rejected.status, rejected.error_code) == ("rejected", "save.cover")
+            assert sm.read_rng_context(sid, package, context=gm) == rng
+            before = state_rows(sm)
+            sm._conn.execute(
+                "CREATE TEMP TRIGGER fail_no_save_receipt BEFORE INSERT ON command_receipts "
+                "BEGIN SELECT RAISE(ABORT, 'injected'); END"
+            )
+            with pytest.raises(StateMachineError) as fault:
+                sm.submit_command(command, package, context=gm)
+            assert fault.value.code == "storage_error"
+            assert state_rows(sm) == before
+            assert sm.get_command_receipt(sid, command.command_id, package, context=gm) is None
+            sm._conn.execute("DROP TRIGGER fail_no_save_receipt")
+        receipt = sm.submit_command(command, package, context=gm)
+        assert receipt.status == expected, receipt
+        assert sm._world.characters.effects.held_bardic_inspiration(sid, actor, 0) == grant
+        assert sm.submit_command(command, package, context=gm) == receipt
+        after = state_rows(sm)
+        for table in ("objects", "mechanism_activations", "object_mechanisms", "characters"):
+            assert after[table] == before[table]
+        events = sm.read_events(sid, package, context=gm, after_seq=receipt.event_seqs[0] - 1)
+        rolls = sm.get_command_rolls(sid, command.command_id, package, context=gm)["rolls"]
+        if cover == "total":
+            assert len(events) == 1 and events[0].event_type == "rules.save_not_applicable"
+            assert events[0].payload["engine_event"] == {
+                "type": "save_not_applicable",
+                "target_id": actor,
+                "source_id": LEVER,
+                "source_kind": "world_object",
+                "reason": "total_cover",
+            }
+            assert rolls == []
+            assert sm.read_rng_context(sid, package, context=gm) == rng
+        else:
+            assert rolls[0]["succeeded"] is False
+            assert {"kind": "fixed", "source": "cover", "value": 2} in rolls[0]["roll_detail"][
+                "modifiers"
+            ]
+    if cover == "total":
+        with StateMachine(db, dnd_loader=loader) as reopened:
+            assert reopened.submit_command(command, package, context=gm) == receipt
+            assert (
+                reopened.read_events(sid, package, context=gm, after_seq=receipt.event_seqs[0] - 1)
+                == events
+            )
+
+
+def test_save_source_actor_provenance_verifies_identity_without_geometry(
+    tmp_path, package_data, context, monkeypatch
+):
+    gm = replace(context, can_adjudicate_checks=True)
+    sm, sid, package = setup_save(tmp_path, package_data, context)
+    with sm:
+        monkeypatch.setattr(
+            sm._rules, "_save_geometry", lambda *args, **kwargs: pytest.fail("unrequested geometry")
+        )
+        before = sm.read_rng_context(sid, package, context=gm)
+        bad = save_json(sm, sid, package, gm, source_id="npc.missing")
+        with pytest.raises(StateMachineError) as denied:
+            sm.submit_command(bad, package, context=gm)
+        assert denied.value.code == "invalid_actor"
+        assert sm.read_rng_context(sid, package, context=gm) == before
+        valid = save_json(sm, sid, package, gm, source_id=NPC)
+        receipt = sm.submit_command(valid, package, context=gm)
+        assert receipt.status == "committed", receipt
+        event = sm.read_events(sid, package, context=gm, after_seq=receipt.event_seqs[0] - 1)[0]
+        assert event.payload["adjudication"]["payload"]["source_id"] == NPC
+
+
+def test_standalone_save_reads_item_in_closed_container_by_exact_placement(tmp_path, context):
+    gm = replace(context, can_adjudicate_checks=True)
+    sm, sid, package, _ = setup_world(tmp_path, context, container_data())
+    with sm:
+        acquire(sm, sid, package, context)
+        for operation, key in (
+            (PickupItem(BOX, A, "1,0"), "box.pick"),
+            (PutItem(A, CRED, BOX, "0,0"), "box.put"),
+            (SetObjectState(A, BOX, ObjectState.CLOSED), "box.close"),
+        ):
+            receipt = submit_world(sm, sid, package, context, operation, key)
+            assert receipt.status == "committed", receipt
+        actor = sm.read_session(sid, package, context=gm).pc_actor_id
+        assert CRED not in {
+            entry.instance_id
+            for entry in sm.read_carried_items(sid, actor, package, context=context).entries
+        }
+        before = state_rows(sm)
+        for source in (NPC, "object.missing"):
+            invalid = save_json(sm, sid, package, gm, source_id=source, source_kind="world_object")
+            with pytest.raises(StateMachineError) as denied:
+                sm.submit_command(invalid, package, context=gm)
+            assert denied.value.code == "invalid_target"
+        with sm._transaction(write=True):
+            sm.scene_lifecycle.ensure_scene(sid, B, package)
+        remote = save_json(
+            sm,
+            sid,
+            package,
+            gm,
+            source_id=OTHER_DOOR,
+            source_kind="world_object",
+            effect_reach={"kind": "direct"},
+        )
+        with pytest.raises(StateMachineError) as denied:
+            sm.submit_command(remote, package, context=gm)
+        assert denied.value.code == "invalid_spatial_state"
+        assert state_rows(sm)["rng_states"] == before["rng_states"]
+        counts = []
+        for epoch, extra in enumerate((0, 25)):
+            _grow_remote(sm, sid, extra)
+            save = save_json(
+                sm,
+                sid,
+                package,
+                gm,
+                command_id=f"source.item.{epoch}",
+                source_id=CRED,
+                source_kind="world_object",
+                effect_reach={"kind": "direct"},
+            )
+            with measure(sm) as (work, _):
+                receipt = sm.submit_command(save, package, context=gm)
+            assert receipt.status == "committed", receipt
+            assert sm.get_command_rolls(sid, save.command_id, package, context=gm)["rolls"]
+            counts.append((work["sql_selects"], work["sql_rows"]))
+        assert counts[0] == counts[1]
+        after = state_rows(sm)
+        original_objects = {row[1]: row for row in before["objects"]}
+        assert {
+            row[1]: row for row in after["objects"] if row[1] in original_objects
+        } == original_objects
 
 
 @pytest.mark.parametrize(("source_cell", "cover_bonus"), [("0,1", 2), ("2,0", 0)])

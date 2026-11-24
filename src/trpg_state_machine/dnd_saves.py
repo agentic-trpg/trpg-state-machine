@@ -1,19 +1,19 @@
 """Admit the Engine's empty-delta standalone saving throw result."""
 
-from dnd5e_engine.evaluation_contracts import MechanismSaveNotApplicable
+from dnd5e_engine.evaluation_contracts import MechanismSaveNotApplicable, SaveNotApplicable
 from dnd5e_engine.events import SaveRolled
 
 from .errors import StateMachineError
 
 
 def save_changes(request, result):
-    """Require a bound save or an unchanged-RNG mechanism applicability outcome."""
+    """Require a bound save or a verified unchanged-RNG applicability outcome."""
     payload = request.payload
     if result.state_delta.operations or len(result.proposed_events) != 1:
         raise StateMachineError("invalid_rule_result", "Save requires empty Delta and one event")
     event = result.proposed_events[0]
-    if type(event) is MechanismSaveNotApplicable:
-        # validate_dnd_result already verified the exact mechanism source and unchanged RNG.
+    if isinstance(event, (MechanismSaveNotApplicable, SaveNotApplicable)):
+        # validate_dnd_result already verified the exact source and unchanged RNG.
         return ()
     if type(event) is not SaveRolled or any(
         getattr(event, field) != getattr(payload, field) for field in ("target_id", "ability", "dc")

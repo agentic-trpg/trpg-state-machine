@@ -2461,7 +2461,20 @@ class RulesAdapter:
                         )
                     }
                 )
+            elif command.payload.source_kind == "world_object":
+                self._save_source_object(command.session_id, command.payload.source_id)
+            elif command.payload.source_id is not None and not self.characters.actor_exists(
+                command.session_id, command.payload.source_id
+            ):
+                raise StateMachineError("invalid_actor", "Save requires an existing actor source")
         return request
+
+    def _save_source_object(self, session_id, source_id):
+        """Read the exact World source without exercising its capabilities."""
+        source = self.facts.object(session_id, source_id) if source_id is not None else None
+        if source is None:
+            raise StateMachineError("invalid_target", "Save requires an existing World source")
+        return source
 
     def _save_geometry(self, command, snapshot, need, package, *, opening=None):
         """Fix the declared World endpoints and their relevant authored cover contributions."""
@@ -2472,7 +2485,9 @@ class RulesAdapter:
             sid, scene_id, snapshot.scene_state.grid.model_dump(mode="json")
         )
         if need.source_kind == "world_object":
-            source = self.facts.placement(sid, need.source_id)
+            source = self.facts.placement(
+                sid, need.source_id, row=self._save_source_object(sid, need.source_id)
+            )
             source_scene, source_cell = source["scene_id"], source["cell"]
         else:
             if need.source_id == need.target_id:
@@ -2493,7 +2508,12 @@ class RulesAdapter:
         if need.object_cover:
             ray = cover_ray_cells(source_cell, target.cell)
             obstacles = self.world.objects.spatial.local_cover_contributions(
-                sid, scene_id, ray, package, exclude_object=need.source_id, opening=opening
+                sid,
+                scene_id,
+                ray,
+                package,
+                exclude_object=need.source_id if need.source_kind == "world_object" else None,
+                opening=opening,
             )
         return SaveGeometryFact(
             source_id=need.source_id,

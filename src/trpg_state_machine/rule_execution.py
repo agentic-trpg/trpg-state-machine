@@ -1614,7 +1614,7 @@ class RuleExecution:
                             package,
                             "rules.check_rolled"
                             if public_check or domain_check
-                            else "rules.save_rolled"
+                            else f"rules.{event.type}"
                             if public_save
                             else "world.item_used"
                             if exploration_item

@@ -2131,6 +2131,16 @@ class CharacterFacts:
         }
         return actors
 
+    @scoped_read
+    def actor_exists(self, sid, actor_id):
+        """Identify an exact persisted actor without reading spatial facts."""
+        return (
+            self._conn.execute(
+                "SELECT 1 FROM actors WHERE session_id=? AND actor_id=?", (sid, actor_id)
+            ).fetchone()
+            is not None
+        )
+
     def position(self, sid, actor_id):
         """Read authoritative actor position, rejecting a missing character."""
         from .spatial import SpatialPosition
