@@ -548,6 +548,7 @@ class CommandRuntime:
             row = self._session(response.session_id, package, context)
             self._authorize_command(row, response.actor_id, response.payload, context)
             if replay := self._command_replay(response, fingerprint):
+                self._discard_pending_action_choice(response.session_id)
                 return replay
             if response.actor_id != pending.command.actor_id:
                 raise StateMachineError("unauthorized", "Action choice belongs to another actor")
@@ -642,6 +643,10 @@ class CommandRuntime:
                         raise StateMachineError(
                             "idempotency_conflict", "Pending action key has different content"
                         )
+                    with self._transaction():
+                        if replay := self._command_replay(command, fingerprint):
+                            self._discard_pending_action_choice(command.session_id)
+                            return replay
                     return pending.receipt
                 if (
                     type(command.payload) is ChoiceRespondOperationPayload

@@ -565,3 +565,55 @@ def test_public_bard_grant_then_light_gate_choice(tmp_path, context, monkeypatch
             reopened.submit_command(source, package, context=granted_context).status == "committed"
         )
         assert reopened.submit_command(answer, package, context=granted_context) == final
+
+
+def test_action_choice_late_answer_receipt_fault_rolls_back(tmp_path, context, monkeypatch):
+    sm, sid, package, _ = setup_bardic_mechanism(tmp_path, context)
+    with sm:
+        actor = sm.read_session(sid, package, context=context).pc_actor_id
+        grant_bardic(sm, sid, actor)
+        source = command(sm, sid, package, context, SetLightEnabled(A, CRED, "0,0", True), "fault")
+        pending = sm.submit_command(source, package, context=context)
+        before = state_rows(sm)
+        before_rng = sm.read_rng_context(sid, package, context=context)
+        answer = TypedCommand(
+            sid,
+            "answer-fault",
+            actor,
+            "choice.respond",
+            ChoiceRespondOperationPayload(source.command_id, "accept"),
+            pending.world_version,
+        )
+        original = sm._session_runtime.record_receipt
+
+        def fail_answer(command, *args, **kwargs):
+            if command.command_id == answer.command_id:
+                raise RuntimeError("late answer receipt failure")
+            return original(command, *args, **kwargs)
+
+        monkeypatch.setattr(sm._session_runtime, "record_receipt", fail_answer)
+        with pytest.raises(RuntimeError, match="late answer receipt failure"):
+            sm.submit_command(answer, package, context=context)
+        assert state_rows(sm) == before
+        assert sm.read_rng_context(sid, package, context=context) == before_rng
+        assert sm._has_pending_action_choice(sid)
+        assert sm._session_runtime.receipt(sid, source.command_id) is None
+        assert sm._session_runtime.receipt(sid, answer.command_id) is None
+        monkeypatch.setattr(sm._session_runtime, "record_receipt", original)
+        assert sm.submit_command(answer, package, context=context).status == "committed"
+
+
+def test_cold_runtime_drops_uncommitted_action_choice(tmp_path, context):
+    sm, sid, package, db = setup_bardic_mechanism(tmp_path, context)
+    actor = sm.read_session(sid, package, context=context).pc_actor_id
+    grant_bardic(sm, sid, actor)
+    source = command(sm, sid, package, context, SetLightEnabled(A, CRED, "0,0", True), "cold")
+    assert sm.submit_command(source, package, context=context).status == "pending_choice"
+    before = state_rows(sm)
+    sm.close()
+    assert not sm._has_pending_action_choice(sid)
+    with StateMachine(db, dnd_loader=sm._rules.loader) as reopened:
+        assert state_rows(reopened) == before
+        assert (
+            reopened.get_command_receipt(sid, source.command_id, package, context=context) is None
+        )
