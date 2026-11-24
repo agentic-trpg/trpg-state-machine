@@ -478,3 +478,43 @@ def test_successful_trap_save_preserves_held_inspiration(tmp_path, context):
         assert not check["succeeded"] and save["succeeded"]
         assert not sm._world_facts.light_state(sid, CRED)["enabled"]
         assert sm._world.characters.effects.held_bardic_inspiration(sid, cmd.actor_id, 0)
+
+
+def test_pick_save_reply_replays_after_postcommit_driver_fault(tmp_path, context, monkeypatch):
+    from test_mechanism_save_gate import grant_bardic
+
+    from trpg_state_machine.choice_models import ChoiceRespondOperationPayload
+    from trpg_state_machine.commands import TypedCommand
+
+    sm, sid, package, _, _ = inspired_game(tmp_path, context, save_dc=100)
+    with sm:
+        cmd = pick_command(sm, sid, package, context)
+        grant_bardic(sm, sid, cmd.actor_id)
+        pending = sm.submit_command(cmd, package, context=context)
+        assert pending.status == "pending_choice"
+        answer = TypedCommand(
+            sid,
+            "answer",
+            cmd.actor_id,
+            "choice.respond",
+            ChoiceRespondOperationPayload("pick", "accept"),
+            pending.world_version,
+        )
+
+        def fail_refresh(_runtime):
+            assert not sm._conn.in_transaction
+            raise RuntimeError("injected after durable commit")
+
+        with monkeypatch.context() as fault:
+            fault.setattr(type(sm._session_runtime), "refresh_time_drivers", fail_refresh)
+            with pytest.raises(RuntimeError, match="injected after durable commit"):
+                sm.submit_command(answer, package, context=context)
+        durable = sm.get_command_receipt(sid, "answer", package, context=context)
+        assert durable is not None and durable.status == "committed"
+        rng = sm.read_rng_context(sid, package, context=context)
+        assert sm.submit_command(answer, package, context=context) == durable
+        assert sm.get_command_receipt(sid, "pick", package, context=context).status == "committed"
+        assert sm.read_rng_context(sid, package, context=context) == rng
+        assert sm._world_facts.mechanism_state(sid, LEVER).activation_count == 1
+        another = pick_command(sm, sid, package, context, "other")
+        assert sm.submit_command(another, package, context=context).status == "committed"

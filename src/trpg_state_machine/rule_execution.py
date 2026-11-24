@@ -494,6 +494,7 @@ class RuleExecution:
                     "idempotency_conflict", "Reply key must differ from the pick"
                 )
             if replay := self.runtime._command_replay(reply, fingerprint):
+                self.action_choices._discard_pending_action_choice(sid, expected=pending)
                 return replay
             if reply.expected_world_version != pending.command.expected_world_version:
                 raise StateMachineError("version_conflict", "Pick save reply version changed")
@@ -838,7 +839,11 @@ class RuleExecution:
             self.runtime.authorize_time_wait_reply(row, package, command, context)
             if response is None and confirmation is None:
                 self.sessions._npc_handoff_command_guard(command)
-                if replay := self.runtime._command_replay(command, fingerprint):
+                # A resumed pick must replay the reply's receipt if another
+                # submission finalizes the pick during the handoff.
+                if pick_reply is None and (
+                    replay := self.runtime._command_replay(command, fingerprint)
+                ):
                     return replay
                 guard_shield_window(self._conn, row)
             if public_save and self.world._active_combat(command.session_id):
@@ -1260,9 +1265,12 @@ class RuleExecution:
         with self.store.transaction(write=True):
             row = self.sessions._session(command.session_id, package, context)
             if pick_reply is not None:
-                _, reply, reply_fingerprint = pick_reply
+                pending, reply, reply_fingerprint = pick_reply
                 self.sessions._authorize_command(row, reply.actor_id, reply.payload, context)
                 if replay := self.runtime._command_replay(reply, reply_fingerprint):
+                    self.action_choices._discard_pending_action_choice(
+                        command.session_id, expected=pending
+                    )
                     return replay
                 if self.runtime._command_replay(command, fingerprint):
                     raise StateMachineError("choice_closed", "Original pick already completed")
@@ -2004,11 +2012,12 @@ class RuleExecution:
                 receipt = self.runtime.finish(
                     reply, context, reply_fingerprint, row, status, version, error
                 )
-        self.runtime.refresh_time_drivers()
         if pick_reply is not None:
+            # Both receipts are durable once the write scope has closed.
             self.action_choices._discard_pending_action_choice(
                 command.session_id, expected=pick_reply[0]
             )
+        self.runtime.refresh_time_drivers()
         if spell_save_reply is not None:
             self.action_choices._discard_pending_action_choice(
                 command.session_id, expected=_spell_save_resume[0]
