@@ -1246,12 +1246,16 @@ class RuleExecution:
                     self.sessions._npc_combat_target_guard(
                         shield_original or command, package, build_snapshot(row)
                     )
-                result, changes = validate_dnd_result(
-                    request,
-                    result,
-                    loader=self.rules.loader,
-                    preverified_faerie=preverified_faerie,
-                )
+                # These casts already verified their ordered saves before
+                # writes. The live read fence and facts above guard adoption.
+                if not ward_spell and not (
+                    environmental_spell and command.payload.spell_id == "faerie-fire"
+                ):
+                    result, changes = validate_dnd_result(
+                        request,
+                        result,
+                        loader=self.rules.loader,
+                    )
                 self._conn.execute("SAVEPOINT dnd_effects")
                 try:
                     if command.time_wait is not None:

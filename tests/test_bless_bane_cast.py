@@ -245,14 +245,25 @@ def test_bless_drop_expiry_reopen_and_late_rollback(timed_spell_world, tmp_path)
         assert reopened.read_noncombat_snapshot(sid, package, context=context).effect_states == ()
 
 
-def test_public_bane_resolves_ordered_saves_once(timed_spell_world):
+def test_public_bane_resolves_ordered_saves_once(timed_spell_world, monkeypatch):
+    from dnd5e_engine import evaluation_ward_spells
+
     session = _session(timed_spell_world, "bane")
     sm, sid, package, context = session
     with sm:
         assert submit(session, AdvanceSessionTime(11), "ward-start").status == "committed"
         pc = sm.read_session(sid, package, context=context).pc_actor_id
+        evaluate = evaluation_ward_spells.evaluate_ward_spell
+        transactions = []
+
+        def observe_verification(*args, **kwargs):
+            transactions.append(sm._conn.in_transaction)
+            return evaluate(*args, **kwargs)
+
+        monkeypatch.setattr(evaluation_ward_spells, "evaluate_ward_spell", observe_verification)
         command, receipt = _cast(session, "bane", (NPC, pc), command_id="cast.bane")
         assert receipt.status == "committed", receipt
+        assert transactions and not any(transactions)
         events = [
             event.payload["engine_event"]
             for event in sm.read_events(sid, package, context=context)
