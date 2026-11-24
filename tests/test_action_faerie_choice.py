@@ -4,7 +4,9 @@ import asyncio
 
 import pytest
 from dnd5e_engine.activities.effects import passive_effect_to_active_effect
+from dnd5e_engine.evaluation_bardic_grant import ExplorationFeaturePayload
 from dnd5e_engine.evaluation_effects import effect_state
+from item_support import NPC
 from test_timed_spell_cast import timed_spell_world as timed_spell_world
 
 from trpg_state_machine import TypedCommand, world_command_from_data
@@ -29,6 +31,44 @@ def bard_faerie_world(timed_spell_world, *, seed=1, invalid_save_trait=False):
         caster_subclass="lore",
         additional_spells=("faerie-fire",),
         seed=seed,
+        configure=configure,
+    )
+
+
+def public_bard_faerie_world(timed_spell_world):
+    """Give the nearby controlled NPC a funded Bard feature for public issuance."""
+
+    def configure(data):
+        data["rule_bindings"].pop("combat_foundation")
+        data["actors"][0]["initial_cell"] = "2,0"
+        snapshot = data["rule_bindings"]["noncombat_foundation"]["snapshot"]
+        pc, npc = snapshot["character_states"]
+        npc.update(
+            class_slug="bard",
+            classes={"bard": 5},
+            subclass_slug="lore",
+            character_level=5,
+            granted_features=pc["granted_features"],
+            charisma=16,
+            custom_counters={"feature_use:bardic-inspiration": {"spent": 0}},
+        )
+        snapshot["resource_state"]["pools"].append(
+            {
+                "kind": "feature_uses",
+                "owner_id": NPC,
+                "pool_id": "bardic-inspiration",
+                "current": 3,
+                "maximum": 3,
+                "feature_slug": "bardic-inspiration",
+            }
+        )
+
+    return timed_spell_world(
+        database="action-faerie-public-grant.sqlite",
+        caster_class="bard",
+        caster_subclass="lore",
+        additional_spells=("faerie-fire",),
+        seed=2,
         configure=configure,
     )
 
@@ -190,3 +230,43 @@ def test_faerie_inspired_cast_admission_rejects_without_prompt(timed_spell_world
         assert receipt.status == "rejected", receipt
         assert not sm._has_pending_action_choice(sid)
         assert sm.read_rng_context(sid, package, context=context) == before_rng
+
+
+def test_public_bard_grant_precedes_public_faerie_choice(timed_spell_world):
+    sm, sid, package, context = public_bard_faerie_world(timed_spell_world)
+    with sm:
+        state = sm.read_session(sid, package, context=context)
+        actor = state.pc_actor_id
+        issued = TypedCommand(
+            sid,
+            "faerie-public-grant",
+            NPC,
+            "world.use_feature",
+            ExplorationFeaturePayload(
+                kind="world.use_feature",
+                feature_id="bardic-inspiration",
+                target_id=actor,
+            ),
+            state.world_version,
+        )
+        grant_receipt = sm.submit_command(issued, package, context=context)
+        assert grant_receipt.status == "committed", grant_receipt
+        grant_state = sm.read_noncombat_snapshot(sid, package, context=context)
+        assert any(
+            effect.id == "effect:inspired"
+            and effect.target_id == actor
+            and effect.flags["bardic_inspiration"]["grant_id"] == issued.command_id
+            for effect in grant_state.effect_states
+        )
+        source = cast(sm, sid, package, context)
+        prompt = sm.submit_command(source, package, context=context)
+        assert prompt.status == "pending_choice", prompt
+        answer = TypedCommand(
+            sid,
+            "faerie-public-answer",
+            actor,
+            "choice.respond",
+            ChoiceRespondOperationPayload(source.command_id, "decline"),
+            prompt.world_version,
+        )
+        assert sm.submit_command(answer, package, context=context).status == "committed"
