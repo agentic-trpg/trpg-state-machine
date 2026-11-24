@@ -259,6 +259,7 @@ def test_mechanism_source_standalone_save_without_activation(tmp_path, context, 
     """The exact source stays inert, including when a held Inspiration could assist a roll."""
     gm = replace(context, can_adjudicate_checks=True)
     data = gated_data(dc=100)
+    data["rule_bindings"].pop("combat_foundation")
     next(obj for obj in data["scenes"][0]["objects"] if obj["object_id"] == LEVER)[
         "initial_cell"
     ] = "2,0"
