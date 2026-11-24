@@ -495,7 +495,11 @@ class StateMachine(
     def _register_pending_action_choice(self, pending, package, context, rng, *, previous=None):
         """Publish one provisional action under the shared file gate after fresh admission."""
         from ._operations import StepActor
-        from .action_pending import PendingActionChoice, PendingSpellSaveChoice
+        from .action_pending import (
+            PendingActionChoice,
+            PendingPickSaveChoice,
+            PendingSpellSaveChoice,
+        )
 
         command = pending.command
         sid = command.session_id
@@ -538,16 +542,23 @@ class StateMachine(
             if self._rules._rng_context(row) != rng:
                 raise StateMachineError("version_conflict", "Action RNG changed before choice")
             if isinstance(pending, PendingActionChoice):
-                requests = self._objects.mechanisms.prepare_direct_saves(
-                    row, command.actor_id, command.payload, package, command.command_id
-                )
+                # The original check's RNG fences pick registration. Replay its
+                # ordered consequences to match the gate at reply adoption.
+                if not isinstance(pending, PendingPickSaveChoice):
+                    requests = self._objects.mechanisms.prepare_direct_saves(
+                        row, command.actor_id, command.payload, package, command.command_id
+                    )
+                    if requests != pending.requests:
+                        raise StateMachineError(
+                            "version_conflict", "Action source changed before choice"
+                        )
                 tick = self._world_facts.time_state(sid)[1]
                 grant = self._world.characters.effects.held_bardic_inspiration(
                     sid, command.actor_id, tick
                 )
-                if requests != pending.requests or grant != pending.grant:
+                if grant != pending.grant:
                     raise StateMachineError(
-                        "version_conflict", "Action source or grant changed before choice"
+                        "version_conflict", "Action grant changed before choice"
                     )
             elif isinstance(pending, PendingSpellSaveChoice) and (
                 pending.progress.pending_target_id != row["pc_actor_id"]
@@ -758,12 +769,12 @@ class StateMachine(
     async def submit_command_async(self, command, package, *, context):
         """Delegate supported asynchronous rule command submission."""
         if self._has_pending_action_choice(command.session_id):
-            from .action_pending import PendingSpellSaveChoice
+            from .action_pending import PendingPickSaveChoice, PendingSpellSaveChoice
             from .choice_models import ChoiceRespondOperationPayload
 
             pending = self._pending_action_choices[command.session_id]
             if (
-                isinstance(pending, PendingSpellSaveChoice)
+                isinstance(pending, (PendingPickSaveChoice, PendingSpellSaveChoice))
                 and type(command.payload) is ChoiceRespondOperationPayload
                 and command.payload.pending_operation_id == pending.command.command_id
             ):

@@ -59,8 +59,14 @@ from dnd5e_engine.spellcasting import spell_range_ft
 from pydantic import ValidationError
 
 from ._execution import _WorldEffectKind, _WorldEffectOrigin
-from .choice_models import ChoiceFinalizeSpellOperationPayload, ChoiceRespondOperationPayload
+from .action_pending import PendingPickSaveChoice, resolve_action_save_choice
+from .choice_models import (
+    ChoiceFinalizeSpellOperationPayload,
+    ChoiceRespondOperationPayload,
+    PendingChoice,
+)
 from .combat import process_id
+from .commands import CommandReceipt
 from .dnd_checks import world_effects_ready
 from .effect_hp_adoption import apply_world_spell_ends
 from .errors import StateMachineError
@@ -88,6 +94,7 @@ from .spell_cast_activity import (
 )
 from .time_binding import TimeBinding, deadline_after_seconds
 from .world_commands import OPENABLE_CHECK_OPERATIONS, CheckMechanism, PickLock
+from .world_mechanisms import _PickFailureSaveCandidate
 
 
 class RuleExecution:
@@ -422,6 +429,103 @@ class RuleExecution:
         )
 
     async def submit(self, command, package, context, fingerprint, *, _spell_save_resume=None):
+        """Submit rules, resolving a failed pick's save after its draft rolls back."""
+        try:
+            return await self._submit(
+                command, package, context, fingerprint, _spell_save_resume=_spell_save_resume
+            )
+        except _PickFailureSaveCandidate as draft:
+            mechanisms = self.world.objects.mechanisms
+            can_choose = draft.grant is not None and self.action_choices is not None
+            prepared, waiting, _ = mechanisms.evaluate_direct_saves(
+                (draft.request,), stop_on_failure=can_choose, action_choice=can_choose
+            )
+            if waiting is not None:
+                return self._open_pick_save_choice(
+                    draft, fingerprint, prepared, waiting, package, context
+                )
+            return await self._submit(
+                draft.command, package, context, fingerprint, pick_failure=(draft.check, prepared)
+            )
+
+    def _open_pick_save_choice(self, draft, fingerprint, prepared, waiting, package, context):
+        """Register the detached check and failed save for the selected PC."""
+        command = draft.command
+        prompt = PendingChoice(
+            command.command_id,
+            command.actor_id,
+            "rules.bardic_inspiration",
+            ("accept", "decline"),
+            draft.grant.expires_tick,
+        )
+        receipt = CommandReceipt(
+            command.session_id,
+            command.command_id,
+            command.actor_id,
+            "pending_choice",
+            command.expected_world_version,
+            (),
+            pending_choice=prompt,
+        )
+        pending = PendingPickSaveChoice(
+            command,
+            fingerprint,
+            (draft.request,),
+            prepared,
+            waiting,
+            draft.grant,
+            receipt,
+            check=draft.check,
+        )
+        return self.action_choices._register_pending_action_choice(
+            pending, package, context, draft.check[0].request.rng_context
+        )
+
+    async def _reply_pick_save(self, pending, reply, package, context, fingerprint):
+        """Continue the exact original save after validating its private reply."""
+        sid = reply.session_id
+        with self.store.transaction():
+            row = self.sessions._session(sid, package, context)
+            self.sessions._authorize_command(row, reply.actor_id, reply.payload, context)
+            if reply.actor_id != pending.command.actor_id:
+                raise StateMachineError("unauthorized", "Pick save choice belongs to its target")
+            if reply.command_id == pending.command.command_id:
+                raise StateMachineError(
+                    "idempotency_conflict", "Reply key must differ from the pick"
+                )
+            if replay := self.runtime._command_replay(reply, fingerprint):
+                return replay
+            if reply.expected_world_version != pending.command.expected_world_version:
+                raise StateMachineError("version_conflict", "Pick save reply version changed")
+            tick = self.world.facts.time_state(sid)[1]
+            grant = self.world.characters.effects.held_bardic_inspiration(sid, reply.actor_id, tick)
+            if tick >= pending.grant.expires_tick or grant != pending.grant:
+                self.action_choices._discard_pending_action_choice(sid, expected=pending)
+                raise StateMachineError("choice_stale", "Pick save grant changed or expired")
+        request, result, _ = pending.prepared[pending.waiting_key]
+        resolved = resolve_action_save_choice(
+            request, result, pending.grant, use=reply.payload.selected_option_id == "accept"
+        )
+        return await self._submit(
+            pending.command,
+            package,
+            context,
+            pending.fingerprint,
+            pick_failure=(pending.check, {pending.waiting_key: resolved}),
+            pick_reply=(pending, reply, fingerprint),
+        )
+
+    async def _submit(
+        self,
+        command,
+        package,
+        context,
+        fingerprint,
+        *,
+        _spell_save_resume=None,
+        pick_failure=None,
+        pick_reply=None,
+    ):
         """Evaluate fixed rules inputs, then revalidate and adopt their guarded result.
 
         Preparation authorizes the actor, bindings, target and optional domain check in
@@ -446,6 +550,11 @@ class RuleExecution:
             from .action_pending import PendingSpellSaveChoice
 
             pending = self.action_choices._pending_action_choices.get(command.session_id)
+            if (
+                isinstance(pending, PendingPickSaveChoice)
+                and command.payload.pending_operation_id == pending.command.command_id
+            ):
+                return await self._reply_pick_save(pending, command, package, context, fingerprint)
             if (
                 isinstance(pending, PendingSpellSaveChoice)
                 and command.payload.pending_operation_id == pending.command.command_id
@@ -1012,7 +1121,12 @@ class RuleExecution:
                             loader=self.rules.loader,
                         )
                     elif object_check:
-                        result = await evaluate_openable(spec, loader=self.rules.loader)
+                        if pick_failure is None:
+                            result = await evaluate_openable(spec, loader=self.rules.loader)
+                        else:
+                            previous_spec, result = pick_failure[0]
+                            if previous_spec != spec:
+                                raise StateMachineError("version_conflict", "Pick facts changed")
                     elif spell_save_handlers is not None and spell_save_recipient is not None:
                         step, verify = spell_save_handlers
                         try:
@@ -1145,6 +1259,13 @@ class RuleExecution:
         )
         with self.store.transaction(write=True):
             row = self.sessions._session(command.session_id, package, context)
+            if pick_reply is not None:
+                _, reply, reply_fingerprint = pick_reply
+                self.sessions._authorize_command(row, reply.actor_id, reply.payload, context)
+                if replay := self.runtime._command_replay(reply, reply_fingerprint):
+                    return replay
+                if self.runtime._command_replay(command, fingerprint):
+                    raise StateMachineError("choice_closed", "Original pick already completed")
             if spell_save_reply is not None:
                 self.sessions._authorize_command(
                     row, spell_save_reply.actor_id, spell_save_reply.payload, context
@@ -1169,9 +1290,9 @@ class RuleExecution:
                     )
                     raise StateMachineError("choice_stale", "Spell save grant changed or expired")
             if self.action_choices is not None:
+                resume = pick_reply if pick_reply is not None else _spell_save_resume
                 self.action_choices._guard_pending_action_owner(
-                    command.session_id,
-                    expected=_spell_save_resume[0] if _spell_save_resume is not None else None,
+                    command.session_id, expected=resume[0] if resume is not None else None
                 )
             if shield_prompt is not None:
                 replay, pending, error = self.shield_windows.check(
@@ -1762,9 +1883,29 @@ class RuleExecution:
                         if time_events
                         else row
                     )
-                    events = time_events + self.effects._expand_events(
-                        outcome_row, package, events, command.command_id
-                    )
+                    if type(command.payload) is PickLock:
+                        mechanisms = self.world.objects.mechanisms
+                        prepared = pick_failure[1] if pick_failure is not None else None
+                        token = mechanisms._prepared_saves.set(prepared)
+                        source_token = mechanisms._source_command.set(command)
+                        try:
+                            events = self.effects._expand_events(
+                                outcome_row, package, events, command.command_id
+                            )
+                            if prepared:
+                                raise StateMachineError("version_conflict", "Pick trigger changed")
+                        except _PickFailureSaveCandidate as pending:
+                            pending.command = command
+                            pending.check = (spec, result)
+                            raise
+                        finally:
+                            mechanisms._source_command.reset(source_token)
+                            mechanisms._prepared_saves.reset(token)
+                    else:
+                        events = self.effects._expand_events(
+                            outcome_row, package, events, command.command_id
+                        )
+                    events = time_events + events
                     events.extend(
                         self.runtime.coordinate_combat_time(
                             row, package, command.command_id, previous_round, len(events)
@@ -1859,7 +2000,15 @@ class RuleExecution:
                     version,
                     error,
                 )
+            if pick_reply is not None:
+                receipt = self.runtime.finish(
+                    reply, context, reply_fingerprint, row, status, version, error
+                )
         self.runtime.refresh_time_drivers()
+        if pick_reply is not None:
+            self.action_choices._discard_pending_action_choice(
+                command.session_id, expected=pick_reply[0]
+            )
         if spell_save_reply is not None:
             self.action_choices._discard_pending_action_choice(
                 command.session_id, expected=_spell_save_resume[0]

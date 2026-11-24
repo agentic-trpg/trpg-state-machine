@@ -8,7 +8,9 @@ import hashlib
 import json
 from contextvars import ContextVar
 from dataclasses import asdict, replace
+from heapq import merge
 from itertools import pairwise
+from operator import itemgetter
 
 from ._execution import _WorldEffectKind, _WorldEffectOrigin
 from ._operations import ObjectState, SetObjectState, StepActor
@@ -16,7 +18,7 @@ from .errors import StateMachineError
 from .events import _ActorMotion
 from .mechanism_effects import MechanismEffectRunner
 from .runtime_instances import MechanismLinks, TriggerIndex, instance_read, world_read
-from .world_commands import CheckMechanism, SetLightEnabled
+from .world_commands import CheckMechanism, PickLock, SetLightEnabled
 
 
 class _StepSaveCandidate(Exception):
@@ -28,6 +30,17 @@ class _StepSaveCandidate(Exception):
         self.key = key
         self.request = request
         self.grant = grant
+
+
+class _PickFailureSaveCandidate(Exception):
+    """Return the bound save input by aborting the failed pick's draft expansion."""
+
+    def __init__(self, request, grant):
+        """Keep the detached save and applicable grant until the draft scope exits."""
+        self.request = request
+        self.grant = grant
+        self.command = None
+        self.check = None
 
 
 class MechanismService:
@@ -76,6 +89,8 @@ class MechanismService:
                     targets = (
                         tuple(dict.fromkeys(trigger.cells))
                         if trigger.kind == "enter_region"
+                        else ((trigger.target_object_id, trigger.lock_id),)
+                        if trigger.lock_id is not None
                         else (trigger.target_object_id,)
                     )
                     kind = (
@@ -428,6 +443,30 @@ class MechanismService:
         )
         return actual if actual == expected else None
 
+    @staticmethod
+    def _failed_pick_source(row, command, event, command_id):
+        """Match the exact failed RE check emitted by the authorized pick command."""
+        if (
+            command is None
+            or type(command.payload) is not PickLock
+            or command.session_id != row["session_id"]
+            or command.command_id != command_id
+            or command.actor_id != row["pc_actor_id"]
+            or event is None
+            or event.event_type != "rules.check_rolled"
+        ):
+            return None
+        adjudication = event.payload.get("adjudication", {})
+        if (
+            adjudication.get("openable_operation")
+            != {"command_type": "world.pick_lock", "payload": asdict(command.payload)}
+            or adjudication.get("payload", {}).get("actor_id") != command.actor_id
+            or event.payload.get("scene_id") != command.payload.scene_id
+            or event.payload.get("engine_event", {}).get("succeeded") is not False
+        ):
+            return None
+        return command.payload
+
     def evaluate_direct_saves(
         self, requests, *, first_rng=None, stop_on_failure=False, action_choice=False
     ):
@@ -518,24 +557,35 @@ class MechanismService:
         )
 
     def _resolve_save_gate(self, row, package, actor, gate, command_id, oid, operation_id):
-        """Fix the next regional input or adopt an exact prepared save."""
-        prepared = self._prepared_saves.get() or {}
+        """Fix a staged gate's actual input, or adopt a save against revalidated facts."""
+        prepared = self._prepared_saves.get()
         command = self._source_command.get()
         is_step = command is not None and type(command.payload) is StepActor
+        is_pick = command is not None and type(command.payload) is PickLock
+        staged = is_step or is_pick
         key = (oid, operation_id)
         if is_step and prepared and key != next(iter(prepared)):
             raise StateMachineError("version_conflict", "Regional save order changed")
-        item = prepared.pop(key, None) if is_step else prepared.get(key)
-        if item is None and not is_step:
+        if prepared is None:
+            item = None
+        elif staged:
+            item = prepared.pop(key, None)
+        else:
+            item = prepared.get(key)
+        if item is None and is_pick and prepared is not None:
+            raise StateMachineError("version_conflict", "Mechanism save source was not fixed")
+        if item is None and not staged:
             raise StateMachineError("unsupported_mechanism_save", "Save was not prepared")
         current = self._save_request(row, package, actor, gate, command_id, oid)
         if item is None:
             sid = row["session_id"]
             tick = self.h.facts.time_state(sid)[1]
             grant = self.h.characters.effects.held_bardic_inspiration(sid, actor, tick)
-            raise _StepSaveCandidate(key, current, grant)
+            if is_step:
+                raise _StepSaveCandidate(key, current, grant)
+            raise _PickFailureSaveCandidate((*key, current), grant)
         request, result, spend_grant = item
-        if not is_step:
+        if not staged:
             current = self._save_recheck_projection(current)
             expected = self._save_recheck_projection(request)
         else:
@@ -595,8 +645,12 @@ class MechanismService:
         region_source = self._direct_step_motion(
             row, self._source_command.get(), source_event, command_id
         )
+        pick_source = self._failed_pick_source(
+            row, self._source_command.get(), source_event, command_id
+        )
         if operation.save_gate is not None and (
-            actor != row["pc_actor_id"] or not (light_source or state_source or region_source)
+            actor != row["pc_actor_id"]
+            or not (light_source or state_source or region_source or pick_source)
         ):
             raise StateMachineError(
                 "unsupported_mechanism_source", "Save gate requires a direct current PC action"
@@ -1102,6 +1156,10 @@ class MechanismService:
                 return []
             actor = adjudication["payload"]["actor_id"]
             candidates = index.get(("check_result", scene, admitted["payload"]["object_id"]), ())
+            pick = self._failed_pick_source(row, self._source_command.get(), event, command_id)
+            if pick is not None:
+                exact = index.get(("check_result", scene, (pick.object_id, pick.lock_id)), ())
+                candidates = merge(candidates, exact, key=itemgetter(0, 1))
             target_kind = "check_result"
         else:
             if kind == "item.container_transferred" and payload.get("phase") != "after":

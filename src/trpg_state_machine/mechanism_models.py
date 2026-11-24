@@ -52,7 +52,10 @@ class MechanismOperation:
 
 @dataclass(frozen=True, slots=True)
 class MechanismTrigger:
-    """Describe an event and target condition that may activate a mechanism."""
+    """Describe an event and target condition that may activate a mechanism.
+
+    Package normalization sets lock_id for an authored lock failure reference.
+    """
 
     kind: Literal["enter_region", "object_operation", "check_result"]
     scene_id: str
@@ -62,6 +65,7 @@ class MechanismTrigger:
     event_type: str | None = None
     succeeded: bool | None = None
     value: Literal["open", "closed"] | bool | None = None
+    lock_id: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -132,8 +136,8 @@ def parse_mechanism(config, objects, scenes, *, enabled):
 
     Validate operation/trigger/method identities, component references and action
     shapes, including bounded rule effect definitions and the explicit compatibility
-    form. Configuration admission does not execute actions or establish that an effect
-    port is available in the current runtime.
+    form. The Package loader validates gate and trigger coverage after resolving lock
+    references. Parsing does not run actions or establish availability of an effect port.
     """
     from .package import _fail, _list, _mapping, _reference, _text, _unique
 
@@ -344,25 +348,8 @@ def parse_mechanism(config, objects, scenes, *, enabled):
             _fail("unsupported_mechanism", p, "Unknown automatic trigger")
         triggers.append(MechanismTrigger(**{**t, "cells": tuple(cells)}))
     if len(triggers) > 16:
-        _fail("schema_error", p, "At most sixteen triggers")
+        _fail("schema_error", p, "At most sixteen authored triggers")
     gated = {op.operation_id for op in operations if op.save_gate is not None}
-    if gated and (
-        not {trigger.operation_id for trigger in triggers} >= gated
-        or any(
-            trigger.operation_id in gated
-            and trigger.kind != "enter_region"
-            and (
-                trigger.kind != "object_operation"
-                or not (
-                    trigger.event_type == "object.light_changed"
-                    and trigger.value is True
-                    or trigger.event_type == "object.state_changed"
-                )
-            )
-            for trigger in triggers
-        )
-    ):
-        _fail("unsupported_mechanism", p, "Save gate requires a direct object or region trigger")
     methods = []
     for value in _list(c["methods"], p):
         m = _mapping(
@@ -416,3 +403,32 @@ def parse_mechanism(config, objects, scenes, *, enabled):
             "rule_effects": tuple(effects),
         },
     )
+
+
+def validate_save_triggers(mechanism: Mechanism) -> None:
+    """Validate effective triggers after resolving optional authored lock links."""
+    from .package import _fail
+
+    path = "world_objects.mechanism"
+    if len(mechanism.triggers) > 16:
+        _fail("schema_error", path, "At most sixteen triggers")
+    gated = {op.operation_id for op in mechanism.operations if op.save_gate is not None}
+    if gated and (
+        not {trigger.operation_id for trigger in mechanism.triggers} >= gated
+        or any(
+            trigger.operation_id in gated
+            and not (
+                trigger.kind == "enter_region"
+                or trigger.kind == "check_result"
+                and trigger.lock_id is not None
+                or trigger.kind == "object_operation"
+                and (
+                    trigger.event_type == "object.light_changed"
+                    and trigger.value is True
+                    or trigger.event_type == "object.state_changed"
+                )
+            )
+            for trigger in mechanism.triggers
+        )
+    ):
+        _fail("unsupported_mechanism", path, "Save gate requires a supported direct trigger")

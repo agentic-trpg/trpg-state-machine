@@ -817,9 +817,9 @@ class CommandRuntime:
                         raise StateMachineError(
                             "action_choice_pending", "Resolve the current action"
                         )
-                    from .action_pending import PendingSpellSaveChoice
+                    from .action_pending import PendingPickSaveChoice, PendingSpellSaveChoice
 
-                    if isinstance(pending, PendingSpellSaveChoice):
+                    if isinstance(pending, (PendingPickSaveChoice, PendingSpellSaveChoice)):
                         import asyncio
 
                         try:
@@ -1168,7 +1168,7 @@ class CommandRuntime:
             if pending is not None and pending.command.command_id != command_id:
                 pending = None
             if pending is not None:
-                from .action_pending import PendingSpellSaveChoice
+                from .action_pending import PendingPickSaveChoice, PendingSpellSaveChoice
 
                 if pending.receipt.pending_choice.authorized_responder != row["pc_actor_id"]:
                     raise StateMachineError("unauthorized", "Action choice holder changed")
@@ -1182,8 +1182,10 @@ class CommandRuntime:
                         for event in result.proposed_events
                     )
                 )
+                if isinstance(pending, PendingPickSaveChoice):
+                    events = pending.check[1].proposed_events + events
                 for event in events:
-                    if event.type != "save_rolled":
+                    if event.type not in ("check_rolled", "save_rolled"):
                         continue
                     data = event.model_dump(mode="json")
                     rolls.append(
@@ -1194,7 +1196,10 @@ class CommandRuntime:
                                 key: data[key]
                                 for key in (
                                     "target_id",
+                                    "actor_id",
                                     "ability",
+                                    "skill",
+                                    "tool",
                                     "dc",
                                     "advantage",
                                     "natural",

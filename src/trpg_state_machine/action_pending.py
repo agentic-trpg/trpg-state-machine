@@ -51,6 +51,13 @@ class PendingSpellSaveChoice:
     receipt: CommandReceipt
 
 
+@dataclass(slots=True, kw_only=True)
+class PendingPickSaveChoice(PendingActionChoice):
+    """Keep the original admitted lock check alongside its triggered save."""
+
+    check: tuple
+
+
 def resolve_action_save_choice(
     request: RuleEvaluationRequest,
     result: RuleEvaluationResult,
