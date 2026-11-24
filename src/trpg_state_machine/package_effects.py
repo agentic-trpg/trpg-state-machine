@@ -25,15 +25,30 @@ class PackageEffects:
         return self.store.connection
 
     def _expand_events(self, row, package, events, command_id):
-        """Only world effects computable now. No async mechanical commands or scripts."""
+        """Expand bounded candidate consequences with stable source event identities.
+
+        A direct step's regional activation drains its synchronous consequences
+        before World admits the next candidate for the same motion.
+        """
         self.store.require_write()
         by_trigger, _ = self.capture.event_index(package)
         # Immutable instance configuration cannot change through the closed
         # event consequence vocabulary. New scenes/configurations use a new batch.
         mechanism_index = {}
         queue = list(events)
-        index = 0
-        while index < len(queue):
+        settled = set()
+
+        def settle_region(activation_events):
+            """Drain one regional activation and its emitted consequences."""
+            index = len(queue)
+            queue.extend(activation_events)
+            while index < len(queue):
+                expand(index)
+                settled.add(index)
+                index += 1
+
+        def expand(index):
+            """Apply one event's reconciliations, mechanism hooks and Package effects."""
             if (
                 len(queue)
                 + sum(
@@ -59,6 +74,7 @@ class PackageEffects:
                     command_id,
                     row["event_seq"] + index,
                     prepared=mechanism_index,
+                    settle_region=settle_region,
                 )
             )
             scene_id = payload.get("scene_id", payload.get("to_scene_id"))
@@ -112,4 +128,10 @@ class PackageEffects:
                         phase="package.after_effect",
                     )
                 )
+
+        index = 0
+        while index < len(queue):
+            if index not in settled:
+                expand(index)
+            index += 1
         return queue

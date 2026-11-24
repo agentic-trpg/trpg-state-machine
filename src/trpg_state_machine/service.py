@@ -492,18 +492,42 @@ class StateMachine(
             == [expected[0].model_dump(mode="json")]
         )
 
-    def _register_pending_action_choice(self, pending, package, context, rng):
+    def _register_pending_action_choice(self, pending, package, context, rng, *, previous=None):
         """Publish one provisional action under the shared file gate after fresh admission."""
         from ._operations import StepActor
         from .action_pending import PendingActionChoice, PendingSpellSaveChoice
 
         command = pending.command
         sid = command.session_id
-        step_requests = None
         if isinstance(pending, PendingActionChoice) and type(command.payload) is StepActor:
-            step_requests, _ = self._prepare_step_saves(
-                command, package, context, pending.fingerprint
-            )
+            with self._store._coordinator.lock:
+                if previous is None:
+                    existing = self._pending_action_choices.get(sid)
+                    if (
+                        existing is not None
+                        and existing.command.command_id == command.command_id
+                        and existing.fingerprint == pending.fingerprint
+                    ):
+                        return existing.receipt
+                saves = dict(pending.prepared)
+                request, _, _ = saves.pop(pending.waiting_key)
+                candidate = self._prepare_step_candidate(
+                    command, package, context, pending.fingerprint, saves, previous
+                )
+                if candidate is None:
+                    with self._transaction():
+                        if replay := self._command_replay(command, pending.fingerprint):
+                            return replay
+                if (
+                    candidate is None
+                    or candidate.key != pending.waiting_key
+                    or candidate.request != request
+                    or candidate.grant != pending.grant
+                ):
+                    raise StateMachineError(
+                        "version_conflict", "Regional save changed before choice"
+                    )
+                return self._publish_pending_action_choice(pending, previous=previous)
         with self._store._coordinator.lock, self._transaction():
             row = self._session(sid, package, context)
             self._authorize_command(row, command.actor_id, command.payload, context)
@@ -514,12 +538,8 @@ class StateMachine(
             if self._rules._rng_context(row) != rng:
                 raise StateMachineError("version_conflict", "Action RNG changed before choice")
             if isinstance(pending, PendingActionChoice):
-                requests = (
-                    step_requests
-                    if step_requests is not None
-                    else self._objects.mechanisms.prepare_direct_saves(
-                        row, command.actor_id, command.payload, package, command.command_id
-                    )
+                requests = self._objects.mechanisms.prepare_direct_saves(
+                    row, command.actor_id, command.payload, package, command.command_id
                 )
                 tick = self._world_facts.time_state(sid)[1]
                 grant = self._world.characters.effects.held_bardic_inspiration(
@@ -537,20 +557,28 @@ class StateMachine(
                 raise StateMachineError(
                     "version_conflict", "Spell save recipient, binding or grant changed"
                 )
+            return self._publish_pending_action_choice(pending)
+
+    def _publish_pending_action_choice(self, pending, *, previous=None):
+        """Install the validated prompt under the gate, replacing only its live predecessor."""
+        sid = pending.command.session_id
+        if previous is not None:
+            self._guard_pending_action_owner(sid, expected=previous)
+        else:
             owner = self._store._coordinator.pending_action_owners.get(sid)
             if owner is not None:
                 existing = owner._pending_action_choices.get(sid)
                 if (
                     owner is self
                     and existing is not None
-                    and existing.command.command_id == command.command_id
+                    and existing.command.command_id == pending.command.command_id
                     and existing.fingerprint == pending.fingerprint
                 ):
                     return existing.receipt
                 raise StateMachineError("action_choice_pending", "Resolve the current action")
-            self._pending_action_choices[sid] = pending
-            self._store._coordinator.pending_action_owners[sid] = self
-            return pending.receipt
+        self._pending_action_choices[sid] = pending
+        self._store._coordinator.pending_action_owners[sid] = self
+        return pending.step_replies[-1].receipt if previous is not None else pending.receipt
 
     def _open_spell_save_choice(self, command, fingerprint, request, progress, package, context):
         """Offer the selected PC one private, uncommitted spell save choice."""
