@@ -247,7 +247,7 @@ class MechanismService:
         operation = c.operation(op.operation_id)
         if operation.save_gate is not None:
             raise StateMachineError(
-                "unsupported_mechanism_operation", "Authored save gates require a light trigger"
+                "unsupported_mechanism_operation", "Authored save gates require a direct PC trigger"
             )
         self.preflight(row["session_id"], operation.actions, package)
         return c
@@ -265,7 +265,7 @@ class MechanismService:
     def _resolve_save_gate(self, row, package, actor, gate, command_id):
         """Evaluate one authored save against this activation's current candidate facts.
 
-        The light change has already been staged in the command savepoint. The
+        The triggering light or object state change has already been staged. The
         Engine owns admission and the roll; this method adopts only its RNG.
         """
         from dnd5e_engine.evaluation import evaluate_bound_save
@@ -327,16 +327,24 @@ class MechanismService:
             raise StateMachineError("invalid_execution_origin", "Admitted source command required")
         c = self.config(row["session_id"], oid)
         operation = c.operation(operation_id)
+        light_source = (
+            source_event is not None
+            and source_event.event_type == "object.light_changed"
+            and source_event.mechanical_phase == "world.after_light_update"
+            and not source_event.payload.get("execution")
+            and source_event.payload.get("actor_id") == actor
+        )
+        state_source = (
+            source_event is not None
+            and source_event.event_type == "object.state_changed"
+            and source_event.mechanical_phase == "world.after_object_update"
+            and source_event.payload.get("execution") == {"kind": "actor", "actor_id": actor}
+        )
         if operation.save_gate is not None and (
-            source_event is None
-            or source_event.event_type != "object.light_changed"
-            or source_event.mechanical_phase != "world.after_light_update"
-            or source_event.payload.get("execution")
-            or source_event.payload.get("actor_id") != actor
-            or actor != row["pc_actor_id"]
+            actor != row["pc_actor_id"] or not (light_source or state_source)
         ):
             raise StateMachineError(
-                "unsupported_mechanism_source", "Save gate requires the current PC light action"
+                "unsupported_mechanism_source", "Save gate requires a direct current PC action"
             )
         activation = self.activation_id(oid, command_id, source_seq, operation_id)
         if h._conn.execute(
@@ -345,9 +353,10 @@ class MechanismService:
         ).fetchone():
             return []
         state = self._eligible(sid, oid, c, actor, package)
-        changed = self.preflight(sid, operation.actions, package)
-        if not changed and not operation.consume_on_noop:
-            return []
+        if operation.save_gate is None:
+            changed = self.preflight(sid, operation.actions, package)
+            if not changed and not operation.consume_on_noop:
+                return []
         location = h.facts.placement(sid, oid)
         payload = {
             "scene_id": location["scene_id"],
@@ -374,6 +383,10 @@ class MechanismService:
                 row, package, actor, operation.save_gate, command_id
             )
             save_succeeded = save_event.succeeded
+            # Only the failed branch executes these actions. A successful save
+            # must not be rejected by an unavailable failure-only target.
+            if not save_succeeded:
+                self.preflight(sid, operation.actions, package)
             events.append(
                 h._capture_event(
                     sid,

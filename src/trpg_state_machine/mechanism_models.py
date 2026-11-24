@@ -332,13 +332,18 @@ def parse_mechanism(config, objects, scenes, *, enabled):
             trigger.operation_id in gated
             and (
                 trigger.kind != "object_operation"
-                or trigger.event_type != "object.light_changed"
-                or trigger.value is not True
+                or not (
+                    trigger.event_type == "object.light_changed"
+                    and trigger.value is True
+                    or trigger.event_type == "object.state_changed"
+                )
             )
             for trigger in triggers
         )
     ):
-        _fail("unsupported_mechanism", p, "Save gate requires an enabled-light trigger")
+        _fail(
+            "unsupported_mechanism", p, "Save gate requires a direct light or object-state trigger"
+        )
     methods = []
     for value in _list(c["methods"], p):
         m = _mapping(

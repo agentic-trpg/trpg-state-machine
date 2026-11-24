@@ -1,4 +1,4 @@
-"""Authored exploration save gates through a real light-triggered mechanism."""
+"""Authored exploration save gates through real light and object-state triggers."""
 
 import json
 from copy import deepcopy
@@ -13,7 +13,9 @@ from world_support import command, setup
 
 from trpg_state_machine import (
     ActivateMechanism,
+    ObjectState,
     SetLightEnabled,
+    SetObjectState,
     StateMachine,
     StateMachineError,
     world_command_from_data,
@@ -47,6 +49,76 @@ def gated_data(*, dc):
     ]
     next(o for o in data["scenes"][0]["objects"] if o["object_id"] == CRED)["initial_cell"] = "1,0"
     return data
+
+
+def state_gated_data(*, dc):
+    """Use a direct door switch as the save source and a light as its consequence."""
+    data = gated_data(dc=dc)
+    config = data["world_objects"][-1]["capabilities"][0]
+    config["triggers"] = [
+        trigger(
+            "object_operation",
+            target_object_id=DOOR,
+            event_type="object.state_changed",
+            value="open",
+        )
+    ]
+    config["operations"][0]["actions"] = [
+        dict(
+            kind="set_light_enabled",
+            target_object_id=CRED,
+            value=True,
+        )
+    ]
+    return data
+
+
+@pytest.mark.parametrize("dc,failed", [(100, True), (0, False)])
+def test_direct_object_state_save_gate_commits_and_replays(tmp_path, context, dc, failed):
+    sm, sid, package, db = setup(tmp_path, context, state_gated_data(dc=dc))
+    with sm:
+        cmd = command(sm, sid, package, context, SetObjectState(A, DOOR, ObjectState.OPEN), "state")
+        before_rng = sm.read_rng_context(sid, package, context=context)
+        receipt = sm.submit_command(cmd, package, context=context)
+        assert receipt.status == "committed", receipt
+        assert sm._world_facts.object(sid, DOOR)["state"] == "open"
+        assert sm._world_facts.light_state(sid, CRED)["enabled"] is failed
+        assert sm._world_facts.mechanism_state(sid, LEVER).activation_count == 1
+        rolls = sm.get_command_rolls(sid, "state", package, context=context)["rolls"]
+        assert len(rolls) == 1 and rolls[0]["succeeded"] is not failed
+        assert sm.read_rng_context(sid, package, context=context) != before_rng
+        assert sm.submit_command(cmd, package, context=context) == receipt
+    with StateMachine(db, dnd_loader=__import__("lock_support").lock_loader()) as reopened:
+        assert reopened.submit_command(cmd, package, context=context) == receipt
+        assert reopened.get_command_rolls(sid, "state", package, context=context)["rolls"] == rolls
+
+
+def test_success_skips_failure_only_preflight_but_failure_rolls_back(
+    tmp_path, context, monkeypatch
+):
+    for dc, expected in [(0, "committed"), (100, "rejected")]:
+        case_path = tmp_path / str(dc)
+        case_path.mkdir()
+        sm, sid, package, _ = setup(case_path, context, state_gated_data(dc=dc))
+        with sm:
+
+            def unavailable(*_args, **_kwargs):
+                raise StateMachineError("invalid_target", "Failure-only target unavailable")
+
+            monkeypatch.setattr(sm._world.objects.mechanisms, "preflight", unavailable)
+            cmd = command(
+                sm, sid, package, context, SetObjectState(A, DOOR, ObjectState.OPEN), str(dc)
+            )
+            before = state_rows(sm)
+            receipt = sm.submit_command(cmd, package, context=context)
+            assert receipt.status == expected, receipt
+            if expected == "rejected":
+                assert state_rows(sm) == before
+                assert sm._world_facts.object(sid, DOOR)["state"] == "closed"
+                assert sm._world_facts.mechanism_state(sid, LEVER).activation_count == 0
+            else:
+                assert sm._world_facts.object(sid, DOOR)["state"] == "open"
+                assert sm._world_facts.mechanism_state(sid, LEVER).activation_count == 1
 
 
 def test_v4_preserves_ungated_effect_definition_and_rejects_gated_effect():
