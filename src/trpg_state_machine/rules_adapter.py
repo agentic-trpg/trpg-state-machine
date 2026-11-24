@@ -1319,7 +1319,7 @@ def validate_dnd_result(request, result, *, loader=None):
         # RE /24 verifies /2 stage coverage against this exact input. Uncovered
         # is a valid explicit limitation, never upgraded to sensory Evidence or
         # complete coverage by SM; existing operation admission remains unchanged.
-        result.verify_request(request)
+        result.verify_request(request, loader=loader)
     except (ValidationError, ValueError, TypeError) as exc:
         raise StateMachineError(
             "invalid_rule_result", "Invalid Engine result envelope/binding/RNG"
@@ -1339,7 +1339,7 @@ def validate_dnd_result(request, result, *, loader=None):
     if request.spell_end_facts is not None:
         native_request = request.without_spell_ends()
         _, changes = validate_dnd_result(
-            native_request, result.without_spell_ends(request), loader=loader
+            native_request, result.without_spell_ends(request, loader=loader), loader=loader
         )
         return result, changes
     actors = {a.entity_id for a in request.state_snapshot.character_states}

@@ -10,13 +10,15 @@ from dnd5e_engine.evaluation_state import ConditionRecord
 from dnd5e_engine.evaluation_world_effect import EffectExpiryPolicy, WorldEffectApplication
 from dnd5e_engine.rules.conditions import CONDITION_IMPLIES, Condition
 from dnd5e_srd_data import BundledAssetLoader
+from dnd5e_srd_data.schema.common import PassiveEffect, PassiveEffectChange
 from item_support import NPC
 from spatial_support import submit as submit_world
-from test_faerie_fire import _cast
+from test_faerie_fire import _cast, _cast_command
 from test_spell_attack_cast import OTHER_ENEMY
 from test_timed_spell_cast import timed_spell_world as timed_spell_world
 
-from trpg_state_machine import AdvanceSessionTime, StateMachine
+from trpg_state_machine import AdvanceSessionTime, EquipWeapon, StateMachine, UnequipWeapon
+from trpg_state_machine.errors import StateMachineError
 
 
 def _session(
@@ -28,6 +30,7 @@ def _session(
     bind_trait=False,
     condition_definition=None,
     item_definition=None,
+    save_weapon=None,
     exhaustion_level=1,
     seed=80,
     database="faerie-save-modifiers.sqlite",
@@ -90,6 +93,39 @@ def _session(
                     "accessible": True,
                 }
             )
+        if save_weapon is not None:
+            owner = data["pc_templates"][0]["pc_template_id"]
+            instance = "object.warding_staff"
+            data["pc_templates"][0]["character"]["inventory"].append(save_weapon.slug)
+            data["scenes"][0]["objects"].append(
+                dict(
+                    object_id=instance,
+                    state=None,
+                    movable=False,
+                    blocks_passage=False,
+                    initial_cell="0,0",
+                )
+            )
+            data["item_transfers"].append(
+                dict(
+                    instance_id=instance,
+                    item_slug=save_weapon.slug,
+                    initial_owner_id=owner,
+                    quantity=1,
+                    charges_remaining_per_unit=0,
+                    policy="ordinary_public",
+                )
+            )
+            foundation["snapshot"]["inventory_state"]["entries"].append(
+                dict(
+                    instance_id=instance,
+                    owner_id=owner,
+                    item_slug=save_weapon.slug,
+                    quantity=1,
+                    charges_remaining_per_unit=0,
+                    accessible=True,
+                )
+            )
 
     canonical = BundledAssetLoader()
     names = {
@@ -108,7 +144,7 @@ def _session(
         additional_unprepared_spells=("bless", "bane"),
         additional_traits=("magic-resistance",) if bind_trait else (),
         additional_conditions=tuple(definitions.values()),
-        additional_items=(item_definition,) if item_definition is not None else (),
+        additional_items=tuple(item for item in (item_definition, save_weapon) if item is not None),
         configure=configure,
         seed=seed,
     )
@@ -181,6 +217,104 @@ def _creature_targets(session, command):
             (sid, f"visual:{command.command_id}"),
         ).fetchall()
     return tuple(row["target_id"] for row in rows)
+
+
+def _save_staff(value="+1"):
+    """Make one fixture-only weapon with a bound save clause."""
+    return (
+        BundledAssetLoader()
+        .get_weapon("quarterstaff")
+        .model_copy(
+            update={
+                "slug": "fixture-warding-quarterstaff",
+                "name": "Fixture Warding Quarterstaff",
+                "passive_effects": [
+                    PassiveEffect(
+                        _id="fixture-save-bonus",
+                        name="Held save bonus",
+                        changes=[
+                            PassiveEffectChange(
+                                key="system.bonuses.abilities.save", mode=2, value=value
+                            )
+                        ],
+                    )
+                ],
+            }
+        )
+    )
+
+
+def test_faerie_uses_only_the_bound_held_save_weapon(timed_spell_world, tmp_path):
+    """Public equip changes the caster's own area save and cold replay retains it."""
+    slug, instance = "fixture-warding-quarterstaff", "object.warding_staff"
+    staff = _save_staff()
+    db = "faerie-held-save.sqlite"
+    session = _session(
+        timed_spell_world, save_weapon=staff, condition="restrained", database=db, seed=0
+    )
+    sm, sid, package, context = session
+    with sm:
+        caster = sm.read_session(sid, package, context=context).pc_actor_id
+        first, plain_receipt = _cast(session, "stowed-save", cell="0,0")
+        assert plain_receipt.status == "committed", plain_receipt
+        plain = next(save for save in _saves(session, first) if save["target_id"] == caster)
+        assert not any(
+            part["source"].startswith("equipment:") for part in plain["roll_detail"]["modifiers"]
+        )
+        equipped = submit_world(sm, sid, package, context, EquipWeapon(instance), "hold-ward")
+        assert equipped.status == "committed", equipped
+        second = _cast_command(session, "held-save", cell="0,0")
+        before_late = sm.read_noncombat_snapshot(sid, package, context=context)
+        rng_before_late = sm.read_rng_context(sid, package, context=context)
+        sm._conn.execute(
+            "CREATE TEMP TRIGGER fail_held_save BEFORE INSERT ON command_receipts "
+            "WHEN NEW.command_id='held-save' BEGIN SELECT RAISE(ABORT,'late cast'); END"
+        )
+        with pytest.raises(StateMachineError) as failure:
+            sm.submit_command(second, package, context=context)
+        assert failure.value.code == "storage_error"
+        assert sm.read_noncombat_snapshot(sid, package, context=context) == before_late
+        assert sm.read_rng_context(sid, package, context=context) == rng_before_late
+        assert sm.get_command_receipt(sid, second.command_id, package, context=context) is None
+        sm._conn.execute("DROP TRIGGER fail_held_save")
+        held_receipt = sm.submit_command(second, package, context=context)
+        assert held_receipt.status == "committed", held_receipt
+        held = next(save for save in _saves(session, second) if save["target_id"] == caster)
+        held_saves = _saves(session, second)
+        assert {
+            "kind": "fixed",
+            "source": f"equipment:{instance}:{slug}",
+            "value": 1,
+        } in held["roll_detail"]["modifiers"]
+        assert held["modifier"] == plain["modifier"] + 1
+        stowed = submit_world(sm, sid, package, context, UnequipWeapon(instance), "stow-ward")
+        assert stowed.status == "committed", stowed
+        third, unheld_receipt = _cast(session, "unheld-save", cell="0,0")
+        assert unheld_receipt.status == "committed", unheld_receipt
+        unheld = next(save for save in _saves(session, third) if save["target_id"] == caster)
+        assert unheld["modifier"] == plain["modifier"]
+        assert sm.submit_command(second, package, context=context) == held_receipt
+        loader = sm._rules.loader
+    with StateMachine(tmp_path / db, dnd_loader=loader) as reopened:
+        assert reopened.submit_command(second, package, context=context) == held_receipt
+        assert _saves((reopened, sid, package, context), second) == held_saves
+
+
+def test_faerie_refuses_unreviewed_carried_save_weapon_before_payment(timed_spell_world):
+    """A bound dice-valued save clause fails even while its weapon is stowed."""
+    session = _session(timed_spell_world, save_weapon=_save_staff("1d4"))
+    sm, sid, package, context = session
+    with sm:
+        before = sm.read_noncombat_snapshot(sid, package, context=context)
+        rng = sm.read_rng_context(sid, package, context=context)
+        events = sm.read_events(sid, package, context=context)
+        command, receipt = _cast(session, "unreviewed-staff", cell="0,0")
+        assert (receipt.status, receipt.error_code) == ("rejected", "spell.visual_targets")
+        assert not receipt.event_seqs
+        assert sm.read_noncombat_snapshot(sid, package, context=context) == before
+        assert sm.read_rng_context(sid, package, context=context) == rng
+        assert sm.read_events(sid, package, context=context) == events
+        assert _saves(session, command) == ()
 
 
 def test_public_faerie_saves_use_each_targets_spell_and_conserve_order(timed_spell_world, tmp_path):
