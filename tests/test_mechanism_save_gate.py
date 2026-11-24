@@ -18,6 +18,7 @@ from trpg_state_machine import (
     SetObjectState,
     StateMachine,
     StateMachineError,
+    SwitchLightMode,
     world_command_from_data,
 )
 from trpg_state_machine.package import _validate
@@ -147,6 +148,23 @@ def test_derived_object_state_cannot_impersonate_direct_pc_source(tmp_path, cont
         assert receipt.status == "rejected" and receipt.error_code == "unsupported_mechanism_source"
         assert state_rows(sm) == before
         assert sm.get_command_rolls(sid, "derived", package, context=context)["rolls"] == []
+
+
+def test_mode_switch_on_enabled_light_skips_save_gate(tmp_path, context):
+    data = gated_data(dc=100)
+    emitter = next(obj for obj in data["world_objects"] if obj["object_id"] == CRED)
+    next(cap for cap in emitter["capabilities"] if cap["kind"] == "light")["initial_enabled"] = True
+    sm, sid, package, _ = setup(tmp_path, context, data)
+    with sm:
+        before_rng = sm.read_rng_context(sid, package, context=context)
+        cmd = command(sm, sid, package, context, SwitchLightMode(A, CRED, "0,0", "hooded"), "mode")
+        receipt = sm.submit_command(cmd, package, context=context)
+        assert receipt.status == "committed", receipt
+        assert sm._world_facts.light_state(sid, CRED)["mode"] == "hooded"
+        assert sm._world_facts.object(sid, DOOR)["state"] == "closed"
+        assert sm._world_facts.mechanism_state(sid, LEVER).activation_count == 0
+        assert sm.read_rng_context(sid, package, context=context) == before_rng
+        assert sm.get_command_rolls(sid, "mode", package, context=context)["rolls"] == []
 
 
 def test_v4_preserves_ungated_effect_definition_and_rejects_gated_effect():
@@ -279,3 +297,33 @@ def test_two_light_activations_use_each_prior_candidate_rng(tmp_path, context, m
         assert seen[1][0].state == seen[0][1].next_state
         assert seen[1][0].version == seen[0][0].version + 1
         assert len(sm.get_command_rolls(sid, "two", package, context=context)["rolls"]) == 2
+
+
+def test_ineligible_first_light_gate_does_not_hide_armed_second(tmp_path, context, monkeypatch):
+    from dnd5e_engine import evaluation
+
+    data = gated_data(dc=100)
+    obj = deepcopy(data["scenes"][0]["objects"][-1])
+    definition = deepcopy(data["world_objects"][-1])
+    obj["object_id"] = "object.ward_two"
+    definition.update(object_id="object.ward_two", definition_ref="definition.ward_two")
+    data["scenes"][0]["objects"].append(obj)
+    data["world_objects"].append(definition)
+    sm, sid, package, _ = setup(tmp_path, context, data)
+    seen = []
+    real = evaluation.evaluate_bound_save
+
+    def capture(request, *, loader):
+        seen.append(request)
+        return real(request, loader=loader)
+
+    monkeypatch.setattr(evaluation, "evaluate_bound_save", capture)
+    with sm:
+        with sm._transaction(write=True):
+            state = sm._world_facts.mechanism_state(sid, LEVER)
+            sm._world_facts.set_mechanism_state(sid, LEVER, replace(state, status="unprepared"))
+        cmd = command(sm, sid, package, context, SetLightEnabled(A, CRED, "0,0", True), "skip")
+        receipt = sm.submit_command(cmd, package, context=context)
+        assert receipt.status == "committed", receipt
+        assert len(seen) == 1
+        assert len(sm.get_command_rolls(sid, "skip", package, context=context)["rolls"]) == 1

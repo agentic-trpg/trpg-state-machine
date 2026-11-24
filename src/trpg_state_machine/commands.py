@@ -588,6 +588,23 @@ class CommandRuntime:
             command, package, context, fingerprint
         )
         prepared = None
+        mechanism_saves = {}
+        if type(command.payload) in (SetLightEnabled, SetObjectState):
+            with self._transaction():
+                row = self._session(command.session_id, package, context)
+                self._authorize_command(row, command.actor_id, command.payload, context)
+                if not self._command_replay(
+                    command, fingerprint
+                ) and not self._session_runtime.version_conflict(row, command):
+                    try:
+                        requests = self._objects.mechanisms.prepare_direct_saves(
+                            row, command.actor_id, command.payload, package, command.command_id
+                        )
+                    except StateMachineError:
+                        requests = ()  # The ordinary write path records the rejection.
+                else:
+                    requests = ()
+            mechanism_saves = self._objects.mechanisms.evaluate_direct_saves(requests)
         if type(command.payload) is InitializeCombat:
             with self._transaction():
                 row = self._session(command.session_id, package, context)
@@ -641,7 +658,15 @@ class CommandRuntime:
                         AdvanceSessionTime,
                         SetTimeRunning,
                     ):
-                        events = self._expand_events(row, package, events, command.command_id)
+                        token = self._objects.mechanisms._prepared_saves.set(mechanism_saves)
+                        source_token = self._objects.mechanisms._source_operation.set(
+                            command.payload
+                        )
+                        try:
+                            events = self._expand_events(row, package, events, command.command_id)
+                        finally:
+                            self._objects.mechanisms._source_operation.reset(source_token)
+                            self._objects.mechanisms._prepared_saves.reset(token)
                     if type(command.payload) is not InitializeCombat:
                         events.extend(
                             sync_npc_schedules(

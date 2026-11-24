@@ -6,6 +6,7 @@ hooks consume admitted mechanical events in the caller's savepoint, never NPC OB
 
 import hashlib
 import json
+from contextvars import ContextVar
 from dataclasses import asdict, replace
 from itertools import pairwise
 
@@ -25,6 +26,8 @@ class MechanismService:
         self.h = handler
         self._invocation = None
         self.effects = MechanismEffectRunner(handler)
+        self._prepared_saves = ContextVar("prepared_mechanism_saves", default=None)
+        self._source_operation = ContextVar("source_mechanism_operation", default=None)
 
     def config(self, sid, oid):
         """Read the object's instance mechanism capability."""
@@ -262,23 +265,17 @@ class MechanismService:
         )
         return "activation." + hashlib.sha256(raw.encode()).hexdigest()
 
-    def _resolve_save_gate(self, row, package, actor, gate, command_id):
-        """Evaluate one authored save against this activation's current candidate facts.
-
-        The triggering light or object state change has already been staged. The
-        Engine owns admission and the roll; this method adopts only its RNG.
-        """
-        from dnd5e_engine.evaluation import evaluate_bound_save
+    def _save_request(self, row, package, actor, gate, command_id, rng=None):
+        """Fix the actor's rule facts for a direct trigger save before any write."""
         from dnd5e_engine.evaluation_contracts import SavePayload
 
         from .commands import TypedCommand
-        from .rules_adapter import validate_dnd_result
 
         rules = self.h.objects.openable.rules
         rules._verify_dnd_binding(package, row)
         snapshot = rules._noncombat_snapshot(row, actor_ids=(actor,))
-        rng = rules._rng_context(row)
-        request = rules.request(
+        rng = rng or rules._rng_context(row)
+        return rules.request(
             TypedCommand(
                 row["session_id"],
                 command_id,
@@ -300,16 +297,102 @@ class MechanismService:
             rng,
             row=row,
         )
-        result = evaluate_bound_save(request, loader=rules.loader)
-        result, changes = validate_dnd_result(request, result, loader=rules.loader)
+
+    def prepare_direct_saves(self, row, actor, operation, package, command_id):
+        """Select direct object gates in a read scope; evaluate after it closes.
+
+        The caller must hold a read transaction while invoking this method. It
+        returns requests only, so rule evaluation never holds a database lock.
+        Requests use trigger order; evaluation advances a detached RNG between them.
+        """
+        if type(operation) not in (SetLightEnabled, SetObjectState):
+            return ()
+        sid = row["session_id"]
+        if type(operation) is SetLightEnabled:
+            self.h.objects.lights.validate(row, actor, operation, package)
+            light = self.h.facts.light_state(sid, operation.object_id)
+            if light is None or light["enabled"] == operation.enabled:
+                return ()
+            event_kind, value = "object.light_changed", operation.enabled
+        else:
+            self.h.objects.openable.validate_open(row, actor, operation, package)
+            obj = self.h.facts.object(sid, operation.object_id)
+            if obj["state"] == operation.state.value:
+                return ()
+            event_kind, value = "object.state_changed", operation.state.value
+        gates = []
+        for oid, _, trigger in self._scene_index(sid, operation.scene_id).get(
+            (event_kind, operation.scene_id, operation.object_id), ()
+        ):
+            if trigger.value is not None and trigger.value != value:
+                continue
+            config = self.config(sid, oid)
+            gate = config.operation(trigger.operation_id).save_gate
+            if gate is None:
+                continue
+            try:
+                self._eligible(sid, oid, config, actor, package)
+            except StateMachineError as exc:
+                if exc.code in (
+                    "mechanism_frequency_limited",
+                    "mechanism_unprepared",
+                    "mechanism_broken",
+                    "container_inaccessible",
+                ):
+                    continue
+                raise
+            gates.append((oid, trigger.operation_id, gate))
+        return tuple(
+            (oid, operation_id, self._save_request(row, package, actor, gate, command_id))
+            for oid, operation_id, gate in gates
+        )
+
+    def evaluate_direct_saves(self, requests):
+        """Evaluate fixed direct-object requests outside every SQLite transaction."""
+        from dnd5e_engine.evaluation import evaluate_bound_save
+        from dnd5e_engine.evaluation_rng import RNGContext
+
+        from .rules_adapter import validate_dnd_result
+
+        prepared = {}
+        next_rng = None
+        for oid, operation_id, request in requests:
+            if next_rng is not None:
+                request = request.model_copy(update={"rng_context": next_rng})
+            result = evaluate_bound_save(request, loader=self.h.objects.openable.rules.loader)
+            result, changes = validate_dnd_result(
+                request, result, loader=self.h.objects.openable.rules.loader
+            )
+            if changes:
+                raise StateMachineError(
+                    "invalid_rule_result", "Mechanism save cannot change actors"
+                )
+            prepared[(oid, operation_id)] = (request, result)
+            next_rng = RNGContext(
+                stream_id=request.rng_context.stream_id,
+                version=request.rng_context.version + int(result.rng_transition.state_changed),
+                state=result.rng_transition.next_state,
+            )
+        return prepared
+
+    def _resolve_save_gate(self, row, package, actor, gate, command_id, oid, operation_id):
+        """Adopt a pre-evaluated save only if its fixed facts still match current facts."""
+        prepared = self._prepared_saves.get()
+        item = prepared.get((oid, operation_id)) if prepared is not None else None
+        if item is None:
+            raise StateMachineError("unsupported_mechanism_save", "Save was not prepared")
+        request, result = item
+        current = self._save_request(row, package, actor, gate, command_id)
+        if current != request:
+            raise StateMachineError("version_conflict", "Mechanism save facts changed")
         if result.status != "accepted":
             raise StateMachineError(
                 result.error.code if result.error else "unsupported_mechanism_save",
                 result.error.reason if result.error else "Mechanism save was not accepted",
             )
-        if changes:
-            raise StateMachineError("invalid_rule_result", "Mechanism save cannot change actors")
-        self.h.runtime.advance_rule_rng(row["session_id"], result.rng_transition, rng)
+        self.h.runtime.advance_rule_rng(
+            row["session_id"], result.rng_transition, request.rng_context
+        )
         return result.proposed_events[0]
 
     def _activate(
@@ -380,7 +463,7 @@ class MechanismService:
         save_succeeded = None
         if operation.save_gate is not None:
             save_event = self._resolve_save_gate(
-                row, package, actor, operation.save_gate, command_id
+                row, package, actor, operation.save_gate, command_id, oid, operation_id
             )
             save_succeeded = save_event.succeeded
             # Only the failed branch executes these actions. A successful save
@@ -859,6 +942,14 @@ class MechanismService:
             ):
                 continue
             c = self.config(row["session_id"], oid)
+            gate = c.operation(trigger.operation_id).save_gate
+            source_type = type(self._source_operation.get())
+            if (
+                gate is not None
+                and kind == "object.light_changed"
+                and source_type is not SetLightEnabled
+            ):
+                continue
             state = self.h.facts.mechanism_state(sid, oid)
             if state is None or state.status != "armed":
                 continue
