@@ -3,7 +3,7 @@
 import json
 import re
 from copy import deepcopy
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, replace
 
 from dnd5e_engine.evaluation_bardic_grant import ExplorationFeaturePayload
 from dnd5e_engine.evaluation_contracts import (
@@ -539,7 +539,86 @@ class CommandRuntime:
         """Look up an idempotent replay using command identity and fingerprint."""
         return self._session_runtime._command_replay(command, fingerprint)
 
-    def submit_command(self, command: TypedCommand, package, *, context) -> CommandReceipt:
+    def _respond_action_choice(self, pending, response, package, context, fingerprint):
+        """Resolve a live mechanism save from its original roll, then commit once."""
+        from dnd5e_engine.evaluation_rng import RNGContext, RNGTransition
+        from dnd5e_engine.evaluation_saves import resolve_bardic_save_choice
+
+        with self._transaction():
+            row = self._session(response.session_id, package, context)
+            self._authorize_command(row, response.actor_id, response.payload, context)
+            if replay := self._command_replay(response, fingerprint):
+                return replay
+            if response.actor_id != pending.command.actor_id:
+                raise StateMachineError("unauthorized", "Action choice belongs to another actor")
+            if self._session_runtime.version_conflict(row, response):
+                raise StateMachineError("version_conflict", "Choice reply version changed")
+            if self._world_facts.time_state(response.session_id)[1] >= pending.grant.expires_tick:
+                raise StateMachineError("choice_expired", "Bardic grant expired")
+            grant = self._world.characters.effects.held_bardic_inspiration(
+                response.session_id,
+                response.actor_id,
+                self._world_facts.time_state(response.session_id)[1],
+            )
+            if grant != pending.grant:
+                raise StateMachineError("choice_stale", "Bardic grant changed")
+            oid, operation_id = pending.waiting_key
+            gate = (
+                self._objects.mechanisms.config(response.session_id, oid)
+                .operation(operation_id)
+                .save_gate
+            )
+            request, result, _ = pending.prepared[pending.waiting_key]
+            current = self._objects.mechanisms._save_request(
+                row, package, response.actor_id, gate, pending.command.command_id
+            )
+            if current != request:
+                raise StateMachineError("choice_stale", "Action save facts changed")
+        original = result.proposed_events[0]
+        after_original = RNGContext(
+            stream_id=request.rng_context.stream_id,
+            version=request.rng_context.version + int(result.rng_transition.state_changed),
+            state=result.rng_transition.next_state,
+        )
+        use = response.payload.selected_option_id == "accept"
+        final, bonus = resolve_bardic_save_choice(
+            original, pending.grant.die_sides, after_original, use=use
+        )
+        combined = RNGTransition(
+            stream_id=request.rng_context.stream_id,
+            input_version=request.rng_context.version,
+            input_state=request.rng_context.state,
+            next_state=bonus.next_state,
+            state_changed=request.rng_context.state != bonus.next_state,
+        )
+        prepared = dict(pending.prepared)
+        prepared[pending.waiting_key] = (
+            request,
+            result.model_copy(update={"proposed_events": (final,), "rng_transition": combined}),
+            pending.grant if use else None,
+        )
+        remaining = [item for item in pending.requests if (item[0], item[1]) not in prepared]
+        if remaining:
+            next_rng = RNGContext(
+                stream_id=after_original.stream_id,
+                version=after_original.version + int(bonus.state_changed),
+                state=bonus.next_state,
+            )
+            rest, _, _ = self._objects.mechanisms.evaluate_direct_saves(
+                remaining, first_rng=next_rng, action_choice=True
+            )
+            prepared.update(rest)
+        resumed = replace(pending, prepared=prepared)
+        return self.submit_command(
+            resumed.command,
+            package,
+            context=context,
+            _action_resume=(resumed, response, fingerprint),
+        )
+
+    def submit_command(
+        self, command: TypedCommand, package, *, context, _action_resume=None
+    ) -> CommandReceipt:
         """Authorize and submit a command, returning its durable idempotent outcome.
 
         Route actual rules operations to the async evaluation coordinator and synthetic
@@ -555,6 +634,29 @@ class CommandRuntime:
             self._session_runtime.guard_time_owner(command.session_id)
             self._session_runtime.admit(admitted)
             fingerprint = self._session_runtime.fingerprint(command, admitted, context)
+        if _action_resume is None:
+            pending = self._pending_action_choices.get(command.session_id)
+            if pending is not None:
+                if command.command_id == pending.command.command_id:
+                    if fingerprint != pending.fingerprint:
+                        raise StateMachineError(
+                            "idempotency_conflict", "Pending action key has different content"
+                        )
+                    return pending.receipt
+                if (
+                    type(command.payload) is ChoiceRespondOperationPayload
+                    and command.payload.pending_operation_id == pending.command.command_id
+                ):
+                    return self._respond_action_choice(
+                        pending, command, package, context, fingerprint
+                    )
+                raise StateMachineError("action_choice_pending", "Resolve the current action")
+            if type(command.payload) is ChoiceRespondOperationPayload:
+                with self._transaction():
+                    row = self._session(command.session_id, package, context)
+                    self._authorize_command(row, command.actor_id, command.payload, context)
+                    if replay := self._command_replay(command, fingerprint):
+                        return replay
         if package.legacy_audit_only:
             raise StateMachineError(
                 "legacy_rules_audit_only", "Old package permits audit reads only"
@@ -592,8 +694,10 @@ class CommandRuntime:
             command, package, context, fingerprint
         )
         prepared = None
-        mechanism_saves = {}
-        if type(command.payload) in (SetLightEnabled, SetObjectState):
+        mechanism_saves = _action_resume[0].prepared if _action_resume is not None else {}
+        requests = ()
+        grant = None
+        if _action_resume is None and type(command.payload) in (SetLightEnabled, SetObjectState):
             with self._transaction():
                 row = self._session(command.session_id, package, context)
                 self._authorize_command(row, command.actor_id, command.payload, context)
@@ -604,11 +708,40 @@ class CommandRuntime:
                         requests = self._objects.mechanisms.prepare_direct_saves(
                             row, command.actor_id, command.payload, package, command.command_id
                         )
+                        tick = self._world_facts.time_state(command.session_id)[1]
+                        grant = self._world.characters.effects.held_bardic_inspiration(
+                            command.session_id, command.actor_id, tick
+                        )
                     except StateMachineError:
                         requests = ()  # The ordinary write path records the rejection.
                 else:
                     requests = ()
-            mechanism_saves = self._objects.mechanisms.evaluate_direct_saves(requests)
+            mechanism_saves, waiting, _ = self._objects.mechanisms.evaluate_direct_saves(
+                requests, stop_on_failure=grant is not None, action_choice=grant is not None
+            )
+            if waiting is not None:
+                from .action_pending import PendingActionChoice
+
+                choice = PendingChoice(
+                    command.command_id,
+                    command.actor_id,
+                    "rules.bardic_inspiration",
+                    ("accept", "decline"),
+                    grant.expires_tick,
+                )
+                receipt = CommandReceipt(
+                    command.session_id,
+                    command.command_id,
+                    command.actor_id,
+                    "pending_choice",
+                    command.expected_world_version,
+                    (),
+                    pending_choice=choice,
+                )
+                self._pending_action_choices[command.session_id] = PendingActionChoice(
+                    command, fingerprint, requests, mechanism_saves, waiting, grant, receipt
+                )
+                return receipt
         if type(command.payload) is InitializeCombat:
             with self._transaction():
                 row = self._session(command.session_id, package, context)
@@ -627,7 +760,7 @@ class CommandRuntime:
             version = row["world_version"]
             error = None
             status = "committed"
-            if self._session_runtime.version_conflict(row, command):
+            if _action_resume is None and self._session_runtime.version_conflict(row, command):
                 status, error = "conflict", "version_conflict"
             else:
                 self._conn.execute("SAVEPOINT command_effects")
@@ -710,13 +843,35 @@ class CommandRuntime:
             receipt = self._session_runtime.finish(
                 command, context, fingerprint, row, status, version, error
             )
+            if _action_resume is not None:
+                _, response, response_fingerprint = _action_resume
+                self._authorize_command(row, response.actor_id, response.payload, context)
+                response_receipt = self._session_runtime.finish(
+                    response,
+                    context,
+                    response_fingerprint,
+                    row,
+                    status,
+                    version,
+                    error,
+                )
         self._session_runtime.refresh_time_drivers()
+        if _action_resume is not None:
+            self._discard_pending_action_choice(command.session_id)
+            return response_receipt
         return receipt
 
     def get_command_receipt(self, session_id, command_id, package, *, context):
-        """Authorize access to a command's durable receipt."""
+        """Authorize a durable receipt or this runtime's provisional action prompt."""
         with self._transaction():
             row = self._session(session_id, package, context)
+            pending = self._pending_action_choices.get(session_id)
+            if pending is not None and pending.command.command_id != command_id:
+                pending = None
+            if pending is not None:
+                if pending.command.actor_id != row["pc_actor_id"]:
+                    raise StateMachineError("unauthorized", "Action choice holder changed")
+                return pending.receipt
             receipt = self._session_runtime.receipt(session_id, command_id)
             if receipt is None:
                 return None
@@ -732,7 +887,7 @@ class CommandRuntime:
             raise StateMachineError("unauthorized", "Actor control grant has been revoked")
 
     def get_command_rolls(self, session_id, command_id, package, *, context):
-        """Project committed check, save, rest and Cure Wounds dice evidence.
+        """Project committed dice or authorized live action-choice dice evidence.
 
         Return None for an unknown command, otherwise a JSON-ready mapping with
         receipt status and rolls in committed event order. A roll_detail of None
@@ -747,6 +902,46 @@ class CommandRuntime:
 
         with self._transaction():
             row = self._session(session_id, package, context)
+            pending = self._pending_action_choices.get(session_id)
+            if pending is not None and pending.command.command_id != command_id:
+                pending = None
+            if pending is not None:
+                if pending.command.actor_id != row["pc_actor_id"]:
+                    raise StateMachineError("unauthorized", "Action choice holder changed")
+                rolls = []
+                for _, result, _ in pending.prepared.values():
+                    for event in result.proposed_events:
+                        if event.type != "save_rolled":
+                            continue
+                        data = event.model_dump(mode="json")
+                        rolls.append(
+                            {
+                                "event_seq": None,
+                                "type": data["type"],
+                                **{
+                                    key: data[key]
+                                    for key in (
+                                        "target_id",
+                                        "ability",
+                                        "dc",
+                                        "advantage",
+                                        "natural",
+                                        "modifier",
+                                        "roll_total",
+                                        "succeeded",
+                                        "sources",
+                                    )
+                                    if key in data
+                                },
+                                "roll_detail": data.get("roll_detail"),
+                            }
+                        )
+                return {
+                    "session_id": session_id,
+                    "command_id": command_id,
+                    "status": "pending_choice",
+                    "rolls": rolls,
+                }
             receipt = self._session_runtime.receipt(session_id, command_id)
             if receipt is None:
                 return None

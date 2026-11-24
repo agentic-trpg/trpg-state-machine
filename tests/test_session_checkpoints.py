@@ -5,9 +5,20 @@ import sqlite3
 
 import pytest
 from dnd5e_engine.evaluation_rng import RNGState
+from lock_support import CRED, A, lock_loader
+from test_bardic_feature_grant import grant_command, make_bard_world
 from test_exploration_healing_potion import exploration_potion_world
+from test_mechanism_effects import state_rows
+from test_mechanism_save_gate import gated_data
+from world_support import command as world_command
 
-from trpg_state_machine import StateMachine, StateMachineError, TrustedContext, session_checkpoints
+from trpg_state_machine import (
+    SetLightEnabled,
+    StateMachine,
+    StateMachineError,
+    TrustedContext,
+    session_checkpoints,
+)
 
 
 def test_deliberate_load_reseeds_only_fresh_runtime_and_resume_keeps_rng(
@@ -37,9 +48,8 @@ def test_deliberate_load_reseeds_only_fresh_runtime_and_resume_keeps_rng(
         discarded = []
         monkeypatch.setattr(
             sm,
-            "discard_pending_action_choice",
+            "_discard_pending_action_choice",
             lambda selected: discarded.append(selected),
-            raising=False,
         )
         loaded = sm.load_checkpoint(
             checkpoint, tmp_path / "loaded.db", sid, package, context=context
@@ -104,12 +114,12 @@ def test_checkpoint_refuses_auth_pending_existing_and_invalid_input(tmp_path, co
         assert auth.value.code == "unauthorized"
         assert not checkpoint.exists()
 
-        monkeypatch.setattr(sm, "has_pending_action_choice", lambda _sid: True, raising=False)
+        monkeypatch.setattr(sm, "_has_pending_action_choice", lambda _sid: True)
         with pytest.raises(StateMachineError) as pending:
             sm.create_checkpoint(sid, package, checkpoint, context=context)
         assert pending.value.code == "pending_action_choice"
         assert not checkpoint.exists()
-        monkeypatch.setattr(sm, "has_pending_action_choice", lambda _sid: False)
+        monkeypatch.setattr(sm, "_has_pending_action_choice", lambda _sid: False)
 
         sm.create_checkpoint(sid, package, checkpoint, context=context)
         with pytest.raises(StateMachineError) as exists:
@@ -120,9 +130,8 @@ def test_checkpoint_refuses_auth_pending_existing_and_invalid_input(tmp_path, co
         discarded = []
         monkeypatch.setattr(
             sm,
-            "discard_pending_action_choice",
+            "_discard_pending_action_choice",
             lambda selected: discarded.append(selected),
-            raising=False,
         )
         with pytest.raises(StateMachineError) as auth:
             sm.load_checkpoint(checkpoint, destination, sid, package, context=wrong)
@@ -169,3 +178,53 @@ def test_checkpoint_refuses_whole_database_with_another_session(
             sm.create_checkpoint(first.session_id, package, target, context=context)
         assert scope.value.code == "unsupported_checkpoint_scope"
         assert not target.exists()
+
+
+def test_loading_pre_action_checkpoint_discards_live_bardic_save_and_changes_roll(
+    tmp_path, context, monkeypatch
+):
+    """A real ward rolls from the freshly loaded stream after discarding its prior attempt."""
+    import test_bardic_feature_grant as bard_fixture
+
+    monkeypatch.setattr(bard_fixture, "item_data", lambda: gated_data(dc=100))
+    monkeypatch.setattr(bard_fixture, "item_loader", lock_loader)
+    db, sid, package, loader, context = make_bard_world(tmp_path, context)
+    checkpoint = tmp_path / "before-ward.db"
+    operation = SetLightEnabled(A, CRED, "0,0", True)
+    with StateMachine(db, dnd_loader=loader) as machine:
+        grant = grant_command(machine, sid, package, context)
+        assert machine.submit_command(grant, package, context=context).status == "committed"
+        machine.create_checkpoint(sid, package, checkpoint, context=context)
+        committed = state_rows(machine)
+        original_rng = machine.read_rng_context(sid, package, context=context)
+        first = world_command(machine, sid, package, context, operation, "first-ward")
+        assert machine.submit_command(first, package, context=context).status == "pending_choice"
+        rolls = machine.get_command_rolls(sid, first.command_id, package, context=context)["rolls"]
+        original_die = rolls[0]["natural"]
+        assert state_rows(machine) == committed
+
+        with pytest.raises(StateMachineError, match="Finish or discard") as pending:
+            machine.create_checkpoint(sid, package, tmp_path / "mid-ward.db", context=context)
+        assert pending.value.code == "pending_action_choice"
+        seed = next(seed for seed in (4, 2) if random.Random(seed).randint(1, 20) != original_die)
+        fresh_state = RNGState.capture(random.Random(seed))
+        monkeypatch.setattr(session_checkpoints, "_new_rng_state", lambda: fresh_state)
+        with machine.load_checkpoint(
+            checkpoint, tmp_path / "fresh-ward.db", sid, package, context=context
+        ) as loaded:
+            assert not machine._has_pending_action_choice(sid)
+            assert state_rows(machine) == committed
+            assert machine.read_rng_context(sid, package, context=context) == original_rng
+            assert loaded.read_rng_context(sid, package, context=context).state == fresh_state
+
+            second = world_command(loaded, sid, package, context, operation, "second-ward")
+            assert (
+                loaded.submit_command(second, package, context=context).status == "pending_choice"
+            )
+            fresh_rolls = loaded.get_command_rolls(
+                sid, second.command_id, package, context=context
+            )["rolls"]
+            assert fresh_rolls[0]["natural"] != original_die
+    with StateMachine(db, dnd_loader=loader) as reopened:
+        assert not reopened._has_pending_action_choice(sid)
+        assert reopened.read_rng_context(sid, package, context=context) == original_rng

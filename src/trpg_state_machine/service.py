@@ -97,6 +97,8 @@ class StateMachine(
         loader = get_default_ruleset() if dnd_loader is None else freeze_ruleset(dnd_loader)
         self._evaluator = evaluator if evaluator is not None else SyntheticEvaluator()
         self._store = SqliteStore(database)
+        # Action-level choices are provisional and never part of SQLite backup.
+        self._pending_action_choices = {}
         self._sessions = SessionAccess(self._store)
         self._world_facts = WorldFacts(self._store)
         self._characters = CharacterFacts(self._store, self._world_facts, loader)
@@ -229,6 +231,7 @@ class StateMachine(
 
     def close(self) -> None:
         """Close drivers and Store and release rebuildable environment snapshots."""
+        self._pending_action_choices.clear()
         if not self._store._closed:
             for driver in tuple(self._session_runtime.time.drivers.values()):
                 driver.close()
@@ -430,11 +433,20 @@ class StateMachine(
         """Release loaded facts without re-instantiation or changing game state."""
         with self._transaction():
             self._session(session_id, package, context)
+        self._discard_pending_action_choice(session_id)
         driver = self._session_runtime.time.drivers.get(session_id)
         if driver is not None:
             driver.close()
         self._store.release_memory(session_id)
         self.environment.release_session(session_id)
+
+    def _has_pending_action_choice(self, session_id: str) -> bool:
+        """Report whether this live runtime holds an uncommitted action choice."""
+        return session_id in self._pending_action_choices
+
+    def _discard_pending_action_choice(self, session_id: str) -> None:
+        """Forget provisional action work when the runtime is abandoned or reloaded."""
+        self._pending_action_choices.pop(session_id, None)
 
     def save_session(
         self, session_id: str, package: AdventurePackage, *, context: TrustedContext
@@ -578,6 +590,8 @@ class StateMachine(
 
     async def submit_command_async(self, command, package, *, context):
         """Delegate supported asynchronous rule command submission."""
+        if self._has_pending_action_choice(command.session_id):
+            return self.submit_command(command, package, context=context)
         return await self._combat.submit_command_async(command, package, context=context)
 
     async def query_spell_condition_choices(

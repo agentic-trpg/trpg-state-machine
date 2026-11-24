@@ -5,13 +5,17 @@ from copy import deepcopy
 from dataclasses import asdict, replace
 
 import pytest
-from lock_support import CRED, DOOR, A
+from dnd5e_engine.activities.effects import passive_effect_to_active_effect
+from dnd5e_engine.evaluation_effects import effect_state
+from dnd5e_engine.evaluation_ruleset import get_default_ruleset, ruleset_binding
+from dnd5e_srd_data import MemoryAssetLoader
+from lock_support import CRED, DOOR, A, lock_loader
 from test_equipment_save_modifier import STAFF, _save, _world
 from test_mechanism_effects import effect, rule_action, state_rows
 from test_mechanism_service import extended_data, method, trigger
 from test_world_containers import BOX, container_data
 from test_world_mechanisms import LEVER
-from world_support import command, setup
+from world_support import command, create, setup
 
 from trpg_state_machine import (
     ActivateMechanism,
@@ -26,7 +30,41 @@ from trpg_state_machine import (
     SwitchLightMode,
     world_command_from_data,
 )
+from trpg_state_machine.choice_models import ChoiceRespondOperationPayload
+from trpg_state_machine.commands import TypedCommand
 from trpg_state_machine.package import _validate
+
+
+def grant_bardic(sm, sid, actor):
+    """Give the fixture PC one exact timed grant through the Effects owner."""
+    feature = get_default_ruleset().get_feature("bardic-inspiration")
+    inspired = passive_effect_to_active_effect(
+        feature.passive_effects[0],
+        target_id=actor,
+        caster_id="npc.fixture",
+        extra_flags={"bardic_inspiration": {"grant_id": "grant.fixture", "die_sides": 8}},
+    )
+    with sm._transaction(write=True):
+        sm._world.characters.effects.add_effect(
+            sid, effect_state(inspired).model_dump(mode="json"), expires_tick=3600
+        )
+
+
+def setup_bardic_mechanism(tmp_path, context):
+    """Bind the canonical Inspired feature to the otherwise local mechanism fixture."""
+    base = lock_loader()
+    loader = MemoryAssetLoader(
+        items=[base.get_item(slug) for slug in base.list_slugs("items")],
+        monsters=[base.get_monster(slug) for slug in base.list_slugs("monsters")],
+        features=[get_default_ruleset().get_feature("bardic-inspiration")],
+    )
+    data = gated_data(dc=100)
+    data["manifest"]["ruleset_binding"] = ruleset_binding(loader).model_dump(mode="json")
+    package = _validate(data)
+    db = tmp_path / "world.db"
+    sm = StateMachine(db, dnd_loader=loader)
+    sid = create(sm, package, context)
+    return sm, sid, package, db
 
 
 def gated_data(*, dc):
@@ -437,3 +475,93 @@ def test_ineligible_first_light_gate_does_not_hide_armed_second(tmp_path, contex
         assert receipt.status == "committed", receipt
         assert len(seen) == 1
         assert len(sm.get_command_rolls(sid, "skip", package, context=context)["rolls"]) == 1
+
+
+@pytest.mark.parametrize("option", ["accept", "decline"])
+def test_light_gate_bardic_choice_is_provisional_then_atomic(tmp_path, context, option):
+    sm, sid, package, _ = setup_bardic_mechanism(tmp_path, context)
+    with sm:
+        actor = sm.read_session(sid, package, context=context).pc_actor_id
+        grant_bardic(sm, sid, actor)
+        from dnd5e_engine.evaluation_saves import _held_inspiration
+
+        snapshot = sm.read_noncombat_snapshot(sid, package, context=context)
+        assert _held_inspiration(snapshot.effect_states[0], sm._rules.loader)
+        source = command(sm, sid, package, context, SetLightEnabled(A, CRED, "0,0", True), "bard")
+        before_rng = sm.read_rng_context(sid, package, context=context)
+        before = state_rows(sm)
+        pending = sm.submit_command(source, package, context=context)
+        assert pending.status == "pending_choice", pending
+        assert sm._has_pending_action_choice(sid)
+        assert state_rows(sm) == before
+        assert sm.read_rng_context(sid, package, context=context) == before_rng
+        assert sm.submit_command(source, package, context=context) == pending
+        original = sm.get_command_rolls(sid, "bard", package, context=context)["rolls"]
+        assert len(original) == 1 and original[0]["succeeded"] is False
+        answer = TypedCommand(
+            sid,
+            f"answer-{option}",
+            actor,
+            "choice.respond",
+            ChoiceRespondOperationPayload("bard", option),
+            pending.world_version,
+        )
+        receipt = sm.submit_command(answer, package, context=context)
+        assert receipt.status == "committed", receipt
+        assert not sm._has_pending_action_choice(sid)
+        assert sm.get_command_receipt(sid, "bard", package, context=context).status == "committed"
+        final = sm.get_command_rolls(sid, "bard", package, context=context)["rolls"]
+        assert len(final) == 1 and final[0]["natural"] == original[0]["natural"]
+        assert sm.submit_command(answer, package, context=context) == receipt
+        assert bool(sm.read_noncombat_snapshot(sid, package, context=context).effect_states) is (
+            option == "decline"
+        )
+
+
+def test_public_bard_grant_then_light_gate_choice(tmp_path, context, monkeypatch):
+    """Exercise the actual feature command before the pending world action."""
+    import test_bardic_feature_grant as bard_fixture
+
+    monkeypatch.setattr(bard_fixture, "item_data", lambda: gated_data(dc=100))
+    monkeypatch.setattr(bard_fixture, "item_loader", lock_loader)
+    db, sid, package, loader, granted_context = bard_fixture.make_bard_world(tmp_path, context)
+    with StateMachine(db, dnd_loader=loader) as sm:
+        grant = bard_fixture.grant_command(sm, sid, package, granted_context)
+        assert sm.submit_command(grant, package, context=granted_context).status == "committed"
+        before = state_rows(sm)
+        source = command(
+            sm,
+            sid,
+            package,
+            granted_context,
+            SetLightEnabled(A, CRED, "0,0", True),
+            "actual-grant-light",
+        )
+        pending = sm.submit_command(source, package, context=granted_context)
+        assert pending.status == "pending_choice", pending
+        assert state_rows(sm) == before
+        original = sm.get_command_rolls(sid, source.command_id, package, context=granted_context)
+        assert len(original["rolls"]) == 1
+        answer = TypedCommand(
+            sid,
+            "actual-grant-answer",
+            source.actor_id,
+            "choice.respond",
+            ChoiceRespondOperationPayload(source.command_id, "accept"),
+            pending.world_version,
+        )
+        final = sm.submit_command(answer, package, context=granted_context)
+        assert final.status == "committed", final
+        assert sm.submit_command(answer, package, context=granted_context) == final
+        assert not sm._has_pending_action_choice(sid)
+        assert (
+            sm.get_command_rolls(sid, source.command_id, package, context=granted_context)["rolls"][
+                0
+            ]["natural"]
+            == original["rolls"][0]["natural"]
+        )
+    with StateMachine(db, dnd_loader=loader) as reopened:
+        assert (
+            reopened.submit_command(source, package, context=granted_context).status == "committed"
+        )
+        assert reopened.submit_command(answer, package, context=granted_context) == final

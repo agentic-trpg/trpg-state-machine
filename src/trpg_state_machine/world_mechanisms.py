@@ -347,19 +347,27 @@ class MechanismService:
             for oid, operation_id, gate in gates
         )
 
-    def evaluate_direct_saves(self, requests):
-        """Evaluate fixed direct-object requests outside every SQLite transaction."""
+    def evaluate_direct_saves(
+        self, requests, *, first_rng=None, stop_on_failure=False, action_choice=False
+    ):
+        """Evaluate ordered direct-object saves until a possible player choice."""
         from dnd5e_engine.evaluation import evaluate_bound_save
         from dnd5e_engine.evaluation_rng import RNGContext
 
         from .rules_adapter import validate_dnd_result
 
         prepared = {}
-        next_rng = None
+        next_rng = first_rng
         for oid, operation_id, request in requests:
             if next_rng is not None:
                 request = request.model_copy(update={"rng_context": next_rng})
-            result = evaluate_bound_save(request, loader=self.h.objects.openable.rules.loader)
+            if action_choice:
+                from dnd5e_engine.evaluation import evaluate_bound_action_save
+
+                evaluator = evaluate_bound_action_save
+            else:
+                evaluator = evaluate_bound_save
+            result = evaluator(request, loader=self.h.objects.openable.rules.loader)
             result, changes = validate_dnd_result(
                 request, result, loader=self.h.objects.openable.rules.loader
             )
@@ -367,13 +375,25 @@ class MechanismService:
                 raise StateMachineError(
                     "invalid_rule_result", "Mechanism save cannot change actors"
                 )
-            prepared[(oid, operation_id)] = (request, result)
+            prepared[(oid, operation_id)] = (request, result, None)
+            if result.status != "accepted":
+                return prepared, None, next_rng
             next_rng = RNGContext(
                 stream_id=request.rng_context.stream_id,
                 version=request.rng_context.version + int(result.rng_transition.state_changed),
                 state=result.rng_transition.next_state,
             )
-        return prepared
+            event = result.proposed_events[0] if result.proposed_events else None
+            if (
+                stop_on_failure
+                and result.status == "accepted"
+                and event is not None
+                and event.succeeded is False
+                and event.roll_detail is not None
+                and event.roll_detail.status == "rolled"
+            ):
+                return prepared, (oid, operation_id), next_rng
+        return prepared, None, next_rng
 
     @staticmethod
     def _save_recheck_projection(request):
@@ -421,7 +441,7 @@ class MechanismService:
         item = prepared.get((oid, operation_id)) if prepared is not None else None
         if item is None:
             raise StateMachineError("unsupported_mechanism_save", "Save was not prepared")
-        request, result = item
+        request, result, spend_grant = item
         current = self._save_request(row, package, actor, gate, command_id)
         if self._save_recheck_projection(current) != self._save_recheck_projection(request):
             raise StateMachineError("version_conflict", "Mechanism save facts changed")
@@ -433,6 +453,18 @@ class MechanismService:
         self.h.runtime.advance_rule_rng(
             row["session_id"], result.rng_transition, request.rng_context
         )
+        if spend_grant is not None:
+            from .ongoing_effects import BARDIC_INSPIRATION_EFFECT_ID
+
+            tick = self.h.facts.time_state(row["session_id"])[1]
+            if (
+                self.h.characters.effects.held_bardic_inspiration(row["session_id"], actor, tick)
+                != spend_grant
+            ):
+                raise StateMachineError("choice_stale", "Exact Bardic grant changed")
+            self.h.characters.effects.remove_effect(
+                row["session_id"], actor, BARDIC_INSPIRATION_EFFECT_ID, spend_grant.origin
+            )
         return result.proposed_events[0]
 
     def _activate(

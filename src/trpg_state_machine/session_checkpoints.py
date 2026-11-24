@@ -72,8 +72,7 @@ def create_checkpoint(machine, session_id, package, destination, *, context):
     with machine._store._coordinator.lock:
         machine.save_session(session_id, package, context=context)
         _single_session(machine, session_id)
-        pending = getattr(machine, "has_pending_action_choice", lambda _sid: False)
-        if pending(session_id):
+        if machine._has_pending_action_choice(session_id):
             raise StateMachineError(
                 "pending_action_choice", "Finish or discard the action before checkpointing"
             )
@@ -204,9 +203,7 @@ def load_checkpoint(machine, checkpoint, destination, session_id, package, *, co
             db.commit()
         loaded = _runtime_like(machine, target)
         loaded.resume_session(session_id, package, context=context)
-        discard = getattr(machine, "discard_pending_action_choice", None)
-        if discard is not None:
-            discard(session_id)
+        machine._discard_pending_action_choice(session_id)
         return loaded
     except BaseException:
         if loaded is not None:
