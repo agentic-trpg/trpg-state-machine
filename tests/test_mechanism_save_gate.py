@@ -121,6 +121,34 @@ def test_success_skips_failure_only_preflight_but_failure_rolls_back(
                 assert sm._world_facts.mechanism_state(sid, LEVER).activation_count == 1
 
 
+def test_derived_object_state_cannot_impersonate_direct_pc_source(tmp_path, context):
+    data = state_gated_data(dc=100)
+    gated_object = deepcopy(data["scenes"][0]["objects"][-1])
+    gated_object["object_id"] = "object.state_ward"
+    gated_definition = deepcopy(data["world_objects"][-1])
+    gated_definition.update(object_id="object.state_ward", definition_ref="definition.state_ward")
+    data["scenes"][0]["objects"].append(gated_object)
+    data["world_objects"].append(gated_definition)
+    first = data["world_objects"][-2]["capabilities"][0]
+    first["operations"][0]["save_gate"] = None
+    first["operations"][0]["actions"] = [
+        dict(kind="set_open_state", target_object_id=DOOR, value="open")
+    ]
+    first["triggers"] = [
+        trigger(
+            "object_operation", target_object_id=CRED, event_type="object.light_changed", value=True
+        )
+    ]
+    sm, sid, package, _ = setup(tmp_path, context, data)
+    with sm:
+        before = state_rows(sm)
+        cmd = command(sm, sid, package, context, SetLightEnabled(A, CRED, "0,0", True), "derived")
+        receipt = sm.submit_command(cmd, package, context=context)
+        assert receipt.status == "rejected" and receipt.error_code == "unsupported_mechanism_source"
+        assert state_rows(sm) == before
+        assert sm.get_command_rolls(sid, "derived", package, context=context)["rolls"] == []
+
+
 def test_v4_preserves_ungated_effect_definition_and_rejects_gated_effect():
     data = gated_data(dc=12)
     config = data["world_objects"][-1]["capabilities"][0]
