@@ -37,6 +37,10 @@ from dnd5e_engine.evaluation_environmental_contracts import (
     WorldEnvironmentalEffectEnd,
     WorldVisualEffectCreate,
 )
+from dnd5e_engine.evaluation_environmental_spells import (
+    evaluate_bound_faerie_step,
+    verify_bound_faerie_result,
+)
 from dnd5e_engine.evaluation_exploration_healing import exploration_healing_requires_sight
 from dnd5e_engine.evaluation_identify import IDENTIFY_SPELL_ID
 from dnd5e_engine.evaluation_openable import OpenableCheckRequest, evaluate_openable
@@ -45,7 +49,11 @@ from dnd5e_engine.evaluation_ruleset import EVALUATOR_VERSION, RulesetBindingErr
 from dnd5e_engine.evaluation_shield_window import answer_shield, evaluate_for_shield
 from dnd5e_engine.evaluation_speed_effects import spell_attack_has_speed_effect
 from dnd5e_engine.evaluation_spell_termination import WorldSpellEnd
-from dnd5e_engine.evaluation_ward_spells import prepare_ward_spell
+from dnd5e_engine.evaluation_ward_spells import (
+    evaluate_bound_bane_step,
+    prepare_ward_spell,
+    verify_bound_bane_result,
+)
 from dnd5e_engine.events import ObjectIdentified
 from dnd5e_engine.spellcasting import spell_range_ft
 from pydantic import ValidationError
@@ -413,7 +421,7 @@ class RuleExecution:
             update={"casting_state": casting.model_copy(update={"actors": actors})}
         )
 
-    async def submit(self, command, package, context, fingerprint, *, _faerie_resume=None):
+    async def submit(self, command, package, context, fingerprint, *, _spell_save_resume=None):
         """Evaluate fixed rules inputs, then revalidate and adopt their guarded result.
 
         Preparation authorizes the actor, bindings, target and optional domain check in
@@ -435,11 +443,11 @@ class RuleExecution:
             type(command.payload) is ChoiceRespondOperationPayload
             and self.action_choices is not None
         ):
-            from .action_pending import PendingFaerieChoice
+            from .action_pending import PendingSpellSaveChoice
 
             pending = self.action_choices._pending_action_choices.get(command.session_id)
             if (
-                isinstance(pending, PendingFaerieChoice)
+                isinstance(pending, PendingSpellSaveChoice)
                 and command.payload.pending_operation_id == pending.command.command_id
             ):
                 with self.store.transaction():
@@ -447,8 +455,17 @@ class RuleExecution:
                     self.sessions._authorize_command(
                         row, command.actor_id, command.payload, context
                     )
-                    if command.actor_id != pending.progress.pending_target_id:
-                        raise StateMachineError("unauthorized", "Faerie choice belongs to target")
+                    if (
+                        command.actor_id != pending.progress.pending_target_id
+                        or command.actor_id != row["pc_actor_id"]
+                    ):
+                        raise StateMachineError(
+                            "unauthorized", "Spell save choice belongs to its target"
+                        )
+                    if command.command_id == pending.command.command_id:
+                        raise StateMachineError(
+                            "idempotency_conflict", "Reply key must differ from the pending cast"
+                        )
                     if replay := self.runtime._command_replay(command, fingerprint):
                         self.action_choices._discard_pending_action_choice(
                             command.session_id, expected=pending
@@ -459,19 +476,25 @@ class RuleExecution:
                             command.session_id, expected=pending
                         )
                         raise StateMachineError("choice_closed", "Original cast already completed")
-                    if not self.action_choices._current_faerie_grant(pending):
+                    if command.expected_world_version != pending.command.expected_world_version:
+                        raise StateMachineError(
+                            "version_conflict", "Spell save reply version changed"
+                        )
+                    if not self.action_choices._current_spell_save_grant(pending):
                         self.action_choices._discard_pending_action_choice(
                             command.session_id, expected=pending
                         )
-                        raise StateMachineError("choice_stale", "Faerie grant changed or expired")
+                        raise StateMachineError(
+                            "choice_stale", "Spell save grant changed or expired"
+                        )
                 return await self.submit(
                     pending.command,
                     package,
                     context,
                     pending.fingerprint,
-                    _faerie_resume=(pending, command, fingerprint),
+                    _spell_save_resume=(pending, command, fingerprint),
                 )
-        faerie_reply = _faerie_resume[1] if _faerie_resume is not None else None
+        spell_save_reply = _spell_save_resume[1] if _spell_save_resume is not None else None
         response = shield_prompt = shield_pending = shield_original = None
         confirmation = None
         if type(command.payload) is ChoiceFinalizeSpellOperationPayload:
@@ -539,6 +562,14 @@ class RuleExecution:
             type(command.payload) is ExplorationSpellCastPayload
             and command.payload.target_ids is not None
         )
+        spell_save_handlers = (
+            (evaluate_bound_bane_step, verify_bound_bane_result)
+            if ward_spell and command.payload.spell_id == "bane"
+            else (evaluate_bound_faerie_step, verify_bound_faerie_result)
+            if environmental_spell and command.payload.spell_id == "faerie-fire"
+            else None
+        )
+        spell_save_recipient = None
         ward_needs = (
             prepare_ward_spell(command.payload, command.actor_id, self.rules.loader)
             if ward_spell
@@ -810,6 +841,27 @@ class RuleExecution:
                 if material is None:
                     prepare_error = "spell.material"
             snapshot = None if prepare_error else build_snapshot(row)
+            if (
+                spell_save_handlers is not None
+                and self.action_choices is not None
+                and snapshot is not None
+                and row["pc_actor_id"] in spell_actor_ids
+                and (not ward_spell or row["pc_actor_id"] in command.payload.target_ids)
+                and any(
+                    effect.id == "effect:inspired"
+                    and effect.target_id == row["pc_actor_id"]
+                    and not effect.disabled
+                    for effect in snapshot.effect_states
+                )
+            ):
+                tick = self.world.facts.time_state(command.session_id)[1]
+                if (
+                    self.world.characters.effects.held_bardic_inspiration(
+                        command.session_id, row["pc_actor_id"], tick
+                    )
+                    is not None
+                ):
+                    spell_save_recipient = row["pc_actor_id"]
             if rest and snapshot is not None and not long_rest:
                 attune_plan, prepare_error = prepare_attunement(
                     row, command.actor_id, command.payload, self.world, snapshot
@@ -934,8 +986,19 @@ class RuleExecution:
         if capability is None and not world_ready:
             capability = "world_precondition_failed"
         result, changes, shield_token = None, (), None
-        faerie_progress = None
-        preverified_faerie = False
+        spent_spell_grants = ()
+        preverified_spell_save = False
+        if _spell_save_resume is not None:
+            pending = _spell_save_resume[0]
+            if (
+                request != pending.request
+                or capability is not None
+                or spell_save_recipient != pending.progress.pending_target_id
+            ):
+                self.action_choices._discard_pending_action_choice(
+                    command.session_id, expected=pending
+                )
+                raise StateMachineError("choice_stale", "Spell save facts changed while waiting")
         input_version = row["world_version"] if snapshot is None else snapshot.world_version
         if input_version == command.expected_world_version:
             self.rules._verify_dnd_binding(package, row)
@@ -950,81 +1013,84 @@ class RuleExecution:
                         )
                     elif object_check:
                         result = await evaluate_openable(spec, loader=self.rules.loader)
-                    elif (
-                        environmental_spell
-                        and command.payload.spell_id == "faerie-fire"
-                        and self.action_choices is not None
-                        and (
-                            _faerie_resume is not None
-                            or any(
-                                effect.id == "effect:inspired"
-                                and effect.target_id == row["pc_actor_id"]
-                                and effect.target_id in spell_actor_ids
-                                and not effect.disabled
-                                for effect in snapshot.effect_states
-                            )
-                        )
-                    ):
-                        from dnd5e_engine.evaluation_environmental_spells import (
-                            evaluate_bound_faerie_step,
-                            verify_bound_faerie_result,
-                        )
-
+                    elif spell_save_handlers is not None and spell_save_recipient is not None:
+                        step, verify = spell_save_handlers
                         try:
-                            if _faerie_resume is not None:
-                                pending, reply, _ = _faerie_resume
-                                if request != pending.request:
-                                    self.action_choices._discard_pending_action_choice(
-                                        command.session_id, expected=pending
-                                    )
-                                    raise StateMachineError(
-                                        "choice_stale", "Faerie cast facts changed while waiting"
-                                    )
-                                faerie_progress = evaluate_bound_faerie_step(
+                            if _spell_save_resume is None:
+                                spell_save_progress = step(
+                                    request,
+                                    choice_target_id=spell_save_recipient,
+                                    loader=self.rules.loader,
+                                )
+                            else:
+                                pending, reply, _ = _spell_save_resume
+                                spell_save_progress = step(
                                     request,
                                     prior_steps=pending.progress.steps,
                                     choice=reply.payload.selected_option_id == "accept",
                                     choice_die_sides=pending.grant.die_sides,
+                                    choice_target_id=spell_save_recipient,
                                     loader=self.rules.loader,
                                 )
-                            else:
-                                faerie_progress = evaluate_bound_faerie_step(
-                                    request, loader=self.rules.loader
-                                )
                         except ValueError as exc:
-                            if _faerie_resume is not None:
+                            if _spell_save_resume is not None:
                                 self.action_choices._discard_pending_action_choice(
-                                    command.session_id, expected=_faerie_resume[0]
+                                    command.session_id, expected=_spell_save_resume[0]
                                 )
                                 raise StateMachineError(
-                                    "choice_stale", "Faerie choice no longer evaluates"
+                                    "choice_stale", "Spell save choice no longer evaluates"
                                 ) from exc
                             ordinary = await self.rules._evaluate_dnd(copy.deepcopy(request))
                             if ordinary.status not in ("rejected", "unsupported"):
                                 raise StateMachineError(
                                     "unsupported_action_choice",
-                                    "Faerie action choice cannot be staged",
+                                    "Spell save choice cannot be staged",
                                 ) from exc
                             result = ordinary
-                        if (
-                            faerie_progress is not None
-                            and faerie_progress.pending_target_id is not None
-                        ):
-                            if _faerie_resume is not None:
-                                raise StateMachineError(
-                                    "unsupported_action_choice",
-                                    "A second Faerie choice is outside this action boundary",
+                        else:
+                            if spell_save_progress.pending_target_id is not None:
+                                if _spell_save_resume is not None:
+                                    raise StateMachineError(
+                                        "invalid_rule_result", "Spell save choice did not finish"
+                                    )
+                                return self.action_choices._open_spell_save_choice(
+                                    command,
+                                    fingerprint,
+                                    request,
+                                    spell_save_progress,
+                                    package,
+                                    context,
                                 )
-                            return self.action_choices._open_faerie_choice(
-                                command, fingerprint, request, faerie_progress, package, context
-                            )
-                        if faerie_progress is not None:
-                            result = faerie_progress.result
-                        if _faerie_resume is not None and faerie_progress is not None:
-                            verify_bound_faerie_result(
-                                result, request, faerie_progress.steps, loader=self.rules.loader
-                            )
-                            preverified_faerie = True
+                            result = spell_save_progress.result
+                            if _spell_save_resume is not None:
+                                steps = spell_save_progress.steps
+                                prior = pending.progress.steps
+                                index = len(prior) - 1
+                                if (
+                                    result is None
+                                    or len(steps) < len(prior)
+                                    or steps[:index] != prior[:index]
+                                    or steps[index].original != prior[index].original
+                                    or steps[index].rng_after != prior[index].rng_after
+                                    or steps[index].choice != reply.payload.selected_option_id
+                                ):
+                                    raise StateMachineError(
+                                        "invalid_rule_result",
+                                        "Spell save result changed the reply or prefix",
+                                    )
+                                try:
+                                    spent_spell_grants = verify(
+                                        result,
+                                        request,
+                                        steps,
+                                        choice_target_id=spell_save_recipient,
+                                        loader=self.rules.loader,
+                                    )
+                                except ValueError as exc:
+                                    raise StateMachineError(
+                                        "invalid_rule_result", "Invalid spell save continuation"
+                                    ) from exc
+                                preverified_spell_save = True
                     elif (
                         getattr(command.payload, "intent_type", None) == "attack"
                         and command.payload.stat_block_action_id is not None
@@ -1060,7 +1126,7 @@ class RuleExecution:
                             request,
                             result,
                             loader=self.rules.loader,
-                            preverified_faerie=preverified_faerie,
+                            preverified_spell_save=preverified_spell_save,
                         )
                     except UnsupportedSpellConsequence:
                         capability = "spell.capability"
@@ -1079,29 +1145,33 @@ class RuleExecution:
         )
         with self.store.transaction(write=True):
             row = self.sessions._session(command.session_id, package, context)
-            if faerie_reply is not None:
+            if spell_save_reply is not None:
                 self.sessions._authorize_command(
-                    row, faerie_reply.actor_id, faerie_reply.payload, context
+                    row, spell_save_reply.actor_id, spell_save_reply.payload, context
                 )
-                if replay := self.runtime._command_replay(faerie_reply, _faerie_resume[2]):
+                if replay := self.runtime._command_replay(spell_save_reply, _spell_save_resume[2]):
                     self.action_choices._discard_pending_action_choice(
-                        command.session_id, expected=_faerie_resume[0]
+                        command.session_id, expected=_spell_save_resume[0]
                     )
                     return replay
                 if self.runtime._command_replay(command, fingerprint):
                     self.action_choices._discard_pending_action_choice(
-                        command.session_id, expected=_faerie_resume[0]
+                        command.session_id, expected=_spell_save_resume[0]
                     )
                     raise StateMachineError("choice_closed", "Original cast already completed")
-                if not self.action_choices._current_faerie_grant(_faerie_resume[0]):
+                if (
+                    row["pc_actor_id"] != spell_save_reply.actor_id
+                    or self.rules.session_binding(row) != request.ruleset_binding
+                    or not self.action_choices._current_spell_save_grant(_spell_save_resume[0])
+                ):
                     self.action_choices._discard_pending_action_choice(
-                        command.session_id, expected=_faerie_resume[0]
+                        command.session_id, expected=_spell_save_resume[0]
                     )
-                    raise StateMachineError("choice_stale", "Faerie grant changed or expired")
+                    raise StateMachineError("choice_stale", "Spell save grant changed or expired")
             if self.action_choices is not None:
                 self.action_choices._guard_pending_action_owner(
                     command.session_id,
-                    expected=_faerie_resume[0] if _faerie_resume is not None else None,
+                    expected=_spell_save_resume[0] if _spell_save_resume is not None else None,
                 )
             if shield_prompt is not None:
                 replay, pending, error = self.shield_windows.check(
@@ -1479,11 +1549,11 @@ class RuleExecution:
                             if type(operation) is TurnUpdate
                         ),
                     )
-                    if faerie_progress is not None and faerie_progress.spent_grants:
+                    if spent_spell_grants:
                         from .ongoing_effects import BARDIC_INSPIRATION_EFFECT_ID
 
                         tick = self.world.facts.time_state(command.session_id)[1]
-                        for spent in faerie_progress.spent_grants:
+                        for spent in spent_spell_grants:
                             current = self.world.characters.effects.for_target_effect(
                                 command.session_id, spent.target_id, BARDIC_INSPIRATION_EFFECT_ID
                             )
@@ -1497,7 +1567,7 @@ class RuleExecution:
                                 or held.die_sides != spent.flags["bardic_inspiration"]["die_sides"]
                             ):
                                 raise StateMachineError(
-                                    "choice_stale", "Faerie grant changed before adoption"
+                                    "choice_stale", "Spell save grant changed before adoption"
                                 )
                             self.world.characters.effects.remove_effect(
                                 command.session_id,
@@ -1776,23 +1846,23 @@ class RuleExecution:
                 pending_choice=pending_choice,
                 pending_choices=pending_choices,
             )
-            if faerie_reply is not None:
+            if spell_save_reply is not None:
                 self.sessions._authorize_command(
-                    row, faerie_reply.actor_id, faerie_reply.payload, context
+                    row, spell_save_reply.actor_id, spell_save_reply.payload, context
                 )
                 receipt = self.runtime.finish(
-                    faerie_reply,
+                    spell_save_reply,
                     context,
-                    _faerie_resume[2],
+                    _spell_save_resume[2],
                     row,
                     status,
                     version,
                     error,
                 )
         self.runtime.refresh_time_drivers()
-        if faerie_reply is not None:
+        if spell_save_reply is not None:
             self.action_choices._discard_pending_action_choice(
-                command.session_id, expected=_faerie_resume[0]
+                command.session_id, expected=_spell_save_resume[0]
             )
         return receipt
 

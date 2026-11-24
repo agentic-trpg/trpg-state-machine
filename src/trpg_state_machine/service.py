@@ -468,7 +468,7 @@ class StateMachine(
         elif owner is not None:
             raise StateMachineError("action_choice_pending", "Resolve the current action")
 
-    def _current_faerie_grant(self, pending) -> bool:
+    def _current_spell_save_grant(self, pending) -> bool:
         """Match the exact fixed Inspired row and its live deadline for either reply."""
         from .ongoing_effects import BARDIC_INSPIRATION_EFFECT_ID
 
@@ -494,7 +494,7 @@ class StateMachine(
 
     def _register_pending_action_choice(self, pending, package, context, rng):
         """Publish one provisional action under the shared file gate after fresh admission."""
-        from .action_pending import PendingActionChoice, PendingFaerieChoice
+        from .action_pending import PendingActionChoice, PendingSpellSaveChoice
 
         command = pending.command
         sid = command.session_id
@@ -519,15 +519,14 @@ class StateMachine(
                     raise StateMachineError(
                         "version_conflict", "Action source or grant changed before choice"
                     )
-            elif isinstance(pending, PendingFaerieChoice):
-                tick = self._world_facts.time_state(sid)[1]
-                grant = self._world.characters.effects.held_bardic_inspiration(
-                    sid, pending.progress.pending_target_id, tick
+            elif isinstance(pending, PendingSpellSaveChoice) and (
+                pending.progress.pending_target_id != row["pc_actor_id"]
+                or self._rules.session_binding(row) != pending.request.ruleset_binding
+                or not self._current_spell_save_grant(pending)
+            ):
+                raise StateMachineError(
+                    "version_conflict", "Spell save recipient, binding or grant changed"
                 )
-                if grant != pending.grant:
-                    raise StateMachineError(
-                        "version_conflict", "Faerie grant changed before choice"
-                    )
             owner = self._store._coordinator.pending_action_owners.get(sid)
             if owner is not None:
                 existing = owner._pending_action_choices.get(sid)
@@ -543,9 +542,9 @@ class StateMachine(
             self._store._coordinator.pending_action_owners[sid] = self
             return pending.receipt
 
-    def _open_faerie_choice(self, command, fingerprint, request, progress, package, context):
-        """Offer the selected PC one private, uncommitted Faerie Fire save choice."""
-        from .action_pending import PendingFaerieChoice
+    def _open_spell_save_choice(self, command, fingerprint, request, progress, package, context):
+        """Offer the selected PC one private, uncommitted spell save choice."""
+        from .action_pending import PendingSpellSaveChoice
         from .choice_models import PendingChoice
 
         sid, target = command.session_id, progress.pending_target_id
@@ -558,7 +557,7 @@ class StateMachine(
             tick = self._world_facts.time_state(sid)[1]
             grant = self._world.characters.effects.held_bardic_inspiration(sid, target, tick)
             if grant is None:
-                raise StateMachineError("choice_stale", "Faerie grant is unavailable")
+                raise StateMachineError("choice_stale", "Spell save grant is unavailable")
         prompt = PendingChoice(
             command.command_id,
             target,
@@ -575,7 +574,7 @@ class StateMachine(
             (),
             pending_choice=prompt,
         )
-        pending = PendingFaerieChoice(command, fingerprint, request, progress, grant, receipt)
+        pending = PendingSpellSaveChoice(command, fingerprint, request, progress, grant, receipt)
         return self._register_pending_action_choice(pending, package, context, request.rng_context)
 
     def save_session(
@@ -721,20 +720,16 @@ class StateMachine(
     async def submit_command_async(self, command, package, *, context):
         """Delegate supported asynchronous rule command submission."""
         if self._has_pending_action_choice(command.session_id):
-            from .action_pending import PendingFaerieChoice
+            from .action_pending import PendingSpellSaveChoice
             from .choice_models import ChoiceRespondOperationPayload
 
             pending = self._pending_action_choices[command.session_id]
             if (
-                isinstance(pending, PendingFaerieChoice)
+                isinstance(pending, PendingSpellSaveChoice)
                 and type(command.payload) is ChoiceRespondOperationPayload
                 and command.payload.pending_operation_id == pending.command.command_id
             ):
-                with self._transaction():
-                    row = self._session(command.session_id, package, context)
-                    self._authorize_command(row, command.actor_id, command.payload, context)
-                    fingerprint = self._session_runtime.fingerprint(command, row, context)
-                return await self._combat._submit_dnd(command, package, context, fingerprint)
+                return await self._combat.submit_command_async(command, package, context=context)
             return self.submit_command(command, package, context=context)
         return await self._combat.submit_command_async(command, package, context=context)
 

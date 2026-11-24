@@ -1317,10 +1317,10 @@ def haste_effect_changes(request, result):
     return (*base, *adopted)
 
 
-def validate_dnd_result(request, result, *, loader=None, preverified_faerie=False):
+def validate_dnd_result(request, result, *, loader=None, preverified_spell_save=False):
     """Restore an RE result and validate request, binding, read version and Delta.
 
-    An assisted Faerie result is independently verified against its private
+    An assisted spell save result is independently verified against its private
     ordered continuation before this call, then rechecked structurally here.
     """
     try:
@@ -1328,9 +1328,12 @@ def validate_dnd_result(request, result, *, loader=None, preverified_faerie=Fals
         # RE /24 verifies /2 stage coverage against this exact input. Uncovered
         # is a valid explicit limitation, never upgraded to sensory Evidence or
         # complete coverage by SM; existing operation admission remains unchanged.
-        if preverified_faerie:
-            if request.schema_version != FAERIE_FIRE_SCHEMA_VERSION or result.status != "accepted":
-                _invalid("Expected an independently verified Faerie Fire continuation")
+        if preverified_spell_save:
+            if (request.schema_version, getattr(request.payload, "spell_id", None)) not in (
+                (FAERIE_FIRE_SCHEMA_VERSION, "faerie-fire"),
+                (WARD_SPELL_SCHEMA_VERSION, "bane"),
+            ) or result.status not in ("accepted", "rejected"):
+                _invalid("Expected an independently verified spell save continuation")
         else:
             result.verify_request(request, loader=loader)
     except (ValidationError, ValueError, TypeError) as exc:

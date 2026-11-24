@@ -657,9 +657,9 @@ class CommandRuntime:
                     type(command.payload) is ChoiceRespondOperationPayload
                     and command.payload.pending_operation_id == pending.command.command_id
                 ):
-                    from .action_pending import PendingFaerieChoice
+                    from .action_pending import PendingSpellSaveChoice
 
-                    if isinstance(pending, PendingFaerieChoice):
+                    if isinstance(pending, PendingSpellSaveChoice):
                         import asyncio
 
                         try:
@@ -948,14 +948,14 @@ class CommandRuntime:
             if pending is not None and pending.command.command_id != command_id:
                 pending = None
             if pending is not None:
-                from .action_pending import PendingFaerieChoice
+                from .action_pending import PendingSpellSaveChoice
 
                 if pending.receipt.pending_choice.authorized_responder != row["pc_actor_id"]:
                     raise StateMachineError("unauthorized", "Action choice holder changed")
                 rolls = []
                 events = (
                     tuple(step.original for step in pending.progress.steps)
-                    if isinstance(pending, PendingFaerieChoice)
+                    if isinstance(pending, PendingSpellSaveChoice)
                     else tuple(
                         event
                         for _, result, _ in pending.prepared.values()

@@ -6,6 +6,9 @@ cannot resume one; its caller starts a new action from committed state.
 
 from dataclasses import dataclass
 
+from dnd5e_engine.evaluation_contracts import RuleEvaluationRequest
+from dnd5e_engine.evaluation_spell_saves import SpellSaveProgress
+
 from .commands import CommandReceipt, TypedCommand
 from .ongoing_effects import BardicInspirationGrant
 
@@ -24,12 +27,12 @@ class PendingActionChoice:
 
 
 @dataclass(slots=True)
-class PendingFaerieChoice:
+class PendingSpellSaveChoice:
     """Hold RE-authored ordered saves and the original fixed cast request."""
 
     command: TypedCommand
     fingerprint: str
-    request: object
-    progress: object
+    request: RuleEvaluationRequest
+    progress: SpellSaveProgress
     grant: BardicInspirationGrant
     receipt: CommandReceipt
