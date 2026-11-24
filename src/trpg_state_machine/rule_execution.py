@@ -450,13 +450,19 @@ class RuleExecution:
                     if command.actor_id != pending.progress.pending_target_id:
                         raise StateMachineError("unauthorized", "Faerie choice belongs to target")
                     if replay := self.runtime._command_replay(command, fingerprint):
-                        self.action_choices._discard_pending_action_choice(command.session_id)
+                        self.action_choices._discard_pending_action_choice(
+                            command.session_id, expected=pending
+                        )
                         return replay
                     if self.runtime._command_replay(pending.command, pending.fingerprint):
-                        self.action_choices._discard_pending_action_choice(command.session_id)
+                        self.action_choices._discard_pending_action_choice(
+                            command.session_id, expected=pending
+                        )
                         raise StateMachineError("choice_closed", "Original cast already completed")
                     if not self.action_choices._current_faerie_grant(pending):
-                        self.action_choices._discard_pending_action_choice(command.session_id)
+                        self.action_choices._discard_pending_action_choice(
+                            command.session_id, expected=pending
+                        )
                         raise StateMachineError("choice_stale", "Faerie grant changed or expired")
                 return await self.submit(
                     pending.command,
@@ -1055,13 +1061,19 @@ class RuleExecution:
                     row, faerie_reply.actor_id, faerie_reply.payload, context
                 )
                 if replay := self.runtime._command_replay(faerie_reply, _faerie_resume[2]):
-                    self.action_choices._discard_pending_action_choice(command.session_id)
+                    self.action_choices._discard_pending_action_choice(
+                        command.session_id, expected=_faerie_resume[0]
+                    )
                     return replay
                 if self.runtime._command_replay(command, fingerprint):
-                    self.action_choices._discard_pending_action_choice(command.session_id)
+                    self.action_choices._discard_pending_action_choice(
+                        command.session_id, expected=_faerie_resume[0]
+                    )
                     raise StateMachineError("choice_closed", "Original cast already completed")
                 if not self.action_choices._current_faerie_grant(_faerie_resume[0]):
-                    self.action_choices._discard_pending_action_choice(command.session_id)
+                    self.action_choices._discard_pending_action_choice(
+                        command.session_id, expected=_faerie_resume[0]
+                    )
                     raise StateMachineError("choice_stale", "Faerie grant changed or expired")
             if self.action_choices is not None:
                 self.action_choices._guard_pending_action_owner(
@@ -1756,7 +1768,9 @@ class RuleExecution:
                 )
         self.runtime.refresh_time_drivers()
         if faerie_reply is not None:
-            self.action_choices._discard_pending_action_choice(command.session_id)
+            self.action_choices._discard_pending_action_choice(
+                command.session_id, expected=_faerie_resume[0]
+            )
         return receipt
 
     def _bardic_grant_request(self, row, command, package):

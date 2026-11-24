@@ -548,15 +548,15 @@ class CommandRuntime:
             row = self._session(response.session_id, package, context)
             self._authorize_command(row, response.actor_id, response.payload, context)
             if replay := self._command_replay(response, fingerprint):
-                self._discard_pending_action_choice(response.session_id)
+                self._discard_pending_action_choice(response.session_id, expected=pending)
                 return replay
             if response.actor_id != pending.command.actor_id:
                 raise StateMachineError("unauthorized", "Action choice belongs to another actor")
             if self._session_runtime.version_conflict(row, response):
-                self._discard_pending_action_choice(response.session_id)
+                self._discard_pending_action_choice(response.session_id, expected=pending)
                 raise StateMachineError("version_conflict", "Choice reply version changed")
             if self._world_facts.time_state(response.session_id)[1] >= pending.grant.expires_tick:
-                self._discard_pending_action_choice(response.session_id)
+                self._discard_pending_action_choice(response.session_id, expected=pending)
                 raise StateMachineError("choice_expired", "Bardic grant expired")
             grant = self._world.characters.effects.held_bardic_inspiration(
                 response.session_id,
@@ -564,7 +564,7 @@ class CommandRuntime:
                 self._world_facts.time_state(response.session_id)[1],
             )
             if grant != pending.grant:
-                self._discard_pending_action_choice(response.session_id)
+                self._discard_pending_action_choice(response.session_id, expected=pending)
                 raise StateMachineError("choice_stale", "Bardic grant changed")
             oid, operation_id = pending.waiting_key
             gate = (
@@ -577,7 +577,7 @@ class CommandRuntime:
                 row, package, response.actor_id, gate, pending.command.command_id
             )
             if current != request:
-                self._discard_pending_action_choice(response.session_id)
+                self._discard_pending_action_choice(response.session_id, expected=pending)
                 raise StateMachineError("choice_stale", "Action save facts changed")
         original = result.proposed_events[0]
         after_original = RNGContext(
@@ -649,7 +649,9 @@ class CommandRuntime:
                         )
                     with self._transaction():
                         if replay := self._command_replay(command, fingerprint):
-                            self._discard_pending_action_choice(command.session_id)
+                            self._discard_pending_action_choice(
+                                command.session_id, expected=pending
+                            )
                             return replay
                     return pending.receipt
                 if (

@@ -446,9 +446,14 @@ class StateMachine(
         """Report whether this live runtime holds an uncommitted action choice."""
         return session_id in self._pending_action_choices
 
-    def _discard_pending_action_choice(self, session_id: str) -> None:
-        """Forget provisional action work when the runtime is abandoned or reloaded."""
+    def _discard_pending_action_choice(self, session_id: str, *, expected=None) -> None:
+        """Forget only the selected candidate when supplied, preserving a newer action."""
         with self._store._coordinator.lock:
+            if (
+                expected is not None
+                and self._pending_action_choices.get(session_id) is not expected
+            ):
+                return
             self._pending_action_choices.pop(session_id, None)
             owners = self._store._coordinator.pending_action_owners
             if owners.get(session_id) is self:
