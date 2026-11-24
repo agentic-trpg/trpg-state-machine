@@ -377,12 +377,13 @@ class MechanismService:
 
     @staticmethod
     def _save_recheck_projection(request):
-        """Keep exact equipped stock while excluding unrelated inventory access changes.
+        """Keep all stock identities but ignore unrelated access changes after a switch.
 
-        The bound standalone save reads exact held and worn item entries. Its
-        reviewed class profiles may inspect the complete owned stock, so retain
-        that inventory unchanged. All non-inventory facts and the RNG context
-        remain in the request comparison.
+        The bound standalone save reads accessibility for exact held, worn and
+        equipped entries. Opening a container may alter accessibility of other
+        entries without changing the save. Reviewed class profiles inspect the
+        complete owned stock, so their inventory remains exact. All item rows,
+        non-inventory facts and RNG remain in the comparison.
         """
         snapshot = request.state_snapshot
         equipped_ids = set()
@@ -396,6 +397,7 @@ class MechanismService:
                     actor.worn_armor_instance_id,
                     actor.equipped_shield_instance_id,
                     actor.offhand_item_instance_id,
+                    *getattr(actor, "worn_item_instance_ids", ()),
                 )
                 if identity is not None
             )
@@ -403,8 +405,9 @@ class MechanismService:
             update={
                 "entries": tuple(
                     entry
-                    for entry in snapshot.inventory_state.entries
                     if entry.instance_id in equipped_ids
+                    else entry.model_copy(update={"accessible": True})
+                    for entry in snapshot.inventory_state.entries
                 )
             }
         )

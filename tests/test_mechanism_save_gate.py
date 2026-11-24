@@ -250,6 +250,31 @@ def test_save_recheck_keeps_held_item_entry_dependency(tmp_path, context):
         changed = request.model_copy(update={"state_snapshot": changed_snapshot})
         project = sm._world.objects.mechanisms._save_recheck_projection
         assert project(changed) != project(request)
+        other = next(
+            entry for entry in snapshot.inventory_state.entries if entry.instance_id != STAFF
+        )
+        for field, value, expected_equal in (
+            ("accessible", not other.accessible, True),
+            ("quantity", other.quantity + 1, False),
+        ):
+            entries = tuple(
+                entry.model_copy(update={field: value})
+                if entry.instance_id == other.instance_id
+                else entry
+                for entry in snapshot.inventory_state.entries
+            )
+            modified = request.model_copy(
+                update={
+                    "state_snapshot": snapshot.model_copy(
+                        update={
+                            "inventory_state": snapshot.inventory_state.model_copy(
+                                update={"entries": entries}
+                            )
+                        }
+                    )
+                }
+            )
+            assert (project(modified) == project(request)) is expected_equal
 
 
 def test_v4_preserves_ungated_effect_definition_and_rejects_gated_effect():
