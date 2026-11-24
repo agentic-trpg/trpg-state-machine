@@ -20,6 +20,8 @@ from dnd5e_engine.evaluation_contracts import (
     ExplorationItemAreaFacts,
     ExplorationItemUsePayload,
     ExplorationMultiSpellCastPayload,
+    ExplorationMultiSpellPositions,
+    ExplorationMultiSpellTarget,
     ExplorationSpellCastPayload,
     ExplorationSpellPositions,
     IndependentConditionSelection,
@@ -43,6 +45,7 @@ from dnd5e_engine.evaluation_ruleset import EVALUATOR_VERSION, RulesetBindingErr
 from dnd5e_engine.evaluation_shield_window import answer_shield, evaluate_for_shield
 from dnd5e_engine.evaluation_speed_effects import spell_attack_has_speed_effect
 from dnd5e_engine.evaluation_spell_termination import WorldSpellEnd
+from dnd5e_engine.evaluation_ward_spells import prepare_ward_spell
 from dnd5e_engine.events import ObjectIdentified
 from dnd5e_engine.spellcasting import spell_range_ft
 from pydantic import ValidationError
@@ -139,6 +142,47 @@ class RuleExecution:
             visible_target_id=target_id if sight_range is not None else None,
         )
         return None, ids, positions
+
+    def _ward_positions(self, row, command, package, needs):
+        """Read the exact actor cells and sight relationships declared by RE."""
+        sid = command.session_id
+        actor_ids = needs.actor_ids
+        placements = {}
+        for actor_id in actor_ids:
+            place = self.world.facts.carrier_position(sid, actor_id)
+            if place is None or place[0] != row["current_scene_id"] or place[1] is None:
+                return "spell.target", actor_ids, None
+            placements[actor_id] = place[1]
+        sight_ids = frozenset(needs.sight_target_ids)
+        return (
+            None,
+            actor_ids,
+            ExplorationMultiSpellPositions(
+                source_cell=placements[command.actor_id],
+                targets=tuple(
+                    ExplorationMultiSpellTarget(
+                        target_id=target_id,
+                        cell_id=placements[target_id],
+                        willing=False,
+                        visible=(
+                            target_id == command.actor_id
+                            or visible_actor_in_range(
+                                self.world,
+                                sid,
+                                command.actor_id,
+                                target_id,
+                                placements[target_id],
+                                package,
+                                range_ft=needs.range_ft,
+                            )
+                        )
+                        if target_id in sight_ids
+                        else False,
+                    )
+                    for target_id in command.payload.target_ids
+                ),
+            ),
+        )
 
     def _spell_sight_range(self, command):
         """Return the bound range only for the supported visible-creature spell."""
@@ -449,6 +493,20 @@ class RuleExecution:
         exploration_item = type(command.payload) is ExplorationItemUsePayload
         environmental_spell = type(command.payload) is ExplorationEnvironmentalSpellCastPayload
         multi_spell = type(command.payload) is ExplorationMultiSpellCastPayload
+        ward_spell = (
+            type(command.payload) is ExplorationSpellCastPayload
+            and command.payload.target_ids is not None
+        )
+        ward_needs = (
+            prepare_ward_spell(command.payload, command.actor_id, self.rules.loader)
+            if ward_spell
+            else None
+        )
+        selected_material = (
+            ward_needs.material_instance_id
+            if ward_spell and ward_needs is not None
+            else getattr(command.payload, "material_instance_id", None)
+        )
         casting_start = type(command.payload) is StartSpellCast
         casting_finish = type(command.payload) is FinishSpellCast
         casting_activity = casting_start or casting_finish
@@ -509,9 +567,7 @@ class RuleExecution:
 
         def cast_material(value):
             """Read the exact accessible material without exposing ownership failures."""
-            item = self.world.facts.object(
-                value["session_id"], command.payload.material_instance_id
-            )
+            item = self.world.facts.object(value["session_id"], selected_material)
             entry = (
                 self.world.facts.item_entry(item)
                 if item is not None and item["item_slug"] is not None
@@ -678,6 +734,13 @@ class RuleExecution:
                 prepare_error, spell_actor_ids, multi_spell_positions = (
                     project_multi_spell_positions(row)
                 )
+            elif ward_spell and prepare_error is None:
+                if ward_needs is None:
+                    prepare_error = "spell.asset"
+                else:
+                    prepare_error, spell_actor_ids, multi_spell_positions = self._ward_positions(
+                        row, command, package, ward_needs
+                    )
             elif exploration_spell and prepare_error is None:
                 if sight_range is not None and self.runtime.version_conflict(row, command):
                     prepare_error = "version_conflict"
@@ -697,7 +760,7 @@ class RuleExecution:
             if (
                 prepare_error is None
                 and type(command.payload) is ExplorationSpellCastPayload
-                and command.payload.material_instance_id is not None
+                and selected_material is not None
             ):
                 material = cast_material(row)
                 if material is None:
@@ -991,7 +1054,14 @@ class RuleExecution:
                     != (None, spell_actor_ids, multi_spell_positions)
                 )
                 or (
+                    ward_spell
+                    and prepare_error is None
+                    and self._ward_positions(row, command, package, ward_needs)
+                    != (None, spell_actor_ids, multi_spell_positions)
+                )
+                or (
                     not multi_spell
+                    and not ward_spell
                     and (
                         sight_range is not None
                         or (response is not None and shield_prompt is None)
@@ -1211,11 +1281,19 @@ class RuleExecution:
                                     value
                                     for part, _, _field, value in changes
                                     if part == "world_effect"
+                                    or (part == "world_effect_group" and value)
                                 ),
                                 None,
                             )
                         )
-                        if proposal is not None and proposal.concentration:
+                        if ward_spell or (
+                            proposal is not None
+                            and (
+                                proposal[0].concentration
+                                if isinstance(proposal, tuple)
+                                else proposal.concentration
+                            )
+                        ):
                             effects_events = self.runtime.time.consumers[
                                 "effects"
                             ].end_world_concentration(

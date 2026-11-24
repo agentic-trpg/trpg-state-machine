@@ -1083,7 +1083,9 @@ def world_command_from_data(data):
         payload = data["payload"]
         if kind == "set_object_state":
             payload = {**payload, "state": ObjectState(payload["state"])}
-        if kind in ("choice.finalize_spell", "world.cast_spell_many"):
+        if kind in ("choice.finalize_spell", "world.cast_spell_many") or (
+            kind == "world.cast_spell" and "target_ids" in payload
+        ):
             targets = payload.get("target_ids")
             if type(targets) not in (list, tuple):
                 raise ValueError("Expected ordered spell targets")

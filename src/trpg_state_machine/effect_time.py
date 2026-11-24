@@ -75,6 +75,40 @@ class EffectTimeConsumer:
             cast_slot_level=cast_slot_level,
         )
 
+    def apply_verified_group(self, sid, proposals, *, spell_id, cast_slot_level=None):
+        """Persist one paid ward's effects as a single concentration group."""
+        self.store.require_write()
+        if not proposals or any(
+            proposal.session_id != sid
+            or proposal.command_id != proposals[0].command_id
+            or proposal.source_id != proposals[0].source_id
+            or not proposal.concentration
+            or proposal.expiry.action != "remove"
+            or proposal.duration_seconds != proposals[0].duration_seconds
+            for proposal in proposals
+        ):
+            raise StateMachineError("invalid_rule_result", "Ward group differs")
+        deadline = self.world.time.seconds_deadline(sid, proposals[0].duration_seconds)
+        self.owner.create_concentration(
+            sid,
+            f"actor:{proposals[0].command_id}",
+            proposals[0].source_id,
+            proposals[0].effect.id,
+            0,
+            tuple(
+                {
+                    "effect": proposal.effect.model_dump(mode="json"),
+                    "expires_tick": deadline,
+                    "conditions": sorted(proposal.effect.statuses) or None,
+                    "cast_by": proposal.source_id,
+                    "cast_spell_id": spell_id,
+                    "cast_command_id": proposal.command_id,
+                    "cast_slot_level": cast_slot_level,
+                }
+                for proposal in proposals
+            ),
+        )
+
     def spell_end_event(self, sid, package, proposal):
         """Capture the verified exact ending after the command's other effects."""
         application = proposal.expected

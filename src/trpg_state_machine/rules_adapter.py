@@ -25,6 +25,7 @@ from dnd5e_engine.evaluation_contracts import (
     MATERIAL_SPELL_SCHEMA_VERSION,
     MULTI_SPELL_SCHEMA_VERSION,
     STAFF_CAST_SCHEMA_VERSION,
+    WARD_SPELL_SCHEMA_VERSION,
     CheckPayload,
     CombatClosePayload,
     ExplorationCastActivityPayload,
@@ -117,6 +118,7 @@ from .exploration_spell_adoption import (
     environmental_spell_changes,
     exploration_spell_changes,
     multi_exploration_spell_changes,
+    ward_exploration_spell_changes,
 )
 from .haste_adoption import (
     HASTE_LIFECYCLE_OPERATIONS,
@@ -1376,6 +1378,8 @@ def validate_dnd_result(request, result, *, loader=None):
     if type(request.payload) is ExplorationMultiSpellCastPayload:
         return result, multi_exploration_spell_changes(request, result, loader)
     if type(request.payload) is ExplorationSpellCastPayload:
+        if request.payload.target_ids is not None:
+            return result, ward_exploration_spell_changes(request, result, loader)
         return result, exploration_spell_changes(request, result, loader)
     if type(request.payload) is ItemUsePayload:
         changes = delta_changes(request, result)
@@ -2208,6 +2212,10 @@ class RulesAdapter:
                 self.world.runtime.time.consumers["effects"].apply_verified(
                     sid, value, spell_id=cast_spell_id, cast_slot_level=cast_slot_level
                 )
+            elif component == "world_effect_group" and field == "create":
+                self.world.runtime.time.consumers["effects"].apply_verified_group(
+                    sid, value, spell_id=cast_spell_id, cast_slot_level=cast_slot_level
+                )
             elif component == "combat_effect":
                 self.characters.effects.apply_combat_creation(sid, value)
             elif component == "shield_graph":
@@ -2370,6 +2378,9 @@ class RulesAdapter:
                 )
                 or (command.payload.intent_type in {"move", "pass"} and has_speed_effects(snapshot))
             )
+            else WARD_SPELL_SCHEMA_VERSION
+            if type(command.payload) is ExplorationSpellCastPayload
+            and command.payload.target_ids is not None
             else CONDITION_CHOICE_SCHEMA_VERSION
             if type(command.payload) is ExplorationSpellCastPayload
             and command.payload.has_condition_choice

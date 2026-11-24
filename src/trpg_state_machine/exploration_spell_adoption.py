@@ -200,6 +200,26 @@ def multi_exploration_spell_changes(request, result, loader):
     )
 
 
+def ward_exploration_spell_changes(request, result, loader):
+    """Adopt one bound ward payment and its linked concentration members."""
+    if loader is None:
+        raise StateMachineError("invalid_rule_result", "Ward has no bound ruleset loader")
+    # validate_dnd_result has already asked RE to verify the exact result with
+    # this loader; only translate its typed, paid proposal into owner writes.
+    payment, *effects = result.state_delta.operations
+    changes = (_slot_change(request, payment, allow_pact=request.payload.spell_id == "bane"),)
+    if effects:
+        changes += (
+            (
+                "world_effect_group",
+                request.actor_id,
+                "create",
+                tuple(effect.value for effect in effects),
+            ),
+        )
+    return changes
+
+
 def environmental_spell_changes(request, result):
     """Bind the owned slot of a previously verified environmental cast."""
     # RuleEvaluationResult.verify_request checks the exact typed environmental
