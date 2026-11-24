@@ -375,6 +375,43 @@ class MechanismService:
             )
         return prepared
 
+    @staticmethod
+    def _save_recheck_projection(request):
+        """Keep exact equipped stock while excluding unrelated inventory access changes.
+
+        The bound standalone save reads exact held and worn item entries. Its
+        reviewed class profiles may inspect the complete owned stock, so retain
+        that inventory unchanged. All non-inventory facts and the RNG context
+        remain in the request comparison.
+        """
+        snapshot = request.state_snapshot
+        equipped_ids = set()
+        for actor in snapshot.character_states:
+            if actor.classes or actor.class_slug or actor.granted_features:
+                return request
+            equipped_ids.update(
+                identity
+                for identity in (
+                    actor.held_weapon_instance_id,
+                    actor.worn_armor_instance_id,
+                    actor.equipped_shield_instance_id,
+                    actor.offhand_item_instance_id,
+                )
+                if identity is not None
+            )
+        inventory = snapshot.inventory_state.model_copy(
+            update={
+                "entries": tuple(
+                    entry
+                    for entry in snapshot.inventory_state.entries
+                    if entry.instance_id in equipped_ids
+                )
+            }
+        )
+        return request.model_copy(
+            update={"state_snapshot": snapshot.model_copy(update={"inventory_state": inventory})}
+        )
+
     def _resolve_save_gate(self, row, package, actor, gate, command_id, oid, operation_id):
         """Adopt a pre-evaluated save only if its fixed facts still match current facts."""
         prepared = self._prepared_saves.get()
@@ -383,7 +420,7 @@ class MechanismService:
             raise StateMachineError("unsupported_mechanism_save", "Save was not prepared")
         request, result = item
         current = self._save_request(row, package, actor, gate, command_id)
-        if current != request:
+        if self._save_recheck_projection(current) != self._save_recheck_projection(request):
             raise StateMachineError("version_conflict", "Mechanism save facts changed")
         if result.status != "accepted":
             raise StateMachineError(

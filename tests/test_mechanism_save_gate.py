@@ -6,14 +6,19 @@ from dataclasses import asdict, replace
 
 import pytest
 from lock_support import CRED, DOOR, A
+from test_equipment_save_modifier import STAFF, _save, _world
 from test_mechanism_effects import effect, rule_action, state_rows
 from test_mechanism_service import extended_data, method, trigger
+from test_world_containers import BOX, container_data
 from test_world_mechanisms import LEVER
 from world_support import command, setup
 
 from trpg_state_machine import (
     ActivateMechanism,
+    EquipWeapon,
     ObjectState,
+    PickupItem,
+    PutItem,
     SetLightEnabled,
     SetObjectState,
     StateMachine,
@@ -165,6 +170,86 @@ def test_mode_switch_on_enabled_light_skips_save_gate(tmp_path, context):
         assert sm._world_facts.mechanism_state(sid, LEVER).activation_count == 0
         assert sm.read_rng_context(sid, package, context=context) == before_rng
         assert sm.get_command_rolls(sid, "mode", package, context=context)["rolls"] == []
+
+
+@pytest.mark.parametrize("dc,failed", [(100, True), (0, False)])
+def test_opening_carried_box_rechecks_only_save_relevant_inventory(tmp_path, context, dc, failed):
+    """Opening a box may reveal a stowed item without altering this actor's save."""
+    data = state_gated_data(dc=dc)
+    container = container_data()
+    data["scenes"][0]["objects"].extend(
+        deepcopy(item) for item in container["scenes"][0]["objects"] if item["object_id"] == BOX
+    )
+    data["item_transfers"].extend(
+        deepcopy(item) for item in container["item_transfers"] if item["instance_id"] == BOX
+    )
+    data["world_objects"].extend(
+        deepcopy(item) for item in container["world_objects"] if item["object_id"] == BOX
+    )
+    for profile in data["world_objects"]:
+        profile.update(volume_cu_ft=1, fit_profile="station.small", content_kind="station.unit")
+    config = data["world_objects"][-2]["capabilities"][0]
+    config["triggers"][0]["target_object_id"] = BOX
+    config["operations"][0]["actions"] = [
+        dict(kind="set_open_state", target_object_id=DOOR, value="open")
+    ]
+    sm, sid, package, _ = setup(tmp_path, context, data)
+    with sm:
+        for key, operation in (
+            ("pick-item", PickupItem(CRED, A, "1,0")),
+            ("pick-box", PickupItem(BOX, A, "1,0")),
+            ("stow", PutItem(A, CRED, BOX, "0,0")),
+            ("close", SetObjectState(A, BOX, ObjectState.CLOSED)),
+        ):
+            assert (
+                sm.submit_command(
+                    command(sm, sid, package, context, operation, key), package, context=context
+                ).status
+                == "committed"
+            )
+        cmd = command(sm, sid, package, context, SetObjectState(A, BOX, ObjectState.OPEN), "open")
+        receipt = sm.submit_command(cmd, package, context=context)
+        assert receipt.status == "committed", receipt
+        assert sm._world_facts.object(sid, BOX)["state"] == "open"
+        assert sm._world_facts.object(sid, DOOR)["state"] == ("open" if failed else "closed")
+        rolls = sm.get_command_rolls(sid, "open", package, context=context)["rolls"]
+        assert len(rolls) == 1 and rolls[0]["succeeded"] is not failed
+        assert sm.submit_command(cmd, package, context=context) == receipt
+
+
+def test_save_recheck_keeps_held_item_entry_dependency(tmp_path, context):
+    """The exact equipped item remains in the save's staged dependency comparison."""
+    sm, sid, package, _ = _world(tmp_path, context)
+    with sm:
+        equip = command(sm, sid, package, context, EquipWeapon(STAFF), "equip")
+        assert sm.submit_command(equip, package, context=context).status == "committed"
+        actor_id = sm.read_session(sid, package, context=context).pc_actor_id
+        save = _save(sm, sid, package, context, "save")
+        with sm._transaction():
+            row = sm._session(sid, package, context)
+            request = sm._rules.request(
+                save,
+                package,
+                sm._rules._noncombat_snapshot(row, actor_ids=(actor_id,)),
+                sm._rules._rng_context(row),
+                row=row,
+            )
+        snapshot = request.state_snapshot
+        assert any(entry.instance_id == STAFF for entry in snapshot.inventory_state.entries)
+        changed_entries = tuple(
+            entry.model_copy(update={"accessible": False}) if entry.instance_id == STAFF else entry
+            for entry in snapshot.inventory_state.entries
+        )
+        changed_snapshot = snapshot.model_copy(
+            update={
+                "inventory_state": snapshot.inventory_state.model_copy(
+                    update={"entries": changed_entries}
+                )
+            }
+        )
+        changed = request.model_copy(update={"state_snapshot": changed_snapshot})
+        project = sm._world.objects.mechanisms._save_recheck_projection
+        assert project(changed) != project(request)
 
 
 def test_v4_preserves_ungated_effect_definition_and_rejects_gated_effect():
