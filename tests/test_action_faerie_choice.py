@@ -63,7 +63,8 @@ def cast(sm, sid, package, context, key="faerie-action"):
     )
 
 
-def test_faerie_bardic_choice_uses_frozen_prior_rolls(timed_spell_world):
+@pytest.mark.parametrize("decision", ["accept", "decline"])
+def test_faerie_bardic_choice_uses_frozen_prior_rolls(timed_spell_world, decision):
     sm, sid, package, context = bard_faerie_world(timed_spell_world, seed=2)
     with sm:
         actor = sm.read_session(sid, package, context=context).pc_actor_id
@@ -84,7 +85,7 @@ def test_faerie_bardic_choice_uses_frozen_prior_rolls(timed_spell_world):
             "faerie-answer",
             actor,
             "choice.respond",
-            ChoiceRespondOperationPayload(source.command_id, "accept"),
+            ChoiceRespondOperationPayload(source.command_id, decision),
             pending.world_version,
         )
         final = sm.submit_command(answer, package, context=context)
@@ -96,7 +97,9 @@ def test_faerie_bardic_choice_uses_frozen_prior_rolls(timed_spell_world):
         assert sm.submit_command(answer, package, context=context) == final
         assert sm.submit_command(source, package, context=context).command_id == source.command_id
         assert not sm._has_pending_action_choice(sid)
-        assert sm._world.characters.effects.for_target_effect(sid, actor, "effect:inspired") == []
+        assert bool(
+            sm._world.characters.effects.for_target_effect(sid, actor, "effect:inspired")
+        ) == (decision == "decline")
 
 
 def test_faerie_answer_receipt_failure_rolls_back_and_keeps_candidate(
