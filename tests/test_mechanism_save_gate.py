@@ -1,6 +1,7 @@
 """Authored exploration save gates through real light and object-state triggers."""
 
 import json
+from concurrent.futures import ThreadPoolExecutor
 from copy import deepcopy
 from dataclasses import asdict, replace
 
@@ -162,12 +163,35 @@ def test_direct_two_gates_use_each_prior_candidate(
         return build_request(row, package, actor, gate, command_id, oid, **kwargs)
 
     def capture(request, *, loader):
+        assert_unlocked()
         calls.append(request)
         return original(request, loader=loader)
 
     def capture_ordinary(request, *, loader):
+        assert_unlocked()
         calls.append(request)
         return ordinary(request, loader=loader)
+
+    def assert_unlocked():
+        """Another connection can read the committed state during RE evaluation."""
+
+        def probe():
+            gate = sm._store._coordinator.lock
+            acquired = gate.acquire(blocking=False)
+            if acquired:
+                gate.release()
+            if not acquired:
+                return False
+            if len(calls) == 1:
+                with StateMachine(db, dnd_loader=loader) as reader:
+                    return (
+                        reader.read_session(sid, package, context=context).world_version
+                        == cmd.expected_world_version
+                    )
+            return True
+
+        with ThreadPoolExecutor(max_workers=1) as executor:
+            assert executor.submit(probe).result(timeout=5)
 
     monkeypatch.setattr(evaluation, "evaluate_bound_action_save", capture)
     monkeypatch.setattr(evaluation, "evaluate_bound_save", capture_ordinary)

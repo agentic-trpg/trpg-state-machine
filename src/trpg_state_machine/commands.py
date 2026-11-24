@@ -641,43 +641,39 @@ class CommandRuntime:
                 )
 
     def _respond_step_action_choice(self, response, package, context, fingerprint):
-        """Serialize ordered-action replies and replay each provisional reply key."""
+        """Replay authorized replies before continuing an ordered action outside Store locks."""
         from .action_pending import PendingActionChoice
 
         sid = response.session_id
-        with self._store._coordinator.lock:
-            with self._transaction():
-                row = self._session(sid, package, context)
-                self._authorize_command(row, response.actor_id, response.payload, context)
-                pending = self._pending_action_choices.get(sid)
-                if replay := self._command_replay(response, fingerprint):
-                    if isinstance(pending, PendingActionChoice) and self._command_replay(
-                        pending.command, pending.fingerprint
-                    ):
-                        self._discard_pending_action_choice(sid, expected=pending)
-                    return replay
-                if not isinstance(pending, PendingActionChoice) or (
-                    type(pending.command.payload)
-                    not in (StepActor, SetLightEnabled, SetObjectState)
-                    or pending.command.actor_id != response.actor_id
+        with self._transaction():
+            row = self._session(sid, package, context)
+            self._authorize_command(row, response.actor_id, response.payload, context)
+            pending = self._pending_action_choices.get(sid)
+            if replay := self._command_replay(response, fingerprint):
+                if isinstance(pending, PendingActionChoice) and self._command_replay(
+                    pending.command, pending.fingerprint
                 ):
-                    raise StateMachineError("choice_stale", "Ordered save choice changed")
-                for reply in pending.step_replies:
-                    if reply.command.command_id == response.command_id:
-                        if reply.fingerprint != fingerprint:
-                            raise StateMachineError(
-                                "idempotency_conflict", "Reply key has different content"
-                            )
-                        return reply.receipt
-                if response.payload.pending_operation_id != (
-                    pending.receipt.pending_choice.pending_operation_id
-                ):
-                    raise StateMachineError("choice_stale", "Ordered save prompt changed")
-                if response.expected_world_version != pending.command.expected_world_version:
-                    raise StateMachineError(
-                        "version_conflict", "Ordered save reply version changed"
-                    )
-            return self._respond_action_choice(pending, response, package, context, fingerprint)
+                    self._discard_pending_action_choice(sid, expected=pending)
+                return replay
+            if not isinstance(pending, PendingActionChoice) or (
+                type(pending.command.payload) not in (StepActor, SetLightEnabled, SetObjectState)
+                or pending.command.actor_id != response.actor_id
+            ):
+                raise StateMachineError("choice_stale", "Ordered save choice changed")
+            for reply in pending.step_replies:
+                if reply.command.command_id == response.command_id:
+                    if reply.fingerprint != fingerprint:
+                        raise StateMachineError(
+                            "idempotency_conflict", "Reply key has different content"
+                        )
+                    return reply.receipt
+            if response.payload.pending_operation_id != (
+                pending.receipt.pending_choice.pending_operation_id
+            ):
+                raise StateMachineError("choice_stale", "Ordered save prompt changed")
+            if response.expected_world_version != pending.command.expected_world_version:
+                raise StateMachineError("version_conflict", "Ordered save reply version changed")
+        return self._respond_action_choice(pending, response, package, context, fingerprint)
 
     def _respond_action_choice(self, pending, response, package, context, fingerprint):
         """Resolve a fixed save and co-commit the action and its replies."""
