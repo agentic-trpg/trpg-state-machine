@@ -2075,7 +2075,8 @@ class CharacterFacts:
                         "invalid_mechanical_state", "Worn item requires exact direct ownership"
                     )
                 worn.append(binding["instance_id"])
-            data["worn_item_instance_ids"] = worn
+            if worn:
+                data["worn_item_instance_ids"] = worn
         data.update(
             hp_current=core["current_hp"],
             hp_max=core["max_hp"],
