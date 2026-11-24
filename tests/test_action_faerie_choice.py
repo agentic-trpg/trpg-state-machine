@@ -12,12 +12,16 @@ from trpg_state_machine.choice_models import ChoiceRespondOperationPayload
 from trpg_state_machine.errors import StateMachineError
 
 
-def bard_faerie_world(timed_spell_world, *, seed=1):
+def bard_faerie_world(timed_spell_world, *, seed=1, invalid_save_trait=False):
     """Build a Bard whose real environmental cast includes the current PC."""
 
     def configure(data):
         data["rule_bindings"].pop("combat_foundation")
         data["actors"][0]["initial_cell"] = "2,0"
+        if invalid_save_trait:
+            data["rule_bindings"]["noncombat_foundation"]["snapshot"]["character_states"][1][
+                "trait_mechanics"
+            ] = ["pack_tactics"]
 
     return timed_spell_world(
         database="action-faerie.sqlite",
@@ -171,3 +175,18 @@ def test_faerie_decline_rechecks_grant_and_releases_stale_candidate(timed_spell_
         assert not sm._has_pending_action_choice(sid)
         assert sm._session_runtime.receipt(sid, source.command_id) is None
         assert sm.submit_command(source, package, context=context).status == "committed"
+
+
+def test_faerie_inspired_cast_admission_rejects_without_prompt(timed_spell_world):
+    sm, sid, package, context = bard_faerie_world(
+        timed_spell_world, seed=2, invalid_save_trait=True
+    )
+    with sm:
+        actor = sm.read_session(sid, package, context=context).pc_actor_id
+        grant(sm, sid, actor)
+        source = cast(sm, sid, package, context)
+        before_rng = sm.read_rng_context(sid, package, context=context)
+        receipt = sm.submit_command(source, package, context=context)
+        assert receipt.status == "rejected", receipt
+        assert not sm._has_pending_action_choice(sid)
+        assert sm.read_rng_context(sid, package, context=context) == before_rng

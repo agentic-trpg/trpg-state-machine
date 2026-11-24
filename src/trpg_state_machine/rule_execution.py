@@ -970,24 +970,46 @@ class RuleExecution:
                             verify_bound_faerie_result,
                         )
 
-                        if _faerie_resume is not None:
-                            pending, reply, _ = _faerie_resume
-                            if request != pending.request:
-                                raise StateMachineError(
-                                    "choice_stale", "Faerie cast facts changed while waiting"
+                        try:
+                            if _faerie_resume is not None:
+                                pending, reply, _ = _faerie_resume
+                                if request != pending.request:
+                                    self.action_choices._discard_pending_action_choice(
+                                        command.session_id, expected=pending
+                                    )
+                                    raise StateMachineError(
+                                        "choice_stale", "Faerie cast facts changed while waiting"
+                                    )
+                                faerie_progress = evaluate_bound_faerie_step(
+                                    request,
+                                    prior_steps=pending.progress.steps,
+                                    choice=reply.payload.selected_option_id == "accept",
+                                    choice_die_sides=pending.grant.die_sides,
+                                    loader=self.rules.loader,
                                 )
-                            faerie_progress = evaluate_bound_faerie_step(
-                                request,
-                                prior_steps=pending.progress.steps,
-                                choice=reply.payload.selected_option_id == "accept",
-                                choice_die_sides=pending.grant.die_sides,
-                                loader=self.rules.loader,
-                            )
-                        else:
-                            faerie_progress = evaluate_bound_faerie_step(
-                                request, loader=self.rules.loader
-                            )
-                        if faerie_progress.pending_target_id is not None:
+                            else:
+                                faerie_progress = evaluate_bound_faerie_step(
+                                    request, loader=self.rules.loader
+                                )
+                        except ValueError as exc:
+                            if _faerie_resume is not None:
+                                self.action_choices._discard_pending_action_choice(
+                                    command.session_id, expected=_faerie_resume[0]
+                                )
+                                raise StateMachineError(
+                                    "choice_stale", "Faerie choice no longer evaluates"
+                                ) from exc
+                            ordinary = await self.rules._evaluate_dnd(copy.deepcopy(request))
+                            if ordinary.status not in ("rejected", "unsupported"):
+                                raise StateMachineError(
+                                    "unsupported_action_choice",
+                                    "Faerie action choice cannot be staged",
+                                ) from exc
+                            result = ordinary
+                        if (
+                            faerie_progress is not None
+                            and faerie_progress.pending_target_id is not None
+                        ):
                             if _faerie_resume is not None:
                                 raise StateMachineError(
                                     "unsupported_action_choice",
@@ -996,8 +1018,9 @@ class RuleExecution:
                             return self.action_choices._open_faerie_choice(
                                 command, fingerprint, request, faerie_progress, package, context
                             )
-                        result = faerie_progress.result
-                        if _faerie_resume is not None:
+                        if faerie_progress is not None:
+                            result = faerie_progress.result
+                        if _faerie_resume is not None and faerie_progress is not None:
                             verify_bound_faerie_result(
                                 result, request, faerie_progress.steps, loader=self.rules.loader
                             )
