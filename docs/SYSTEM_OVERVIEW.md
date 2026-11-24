@@ -12,6 +12,11 @@
 SQLite 持久化和受控 RAM 发布。外部适配层负责认证后提供 `TrustedContext`，
 不能从玩家或模型 JSON 直接接受该可信上下文；公开方法并非现成 HTTP 服务。
 
+`create_checkpoint` 对授权且已结算的单 Session 数据库制作一致 SQLite 备份；
+`load_checkpoint` 先按同一固定只读镜像核验身份、绑定和当前 Schema，再复制至新数据库，
+重建运行时并为后续新尝试建立新共享 RNG 流。原活跃库及旧回执保留。
+普通 `save_session`／`resume_session` 仍读取原持久状态并保留原 RNG。
+
 World、Character、Combat、Time、NPC 等组件已有实际实现；SessionMemory、
 实例字段、重量／机关／通路关联及相关消费者已有受限生产接线。
 角色资源池按拥有者／资源 ID 保存独立余额行，SessionMemory 沿原提交边界发布；

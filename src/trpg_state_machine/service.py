@@ -459,6 +459,33 @@ class StateMachine(
             )
             return snapshot
 
+    def create_checkpoint(
+        self,
+        session_id: str,
+        package: AdventurePackage,
+        destination: str | Path,
+        *,
+        context: TrustedContext,
+    ) -> SessionSnapshot:
+        """Back up one authorized, settled Session to a new SQLite checkpoint file."""
+        from .session_checkpoints import create_checkpoint
+
+        return create_checkpoint(self, session_id, package, destination, context=context)
+
+    def load_checkpoint(
+        self,
+        checkpoint: str | Path,
+        destination: str | Path,
+        session_id: str,
+        package: AdventurePackage,
+        *,
+        context: TrustedContext,
+    ) -> "StateMachine":
+        """Load a checkpoint into a fresh runtime with a new shared rules RNG stream."""
+        from .session_checkpoints import load_checkpoint
+
+        return load_checkpoint(self, checkpoint, destination, session_id, package, context=context)
+
     def resume_session(
         self, session_id: str, package: AdventurePackage, *, context: TrustedContext
     ) -> SessionSnapshot:
