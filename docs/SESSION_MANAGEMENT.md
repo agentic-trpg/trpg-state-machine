@@ -10,6 +10,7 @@
 | --- | --- | --- |
 | 预发布开发存档 | 当前 SQLite Schema 为 53。旧版已初始化开发库在可写打开前拒绝。 | [Store](../src/trpg_state_machine/storage.py)、[当前保存策略回归](../tests/test_pre_release_save_policy.py) |
 | 非战斗保存与重开 | `save_session` 校验并读取已提交存档；`resume_session` 在支持的边界恢复，遇已暂停的 Session 按持久事实对账。 | [公开入口](../src/trpg_state_machine/service.py)、[创建到重开回归](../tests/test_integration.py) |
+| 探索检查点与主动读档 | `create_checkpoint` 为可恢复的单 Session 制作一致 SQLite 检查点。等待动作内激励答复时不能建立新检查点。`load_checkpoint` 核验并加载到新数据库，为新尝试建立独立 RNG 流并丢弃当前未提交动作。 | [实际读档与骰点对照](../tests/test_session_checkpoints.py) |
 | 已提交但内存发布失败 | Store 以 `committed_publication_pending` 暂停该 Session 的当前态操作；受支持的恢复完成后同键重试返回原回执。 | [真实 RE 检定故障测试](../tests/test_session_memory_rng_failures.py)、[物品转移故障测试](../tests/test_session_memory_runtime.py) |
 | 活跃战斗跨进程 | 可按权限读取已持久化的审计事实及原回执；普通保存、恢复和新规则推进受 `combat_unrestorable` 限制。精确续玩属 Post-MVP。 | [独立进程回归](../tests/test_dnd_hardening.py)、[MC §8.2](https://github.com/agentic-trpg/agentic-trpg/blob/main/docs/MODULE_CONTRACTS.md#82-必须明确不支持的场景-open) |
 
