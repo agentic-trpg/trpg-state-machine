@@ -40,6 +40,7 @@ from dnd5e_engine.evaluation_contracts import (
     RuleError,
     RuleEvaluationRequest,
     RuleEvaluationResult,
+    SaveCoverObstacle,
     SaveGeometryFact,
     SavePayload,
     SpellWillingnessChoice,
@@ -84,6 +85,7 @@ from dnd5e_engine.evaluation_state import (
 from dnd5e_engine.events import ConditionApplied, ConditionRemoved, HealingApplied, IntentSubmitted
 from dnd5e_engine.movement import project_speeds, speed_for_mode
 from dnd5e_engine.rules.conditions import active_condition_names, exhaustion_level_of
+from dnd5e_engine.spatial import cover_ray_cells
 from dnd5e_engine.turn_rules import (
     next_turn_index,
     ordinary_action_payment,
@@ -2356,6 +2358,8 @@ class RulesAdapter:
         spell_end_applications=(),
         item_area_facts=None,
         independent_condition=None,
+        mechanism_save_source=None,
+        save_cover_opening=None,
     ):
         """Build a rules request with the Session binding and isolated fixed inputs.
 
@@ -2440,6 +2444,7 @@ class RulesAdapter:
             multi_spell_positions=multi_spell_positions,
             item_area_facts=item_area_facts,
             independent_condition=independent_condition,
+            mechanism_save_source=mechanism_save_source,
         )
         if type(command.payload) is SavePayload:
             try:
@@ -2450,34 +2455,57 @@ class RulesAdapter:
                 ) from exc
             if need is not None:
                 request = request.model_copy(
-                    update={"save_geometry": self._save_geometry(command, snapshot, need)}
+                    update={
+                        "save_geometry": self._save_geometry(
+                            command, snapshot, need, package, opening=save_cover_opening
+                        )
+                    }
                 )
         return request
 
-    def _save_geometry(self, command, snapshot, need):
-        """Fix the declared actor source and target cells from current World ownership."""
+    def _save_geometry(self, command, snapshot, need, package, *, opening=None):
+        """Fix the declared World endpoints and their relevant authored cover contributions."""
         from .grid import cell_in_bounds
 
-        if need.source_id == need.target_id:
-            raise StateMachineError("invalid_actor", "Cover requires a distinct source actor")
         sid, scene_id = command.session_id, snapshot.scene_state.scene_id
         topology = self.world.grid.reader.topology_for_grid(
             sid, scene_id, snapshot.scene_state.grid.model_dump(mode="json")
         )
-        positions = []
-        for actor_id in (need.source_id, need.target_id):
-            position = self.characters.position(sid, actor_id)
-            if position.scene_id != scene_id or not cell_in_bounds(topology, position.cell):
-                raise StateMachineError(
-                    "invalid_spatial_state", "Save source or target is outside the scene"
-                )
-            positions.append(position.cell)
+        if need.source_kind == "world_object":
+            source = self.facts.placement(sid, need.source_id)
+            source_scene, source_cell = source["scene_id"], source["cell"]
+        else:
+            if need.source_id == need.target_id:
+                raise StateMachineError("invalid_actor", "Cover requires a distinct source actor")
+            source = self.characters.position(sid, need.source_id)
+            source_scene, source_cell = source.scene_id, source.cell
+        target = self.characters.position(sid, need.target_id)
+        if (
+            source_scene != scene_id
+            or target.scene_id != scene_id
+            or not cell_in_bounds(topology, source_cell)
+            or not cell_in_bounds(topology, target.cell)
+        ):
+            raise StateMachineError(
+                "invalid_spatial_state", "Save source or target is outside the scene"
+            )
+        obstacles = ()
+        if need.object_cover:
+            ray = cover_ray_cells(source_cell, target.cell)
+            obstacles = self.world.objects.spatial.local_cover_contributions(
+                sid, scene_id, ray, package, exclude_object=need.source_id, opening=opening
+            )
         return SaveGeometryFact(
             source_id=need.source_id,
+            source_kind=need.source_kind,
             target_id=need.target_id,
             scene_id=scene_id,
-            source_cell=positions[0],
-            target_cell=positions[1],
+            source_cell=source_cell,
+            target_cell=target.cell,
+            object_cover=tuple(
+                SaveCoverObstacle(object_id=oid, cell=cell, degree=degree)
+                for oid, cell, degree in obstacles
+            ),
         )
 
     def query_availability(

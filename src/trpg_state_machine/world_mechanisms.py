@@ -266,16 +266,34 @@ class MechanismService:
         )
         return "activation." + hashlib.sha256(raw.encode()).hexdigest()
 
-    def _save_request(self, row, package, actor, gate, command_id, rng=None):
-        """Fix the actor's rule facts for a direct trigger save before any write."""
-        from dnd5e_engine.evaluation_contracts import SavePayload
+    def _save_request(self, row, package, actor, gate, command_id, oid, *, source_operation=None):
+        """Fix the admitted source and triggerer's facts without drawing or writing."""
+        from dnd5e_engine.evaluation_contracts import (
+            DirectMechanismEffect,
+            MechanismSaveSource,
+            RadialMechanismPulse,
+            SavePayload,
+        )
 
         from .commands import TypedCommand
 
         rules = self.h.objects.openable.rules
         rules._verify_dnd_binding(package, row)
         snapshot = rules._noncombat_snapshot(row, actor_ids=(actor,))
-        rng = rng or rules._rng_context(row)
+        rng = rules._rng_context(row)
+        opening = None
+        if type(source_operation) is SetObjectState:
+            opening = (source_operation.object_id, source_operation.state.value)
+        source = None
+        if gate.effect_reach is not None:
+            reach = gate.effect_reach
+            source = MechanismSaveSource(
+                object_id=oid,
+                source_ref=gate.source_ref,
+                effect_reach=DirectMechanismEffect(kind="direct")
+                if reach.kind == "direct"
+                else RadialMechanismPulse(kind=reach.kind, radius_ft=reach.radius_ft),
+            )
         return rules.request(
             TypedCommand(
                 row["session_id"],
@@ -290,6 +308,8 @@ class MechanismService:
                     advantage=(),
                     disadvantage=(),
                     is_magical=gate.is_magical,
+                    source_id=oid if source else None,
+                    requires_cover=source is not None,
                 ),
                 row["world_version"],
             ),
@@ -297,6 +317,8 @@ class MechanismService:
             snapshot,
             rng,
             row=row,
+            mechanism_save_source=source,
+            save_cover_opening=opening,
         )
 
     def prepare_direct_saves(self, row, actor, operation, package, command_id):
@@ -344,7 +366,13 @@ class MechanismService:
                 raise
             gates.append((oid, trigger.operation_id, gate))
         return tuple(
-            (oid, operation_id, self._save_request(row, package, actor, gate, command_id))
+            (
+                oid,
+                operation_id,
+                self._save_request(
+                    row, package, actor, gate, command_id, oid, source_operation=operation
+                ),
+            )
             for oid, operation_id, gate in gates
         )
 
@@ -429,7 +457,7 @@ class MechanismService:
             (
                 oid,
                 operation_id,
-                self._save_request(row, package, motion.actor_id, gate, command.command_id),
+                self._save_request(row, package, motion.actor_id, gate, command.command_id, oid),
             )
             for oid, operation_id, gate in self._step_save_gates(row, package, motion)
         )
@@ -440,6 +468,7 @@ class MechanismService:
         """Evaluate ordered direct-action saves until a possible player choice."""
         from dnd5e_engine.evaluation import evaluate_bound_save
         from dnd5e_engine.evaluation_rng import RNGContext
+        from dnd5e_engine.events import SaveRolled
 
         from .rules_adapter import validate_dnd_result
 
@@ -474,7 +503,7 @@ class MechanismService:
             if (
                 stop_on_failure
                 and result.status == "accepted"
-                and event is not None
+                and isinstance(event, SaveRolled)
                 and event.succeeded is False
                 and event.roll_detail is not None
                 and event.roll_detail.status == "rolled"
@@ -534,7 +563,7 @@ class MechanismService:
                 raise StateMachineError("version_conflict", "Regional save source was not fixed")
             raise StateMachineError("unsupported_mechanism_save", "Save was not prepared")
         request, result, spend_grant = item
-        current = self._save_request(row, package, actor, gate, command_id)
+        current = self._save_request(row, package, actor, gate, command_id, oid)
         if not is_step:
             current = self._save_recheck_projection(current)
             expected = self._save_recheck_projection(request)
@@ -634,27 +663,33 @@ class MechanismService:
                 source_actor_id=actor,
             )
         ]
-        save_succeeded = None
+        apply_actions = True
         if operation.save_gate is not None:
+            from dnd5e_engine.events import SaveRolled
+
             save_event = self._resolve_save_gate(
                 row, package, actor, operation.save_gate, command_id, oid, operation_id
             )
-            save_succeeded = save_event.succeeded
-            # Only the failed branch executes these actions. A successful save
-            # must not be rejected by an unavailable failure-only target.
-            if not save_succeeded:
+            rolled = isinstance(save_event, SaveRolled)
+            apply_actions = rolled and not save_event.succeeded
+            if apply_actions:
                 self.preflight(sid, operation.actions, package)
             events.append(
                 h._capture_event(
                     sid,
                     package,
-                    "rules.save_rolled",
+                    "rules.save_rolled" if rolled else "mechanism.effect_not_applicable",
                     {
                         "scene_id": location["scene_id"],
                         "actor_id": actor,
                         "source_ref": operation.save_gate.source_ref,
                         "mechanism_object_id": oid,
                         "activation_id": activation,
+                        **(
+                            {"source_kind": "world_object"}
+                            if operation.save_gate.effect_reach is not None
+                            else {}
+                        ),
                         "engine_event": save_event.model_dump(mode="json"),
                     },
                     phase="world.after_mechanism_save",
@@ -662,7 +697,7 @@ class MechanismService:
                 )
             )
         for index, action in enumerate(operation.actions):
-            if save_succeeded is True:
+            if not apply_actions:
                 break
             origin = _WorldEffectOrigin(
                 _WorldEffectKind.MECHANISM, oid, activation, activation + "." + str(index)

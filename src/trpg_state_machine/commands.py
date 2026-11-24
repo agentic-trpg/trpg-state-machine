@@ -638,7 +638,13 @@ class CommandRuntime:
                 )
                 request, _, _ = pending.prepared[pending.waiting_key]
                 current = self._objects.mechanisms._save_request(
-                    row, package, response.actor_id, gate, pending.command.command_id
+                    row,
+                    package,
+                    response.actor_id,
+                    gate,
+                    pending.command.command_id,
+                    oid,
+                    source_operation=pending.command.payload,
                 )
                 if current != request:
                     self._discard_pending_action_choice(response.session_id, expected=pending)
@@ -1147,6 +1153,16 @@ class CommandRuntime:
                             )
                             if field in engine
                         },
+                        **(
+                            {
+                                field: event.payload[field]
+                                for field in ("mechanism_object_id", "source_kind", "source_ref")
+                            }
+                            if event.event_type == "rules.save_rolled"
+                            and event.payload.get("source_kind") == "world_object"
+                            and {"mechanism_object_id", "source_ref"} <= event.payload.keys()
+                            else {}
+                        ),
                         "roll_detail": engine.get("roll_detail"),
                     }
                 )

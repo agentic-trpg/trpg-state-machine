@@ -4,7 +4,9 @@ import re
 from dataclasses import dataclass
 from typing import Literal, get_args
 
+from dnd5e_engine.evaluation_contracts import MechanismEffectReach
 from dnd5e_engine.rules.skills import Skill
+from pydantic import TypeAdapter, ValidationError
 
 from .errors import StateMachineError
 from .mechanism_effects import RuleEffectAction, RuleEffectDefinition
@@ -20,6 +22,14 @@ class MechanismAction:
 
 
 @dataclass(frozen=True, slots=True)
+class MechanismSaveReach:
+    """Persist the validated Package effect clause with this mechanism instance."""
+
+    kind: Literal["direct", "radial_pulse"]
+    radius_ft: int | None = None
+
+
+@dataclass(frozen=True, slots=True)
 class MechanismSaveGate:
     """Bind an authored saving throw to an operation's failure-only world actions."""
 
@@ -27,6 +37,7 @@ class MechanismSaveGate:
     ability: Literal["str", "dex", "con", "int", "wis", "cha"]
     dc: int
     is_magical: bool
+    effect_reach: MechanismSaveReach | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -142,8 +153,6 @@ def parse_mechanism(config, objects, scenes, *, enabled):
     )
     if c["schema_version"] not in ("mechanism/2", "mechanism/3", "mechanism/4"):
         _fail("unsupported_mechanism", p, "Unknown mechanism definition version")
-    from pydantic import TypeAdapter, ValidationError
-
     from .package import canonical_json
 
     effects = []
@@ -192,7 +201,8 @@ def parse_mechanism(config, objects, scenes, *, enabled):
             _fail("schema_error", p, "Invalid operation identity or noop policy")
         gate = op.get("save_gate")
         if gate is not None:
-            fields = _mapping(gate, "source_ref ability dc is_magical", p)
+            normalized = {"effect_reach": None, **gate} if isinstance(gate, dict) else gate
+            fields = _mapping(normalized, "source_ref ability dc is_magical effect_reach", p)
             if (
                 type(fields["source_ref"]) is not str
                 or not re.fullmatch(r"mechanism\.[a-zA-Z0-9_.-]{1,120}", fields["source_ref"])
@@ -203,6 +213,16 @@ def parse_mechanism(config, objects, scenes, *, enabled):
                 or not op["consume_on_noop"]
             ):
                 _fail("unsupported_mechanism", p, "Invalid authored save gate")
+            if fields["effect_reach"] is not None:
+                if fields["ability"] != "dex":
+                    _fail("unsupported_mechanism", p, "Directional cover requires a Dexterity gate")
+                try:
+                    reach = TypeAdapter(MechanismEffectReach).validate_python(
+                        fields["effect_reach"]
+                    )
+                except ValidationError:
+                    _fail("unsupported_mechanism", p, "Unsupported mechanism effect reach")
+                fields = {**fields, "effect_reach": MechanismSaveReach(**reach.model_dump())}
             gate = MechanismSaveGate(**fields)
         actions = []
         for value in _list(op["actions"], p, nonempty=True):

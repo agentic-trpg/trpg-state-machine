@@ -311,25 +311,14 @@ class WorldMagic:
 
     def _total_cover_cells(self, sid, scene_id, package, corridor):
         """Project only the affected object footprints and local shared-door thresholds."""
-        passages = passage_index(self.h.store, sid)
-        door_cells = {}
-        for cell in corridor:
-            for door in passages.doors_by_threshold.get((scene_id, cell), ()):
-                door_cells.setdefault(door, set()).add(cell)
-        _, occupants = self.h.grid.reader.region_occupants(sid, scene_id, corridor)
-        objects = {oid for oid, _, _ in occupants if oid not in passages.by_door}
         spatial = self.h.objects.spatial
-        total = set()
-        for oid in sorted(objects | door_cells.keys()):
-            cover = spatial.project(sid, oid, package).cover_cells
-            if oid in door_cells:
-                if any(degree == "total" for _, degree in cover):
-                    total.update(door_cells[oid])
-            else:
-                total.update(
-                    cell for cell, degree in cover if degree == "total" and cell in corridor
-                )
-        return total
+        return {
+            cell
+            for _, cell, degree in spatial.local_cover_contributions(
+                sid, scene_id, corridor, package
+            )
+            if degree == "total"
+        }
 
     @staticmethod
     def _ending_facts(record, *, current_cell=None):

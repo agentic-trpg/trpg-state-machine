@@ -12,6 +12,7 @@ from typing import TYPE_CHECKING
 from dnd5e_engine.spatial import canonical_cell_id
 
 from .errors import StateMachineError
+from .instance_data import passage_index
 from .object_protection import (
     ORIENTATIONS,
     PRECIPITATION_KINDS,
@@ -384,6 +385,34 @@ class ObjectSpatialService:
             cells if props.vision_occlusion else (),
             tuple((cell, props.cover) for cell in cells) if props.cover != "none" else (),
         )
+
+    @scoped_read
+    def local_cover_contributions(
+        self, sid, scene_id, cells, package, *, exclude_object=None, opening=None
+    ):
+        """Read selected ray cover, optionally at an admitted pending object's open state."""
+        selected = frozenset(cells)
+        if not selected:
+            return ()
+        index = passage_index(self.h.store, sid)
+        doors = {}
+        for cell in selected:
+            for oid in index.doors_by_threshold.get((scene_id, cell), ()):
+                doors.setdefault(oid, []).append(cell)
+        _, occupants = self.h.grid.reader.region_occupants(sid, scene_id, selected)
+        objects = {oid for oid, _, _ in occupants if oid not in index.by_door}
+        contributions = []
+        for oid in sorted((objects | doors.keys()) - {exclude_object}):
+            candidate = (
+                replace(self.state(sid, oid, package), open_state=opening[1])
+                if opening is not None and oid == opening[0]
+                else None
+            )
+            cover = self.project(sid, oid, package, candidate=candidate).cover_cells
+            if oid in doors and cover:
+                cover = tuple((cell, cover[0][1]) for cell in doors[oid])
+            contributions.extend((oid, cell, degree) for cell, degree in cover if cell in selected)
+        return tuple(sorted(contributions))
 
     @scoped_read
     def target_cells(self, sid, scene_id, oid, package):
