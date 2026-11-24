@@ -8,7 +8,6 @@ from dataclasses import dataclass
 
 from dnd5e_engine.evaluation_contracts import RuleEvaluationRequest, RuleEvaluationResult
 from dnd5e_engine.evaluation_rng import RNGContext, RNGTransition
-from dnd5e_engine.evaluation_saves import resolve_bardic_save_choice
 from dnd5e_engine.evaluation_spell_saves import SpellSaveProgress
 from dnd5e_engine.events import SaveRolled
 
@@ -60,6 +59,8 @@ def resolve_action_save_choice(
     use: bool,
 ) -> tuple[RuleEvaluationRequest, RuleEvaluationResult, BardicInspirationGrant | None]:
     """Continue the fixed failed roll and combine both RNG transitions for adoption."""
+    from dnd5e_engine.evaluation_saves import resolve_bardic_save_choice
+
     transition = result.rng_transition
     original = result.proposed_events[0] if result.proposed_events else None
     if transition is None or not isinstance(original, SaveRolled):
