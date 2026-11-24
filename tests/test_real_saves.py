@@ -233,3 +233,92 @@ def test_save_actor_reads_stay_fixed_as_remote_state_grows(tmp_path, package_dat
             assert receipt.status == "committed", receipt
             counts.append((work["sql_selects"], work["sql_rows"]))
     assert counts[0] == counts[1]
+
+
+@pytest.mark.parametrize(("source_cell", "cover_bonus"), [("0,1", 2), ("2,0", 0)])
+def test_directional_save_cover_public_replay_and_locality(
+    tmp_path, package_data, context, source_cell, cover_bonus
+):
+    """Only a named current source supplies cover; remote actors do not enter the read."""
+    gm = replace(context, can_adjudicate_checks=True)
+    counts = []
+    for size in (0, 25):
+        loader = modern_loader()
+        data = modern_data(package_data, loader, spatial=True)
+        data["rule_bindings"].pop("combat_foundation")
+        data["pc_templates"][0]["initial_cell"] = "2,1"
+        data["actors"][0]["initial_cell"] = source_cell
+        for scene in data["scenes"]:
+            if scene["scene_id"] == "scene.platform":
+                scene["grid"]["cover_cells"] = {"1,1": "half"}
+        data["rule_bindings"]["noncombat_foundation"]["snapshot"]["scene_state"]["grid"][
+            "cover_cells"
+        ] = {"1,1": "half"}
+        package = _validate(data)
+        db = tmp_path / f"cover-{size}.db"
+        sm = StateMachine(db, dnd_loader=loader)
+        sid = create(sm, package, context)
+        with sm:
+            _grow_remote(sm, sid, size)
+            covered = save_command(
+                sm,
+                sid,
+                package,
+                gm,
+                command_id="covered",
+                source_id="npc.caretaker",
+                requires_cover=True,
+            )
+            with measure(sm) as (work, _):
+                receipt = sm.submit_command(covered, package, context=gm)
+            assert receipt.status == "committed"
+            counts.append((work["sql_selects"], work["sql_rows"]))
+            roll = sm.get_command_rolls(sid, "covered", package, context=gm)["rolls"][0]
+            cover_modifiers = [
+                m for m in roll["roll_detail"]["modifiers"] if m["source"] == "cover"
+            ]
+            assert cover_modifiers == (
+                [{"kind": "fixed", "source": "cover", "value": cover_bonus}] if cover_bonus else []
+            )
+            assert sm.submit_command(covered, package, context=gm) == receipt
+            plain = save_command(sm, sid, package, gm, command_id="plain")
+            assert sm.submit_command(plain, package, context=gm).status == "committed"
+            plain_roll = sm.get_command_rolls(sid, "plain", package, context=gm)["rolls"][0]
+            assert not any(m["source"] == "cover" for m in plain_roll["roll_detail"]["modifiers"])
+            absent = save_command(
+                sm,
+                sid,
+                package,
+                gm,
+                command_id="absent",
+                source_id="npc.attendant",
+                requires_cover=True,
+            )
+            before = sm.read_rng_context(sid, package, context=gm)
+            with pytest.raises(StateMachineError) as denied:
+                sm.submit_command(absent, package, context=gm)
+            assert denied.value.code == "invalid_spatial_state"
+            assert sm.read_rng_context(sid, package, context=gm) == before
+            if size == 0:
+                rollback = save_command(
+                    sm,
+                    sid,
+                    package,
+                    gm,
+                    command_id="cover.rollback",
+                    source_id="npc.caretaker",
+                    requires_cover=True,
+                )
+                sm._conn.execute(
+                    "CREATE TEMP TRIGGER fail_cover_receipt BEFORE INSERT ON command_receipts "
+                    "BEGIN SELECT RAISE(ABORT, 'injected'); END"
+                )
+                with pytest.raises(StateMachineError) as fault:
+                    sm.submit_command(rollback, package, context=gm)
+                assert fault.value.code == "storage_error"
+                assert sm.read_rng_context(sid, package, context=gm) == before
+                sm._conn.execute("DROP TRIGGER fail_cover_receipt")
+                assert sm.submit_command(rollback, package, context=gm).status == "committed"
+        with StateMachine(db, dnd_loader=loader) as reopened:
+            assert reopened.submit_command(covered, package, context=gm) == receipt
+    assert counts[0] == counts[1]

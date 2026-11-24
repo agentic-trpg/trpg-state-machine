@@ -38,6 +38,7 @@ from dnd5e_engine.evaluation_contracts import (
     RuleError,
     RuleEvaluationRequest,
     RuleEvaluationResult,
+    SaveGeometryFact,
     SavePayload,
     SpellWillingnessChoice,
 )
@@ -56,6 +57,7 @@ from dnd5e_engine.evaluation_ruleset import (
     get_default_ruleset,
     verify_ruleset,
 )
+from dnd5e_engine.evaluation_saves import save_geometry_need
 from dnd5e_engine.evaluation_shield import plain_shield, shield_support_failure
 from dnd5e_engine.evaluation_speed_effects import (
     has_speed_effects,
@@ -2394,7 +2396,7 @@ class RulesAdapter:
             if snapshot.snapshot_schema_version == "engine-snapshot/18"
             else "engine-evaluation/24"
         )
-        return RuleEvaluationRequest(
+        request = RuleEvaluationRequest(
             schema_version=SPELL_TERMINATION_SCHEMA_VERSION
             if spell_end_applications
             else cast_version,
@@ -2415,6 +2417,44 @@ class RulesAdapter:
             multi_spell_positions=multi_spell_positions,
             item_area_facts=item_area_facts,
             independent_condition=independent_condition,
+        )
+        if type(command.payload) is SavePayload:
+            try:
+                need = save_geometry_need(request, self.loader)
+            except RulesetBindingError as exc:
+                raise StateMachineError(
+                    "ruleset_binding_mismatch", "Evaluator data/configuration differ"
+                ) from exc
+            if need is not None:
+                request = request.model_copy(
+                    update={"save_geometry": self._save_geometry(command, snapshot, need)}
+                )
+        return request
+
+    def _save_geometry(self, command, snapshot, need):
+        """Fix the declared actor source and target cells from current World ownership."""
+        from .grid import cell_in_bounds
+
+        if need.source_id == need.target_id:
+            raise StateMachineError("invalid_actor", "Cover requires a distinct source actor")
+        sid, scene_id = command.session_id, snapshot.scene_state.scene_id
+        topology = self.world.grid.reader.topology_for_grid(
+            sid, scene_id, snapshot.scene_state.grid.model_dump(mode="json")
+        )
+        positions = []
+        for actor_id in (need.source_id, need.target_id):
+            position = self.characters.position(sid, actor_id)
+            if position.scene_id != scene_id or not cell_in_bounds(topology, position.cell):
+                raise StateMachineError(
+                    "invalid_spatial_state", "Save source or target is outside the scene"
+                )
+            positions.append(position.cell)
+        return SaveGeometryFact(
+            source_id=need.source_id,
+            target_id=need.target_id,
+            scene_id=scene_id,
+            source_cell=positions[0],
+            target_cell=positions[1],
         )
 
     def query_availability(
