@@ -12,6 +12,7 @@ from spatial_support import command, create
 from test_long_rest import rest_data
 
 from trpg_state_machine import (
+    DropItem,
     EquipWearable,
     ShortRest,
     StateMachine,
@@ -148,6 +149,13 @@ def test_cloak_requires_both_wear_and_attunement(tmp_path, context):
         assert sm.submit_command(off, package, context=host).status == "committed"
         assert sm.read_character_ac(sid, actor, package, context=host).effective == base_ac
         assert not _cloak_save_modifier(sm, sid, package, host, "save-off")
+        scene, cell = sm._world_facts.carrier_position(sid, actor)
+        blocked_drop = _json(
+            command(sm, sid, package, host, DropItem(CLOAK, scene, cell), "bonded-drop")
+        )
+        refused_drop = sm.submit_command(blocked_drop, package, context=host)
+        assert refused_drop.status == "rejected"
+        assert refused_drop.error_code == "unsupported_item_binding"
         on = _json(command(sm, sid, package, host, EquipWearable(CLOAK), "on"))
         assert sm.submit_command(on, package, context=host).status == "committed"
         assert _cloak_save_modifier(sm, sid, package, host, "save-on")
@@ -158,6 +166,10 @@ def test_cloak_requires_both_wear_and_attunement(tmp_path, context):
         assert sm.read_time_sync(sid, package, context=host).committed_tick == started_at + 7200
         assert sm.read_character_ac(sid, actor, package, context=host).effective == base_ac
         assert not _cloak_save_modifier(sm, sid, package, host, "save-released")
+        unwear = _json(command(sm, sid, package, host, UnequipWearable(CLOAK), "released-off"))
+        assert sm.submit_command(unwear, package, context=host).status == "committed"
+        drop = _json(command(sm, sid, package, host, DropItem(CLOAK, scene, cell), "free-drop"))
+        assert sm.submit_command(drop, package, context=host).status == "committed"
     with StateMachine(tmp_path / "cloak.sqlite", dnd_loader=loader) as reopened:
         assert reopened.submit_command(rest, package, context=host).status == "committed"
         assert reopened.submit_command(release, package, context=host).status == "committed"

@@ -4,6 +4,8 @@ from collections.abc import Mapping
 from dataclasses import asdict
 from types import MappingProxyType
 
+from dnd5e_engine.evaluation_wearables import reviewed_protective_cloak
+
 from .errors import StateMachineError
 from .runtime_instances import instance_read
 from .world_commands import PutItem, TakeItem
@@ -379,6 +381,13 @@ class ContainerService:
                 continue
             slug = self.facts.require_item_unit(obj)["item_slug"]
             asset = h.loader.get_item(slug)
+            # RUO-66-F2: ending a distant attunement needs a timed distance
+            # lifecycle; until that exists, this exact bonded cloak stays held.
+            if drop and obj["item_attuned_actor_id"] == actor and reviewed_protective_cloak(asset):
+                raise StateMachineError(
+                    "unsupported_item_binding",
+                    "RUO-66-F2: bonded cloak distance lifecycle is unsupported",
+                )
             if (
                 asset
                 and (asset.requires_attunement or asset.passive_effects)
