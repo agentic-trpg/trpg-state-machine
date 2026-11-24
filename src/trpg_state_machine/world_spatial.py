@@ -387,10 +387,8 @@ class ObjectSpatialService:
         )
 
     @scoped_read
-    def local_cover_contributions(
-        self, sid, scene_id, cells, package, *, exclude_object=None, opening=None
-    ):
-        """Read selected ray cover, optionally at an admitted pending object's open state."""
+    def local_cover_contributions(self, sid, scene_id, cells, package, *, exclude_object=None):
+        """Read selected ray cover from the current isolated candidate facts."""
         selected = frozenset(cells)
         if not selected:
             return ()
@@ -403,12 +401,7 @@ class ObjectSpatialService:
         objects = {oid for oid, _, _ in occupants if oid not in index.by_door}
         contributions = []
         for oid in sorted((objects | doors.keys()) - {exclude_object}):
-            candidate = (
-                replace(self.state(sid, oid, package), open_state=opening[1])
-                if opening is not None and oid == opening[0]
-                else None
-            )
-            cover = self.project(sid, oid, package, candidate=candidate).cover_cells
+            cover = self.project(sid, oid, package).cover_cells
             if oid in doors and cover:
                 cover = tuple((cell, cover[0][1]) for cell in doors[oid])
             contributions.extend((oid, cell, degree) for cell, degree in cover if cell in selected)

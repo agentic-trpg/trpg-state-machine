@@ -494,16 +494,20 @@ class StateMachine(
 
     def _register_pending_action_choice(self, pending, package, context, rng, *, previous=None):
         """Publish one provisional action under the shared file gate after fresh admission."""
-        from ._operations import StepActor
+        from ._operations import SetObjectState, StepActor
         from .action_pending import (
             PendingActionChoice,
-            PendingPickSaveChoice,
             PendingSpellSaveChoice,
         )
+        from .world_commands import SetLightEnabled
 
         command = pending.command
         sid = command.session_id
-        if isinstance(pending, PendingActionChoice) and type(command.payload) is StepActor:
+        if isinstance(pending, PendingActionChoice) and type(command.payload) in (
+            StepActor,
+            SetLightEnabled,
+            SetObjectState,
+        ):
             with self._store._coordinator.lock:
                 if previous is None:
                     existing = self._pending_action_choices.get(sid)
@@ -529,7 +533,7 @@ class StateMachine(
                     or candidate.grant != pending.grant
                 ):
                     raise StateMachineError(
-                        "version_conflict", "Regional save changed before choice"
+                        "version_conflict", "Ordered save changed before choice"
                     )
                 return self._publish_pending_action_choice(pending, previous=previous)
         with self._store._coordinator.lock, self._transaction():
@@ -542,16 +546,7 @@ class StateMachine(
             if self._rules._rng_context(row) != rng:
                 raise StateMachineError("version_conflict", "Action RNG changed before choice")
             if isinstance(pending, PendingActionChoice):
-                # The original check's RNG fences pick registration. Replay its
-                # ordered consequences to match the gate at reply adoption.
-                if not isinstance(pending, PendingPickSaveChoice):
-                    requests = self._objects.mechanisms.prepare_direct_saves(
-                        row, command.actor_id, command.payload, package, command.command_id
-                    )
-                    if requests != pending.requests:
-                        raise StateMachineError(
-                            "version_conflict", "Action source changed before choice"
-                        )
+                # Pick registration still fences the original check's RNG.
                 tick = self._world_facts.time_state(sid)[1]
                 grant = self._world.characters.effects.held_bardic_inspiration(
                     sid, command.actor_id, tick

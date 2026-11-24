@@ -27,8 +27,8 @@ class PackageEffects:
     def _expand_events(self, row, package, events, command_id):
         """Expand bounded candidate consequences with stable source event identities.
 
-        A direct step's regional activation drains its synchronous consequences
-        before World admits the next candidate for the same motion.
+        An admitted direct action's activation drains synchronous consequences
+        before World admits the next candidate for the same source event.
         """
         self.store.require_write()
         by_trigger, _ = self.capture.event_index(package)
@@ -39,7 +39,7 @@ class PackageEffects:
         settled = set()
 
         def settle_region(activation_events):
-            """Drain one regional activation and its emitted consequences."""
+            """Drain one ordered activation and its emitted consequences."""
             index = len(queue)
             queue.extend(activation_events)
             while index < len(queue):

@@ -26,7 +26,7 @@ class _StepSaveCandidate(Exception):
 
     def __init__(self, key, request, grant):
         """Carry one fixed gate input and its current Inspiration grant."""
-        super().__init__("Regional save prepared")
+        super().__init__("Ordered save prepared")
         self.key = key
         self.request = request
         self.grant = grant
@@ -293,7 +293,7 @@ class MechanismService:
         )
         return "activation." + hashlib.sha256(raw.encode()).hexdigest()
 
-    def _save_request(self, row, package, actor, gate, command_id, oid, *, source_operation=None):
+    def _save_request(self, row, package, actor, gate, command_id, oid):
         """Fix the admitted source and triggerer's facts without drawing or writing."""
         from dnd5e_engine.evaluation_contracts import (
             DirectMechanismEffect,
@@ -308,9 +308,6 @@ class MechanismService:
         rules._verify_dnd_binding(package, row)
         snapshot = rules._noncombat_snapshot(row, actor_ids=(actor,))
         rng = rules._rng_context(row)
-        opening = None
-        if type(source_operation) is SetObjectState:
-            opening = (source_operation.object_id, source_operation.state.value)
         source = None
         if gate.effect_reach is not None:
             reach = gate.effect_reach
@@ -345,62 +342,6 @@ class MechanismService:
             rng,
             row=row,
             mechanism_save_source=source,
-            save_cover_opening=opening,
-        )
-
-    def prepare_direct_saves(self, row, actor, operation, package, command_id):
-        """Select direct object gates in a read scope; evaluate after it closes.
-
-        The caller must hold a read transaction while invoking this method. It
-        returns requests only, so rule evaluation never holds a database lock.
-        Requests use trigger order; evaluation advances a detached RNG between them.
-        """
-        if type(operation) not in (SetLightEnabled, SetObjectState):
-            return ()
-        sid = row["session_id"]
-        if type(operation) is SetLightEnabled:
-            self.h.objects.lights.validate(row, actor, operation, package)
-            light = self.h.facts.light_state(sid, operation.object_id)
-            if light is None or light["enabled"] == operation.enabled:
-                return ()
-            event_kind, value = "object.light_changed", operation.enabled
-        else:
-            self.h.objects.openable.validate_open(row, actor, operation, package)
-            obj = self.h.facts.object(sid, operation.object_id)
-            if obj["state"] == operation.state.value:
-                return ()
-            event_kind, value = "object.state_changed", operation.state.value
-        gates = []
-        for oid, _, trigger in self._scene_index(sid, operation.scene_id).get(
-            (event_kind, operation.scene_id, operation.object_id), ()
-        ):
-            if trigger.value is not None and trigger.value != value:
-                continue
-            config = self.config(sid, oid)
-            gate = config.operation(trigger.operation_id).save_gate
-            if gate is None:
-                continue
-            try:
-                self._eligible(sid, oid, config, actor, package)
-            except StateMachineError as exc:
-                if exc.code in (
-                    "mechanism_frequency_limited",
-                    "mechanism_unprepared",
-                    "mechanism_broken",
-                    "container_inaccessible",
-                ):
-                    continue
-                raise
-            gates.append((oid, trigger.operation_id, gate))
-        return tuple(
-            (
-                oid,
-                operation_id,
-                self._save_request(
-                    row, package, actor, gate, command_id, oid, source_operation=operation
-                ),
-            )
-            for oid, operation_id, gate in gates
         )
 
     def _eligible_automatic(self, sid, scene, oid, config, actor, package):
@@ -443,6 +384,40 @@ class MechanismService:
             command.actor_id, step.scene_id, step.expected_cell, step.scene_id, step.to_cell
         )
         return actual if actual == expected else None
+
+    @staticmethod
+    def _direct_object_source(row, command, event, command_id):
+        """Identify the exact admitted PC object event, excluding derived cascades."""
+        if (
+            command is None
+            or command.session_id != row["session_id"]
+            or command.command_id != command_id
+            or command.actor_id != row["pc_actor_id"]
+            or event is None
+        ):
+            return False
+        operation = command.payload
+        if type(operation) is SetLightEnabled:
+            return (
+                event.event_type == "object.light_changed"
+                and event.mechanical_phase == "world.after_light_update"
+                and not event.payload.get("execution")
+                and event.payload.get("actor_id") == command.actor_id
+                and event.payload.get("object_id") == operation.object_id
+                and event.payload.get("scene_id") == operation.scene_id
+                and event.payload.get("enabled") == operation.enabled
+            )
+        if type(operation) is SetObjectState:
+            return (
+                event.event_type == "object.state_changed"
+                and event.mechanical_phase == "world.after_object_update"
+                and event.payload.get("execution")
+                == {"kind": "actor", "actor_id": command.actor_id}
+                and event.payload.get("object_id") == operation.object_id
+                and event.payload.get("scene_id") == operation.scene_id
+                and event.payload.get("state") == operation.state.value
+            )
+        return False
 
     @staticmethod
     def _failed_pick_source(row, command, event, command_id):
@@ -516,56 +491,20 @@ class MechanismService:
                 return prepared, (oid, operation_id), next_rng
         return prepared, None, next_rng
 
-    @staticmethod
-    def _save_recheck_projection(request):
-        """Keep all stock identities but ignore unrelated access changes after a switch.
-
-        The bound standalone save reads accessibility for exact held, worn and
-        equipped entries. Opening a container may alter accessibility of other
-        entries without changing the save. Reviewed class profiles inspect the
-        complete owned stock, so their inventory remains exact. All item rows,
-        non-inventory facts and RNG remain in the comparison.
-        """
-        snapshot = request.state_snapshot
-        equipped_ids = set()
-        for actor in snapshot.character_states:
-            if actor.classes or actor.class_slug or actor.granted_features:
-                return request
-            equipped_ids.update(
-                identity
-                for identity in (
-                    actor.held_weapon_instance_id,
-                    actor.worn_armor_instance_id,
-                    actor.equipped_shield_instance_id,
-                    actor.offhand_item_instance_id,
-                    *getattr(actor, "worn_item_instance_ids", ()),
-                )
-                if identity is not None
-            )
-        inventory = snapshot.inventory_state.model_copy(
-            update={
-                "entries": tuple(
-                    entry
-                    if entry.instance_id in equipped_ids
-                    else entry.model_copy(update={"accessible": True})
-                    for entry in snapshot.inventory_state.entries
-                )
-            }
-        )
-        return request.model_copy(
-            update={"state_snapshot": snapshot.model_copy(update={"inventory_state": inventory})}
-        )
-
     def _resolve_save_gate(self, row, package, actor, gate, command_id, oid, operation_id):
         """Fix a staged gate's actual input, or adopt a save against revalidated facts."""
         prepared = self._prepared_saves.get()
         command = self._source_command.get()
         is_step = command is not None and type(command.payload) is StepActor
+        is_direct = command is not None and type(command.payload) in (
+            SetLightEnabled,
+            SetObjectState,
+        )
         is_pick = command is not None and type(command.payload) is PickLock
-        staged = is_step or is_pick
+        staged = is_step or is_direct or is_pick
         key = (oid, operation_id)
-        if is_step and prepared and key != next(iter(prepared)):
-            raise StateMachineError("version_conflict", "Regional save order changed")
+        if (is_step or is_direct) and prepared and key != next(iter(prepared)):
+            raise StateMachineError("version_conflict", "Ordered save source changed")
         if prepared is None:
             item = None
         elif staged:
@@ -581,18 +520,13 @@ class MechanismService:
             sid = row["session_id"]
             tick = self.h.facts.time_state(sid)[1]
             grant = self.h.characters.effects.held_bardic_inspiration(sid, actor, tick)
-            if is_step:
+            if is_step or is_direct:
                 raise _StepSaveCandidate(key, current, grant)
             raise _PickFailureSaveCandidate(
                 (*key, current), grant, selected_pc=actor == row["pc_actor_id"]
             )
         request, result, spend_grant = item
-        if not staged:
-            current = self._save_recheck_projection(current)
-            expected = self._save_recheck_projection(request)
-        else:
-            expected = request
-        if current != expected:
+        if current != request:
             raise StateMachineError("version_conflict", "Mechanism save facts changed")
         if result.status != "accepted":
             raise StateMachineError(
@@ -631,22 +565,10 @@ class MechanismService:
             raise StateMachineError("invalid_execution_origin", "Admitted source command required")
         c = self.config(row["session_id"], oid)
         operation = c.operation(operation_id)
-        light_source = (
-            source_event is not None
-            and source_event.event_type == "object.light_changed"
-            and source_event.mechanical_phase == "world.after_light_update"
-            and not source_event.payload.get("execution")
-            and source_event.payload.get("actor_id") == actor
-        )
-        state_source = (
-            source_event is not None
-            and source_event.event_type == "object.state_changed"
-            and source_event.mechanical_phase == "world.after_object_update"
-            and source_event.payload.get("execution") == {"kind": "actor", "actor_id": actor}
-        )
         command = self._source_command.get()
         region_source = self._direct_step_motion(row, command, source_event, command_id)
-        pc_source = actor == row["pc_actor_id"] and (light_source or state_source or region_source)
+        direct_source = self._direct_object_source(row, command, source_event, command_id)
+        pc_source = actor == row["pc_actor_id"] and (direct_source or region_source)
         pick_source = (
             command is not None
             and actor == command.actor_id
@@ -1046,8 +968,8 @@ class MechanismService:
         reuse and activation deduplication have separate scopes. Preserve command and
         source-event identities when activating, and return ordered consequences for
         the caller's bounded event expansion within its shared transaction.
-        For an admitted PC step, World settles each regional activation before
-        checking eligibility and rules facts for the next indexed mechanism.
+        For an admitted PC step or exact direct object action, World settles
+        each activation before checking the next indexed mechanism.
         """
         sid, payload, kind = row["session_id"], event.payload, event.event_type
         if kind not in {
@@ -1168,6 +1090,8 @@ class MechanismService:
             target = payload.get("object_id", payload.get("instance_id"))
             candidates = index.get((kind, scene, target), ())
             target_kind = "object_operation"
+            if self._direct_object_source(row, self._source_command.get(), event, command_id):
+                ordered_region = settle_region
         events, fired = derived, set()
         for oid, _, trigger in candidates:
             if oid in fired:

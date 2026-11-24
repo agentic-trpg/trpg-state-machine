@@ -10,7 +10,6 @@ from dnd5e_engine.evaluation_effects import effect_state
 from dnd5e_engine.evaluation_ruleset import get_default_ruleset, ruleset_binding
 from dnd5e_srd_data import MemoryAssetLoader
 from lock_support import CRED, DOOR, A, lock_loader
-from test_equipment_save_modifier import STAFF, _save, _world
 from test_mechanism_effects import effect, rule_action, state_rows
 from test_mechanism_service import extended_data, method, trigger
 from test_world_containers import BOX, container_data
@@ -19,7 +18,6 @@ from world_support import command, create, setup
 
 from trpg_state_machine import (
     ActivateMechanism,
-    EquipWeapon,
     ObjectState,
     PickupItem,
     PutItem,
@@ -115,6 +113,122 @@ def state_gated_data(*, dc):
         )
     ]
     return data
+
+
+@pytest.mark.parametrize("source_kind", ["light", "state"])
+@pytest.mark.parametrize("first_option", ["accept", "decline"])
+def test_direct_two_gates_use_each_prior_candidate(
+    tmp_path, context, monkeypatch, source_kind, first_option
+):
+    """A later direct gate reads the actual earlier activation and grant disposition."""
+    from dnd5e_engine import evaluation
+
+    data = gated_data(dc=100) if source_kind == "light" else state_gated_data(dc=100)
+    obj = deepcopy(data["scenes"][0]["objects"][-1])
+    definition = deepcopy(data["world_objects"][-1])
+    obj["object_id"] = "object.ward_two"
+    definition.update(object_id="object.ward_two", definition_ref="definition.ward_two")
+    data["scenes"][0]["objects"].append(obj)
+    data["world_objects"].append(definition)
+    base = lock_loader()
+    loader = MemoryAssetLoader(
+        items=[base.get_item(slug) for slug in base.list_slugs("items")],
+        monsters=[base.get_monster(slug) for slug in base.list_slugs("monsters")],
+        features=[get_default_ruleset().get_feature("bardic-inspiration")],
+    )
+    data["manifest"]["ruleset_binding"] = ruleset_binding(loader).model_dump(mode="json")
+    package = _validate(data)
+    db = tmp_path / "world.db"
+    sm = StateMachine(db, dnd_loader=loader)
+    sid = create(sm, package, context)
+    operation = (
+        SetLightEnabled(A, CRED, "0,0", True)
+        if source_kind == "light"
+        else SetObjectState(A, DOOR, ObjectState.OPEN)
+    )
+    calls = []
+    second_facts = []
+    original = evaluation.evaluate_bound_action_save
+    ordinary = evaluation.evaluate_bound_save
+    build_request = sm._objects.mechanisms._save_request
+
+    def observe_candidate(row, package, actor, gate, command_id, oid, **kwargs):
+        if oid == "object.ward_two":
+            second_facts.append(
+                sm._world_facts.object(sid, DOOR)["state"]
+                if source_kind == "light"
+                else sm._world_facts.light_state(sid, CRED)["enabled"]
+            )
+        return build_request(row, package, actor, gate, command_id, oid, **kwargs)
+
+    def capture(request, *, loader):
+        calls.append(request)
+        return original(request, loader=loader)
+
+    def capture_ordinary(request, *, loader):
+        calls.append(request)
+        return ordinary(request, loader=loader)
+
+    monkeypatch.setattr(evaluation, "evaluate_bound_action_save", capture)
+    monkeypatch.setattr(evaluation, "evaluate_bound_save", capture_ordinary)
+    monkeypatch.setattr(sm._objects.mechanisms, "_save_request", observe_candidate)
+    with sm:
+        cmd = command(sm, sid, package, context, operation, "double-direct")
+        grant_bardic(sm, sid, cmd.actor_id)
+        first = sm.submit_command(cmd, package, context=context)
+        assert first.status == "pending_choice"
+        assert len(calls) == 1
+        answer_a = TypedCommand(
+            sid,
+            "answer-a",
+            cmd.actor_id,
+            "choice.respond",
+            ChoiceRespondOperationPayload(first.pending_choice.pending_operation_id, first_option),
+            first.world_version,
+        )
+        next_receipt = sm.submit_command(answer_a, package, context=context)
+        assert len(calls) == 2
+        assert second_facts and all(
+            value == ("open" if source_kind == "light" else True) for value in second_facts
+        )
+        assert calls[1].rng_context.version == calls[0].rng_context.version + 1
+        if first_option == "accept":
+            assert next_receipt.status == "committed", next_receipt
+            assert calls[1].state_snapshot.effect_states == ()
+        else:
+            assert next_receipt.status == "pending_choice", next_receipt
+            active = sm.get_command_receipt(sid, cmd.command_id, package, context=context)
+            assert active.pending_choice != first.pending_choice
+            assert sm.submit_command(answer_a, package, context=context) == next_receipt
+            stale = TypedCommand(
+                sid,
+                "stale-a",
+                cmd.actor_id,
+                "choice.respond",
+                ChoiceRespondOperationPayload(first.pending_choice.pending_operation_id, "accept"),
+                active.world_version,
+            )
+            with pytest.raises(StateMachineError) as denied:
+                sm.submit_command(stale, package, context=context)
+            assert denied.value.code == "choice_stale"
+            answer_b = TypedCommand(
+                sid,
+                "answer-b",
+                cmd.actor_id,
+                "choice.respond",
+                ChoiceRespondOperationPayload(active.pending_choice.pending_operation_id, "accept"),
+                active.world_version,
+            )
+            assert sm.submit_command(answer_b, package, context=context).status == "committed"
+        assert (
+            len(sm.get_command_rolls(sid, cmd.command_id, package, context=context)["rolls"]) == 2
+        )
+        committed = sm.get_command_receipt(sid, cmd.command_id, package, context=context)
+        assert committed.status == "committed"
+        assert sm.submit_command(cmd, package, context=context) == committed
+    with StateMachine(db, dnd_loader=loader) as reopened:
+        assert reopened.submit_command(cmd, package, context=context) == committed
+        assert reopened.submit_command(answer_a, package, context=context).status == "committed"
 
 
 @pytest.mark.parametrize("dc,failed", [(100, True), (0, False)])
@@ -255,64 +369,48 @@ def test_opening_carried_box_rechecks_only_save_relevant_inventory(tmp_path, con
         assert sm.submit_command(cmd, package, context=context) == receipt
 
 
-def test_save_recheck_keeps_held_item_entry_dependency(tmp_path, context):
-    """The exact equipped item remains in the save's staged dependency comparison."""
-    sm, sid, package, _ = _world(tmp_path, context)
+def test_staged_direct_save_rechecks_inventory_entry(tmp_path, context, monkeypatch):
+    """A candidate save cannot adopt an inventory fact changed after its fixed input."""
+    sm, sid, package, _ = setup(tmp_path, context, gated_data(dc=100))
     with sm:
-        equip = command(sm, sid, package, context, EquipWeapon(STAFF), "equip")
-        assert sm.submit_command(equip, package, context=context).status == "committed"
-        actor_id = sm.read_session(sid, package, context=context).pc_actor_id
-        save = _save(sm, sid, package, context, "save")
-        with sm._transaction():
-            row = sm._session(sid, package, context)
-            request = sm._rules.request(
-                save,
-                package,
-                sm._rules._noncombat_snapshot(row, actor_ids=(actor_id,)),
-                sm._rules._rng_context(row),
-                row=row,
-            )
-        snapshot = request.state_snapshot
-        assert any(entry.instance_id == STAFF for entry in snapshot.inventory_state.entries)
-        changed_entries = tuple(
-            entry.model_copy(update={"accessible": False}) if entry.instance_id == STAFF else entry
-            for entry in snapshot.inventory_state.entries
-        )
-        changed_snapshot = snapshot.model_copy(
-            update={
-                "inventory_state": snapshot.inventory_state.model_copy(
-                    update={"entries": changed_entries}
+        pickup = command(sm, sid, package, context, PickupItem(CRED, A, "1,0"), "carry")
+        assert sm.submit_command(pickup, package, context=context).status == "committed"
+        before = state_rows(sm)
+        original = sm._objects.mechanisms._save_request
+        calls = 0
+
+        def altered(row, package, actor, gate, command_id, oid):
+            nonlocal calls
+            request = original(row, package, actor, gate, command_id, oid)
+            calls += 1
+            if calls == 2:
+                snapshot = request.state_snapshot
+                entries = tuple(
+                    entry.model_copy(update={"accessible": False})
+                    if entry.instance_id == CRED
+                    else entry
+                    for entry in snapshot.inventory_state.entries
                 )
-            }
-        )
-        changed = request.model_copy(update={"state_snapshot": changed_snapshot})
-        project = sm._world.objects.mechanisms._save_recheck_projection
-        assert project(changed) != project(request)
-        other = next(
-            entry for entry in snapshot.inventory_state.entries if entry.instance_id != STAFF
-        )
-        for field, value, expected_equal in (
-            ("accessible", not other.accessible, True),
-            ("quantity", other.quantity + 1, False),
-        ):
-            entries = tuple(
-                entry.model_copy(update={field: value})
-                if entry.instance_id == other.instance_id
-                else entry
-                for entry in snapshot.inventory_state.entries
-            )
-            modified = request.model_copy(
-                update={
-                    "state_snapshot": snapshot.model_copy(
-                        update={
-                            "inventory_state": snapshot.inventory_state.model_copy(
-                                update={"entries": entries}
-                            )
-                        }
-                    )
-                }
-            )
-            assert (project(modified) == project(request)) is expected_equal
+                assert entries != snapshot.inventory_state.entries
+                request = request.model_copy(
+                    update={
+                        "state_snapshot": snapshot.model_copy(
+                            update={
+                                "inventory_state": snapshot.inventory_state.model_copy(
+                                    update={"entries": entries}
+                                )
+                            }
+                        )
+                    }
+                )
+            return request
+
+        monkeypatch.setattr(sm._objects.mechanisms, "_save_request", altered)
+        cmd = command(sm, sid, package, context, SetLightEnabled(A, CRED, "0,0", True), "held")
+        receipt = sm.submit_command(cmd, package, context=context)
+        assert calls == 2
+        assert receipt.status == "conflict" and receipt.error_code == "version_conflict"
+        assert state_rows(sm) == before
 
 
 def test_v4_preserves_ungated_effect_definition_and_rejects_gated_effect():

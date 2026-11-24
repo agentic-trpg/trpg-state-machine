@@ -2359,7 +2359,6 @@ class RulesAdapter:
         item_area_facts=None,
         independent_condition=None,
         mechanism_save_source=None,
-        save_cover_opening=None,
     ):
         """Build a rules request with the Session binding and isolated fixed inputs.
 
@@ -2455,11 +2454,7 @@ class RulesAdapter:
                 ) from exc
             if need is not None:
                 request = request.model_copy(
-                    update={
-                        "save_geometry": self._save_geometry(
-                            command, snapshot, need, package, opening=save_cover_opening
-                        )
-                    }
+                    update={"save_geometry": self._save_geometry(command, snapshot, need, package)}
                 )
             elif command.payload.source_kind == "world_object":
                 self._save_source_object(command.session_id, command.payload.source_id)
@@ -2476,7 +2471,7 @@ class RulesAdapter:
             raise StateMachineError("invalid_target", "Save requires an existing World source")
         return source
 
-    def _save_geometry(self, command, snapshot, need, package, *, opening=None):
+    def _save_geometry(self, command, snapshot, need, package):
         """Fix the declared World endpoints and their relevant authored cover contributions."""
         from .grid import cell_in_bounds
 
@@ -2513,7 +2508,6 @@ class RulesAdapter:
                 ray,
                 package,
                 exclude_object=need.source_id if need.source_kind == "world_object" else None,
-                opening=opening,
             )
         return SaveGeometryFact(
             source_id=need.source_id,

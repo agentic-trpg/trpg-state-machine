@@ -544,7 +544,7 @@ class CommandRuntime:
         return self._session_runtime._command_replay(command, fingerprint)
 
     def _prepare_step_candidate(self, command, package, context, fingerprint, saves, previous):
-        """Replay the admitted prefix and roll back at the next actual gate."""
+        """Replay a direct action's admitted prefix, then discard its candidate."""
         from .world_mechanisms import _StepSaveCandidate
 
         try:
@@ -596,7 +596,7 @@ class CommandRuntime:
                     replies = previous.step_replies
                     identity = (command.command_id, command.expected_world_version, key)
                     prompt_id = (
-                        "regional-save:" + hashlib.sha256(repr(identity).encode()).hexdigest()
+                        "ordered-save:" + hashlib.sha256(repr(identity).encode()).hexdigest()
                     )
                 choice = PendingChoice(
                     prompt_id,
@@ -641,7 +641,7 @@ class CommandRuntime:
                 )
 
     def _respond_step_action_choice(self, response, package, context, fingerprint):
-        """Serialize replies and replay provisional replies by their own command key."""
+        """Serialize ordered-action replies and replay each provisional reply key."""
         from .action_pending import PendingActionChoice
 
         sid = response.session_id
@@ -657,10 +657,11 @@ class CommandRuntime:
                         self._discard_pending_action_choice(sid, expected=pending)
                     return replay
                 if not isinstance(pending, PendingActionChoice) or (
-                    type(pending.command.payload) is not StepActor
+                    type(pending.command.payload)
+                    not in (StepActor, SetLightEnabled, SetObjectState)
                     or pending.command.actor_id != response.actor_id
                 ):
-                    raise StateMachineError("choice_stale", "Regional save choice changed")
+                    raise StateMachineError("choice_stale", "Ordered save choice changed")
                 for reply in pending.step_replies:
                     if reply.command.command_id == response.command_id:
                         if reply.fingerprint != fingerprint:
@@ -671,20 +672,18 @@ class CommandRuntime:
                 if response.payload.pending_operation_id != (
                     pending.receipt.pending_choice.pending_operation_id
                 ):
-                    raise StateMachineError("choice_stale", "Regional save prompt changed")
+                    raise StateMachineError("choice_stale", "Ordered save prompt changed")
                 if response.expected_world_version != pending.command.expected_world_version:
                     raise StateMachineError(
-                        "version_conflict", "Regional save reply version changed"
+                        "version_conflict", "Ordered save reply version changed"
                     )
             return self._respond_action_choice(pending, response, package, context, fingerprint)
 
     def _respond_action_choice(self, pending, response, package, context, fingerprint):
         """Resolve a fixed save and co-commit the action and its replies."""
-        from dnd5e_engine.evaluation_rng import RNGContext
-
         from .action_pending import resolve_action_save_choice
 
-        is_step = type(pending.command.payload) is StepActor
+        ordered = type(pending.command.payload) in (StepActor, SetLightEnabled, SetObjectState)
         with self._transaction():
             row = self._session(response.session_id, package, context)
             self._authorize_command(row, response.actor_id, response.payload, context)
@@ -697,7 +696,7 @@ class CommandRuntime:
             if self._session_runtime.version_conflict(row, response):
                 self._discard_pending_action_choice(response.session_id, expected=pending)
                 raise StateMachineError("version_conflict", "Choice reply version changed")
-            if not is_step:
+            if not ordered:
                 tick = self._world_facts.time_state(response.session_id)[1]
                 if tick >= pending.grant.expires_tick:
                     self._discard_pending_action_choice(response.session_id, expected=pending)
@@ -722,13 +721,12 @@ class CommandRuntime:
                     gate,
                     pending.command.command_id,
                     oid,
-                    source_operation=pending.command.payload,
                 )
                 if current != request:
                     self._discard_pending_action_choice(response.session_id, expected=pending)
                     raise StateMachineError("choice_stale", "Action save facts changed")
         prepared = dict(pending.prepared)
-        if is_step:
+        if ordered:
             request, _, _ = prepared.pop(pending.waiting_key)
             candidate = self._prepare_step_candidate(
                 pending.command, package, context, pending.fingerprint, prepared, pending
@@ -747,27 +745,10 @@ class CommandRuntime:
         )
         prepared[pending.waiting_key] = resolved
         resume = (pending, response, fingerprint, prepared)
-        if is_step:
+        if ordered:
             return self._run_step_saves(
                 pending.command, package, context, pending.fingerprint, prepared, resume=resume
             )
-        remaining = [item for item in pending.requests if (item[0], item[1]) not in prepared]
-        if remaining:
-            original = result.rng_transition
-            continued = resolved[1].rng_transition
-            next_rng = RNGContext(
-                stream_id=request.rng_context.stream_id,
-                version=(
-                    request.rng_context.version
-                    + int(original.state_changed)
-                    + int(continued.next_state != original.next_state)
-                ),
-                state=continued.next_state,
-            )
-            rest, _, _ = self._objects.mechanisms.evaluate_direct_saves(
-                remaining, first_rng=next_rng, action_choice=True
-            )
-            prepared.update(rest)
         return self.submit_command(
             pending.command,
             package,
@@ -809,7 +790,11 @@ class CommandRuntime:
                             return replay
                     return pending.receipt
                 if type(command.payload) is ChoiceRespondOperationPayload:
-                    if type(pending.command.payload) is StepActor:
+                    if type(pending.command.payload) in (
+                        StepActor,
+                        SetLightEnabled,
+                        SetObjectState,
+                    ):
                         return self._respond_step_action_choice(
                             command, package, context, fingerprint
                         )
@@ -880,56 +865,8 @@ class CommandRuntime:
         )
         prepared = None
         mechanism_saves = _action_resume[3] if _action_resume is not None else {}
-        requests = ()
-        grant = None
-        if type(command.payload) is StepActor:
+        if type(command.payload) in (StepActor, SetLightEnabled, SetObjectState):
             return self._run_step_saves(command, package, context, fingerprint, {})
-        if _action_resume is None and type(command.payload) in (SetLightEnabled, SetObjectState):
-            with self._transaction():
-                row = self._session(command.session_id, package, context)
-                self._authorize_command(row, command.actor_id, command.payload, context)
-                if not self._command_replay(
-                    command, fingerprint
-                ) and not self._session_runtime.version_conflict(row, command):
-                    try:
-                        requests = self._objects.mechanisms.prepare_direct_saves(
-                            row, command.actor_id, command.payload, package, command.command_id
-                        )
-                        tick = self._world_facts.time_state(command.session_id)[1]
-                        grant = self._world.characters.effects.held_bardic_inspiration(
-                            command.session_id, command.actor_id, tick
-                        )
-                    except StateMachineError:
-                        requests = ()  # The ordinary write path records the rejection.
-        if requests:
-            mechanism_saves, waiting, _ = self._objects.mechanisms.evaluate_direct_saves(
-                requests, stop_on_failure=grant is not None, action_choice=grant is not None
-            )
-            if waiting is not None:
-                from .action_pending import PendingActionChoice
-
-                choice = PendingChoice(
-                    command.command_id,
-                    command.actor_id,
-                    "rules.bardic_inspiration",
-                    ("accept", "decline"),
-                    grant.expires_tick,
-                )
-                receipt = CommandReceipt(
-                    command.session_id,
-                    command.command_id,
-                    command.actor_id,
-                    "pending_choice",
-                    command.expected_world_version,
-                    (),
-                    pending_choice=choice,
-                )
-                candidate = PendingActionChoice(
-                    command, fingerprint, requests, mechanism_saves, waiting, grant, receipt
-                )
-                return self._register_pending_action_choice(
-                    candidate, package, context, requests[0][2].rng_context
-                )
         if type(command.payload) is InitializeCombat:
             with self._transaction():
                 row = self._session(command.session_id, package, context)
@@ -960,9 +897,9 @@ class CommandRuntime:
         _step_probe=False,
         _choice_owner=None,
     ):
-        """Apply one candidate or roll back at regional save discovery.
+        """Apply one candidate or roll back at ordered save discovery.
 
-        A probe can never commit or record a receipt. Fixed regional results are
+        A probe can never commit or record a receipt. Fixed gate results are
         matched, then adopted in order before the next gate yields its input.
         """
         with self._transaction(write=True):
@@ -1030,7 +967,8 @@ class CommandRuntime:
                     ):
                         step_saves = (
                             dict(mechanism_saves)
-                            if type(command.payload) is StepActor and mechanism_saves is not None
+                            if type(command.payload) in (StepActor, SetLightEnabled, SetObjectState)
+                            and mechanism_saves is not None
                             else None
                         )
                         token = self._objects.mechanisms._prepared_saves.set(
@@ -1041,7 +979,7 @@ class CommandRuntime:
                             events = self._expand_events(row, package, events, command.command_id)
                             if step_saves:
                                 raise StateMachineError(
-                                    "version_conflict", "Prepared regional save source changed"
+                                    "version_conflict", "Prepared ordered save source changed"
                                 )
                         finally:
                             self._objects.mechanisms._source_command.reset(source_token)
@@ -1121,7 +1059,10 @@ class CommandRuntime:
             pending = self._pending_action_choices.get(session_id)
             if pending is not None:
                 receipt = pending.receipt if pending.command.command_id == command_id else None
-                if type(pending.command.payload) is StepActor and receipt is None:
+                if (
+                    type(pending.command.payload) in (StepActor, SetLightEnabled, SetObjectState)
+                    and receipt is None
+                ):
                     receipt = next(
                         (
                             reply.receipt
