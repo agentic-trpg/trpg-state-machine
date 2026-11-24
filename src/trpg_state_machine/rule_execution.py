@@ -1101,7 +1101,7 @@ class RuleExecution:
             if self.action_choices is not None:
                 self.action_choices._guard_pending_action_owner(
                     command.session_id,
-                    resume_id=command.command_id if _faerie_resume is not None else None,
+                    expected=_faerie_resume[0] if _faerie_resume is not None else None,
                 )
             if shield_prompt is not None:
                 replay, pending, error = self.shield_windows.check(

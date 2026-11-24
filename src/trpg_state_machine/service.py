@@ -459,16 +459,13 @@ class StateMachine(
             if owners.get(session_id) is self:
                 del owners[session_id]
 
-    def _guard_pending_action_owner(self, session_id: str, *, resume_id=None) -> None:
-        """Block a competing writer while this process holds a live action."""
+    def _guard_pending_action_owner(self, session_id: str, *, expected=None) -> None:
+        """Block competing writes and require the exact live candidate on reply."""
         owner = self._store._coordinator.pending_action_owners.get(session_id)
-        if resume_id is not None and owner is not self:
-            raise StateMachineError("choice_stale", "Live action owner changed")
-        if owner is not None and (
-            owner is not self
-            or resume_id is None
-            or self._pending_action_choices[session_id].command.command_id != resume_id
-        ):
+        if expected is not None:
+            if owner is not self or self._pending_action_choices.get(session_id) is not expected:
+                raise StateMachineError("choice_stale", "Live action candidate changed")
+        elif owner is not None:
             raise StateMachineError("action_choice_pending", "Resolve the current action")
 
     def _current_faerie_grant(self, pending) -> bool:

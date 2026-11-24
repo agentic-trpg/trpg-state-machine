@@ -3,7 +3,7 @@
 import json
 import re
 from copy import deepcopy
-from dataclasses import asdict, dataclass, replace
+from dataclasses import asdict, dataclass
 
 from dnd5e_engine.evaluation_bardic_grant import ExplorationFeaturePayload
 from dnd5e_engine.evaluation_contracts import (
@@ -613,12 +613,11 @@ class CommandRuntime:
                 remaining, first_rng=next_rng, action_choice=True
             )
             prepared.update(rest)
-        resumed = replace(pending, prepared=prepared)
         return self.submit_command(
-            resumed.command,
+            pending.command,
             package,
             context=context,
-            _action_resume=(resumed, response, fingerprint),
+            _action_resume=(pending, response, fingerprint, prepared),
         )
 
     def submit_command(
@@ -720,7 +719,7 @@ class CommandRuntime:
             command, package, context, fingerprint
         )
         prepared = None
-        mechanism_saves = _action_resume[0].prepared if _action_resume is not None else {}
+        mechanism_saves = _action_resume[3] if _action_resume is not None else {}
         requests = ()
         grant = None
         if _action_resume is None and type(command.payload) in (SetLightEnabled, SetObjectState):
@@ -785,23 +784,25 @@ class CommandRuntime:
             replay = self._command_replay(command, fingerprint)
             if replay is not None:
                 if _action_resume is not None:
-                    _, response, response_fingerprint = _action_resume
+                    _, response, response_fingerprint, _ = _action_resume
                     answer_replay = self._command_replay(response, response_fingerprint)
                     if answer_replay is None:
                         raise StateMachineError(
                             "choice_closed", "Original action already completed"
                         )
-                    self._discard_pending_action_choice(command.session_id)
+                    self._discard_pending_action_choice(
+                        command.session_id, expected=_action_resume[0]
+                    )
                     return answer_replay
                 return replay
             self._guard_pending_action_owner(
                 command.session_id,
-                resume_id=command.command_id if _action_resume is not None else None,
+                expected=_action_resume[0] if _action_resume is not None else None,
             )
             version = row["world_version"]
             error = None
             status = "committed"
-            if _action_resume is None and self._session_runtime.version_conflict(row, command):
+            if self._session_runtime.version_conflict(row, command):
                 status, error = "conflict", "version_conflict"
             else:
                 self._conn.execute("SAVEPOINT command_effects")
@@ -885,7 +886,7 @@ class CommandRuntime:
                 command, context, fingerprint, row, status, version, error
             )
             if _action_resume is not None:
-                _, response, response_fingerprint = _action_resume
+                _, response, response_fingerprint, _ = _action_resume
                 self._authorize_command(row, response.actor_id, response.payload, context)
                 response_receipt = self._session_runtime.finish(
                     response,
@@ -898,7 +899,7 @@ class CommandRuntime:
                 )
         self._session_runtime.refresh_time_drivers()
         if _action_resume is not None:
-            self._discard_pending_action_choice(command.session_id)
+            self._discard_pending_action_choice(command.session_id, expected=_action_resume[0])
             return response_receipt
         return receipt
 

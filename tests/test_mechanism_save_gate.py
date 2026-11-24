@@ -678,3 +678,49 @@ def test_stale_decline_releases_mechanism_action(tmp_path, context):
         assert error.value.code == "choice_stale"
         assert not sm._has_pending_action_choice(sid)
         assert sm.get_command_receipt(sid, source.command_id, package, context=context) is None
+
+
+def test_reply_to_discarded_candidate_cannot_commit_same_key_replacement(
+    tmp_path, context, monkeypatch
+):
+    """A late answer must match the exact provisional attempt before any write."""
+    from dnd5e_engine import evaluation_saves
+
+    sm, sid, package, _ = setup_bardic_mechanism(tmp_path, context)
+    with sm:
+        actor = sm.read_session(sid, package, context=context).pc_actor_id
+        grant_bardic(sm, sid, actor)
+        source = command(sm, sid, package, context, SetLightEnabled(A, CRED, "0,0", True), "ward")
+        before = state_rows(sm)
+        prompt = sm.submit_command(source, package, context=context)
+        assert prompt.status == "pending_choice"
+        answer = TypedCommand(
+            sid,
+            "reply-old-attempt",
+            actor,
+            "choice.respond",
+            ChoiceRespondOperationPayload(source.command_id, "accept"),
+            prompt.world_version,
+        )
+        resolve = evaluation_saves.resolve_bardic_save_choice
+
+        def replace_attempt(*args, **kwargs):
+            sm.unload_session(sid, package, context=context)
+            replacement = sm.submit_command(source, package, context=context)
+            assert replacement.status == "pending_choice"
+            return resolve(*args, **kwargs)
+
+        with monkeypatch.context() as test_patch:
+            test_patch.setattr(evaluation_saves, "resolve_bardic_save_choice", replace_attempt)
+            with pytest.raises(StateMachineError) as error:
+                sm.submit_command(answer, package, context=context)
+        assert error.value.code == "choice_stale"
+        assert state_rows(sm) == before
+        assert sm.get_command_receipt(sid, source.command_id, package, context=context) == prompt
+        assert (
+            sm.submit_command(
+                replace(answer, command_id="reply-current-attempt"), package, context=context
+            ).status
+            == "committed"
+        )
+        assert not sm._has_pending_action_choice(sid)
