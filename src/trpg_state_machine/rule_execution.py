@@ -32,7 +32,7 @@ from dnd5e_engine.evaluation_contracts import (
     RestPayload,
     SavePayload,
 )
-from dnd5e_engine.evaluation_delta import ConditionsUpdate, TurnUpdate
+from dnd5e_engine.evaluation_delta import ConditionsUpdate, TurnUpdate, WorldRestEffectEnd
 from dnd5e_engine.evaluation_environmental_contracts import (
     EnvironmentalCreatureTarget,
     EnvironmentalMagicEffectTarget,
@@ -99,6 +99,8 @@ from .rest_activity import (
     advance_rest,
     prepare_attunement,
     prepare_rest,
+    prepare_rest_time_expiries,
+    rest_snapshot_after_time,
 )
 from .rule_sight import read_creature_sight
 from .rules_adapter import UnsupportedEffectConsequence, validate_dnd_result
@@ -1139,6 +1141,7 @@ class RuleExecution:
                             kind="rules.rest",
                             target_id=command.actor_id,
                             rest_type="long" if long_rest else "short",
+                            completed_at_tick=rest_plan[1] if long_rest else None,
                             hit_dice=()
                             if long_rest
                             else tuple(
@@ -1869,6 +1872,7 @@ class RuleExecution:
                     )
                     time_events = []
                     if rest:
+                        expiries = prepare_rest_time_expiries(self.world, request, rest_plan)
                         time_events = advance_rest(
                             row, package, command.command_id, self.runtime.time, rest_plan
                         )
@@ -1879,7 +1883,8 @@ class RuleExecution:
                             or self.world.facts.time_state(sid)[1] != target
                             or self.world.facts.carrier_position(sid, command.actor_id) != place
                             or self.activities.active(sid, command.actor_id) is not None
-                            or build_snapshot(row) != snapshot
+                            or build_snapshot(row)
+                            != rest_snapshot_after_time(snapshot, expiries, time_events)
                             or self.rules._rng_context(row) != rng
                         ):
                             raise StateMachineError(
@@ -2196,6 +2201,25 @@ class RuleExecution:
                         for event in result.proposed_events
                         if not isinstance(event, ObjectIdentified)
                     ]
+                    if long_rest:
+                        events[0:0] = [
+                            self.capture._capture_event(
+                                command.session_id,
+                                package,
+                                "effect.expired",
+                                {
+                                    "identity": (effect.target_id, effect.id, effect.origin),
+                                    "actor_id": effect.target_id,
+                                    "scene_id": rest_plan[2][0],
+                                    "boundary_tick": operation.completed_at_tick,
+                                    "reason": "long_rest",
+                                },
+                                phase="effects.after_rest_expiry",
+                            )
+                            for operation in operations
+                            if type(operation) is WorldRestEffectEnd
+                            for effect in operation.expected
+                        ]
                     events.extend(effects_events)
                     if withdrew:
                         if withdrawal_turn is not None and (

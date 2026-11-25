@@ -2,7 +2,9 @@
 
 from dataclasses import dataclass
 
-from dnd5e_engine.evaluation_delta import HPDelta, ResourceUpdate
+from dnd5e_engine.evaluation_aid import reviewed_hp_bonus
+from dnd5e_engine.evaluation_delta import HPDelta, ResourceUpdate, WorldRestEffectEnd
+from dnd5e_engine.evaluation_rest import rest_inert_elapsed_effects
 from dnd5e_engine.evaluation_wearables import (
     attune_cloak_reason,
     attunement_needs,
@@ -121,6 +123,44 @@ def advance_rest(row, package, command_id, clock, plan):
     return events
 
 
+def prepare_rest_time_expiries(world, request, plan):
+    """Fix absolute deadlines for the evaluator's rest-neutral elapsed effects."""
+    start, target, _ = plan
+    expiries = {}
+    for effect in rest_inert_elapsed_effects(request, world.loader):
+        identity = (effect.target_id, effect.id, effect.origin)
+        application = world.characters.effects.spell_application(request.session_id, identity)
+        if application is None or application.effect != effect or application.expires_tick is None:
+            raise StateMachineError("rest_interrupted", "Elapsed spell application changed")
+        if start <= application.expires_tick <= target:
+            expiries[identity] = application.expires_tick
+    return expiries
+
+
+def rest_snapshot_after_time(snapshot, expiries, events):
+    """Project only expected owner-clock removals before rechecking the fixed rest."""
+    if not expiries:
+        return snapshot
+    settled = {
+        tuple(event.payload["identity"]): event.payload["boundary_tick"]
+        for event in events
+        if event.event_type == "effect.expired"
+        and event.mechanical_phase == "effects.after_expiry"
+        and tuple(event.payload["identity"]) in expiries
+    }
+    if settled != expiries:
+        raise StateMachineError("rest_interrupted", "An expected elapsed spell did not settle")
+    return snapshot.model_copy(
+        update={
+            "effect_states": tuple(
+                effect
+                for effect in snapshot.effect_states
+                if (effect.target_id, effect.id, effect.origin) not in expiries
+            )
+        }
+    )
+
+
 def prepare_attunement(row, actor_id, operation, world, snapshot):
     """Fix the exact item contact, existing bonds and actor facts for one short rest."""
     iid = (
@@ -171,7 +211,7 @@ def rest_changes(request, result):
 
     The pinned evaluator owns healing, recovery and randomness. Compare the
     proposed operations with owned fixed inputs, declared dice and typed evidence
-    before staging any time, resource, HP or RNG changes.
+    before staging any time, resource, HP, effect or RNG changes.
     """
     snapshot = request.state_snapshot
     actor_id = request.actor_id
@@ -186,8 +226,44 @@ def rest_changes(request, result):
     pools = {p.pool_id: p for p in snapshot.resource_state.pools if p.owner_id == actor_id}
     increases = {"hit_dice": {}, "spell_slot": {}, "pact_slot": {}, "feature_uses": {}}
     spent = {}
+    completions = [op for op in result.state_delta.operations if type(op) is WorldRestEffectEnd]
+    expected_endings = (
+        tuple(
+            effect
+            for effect in snapshot.effect_states
+            if effect.target_id == actor_id and effect.duration.until_long_rest
+        )
+        if not short
+        else ()
+    )
+    if len(completions) != bool(expected_endings):
+        raise StateMachineError("invalid_rule_result", "Rest expiry differs from owned effects")
+    ending = completions[0] if completions else None
+    hp_pair = ending.hp if ending is not None else None
+    if ending is not None and (
+        ending.expected != expected_endings
+        or ending.completed_at_tick != request.payload.completed_at_tick
+        or (hp_pair is not None)
+        != any(reviewed_hp_bonus(effect) is not None for effect in expected_endings)
+        or (
+            hp_pair is not None
+            and (
+                hp_pair.expected_current != actor.hp_current
+                or hp_pair.expected_maximum != actor.hp_max
+                or hp_pair.current != hp_pair.maximum
+                or hp_pair.maximum > actor.hp_max
+                or hp_pair.zero_consequence != "none"
+            )
+        )
+    ):
+        raise StateMachineError("invalid_rule_result", "Rest expiry changed unrelated facts")
     healed, changes = 0, []
     for op in result.state_delta.operations:
+        if type(op) is WorldRestEffectEnd:
+            changes.append(("rest_effect", actor_id, "expire", op.expected))
+            if hp_pair is not None:
+                changes.append(("actor", actor_id, "hp_pair", hp_pair))
+            continue
         if type(op) is ResourceUpdate and (
             op.owner_id == actor_id and pools.pop(op.pool_id, None) == op.expected
         ):
@@ -219,6 +295,7 @@ def rest_changes(request, result):
         elif type(op) is HPDelta and (
             op.target_id == actor_id
             and not healed
+            and hp_pair is None
             and (not short or choices)
             and op.expected_hp == actor.hp_current
             and op.amount > 0
@@ -229,6 +306,10 @@ def rest_changes(request, result):
             continue
         raise StateMachineError("invalid_rule_result", "Rest changed unrelated facts")
     events = result.proposed_events
+    if hp_pair is not None and events:
+        # The evaluator verifies healing from the post-expiry HP. Here the
+        # paired write is guarded against the fixed pre-expiry HP facts.
+        healed = getattr(events[0], "hp_regained", 0)
     event_types = ["rest_resolved", "healing_applied"] if healed else ["rest_resolved"]
     if [event.type for event in events] != event_types:
         raise StateMachineError("invalid_rule_result", "Unexpected Rest events")

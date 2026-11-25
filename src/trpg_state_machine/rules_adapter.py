@@ -2749,6 +2749,9 @@ class RulesAdapter:
                 )
             elif component == "resource_restore":
                 self.characters.restore_resource(sid, identity, field, *value)
+            elif component == "rest_effect":
+                for expected in value:
+                    self.characters.effects.apply_rest_expiry(sid, expected)
             elif component == "independent_condition":
                 expected, remaining = value
                 if self.characters.condition(

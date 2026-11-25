@@ -7,7 +7,7 @@ from dataclasses import asdict, replace
 import pytest
 from dnd5e_engine.evaluation_contracts import CombatIntentPayload, ExplorationSpellCastPayload
 from dnd5e_engine.evaluation_rng import RNGState
-from dnd5e_engine.evaluation_ruleset import ruleset_binding
+from dnd5e_engine.evaluation_ruleset import freeze_ruleset, ruleset_binding
 from dnd5e_engine.monster_rules import monster_rule_facts
 from dnd5e_engine.rules.character import proficiency_grants
 from dnd5e_srd_data import BundledAssetLoader, MemoryAssetLoader
@@ -72,6 +72,8 @@ def timed_spell_world(tmp_path, context):
         caster_subclass="evoker",
         configure=None,
         configure_spell=None,
+        ruleset_overlay=None,
+        combat_end_conditions=None,
     ):
         canonical = BundledAssetLoader()
         base = item_loader()
@@ -137,6 +139,8 @@ def timed_spell_world(tmp_path, context):
             traits=[canonical.get_trait(slug) for slug in additional_traits],
             conditions=list(additional_conditions),
         )
+        if ruleset_overlay is not None:
+            loader = freeze_ruleset(loader, overlay=ruleset_overlay)
         data = item_data()
         if region_mechanism:
             fixture = extended_data(triggers=[trigger("enter_region", cells=["1,0", "1,1", "1,2"])])
@@ -377,7 +381,11 @@ def timed_spell_world(tmp_path, context):
             configure(data)
         package = _validate(data)
         authorized = replace(context, can_advance_time=True)
-        sm = StateMachine(tmp_path / database, dnd_loader=loader)
+        sm = StateMachine(
+            tmp_path / database,
+            dnd_loader=loader,
+            combat_end_conditions=combat_end_conditions,
+        )
         sid = create(sm, package, authorized)
         return sm, sid, package, authorized
 

@@ -7,6 +7,7 @@ remain with the bound Rule Engine; every mutation uses the caller's UnitOfWork.
 from dataclasses import dataclass
 
 from dnd5e_engine.effect_lifecycle import conditions_after_effect_application
+from dnd5e_engine.evaluation_aid import reviewed_hp_bonus
 from dnd5e_engine.evaluation_bardic_check import BARDIC_INSPIRATION_DIE_SIDES
 from dnd5e_engine.evaluation_effects import EffectState
 from dnd5e_engine.evaluation_region_effect import (
@@ -23,6 +24,7 @@ from dnd5e_engine.evaluation_spell_termination import (
     spell_preserves_observer_sight,
 )
 from dnd5e_engine.evaluation_state import ConditionLink, LifecycleRecord
+from dnd5e_engine.evaluation_timed_spells import is_reviewed_longstrider_application
 from dnd5e_engine.types.conditions import ActiveCondition
 
 from .errors import StateMachineError
@@ -189,7 +191,7 @@ class OngoingEffects:
         )
 
     def add_world_effect(self, sid, proposal, *, expires_tick, spell_id, cast_slot_level=None):
-        """Persist an elapsed-time effect and its optional one-member concentration."""
+        """Persist a world effect, original cast and any one-member concentration."""
         entry = {
             "effect": proposal.effect.model_dump(mode="json"),
             "expires_tick": expires_tick,
@@ -394,6 +396,20 @@ class OngoingEffects:
             ):
                 raise StateMachineError("version_conflict", "Spell concentration changed")
         self.remove_effect(sid, *expected.identity)
+
+    def apply_rest_expiry(self, sid, expected):
+        """Remove one exact recipient-rest application under its current owner guard."""
+        self.store.require_write()
+        identity = (expected.target_id, expected.id, expected.origin)
+        payload = expected.model_dump(mode="json", exclude={"target_id", "id", "origin"})
+        changed = self._conn.execute(
+            "DELETE FROM ongoing_effects WHERE session_id=? AND target_id=? "
+            "AND effect_id=? AND origin=? AND cast_by IS NOT NULL "
+            "AND expires_tick IS NULL AND concentration_id IS NULL AND payload_json=?",
+            (sid, *identity, canonical_json(payload)),
+        ).rowcount
+        if changed != 1:
+            raise StateMachineError("version_conflict", "Rest spell application changed")
 
     def apply_combat_creation(self, sid, operation):
         """Insert one verified effect, clock and lineage under the keyed absence guard."""
@@ -802,25 +818,34 @@ class OngoingEffects:
 
     @scoped_read
     def world_passive_identities(self, sid, target_ids):
-        """Find roster effects with only a world deadline and passive modifiers.
+        """Find roster passives owned by elapsed time or the recipient's rest.
 
         These rows have no turn trigger or linked condition. Pass can advance
-        the encounter with them still owned and scheduled by SessionTime.
+        the encounter while the same world rows retain their original lifecycle.
         """
         identities = set()
         for target_id in target_ids:
             for row in self._target_rows(sid, target_id):
-                if row["expires_tick"] is None or any(
+                if (row["expires_tick"] is None and row["cast_by"] is None) or any(
                     row[name] is not None
                     for name in ("concentration_id", "lifecycle_json", "conditions_json")
                 ):
                     continue
+                identity = (target_id, row["effect_id"], row["origin"])
                 effect = self.store.memory.json(row["payload_json"])
-                if not any(
+                if row["expires_tick"] is None:
+                    if effect["duration"].get("until_long_rest"):
+                        application = self._spell_application(row)
+                        if application is not None and (
+                            reviewed_hp_bonus(application.effect) is not None
+                            or is_reviewed_longstrider_application(application.effect)
+                        ):
+                            identities.add(identity)
+                elif not any(
                     effect.get(name)
                     for name in ("action_policy", "statuses", "flags", "lifecycle", "end_effects")
                 ):
-                    identities.add((target_id, row["effect_id"], row["origin"]))
+                    identities.add(identity)
         return frozenset(identities)
 
     @scoped_read

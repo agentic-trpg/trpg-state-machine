@@ -379,8 +379,8 @@ def _timed_spell_changes(request, result, spell, loader):
     """Return candidate writes for one cast and one terminal world effect.
 
     The caller validates the shared result envelope and rechecks the version
-    and resource pre-value in its write transaction. The effect's relative
-    duration is converted into a deadline only during that transaction.
+    and resource pre-value in its write transaction. The bound evaluator
+    verifies the expiry policy, and the owner fixes any elapsed deadline.
     """
     payload = request.payload
     snapshot = request.state_snapshot
@@ -432,7 +432,7 @@ def _timed_spell_changes(request, result, spell, loader):
     if spell is None:
         raise StateMachineError("invalid_rule_result", "Timed spell has no bound definition")
     try:
-        verify_timed_spell_effect(request, spell, create)
+        verify_timed_spell_effect(request, spell, create, loader=loader)
     except ValueError as exc:
         raise StateMachineError(
             "invalid_rule_result", "Timed spell effect differs from its bound definition"

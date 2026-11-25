@@ -20,7 +20,7 @@ from .package import canonical_json
 
 
 class EffectTimeConsumer:
-    """Adopt timed Effects, settle indexed deadlines, and release one caster's group."""
+    """Adopt world Effects, settle indexed deadlines, and release one caster's group."""
 
     def __init__(self, runtime, world):
         """Use the existing world owner, Store and runtime time coordinator."""
@@ -58,15 +58,17 @@ class EffectTimeConsumer:
         return result
 
     def apply_verified(self, sid, proposal, *, spell_id, cast_slot_level=None):
-        """Persist an admitted terminal effect at the current Session tick.
+        """Persist an admitted terminal effect with its resolved expiry.
 
         The caller owns the write transaction. The effect table's primary key
-        enforces absence of the full proposed identity at insertion.
+        enforces absence of the full proposed identity at insertion. A
+        recipient-rest effect carries its duration in the typed payload.
         """
         self.store.require_write()
         if proposal.session_id != sid or proposal.expiry.action != "remove":
             raise StateMachineError("invalid_rule_result", "World effect proposal differs")
-        deadline = self.world.time.seconds_deadline(sid, proposal.duration_seconds)
+        seconds = proposal.duration_seconds
+        deadline = self.world.time.seconds_deadline(sid, seconds) if seconds is not None else None
         self.owner.add_world_effect(
             sid,
             proposal,
@@ -137,7 +139,10 @@ class EffectTimeConsumer:
         if (
             application is None
             or application.cast_command_id != operation.cast_command_id
-            or application.expires_tick <= self.world.facts.time_state(sid)[1]
+            or (
+                application.expires_tick is not None
+                and application.expires_tick <= self.world.facts.time_state(sid)[1]
+            )
         ):
             raise StateMachineError("spell.application", "The selected spell is not ongoing")
         characters = self.world.characters
