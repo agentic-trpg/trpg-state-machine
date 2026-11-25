@@ -3453,8 +3453,8 @@ class CombatRecords:
         """Return the combat-records connection."""
         return self.store.connection
 
-    def initialize(self, sid, snapshot, *, process_id, withdrawal=None):
-        """Store fresh encounter records, replacing an ended encounter only for dynamic start."""
+    def initialize(self, sid, snapshot, *, process_id, withdrawal=None, end_condition_id=None):
+        """Store mechanics and fixed encounter policies, replacing only an ended encounter."""
         self.store.require_write()
         effect_fields = (
             "concentration_chain",
@@ -3481,14 +3481,15 @@ class CombatRecords:
             " ON CONFLICT(session_id) DO UPDATE SET combat_id=excluded.combat_id,"
             " scene_id=excluded.scene_id,state_json=excluded.state_json,"
             " process_id=excluded.process_id,region_json=excluded.region_json,"
-            " withdrawal_distance_ft=excluded.withdrawal_distance_ft"
+            " withdrawal_distance_ft=excluded.withdrawal_distance_ft,"
+            " end_condition_id=excluded.end_condition_id"
             " WHERE json_extract(combats.state_json,'$.ended')=1"
             if withdrawal is not None
             else ""
         )
         changed = self._conn.execute(
             "INSERT INTO combats(session_id,combat_id,scene_id,state_json,process_id,region_json,"
-            "withdrawal_distance_ft) VALUES (?,?,?,?,?,?,?)" + replace_ended,
+            "withdrawal_distance_ft,end_condition_id) VALUES (?,?,?,?,?,?,?,?)" + replace_ended,
             (
                 sid,
                 combat_id,
@@ -3499,10 +3500,20 @@ class CombatRecords:
                 if type(withdrawal) is EncounterRegion
                 else None,
                 withdrawal.distance_ft if type(withdrawal) is DistanceWithdrawal else None,
+                end_condition_id,
             ),
         )
         if changed.rowcount != 1:
             raise StateMachineError("combat_already_active", "An encounter is already active")
+
+    def active_end_condition(self, sid):
+        """Read the registered policy identity fixed for the active encounter."""
+        row = self._conn.execute(
+            "SELECT combat_id,end_condition_id FROM combats WHERE session_id=? "
+            "AND json_extract(state_json,'$.ended')=0",
+            (sid,),
+        ).fetchone()
+        return None if row is None else (row["combat_id"], row["end_condition_id"])
 
     def active_region(self, sid):
         """Read the fixed area if the active encounter uses fixed defense."""

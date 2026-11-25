@@ -40,6 +40,8 @@ class StartCombat:
 
     Participants and their confirmed initiative order use actual Session actor
     identities. Optional opponent profiles select actions from bound stat blocks.
+    The optional end condition names one policy installed by the trusted host;
+    callers cannot submit its predicate or a claimed satisfaction result.
     """
 
     participant_ids: tuple[str, ...]
@@ -48,6 +50,7 @@ class StartCombat:
     area_cells: tuple[str, ...] | None = None
     opponent_profiles: tuple[CombatOpponent, ...] = ()
     withdrawal_distance_ft: int | None = None
+    end_condition_id: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -110,6 +113,8 @@ def validate_start_combat(payload: StartCombat) -> None:
             "Choose an opening cell, a complete distinct area, or a positive integer distance",
         )
     profiles = payload.opponent_profiles
+    if payload.end_condition_id is not None and not valid_id(payload.end_condition_id):
+        raise StateMachineError("invalid_operation", "Expected a registered end condition identity")
     if (
         type(profiles) is not tuple
         or any(

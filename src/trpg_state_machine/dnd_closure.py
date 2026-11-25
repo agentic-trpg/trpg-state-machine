@@ -24,11 +24,23 @@ def closure_changes(request, result):
         "Closure requires only one CombatClose; other actor mutations are not admitted",
     )
     close = closes[0]
+    configured = request.configured_close
+    require(
+        (
+            close.reason == "forced"
+            and configured is not None
+            and close.condition_id == configured.condition_id
+            and not close.xp_increments
+        )
+        or (close.reason in ("victory", "defeat_tpk") and close.condition_id is None),
+        "Configured closure proof, reason or rewards differ",
+    )
     require(not combat.ended and close.combat_id == combat.combat_id, "Closure fence differs")
     require(
         len(result.proposed_events) == 1
         and type(result.proposed_events[0]) is CombatEnded
-        and result.proposed_events[0].reason == close.reason,
+        and result.proposed_events[0].reason == close.reason
+        and result.proposed_events[0].condition_id == close.condition_id,
         "Closure requires its corresponding CombatEnded event",
     )
     require(not result.rng_transition.state_changed, "Bounded closure cannot consume RNG")

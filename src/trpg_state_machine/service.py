@@ -87,8 +87,14 @@ class StateMachine(
         environment_effects_provider=None,
         object_protection_provider=None,
         environment_unit_height_provider=None,
+        combat_end_conditions=None,
     ) -> None:
-        """Assemble one Store, fixed ruleset, domain services and Session coordinators."""
+        """Assemble Store, bound rules and services with trusted encounter policies.
+
+        Registered end conditions are synchronous, deterministic, read-only
+        predicates of the detached combat snapshot passed at the close checkpoint.
+        They must not call back into this StateMachine.
+        """
         from dnd5e_engine.evaluation_ruleset import freeze_ruleset, get_default_ruleset
 
         # Select the final effective corpus once, before opening the store. All
@@ -159,8 +165,10 @@ class StateMachine(
             self._package_effects,
             self._event_persistence,
             self._activity_records,
+            end_conditions=combat_end_conditions,
         )
         self._combat.action_choice_runtime = self
+        self._rules.records_end_conditions = self._combat.end_conditions
 
         self._creation = SessionCreation(
             self._store,

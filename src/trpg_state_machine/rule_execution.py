@@ -15,7 +15,9 @@ from dnd5e_engine.evaluation_charged_item import (
 from dnd5e_engine.evaluation_condition_choice import condition_choice_profile
 from dnd5e_engine.evaluation_contracts import (
     CheckPayload,
+    CombatClosePayload,
     CombatIntentPayload,
+    ConfiguredCloseFact,
     ExplorationCastActivityPayload,
     ExplorationEnvironmentalSpellCastPayload,
     ExplorationItemAreaFacts,
@@ -1078,6 +1080,11 @@ class RuleExecution:
                     "unsupported_operation", "Standalone saves require exploration"
                 )
             self.sessions._npc_combat_location_guard(shield_original or command)
+            end_condition_ref = (
+                self.rules.records.active_end_condition(command.session_id)
+                if type(command.payload) is CombatClosePayload
+                else None
+            )
             if row["evaluator_version"] != EVALUATOR_VERSION:
                 raise StateMachineError(
                     "ruleset_binding_mismatch", "Pinned evaluator version is not installed"
@@ -1473,6 +1480,42 @@ class RuleExecution:
                             shield_token, result = result, None
                     else:
                         result = await self.rules._evaluate_dnd(copy.deepcopy(request))
+                        if (
+                            type(command.payload) is CombatClosePayload
+                            and result.status == "rejected"
+                            and result.error.code == "closure.nonterminal"
+                            and end_condition_ref is not None
+                            and end_condition_ref[1] is not None
+                        ):
+                            condition_id = end_condition_ref[1]
+                            provider = self.rules.records_end_conditions.get(condition_id)
+                            if provider is None:
+                                raise StateMachineError(
+                                    "unknown_end_condition",
+                                    "Encounter end condition is unavailable",
+                                )
+                            # A host-installed predicate only sees detached fixed facts;
+                            # this stage never supplies Store or a live Session owner.
+                            met = provider(copy.deepcopy(request.state_snapshot))
+                            if type(met) is not bool:
+                                raise StateMachineError(
+                                    "invalid_end_condition_result",
+                                    "Condition must return a boolean",
+                                )
+                            if met:
+                                request = type(request).model_validate(
+                                    request.model_copy(
+                                        update={
+                                            "configured_close": ConfiguredCloseFact(
+                                                condition_id=condition_id,
+                                                combat_id=end_condition_ref[0],
+                                                world_version=request.state_snapshot.world_version,
+                                                satisfied=True,
+                                            )
+                                        }
+                                    )
+                                )
+                                result = await self.rules._evaluate_dnd(copy.deepcopy(request))
                 except RulesetBindingError as exc:
                     raise StateMachineError(
                         "ruleset_binding_mismatch", "Evaluator binding differs"
@@ -1753,6 +1796,13 @@ class RuleExecution:
                 pending_choice, version = bardic_prompt
                 status = "pending_choice"
             else:
+                if (
+                    type(command.payload) is CombatClosePayload
+                    and request.configured_close is not None
+                    and self.rules.records.active_end_condition(command.session_id)
+                    != end_condition_ref
+                ):
+                    raise StateMachineError("version_conflict", "Encounter condition changed")
                 if not (exploration_spell or rest):
                     self.sessions._npc_combat_target_guard(
                         shield_original or command, package, build_snapshot(row)

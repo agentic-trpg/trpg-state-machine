@@ -1,6 +1,7 @@
 """Real pinned evaluate(), closed delta validation and one SQLite commit boundary."""
 
 import json
+from types import MappingProxyType
 from uuid import uuid4
 
 from dnd5e_engine.evaluation_bardic_grant import ExplorationFeaturePayload
@@ -49,6 +50,8 @@ class CombatHandler:
         effects,
         persistence,
         activities,
+        *,
+        end_conditions=None,
     ):
         """Bind combat domain interfaces and their shared Store."""
         self.runtime = world.runtime
@@ -63,6 +66,7 @@ class CombatHandler:
         self.effects = effects
         self.persistence = persistence
         self.activities = activities
+        self.end_conditions = MappingProxyType(dict(end_conditions or {}))
 
     @property
     def _conn(self):
@@ -189,10 +193,17 @@ class CombatHandler:
         ]
 
     def start(self, row, package, command):
-        """Adopt a trusted encounter and its chosen withdrawal policy in one write scope."""
+        """Adopt one trusted encounter with fixed withdrawal and closure policy identities."""
         self.store.require_write()
         sid, scene_id = row["session_id"], row["current_scene_id"]
         payload = command.payload
+        if payload.end_condition_id is not None and (
+            payload.end_condition_id not in self.end_conditions
+            or not callable(self.end_conditions[payload.end_condition_id])
+        ):
+            raise StateMachineError(
+                "unknown_end_condition", "Encounter end condition is not registered"
+            )
         participant_ids = payload.participant_ids
         if row["pc_actor_id"] not in participant_ids:
             raise StateMachineError("invalid_combat_roster", "Select the Session PC")
@@ -220,7 +231,13 @@ class CombatHandler:
             self.rules.session_binding(row),
             self.rules.loader,
         )
-        self.records.initialize(sid, candidate, process_id=process_id(), withdrawal=withdrawal)
+        self.records.initialize(
+            sid,
+            candidate,
+            process_id=process_id(),
+            withdrawal=withdrawal,
+            end_condition_id=payload.end_condition_id,
+        )
         for actor in candidate.character_states:
             changed = budgets[actor.entity_id]
             for field in sorted(self.characters.RULE_FIELDS):
