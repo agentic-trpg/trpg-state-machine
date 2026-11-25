@@ -12,10 +12,11 @@ from dnd5e_engine.evaluation_contracts import (
 )
 from dnd_support import NPC, create, initialize
 from modern_support import modern_data, modern_loader
+from test_combat_start import opening_data, start_command
 from test_dnd_ledger_scope import stored_state
 from test_dnd_npc_availability import npc_command
 
-from trpg_state_machine import StateMachine, StateMachineError, TypedCommand
+from trpg_state_machine import CombatOpponent, StateMachine, StateMachineError, TypedCommand
 from trpg_state_machine.package import _validate
 
 
@@ -256,3 +257,154 @@ def test_nonterminal_conflict_and_revoked_npc_grant(tmp_path, package_data, cont
         with pytest.raises(StateMachineError) as error:
             sm.save_session(sid, package, context=context)
         assert error.value.code == "combat_unrestorable"
+
+
+def test_dynamic_start_attack_close_restores_exploration(tmp_path, package_data, context):
+    """A real public opening and attack feed the existing terminal close path."""
+    assets = modern_loader()
+    data = opening_data(package_data, assets)
+    enemy = data["rule_bindings"]["noncombat_foundation"]["snapshot"]["character_states"][1]
+    enemy.update(hp_current=1, hp_max=1)
+    package = _validate(data)
+    host = replace(context, can_start_combat=True)
+    path = tmp_path / "dynamic-close.db"
+    with StateMachine(path, dnd_loader=assets) as sm:
+        sid = create(sm, package, host)
+        pc = sm.read_session(sid, package, context=host).pc_actor_id
+        opening = start_command(sm, sid, package, host, initiative_order=(pc, NPC))
+        assert sm.submit_command(opening, package, context=host).status == "committed"
+        attack = pc_attack(sm, sid, package, host)
+        assert sm.submit_command(attack, package, context=host).status == "committed"
+        closing = close_command(sm, sid, package, host)
+        receipt = sm.submit_command(closing, package, context=host)
+        assert receipt.status == "committed"
+        assert sm.read_session(sid, package, context=host).phase == "exploration"
+        assert sm.submit_command(closing, package, context=host) == receipt
+    with StateMachine(path, dnd_loader=assets) as reopened:
+        assert (
+            reopened.get_command_receipt(sid, closing.command_id, package, context=host) == receipt
+        )
+        assert reopened.read_session(sid, package, context=host).phase == "exploration"
+
+
+def test_dynamic_start_npc_kill_closes_defeat(tmp_path, package_data, context):
+    """A real NPC attack can end the sole PC before the same close path runs."""
+    assets = modern_loader()
+    data = opening_data(package_data, assets)
+    hero = data["rule_bindings"]["noncombat_foundation"]["snapshot"]["character_states"][0]
+    hero.update(hp_current=1, hp_max=1, ac=1)
+    data["pc_templates"][0]["character"]["hp"].update(current=1, max=1)
+    package = _validate(data)
+    host = replace(context, can_start_combat=True)
+    path = tmp_path / "dynamic-defeat.db"
+    with StateMachine(path, dnd_loader=assets) as sm:
+        sid = create(sm, package, host)
+        opening = start_command(sm, sid, package, host)
+        assert sm.submit_command(opening, package, context=host).status == "committed"
+        attack = npc_command(sm, sid, package, host)
+        assert sm.submit_command(attack, package, context=host).status == "committed"
+        state = sm.read_combat_snapshot(sid, package, context=host)
+        pc = sm.read_session(sid, package, context=host).pc_actor_id
+        assert pc in state.combat_state.dead_ids
+        assert next(a for a in state.character_states if a.entity_id == pc).hp_current == 0
+        closing = close_command(sm, sid, package, host)
+        receipt = sm.submit_command(closing, package, context=host)
+        assert receipt.status == "committed"
+        assert sm.read_session(sid, package, context=host).phase == "exploration"
+        assert sm.submit_command(closing, package, context=host) == receipt
+    with StateMachine(path, dnd_loader=assets) as reopened:
+        assert (
+            reopened.get_command_receipt(sid, closing.command_id, package, context=host) == receipt
+        )
+        assert reopened.read_session(sid, package, context=host).phase == "exploration"
+
+
+def test_dynamic_dead_enemy_and_living_zero_hp_pc_stay_nonterminal(tmp_path, package_data, context):
+    """A prior enemy death cannot turn the sole dying PC into a TPK."""
+    assets = modern_loader()
+    data = opening_data(package_data, assets)
+    snapshot = data["rule_bindings"]["noncombat_foundation"]["snapshot"]
+    hero = snapshot["character_states"][0]
+    hero.update(hp_current=1, hp_max=8, ac=1)
+    data["pc_templates"][0]["character"]["hp"].update(current=1, max=8)
+    first_enemy = next(a for a in snapshot["character_states"] if a["entity_id"] == NPC)
+    first_enemy.update(hp_current=1, hp_max=1)
+    next(actor for actor in data["actors"] if actor["actor_id"] == "npc.attendant")[
+        "initial_cell"
+    ] = "0,1"
+    package = _validate(data)
+    other = "npc.attendant"
+    host = replace(context, can_start_combat=True, controlled_npc_ids=(NPC, other))
+    with StateMachine(tmp_path / "dynamic-dying.db", dnd_loader=assets) as sm:
+        sid = create(sm, package, host)
+        pc = sm.read_session(sid, package, context=host).pc_actor_id
+        opening = start_command(
+            sm,
+            sid,
+            package,
+            host,
+            participant_ids=(pc, NPC, other),
+            initiative_order=(pc, NPC, other),
+            opponent_profiles=(CombatOpponent(NPC, "bandit"), CombatOpponent(other, "bandit")),
+        )
+        assert sm.submit_command(opening, package, context=host).status == "committed"
+        assert (
+            sm.submit_command(pc_attack(sm, sid, package, host), package, context=host).status
+            == "committed"
+        )
+        state = sm.read_combat_snapshot(sid, package, context=host)
+        assert NPC in state.combat_state.dead_ids
+        pc_pass = TypedCommand(
+            sid,
+            "pc.pass.dying",
+            pc,
+            "combat.intent",
+            CombatIntentPayload(intent_type="pass"),
+            state.world_version,
+        )
+        assert sm.submit_command(pc_pass, package, context=host).status == "committed"
+        state = sm.read_combat_snapshot(sid, package, context=host)
+        attack = TypedCommand(
+            sid,
+            "other.attack.dying",
+            other,
+            "combat.intent",
+            CombatIntentPayload(
+                intent_type="attack",
+                source_id=other,
+                stat_block_action_id="scimitar",
+                target_id=pc,
+            ),
+            state.world_version,
+        )
+        attack_receipt = sm.submit_command(attack, package, context=host)
+        assert attack_receipt.status == "committed", attack_receipt
+        state = sm.read_combat_snapshot(sid, package, context=host)
+        dying = next(a for a in state.character_states if a.entity_id == pc)
+        assert dying.hp_current == 0 and dying.is_alive
+        assert NPC in state.combat_state.dead_ids and other not in state.combat_state.dead_ids
+        assert not any(
+            event.payload.get("engine_event", {}).get("type") == "death_save_rolled"
+            for event in sm.read_events(sid, package, context=host)
+        )
+        close = close_command(sm, sid, package, host)
+        denied = sm.submit_command(close, package, context=host)
+        assert denied.error_code == "closure.nonterminal"
+        assert sm.read_session(sid, package, context=host).phase == "combat"
+        passing = TypedCommand(
+            sid,
+            "other.pass.into.dying",
+            other,
+            "combat.intent",
+            CombatIntentPayload(intent_type="pass", source_id=other),
+            state.world_version,
+        )
+        receipt = sm.submit_command(passing, package, context=host)
+        assert receipt.status == "committed", receipt
+        rolled = [
+            event
+            for event in sm.read_events(sid, package, context=host)
+            if event.payload.get("engine_event", {}).get("type") == "death_save_rolled"
+        ]
+        assert len(rolled) == 1
+        assert sm.submit_command(passing, package, context=host) == receipt

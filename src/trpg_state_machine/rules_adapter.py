@@ -537,14 +537,15 @@ def exploration_potion_changes(request, result):
 _TURN_EVENTS = {"turn_phase", "turn_ended", "round_started", "turn_started"}
 
 
-def _supports_dying_pass_roster(snapshot, dying):
-    """Share the existing sole living zero-HP PC limit with Shield admission."""
+def _supports_dying_pass_roster(snapshot, dying, *, allow_recorded_dead=False):
+    """Admit one dying PC; plain Pass can skip already recorded deaths."""
     return (
         dying.entity_type == "Character"
         and dying.entity_id in snapshot.combat_state.party_ids
         and dying.is_alive
         and all(
-            actor.is_alive and actor.hp_current > 0
+            (allow_recorded_dead and actor.entity_id in snapshot.combat_state.dead_ids)
+            or (actor.is_alive and actor.hp_current > 0)
             for actor in snapshot.character_states
             if actor.entity_id != dying.entity_id
         )
@@ -566,7 +567,7 @@ def _dying_pass_actor(snapshot, actor_id):
     actor = next((actor for actor in snapshot.character_states if actor.hp_current == 0), None)
     if (
         actor is not None
-        and _supports_dying_pass_roster(snapshot, actor)
+        and _supports_dying_pass_roster(snapshot, actor, allow_recorded_dead=True)
         and actor.entity_id in {actor_id, next_actor}
         and next_actor != actor_id
     ):
