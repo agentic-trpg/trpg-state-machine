@@ -393,3 +393,98 @@ def test_opportunity_preserves_prefix_and_suffix_or_lethal_stop(
             sm.read_combat_snapshot(sid, package, context=context).combat_state.actor_zone[NPC]
             == arrival
         )
+
+
+def test_spent_opportunity_cannot_fire_on_second_exit(tmp_path, package_data, context):
+    package, assets = withdrawal_package(package_data, npc_at_reach=True, reviewed_reactions=True)
+    context = replace(context, can_start_combat=True)
+    with StateMachine(tmp_path / "spent-opportunity.db", dnd_loader=assets) as sm:
+        sid = create(sm, package, context)
+        pc = start_encounter(sm, sid, package, context, npc_first=True, distance=20)
+        decision = command(
+            sm,
+            sid,
+            package,
+            context,
+            "react-once",
+            "combat.opportunity",
+            CombatOpportunity(NPC, True),
+        )
+        assert sm.submit_command(decision, package, context=context).status == "committed"
+        first = sm.submit_command(
+            walk(sm, sid, package, context, "first-exit", "2,0", actor=NPC),
+            package,
+            context=context,
+        )
+        assert first.status == "committed", first
+        assert not next(
+            a
+            for a in sm.read_combat_snapshot(sid, package, context=context).character_states
+            if a.entity_id == pc
+        ).reaction_available
+        assert (
+            sm.submit_command(
+                walk(sm, sid, package, context, "reenter", "1,0", actor=NPC),
+                package,
+                context=context,
+            ).status
+            == "committed"
+        )
+        rng = sm.read_rng_context(sid, package, context=context)
+        second = sm.submit_command(
+            walk(sm, sid, package, context, "second-exit", "2,0", actor=NPC),
+            package,
+            context=context,
+        )
+        assert second.status == "committed", second
+        assert not any(
+            event.payload.get("engine_event", {}).get("type") == "attack_rolled"
+            for event in command_events(sm, sid, package, context, second)
+        )
+        assert sm.read_rng_context(sid, package, context=context) == rng
+
+
+def test_reactive_walk_receipt_failure_rolls_back_damage_and_retries(
+    tmp_path, package_data, context
+):
+    package, assets = withdrawal_package(
+        package_data, reviewed_reactions=True, reaction_split=True, npc_hp=1
+    )
+    context = replace(context, can_start_combat=True)
+    with StateMachine(tmp_path / "opportunity-rollback.db", dnd_loader=assets) as sm:
+        sid = create(sm, package, context)
+        start_encounter(sm, sid, package, context, npc_first=True, distance=20)
+        decision = command(
+            sm,
+            sid,
+            package,
+            context,
+            "react-rollback",
+            "combat.opportunity",
+            CombatOpportunity(NPC, True),
+        )
+        assert sm.submit_command(decision, package, context=context).status == "committed"
+        before = sm.read_combat_snapshot(sid, package, context=context)
+        rng = sm.read_rng_context(sid, package, context=context)
+        position = sm.read_actor_position(sid, NPC, package, context=context)
+        move = walk(sm, sid, package, context, "reactive-rollback", "0,3", actor=NPC)
+        sm._conn.execute(
+            "CREATE TEMP TRIGGER fail_opportunity_receipt BEFORE INSERT ON command_receipts "
+            "WHEN NEW.command_id='reactive-rollback' "
+            "BEGIN SELECT RAISE(ABORT,'injected opportunity receipt failure'); END"
+        )
+        try:
+            with pytest.raises(StateMachineError):
+                sm.submit_command(move, package, context=context)
+            assert sm.read_combat_snapshot(sid, package, context=context) == before
+            assert sm.read_rng_context(sid, package, context=context) == rng
+            assert sm.read_actor_position(sid, NPC, package, context=context) == position
+        finally:
+            sm._conn.execute("DROP TRIGGER fail_opportunity_receipt")
+        receipt = sm.submit_command(move, package, context=context)
+        assert receipt.status == "committed", receipt
+        after = sm.read_combat_snapshot(sid, package, context=context)
+        assert next(a for a in after.character_states if a.entity_id == NPC).hp_current == 0
+        assert after.combat_state.actor_zone[NPC] == "0,2"
+        assert not after.combat_state.pending_reactions
+        assert sm.submit_command(move, package, context=context) == receipt
