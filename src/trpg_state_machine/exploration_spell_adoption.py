@@ -15,7 +15,10 @@ from dnd5e_engine.evaluation_condition_choice import (
     independent_condition_matches,
 )
 from dnd5e_engine.evaluation_effects import effect_state
-from dnd5e_engine.evaluation_exploration_healing import exploration_healing_activity
+from dnd5e_engine.evaluation_exploration_healing import (
+    exploration_healing_activity,
+    exploration_healing_life_delta,
+)
 from dnd5e_engine.evaluation_identify import identify_object
 from dnd5e_engine.evaluation_multi_spells import verify_multi_spell_definition
 from dnd5e_engine.evaluation_payments import spell_payment
@@ -286,17 +289,17 @@ def charged_item_changes(request, result, loader):
 
 
 def _healing_changes(request, result, spell, activity, loader):
-    """Bind healing evidence and its RNG discipline to the guarded HP and slot edits."""
+    """Bind healing, payment and zero-HP recovery to one guarded candidate."""
     snapshot, payload = request.state_snapshot, request.payload
     target = next((a for a in snapshot.character_states if a.entity_id == payload.target_id), None)
     events = result.proposed_events
-    if len(events) != 3 or tuple(type(event) for event in events) != (
+    if len(events) not in (3, 4) or tuple(type(event) for event in events[:3]) != (
         IntentSubmitted,
         SpellCast,
         HealingApplied,
     ):
         raise StateMachineError("invalid_rule_result", "Unexpected exploration healing events")
-    intent, cast, healing = events
+    intent, cast, healing = events[:3]
     expects_rng_draw = not any(
         effect.target_id == payload.target_id and is_reviewed_beacon_effect(effect, loader)
         for effect in snapshot.effect_states
@@ -304,7 +307,7 @@ def _healing_changes(request, result, spell, activity, loader):
     if (
         target is None
         or not target.is_alive
-        or target.hp_current <= 0
+        or target.hp_current < 0
         or intent
         != IntentSubmitted(
             actor_id=request.actor_id,
@@ -321,14 +324,22 @@ def _healing_changes(request, result, spell, activity, loader):
     ):
         raise StateMachineError("invalid_rule_result", "Exploration healing evidence differs")
     hp = healing_balance(target.hp_current, target.hp_max, healing.amount)
+    life, removed = exploration_healing_life_delta(target, hp)
+    expected_events = (
+        (ConditionRemoved(target_id=target.entity_id, condition="unconscious"),) if removed else ()
+    )
+    if tuple(events[3:]) != expected_events:
+        raise StateMachineError("invalid_rule_result", "Exploration recovery events differ")
     operations = result.state_delta.operations
     if (
         not operations
         or type(operations[0]) is not delta.ResourceUpdate
-        or len(operations) != 1 + int(hp != target.hp_current)
+        or len(operations) != 1 + int(hp != target.hp_current) + len(life)
     ):
         raise StateMachineError("invalid_rule_result", "Unexpected exploration healing writes")
     spend = _slot_change(request, operations[0])
+    if tuple(operations[1 + int(hp != target.hp_current) :]) != life:
+        raise StateMachineError("invalid_rule_result", "Exploration recovery writes differ")
     if hp == target.hp_current:
         return (spend,)
     if operations[1] != delta.HPDelta(
@@ -339,7 +350,29 @@ def _healing_changes(request, result, spell, activity, loader):
         resulting_hp=hp,
     ):
         raise StateMachineError("invalid_rule_result", "Exploration heal differs from its evidence")
-    return (spend, ("actor", target.entity_id, "hp_current", hp))
+    changes = [spend, ("actor", target.entity_id, "hp_current", hp)]
+    for operation in life:
+        if type(operation) is delta.DeathStateUpdate:
+            changes.append(
+                (
+                    "actor",
+                    target.entity_id,
+                    "death_saves",
+                    None
+                    if operation.value.death_saves is None
+                    else operation.value.death_saves.model_dump(mode="json"),
+                )
+            )
+        elif type(operation) is delta.ConditionsUpdate:
+            changes.append(
+                (
+                    "actor",
+                    target.entity_id,
+                    "conditions",
+                    [condition.model_dump(mode="json") for condition in operation.value],
+                )
+            )
+    return tuple(changes)
 
 
 def _timed_spell_changes(request, result, spell, loader):

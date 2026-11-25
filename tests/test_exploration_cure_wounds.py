@@ -135,6 +135,112 @@ def test_full_hp_keeps_life_unchanged_and_pays_cast(tmp_path, context):
         assert rolls[0]["hp_gained"] == 0
 
 
+def _authored_zero_hp_target(data, _loader):
+    """Supply an explicitly living downed NPC in an exploration-only foundation."""
+    data["rule_bindings"].pop("combat_foundation")
+    for foundation in data["rule_bindings"].values():
+        target = foundation["snapshot"]["character_states"][1]
+        target["death_saves"] = {"successes": 1, "failures": 2, "is_stable": False}
+        target["conditions"] = [
+            {
+                "condition": name,
+                "source_entity_id": source,
+                "scope": "combat",
+                "duration_rounds": None,
+                "save_dc": None,
+                "applied_round": 0,
+                "exhaustion_level": 1,
+                "source_effect_id": None,
+            }
+            for name, source in (
+                ("unconscious", "implied:event"),
+                ("unconscious", "implied:other"),
+                ("prone", "implied:event"),
+            )
+        ]
+
+
+def test_public_heal_recovers_authored_living_zero_hp_target(tmp_path, context):
+    """An explicitly living downed creature uses the same paid public cast."""
+
+    sm, sid, package, loader, db = cure_world(
+        tmp_path, context, exploration=True, target_hp=0, configure=_authored_zero_hp_target
+    )
+    with sm:
+        command = cast_command(sm, sid, package, context, NPC, key="exploration.zero.heal")
+        before = sm.read_noncombat_snapshot(sid, package, context=context)
+        rng = sm.read_rng_context(sid, package, context=context)
+        receipt = sm.submit_command(command, package, context=context)
+        assert receipt.status == "committed", receipt
+        after = sm.read_noncombat_snapshot(sid, package, context=context)
+        target = actor(after, NPC)
+        assert target.is_alive and target.hp_current > 0
+        assert actor(before, NPC).death_saves.failures == 2
+        assert target.death_saves.model_dump() == {
+            "successes": 0,
+            "failures": 0,
+            "is_stable": False,
+        }
+        assert [(c.condition, c.source_entity_id) for c in target.conditions] == [
+            ("unconscious", "implied:other"),
+            ("prone", "implied:event"),
+        ]
+        assert pool(after).current == pool(before).current - 1
+        rolls = sm.get_command_rolls(sid, command.command_id, package, context=context)["rolls"]
+        assert len(rolls) == 1
+        assert rolls[0]["hp_gained"] == target.hp_current
+        cast_events = [
+            event.payload["engine_event"]["type"]
+            for event in sm.read_events(sid, package, context=context)
+            if event.source_command_id == command.command_id
+        ]
+        assert cast_events == [
+            "intent_submitted",
+            "spell_cast",
+            "healing_applied",
+            "condition_removed",
+        ]
+        successor = sm.read_rng_context(sid, package, context=context)
+        assert successor.version == rng.version + 1
+        assert sm.submit_command(command, package, context=context) == receipt
+        assert sm.read_noncombat_snapshot(sid, package, context=context) == after
+    with StateMachine(db, dnd_loader=loader) as reopened:
+        assert reopened.read_noncombat_snapshot(sid, package, context=context) == after
+        assert reopened.read_rng_context(sid, package, context=context) == successor
+
+
+def test_zero_hp_heal_receipt_failure_reverts_life_payment_and_rng(tmp_path, context):
+    sm, sid, package, _, _ = cure_world(
+        tmp_path,
+        context,
+        exploration=True,
+        target_hp=0,
+        configure=_authored_zero_hp_target,
+    )
+    with sm:
+        command = cast_command(sm, sid, package, context, NPC, key="exploration.zero.rollback")
+        before = sm.read_noncombat_snapshot(sid, package, context=context)
+        rng = sm.read_rng_context(sid, package, context=context)
+        events = sm.read_events(sid, package, context=context)
+        sm._conn.execute(
+            "CREATE TEMP TRIGGER fail_zero_heal_receipt BEFORE INSERT ON command_receipts "
+            "WHEN NEW.command_id='exploration.zero.rollback' "
+            "BEGIN SELECT RAISE(ABORT,'injected zero-HP healing receipt failure'); END"
+        )
+        with pytest.raises(StateMachineError) as exc:
+            sm.submit_command(command, package, context=context)
+        assert exc.value.code == "storage_error"
+        assert sm.read_noncombat_snapshot(sid, package, context=context) == before
+        assert sm.read_rng_context(sid, package, context=context) == rng
+        assert sm.read_events(sid, package, context=context) == events
+        assert sm.get_command_receipt(sid, command.command_id, package, context=context) is None
+        sm._conn.execute("DROP TRIGGER fail_zero_heal_receipt")
+        receipt = sm.submit_command(command, package, context=context)
+        assert receipt.status == "committed"
+        assert sm.submit_command(command, package, context=context) == receipt
+        assert actor(sm.read_noncombat_snapshot(sid, package, context=context), NPC).hp_current > 0
+
+
 @pytest.mark.parametrize("unknown_modifier", [False, True])
 def test_exploration_heal_checks_only_reviewed_elapsed_effects(tmp_path, context, unknown_modifier):
     """Use the public command with an existing walking bonus or an unknown heal effect."""
