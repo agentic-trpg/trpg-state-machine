@@ -40,6 +40,10 @@ def withdrawal_package(
     third=False,
     npc_at_passage=False,
     opportunity_reach=False,
+    npc_at_reach=False,
+    reviewed_reactions=False,
+    reaction_split=False,
+    npc_hp=13,
     obstacle=False,
 ):
     if closed:
@@ -48,7 +52,7 @@ def withdrawal_package(
             actor.pop("npc_state", None)
     else:
         assets = modern_loader()
-        data = modern_data(base, assets, npc_hp=13, spatial=True)
+        data = modern_data(base, assets, npc_hp=npc_hp, spatial=True)
     data["time_binding"] = asdict(TimeBinding())
     data["actors"][0]["initial_cell"] = "3,0"
     for scene in data["scenes"]:
@@ -83,6 +87,14 @@ def withdrawal_package(
         data["actors"][0]["initial_cell"] = "0,0"
         data["pc_templates"][0]["initial_cell"] = "2,0"
         noncombat["snapshot"]["character_states"][1]["melee_reach_ft"] = 10
+    if npc_at_reach:
+        data["actors"][0]["initial_cell"] = "1,0"
+    if reaction_split:
+        data["actors"][0]["initial_cell"] = "0,0"
+        data["pc_templates"][0]["initial_cell"] = "1,1"
+    if reviewed_reactions:
+        for actor in noncombat["snapshot"]["character_states"]:
+            actor["granted_features"] = []
     if obstacle:
         data["scenes"][0]["grid"]["blocked_cells"] = ["1,0"]
         noncombat["snapshot"]["scene_state"]["grid"]["blocked_cells"] = ["1,0"]
@@ -105,6 +117,7 @@ def start_encounter(
     key="open",
     npc_first=False,
     enemies=(NPC,),
+    profiles=(),
 ):
     pc = sm.read_session(sid, package, context=context).pc_actor_id
     roster = (pc, *enemies)
@@ -113,6 +126,7 @@ def start_encounter(
         roster[::-1] if npc_first else roster,
         opening_cell="0,0" if area is None and distance is None else None,
         area_cells=area,
+        opponent_profiles=profiles,
         withdrawal_distance_ft=distance,
     )
     result = sm.submit_command(

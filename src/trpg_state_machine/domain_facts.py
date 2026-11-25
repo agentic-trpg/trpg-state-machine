@@ -3441,6 +3441,7 @@ class CombatRecords:
             "processed_zero_hp_damage_instances",
             "dead_ids",
             "deaths_recorded",
+            "pending_reactions",
         )
     )
 

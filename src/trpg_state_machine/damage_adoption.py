@@ -43,11 +43,11 @@ def ordinary_damage_target(state, target):
     )
 
 
-def damage_result_balances(request, result, target, *, source_id, is_crit):
+def damage_result_balances(request, result, target, *, source_id, is_crit, actor_id=None):
     """Bind one damage packet or miss to its typed HP, temporary HP and attribution edits."""
     snapshot = request.state_snapshot
     state = snapshot.combat_state
-    actor_id = request.actor_id
+    actor_id = request.actor_id if actor_id is None else actor_id
     target_id = target.entity_id
     ops = {}
     for op in result.state_delta.operations:
@@ -95,7 +95,7 @@ def damage_result_balances(request, result, target, *, source_id, is_crit):
     return hp, ops, instance
 
 
-def validate_damage_result(request, result, target, *, source_id, is_crit):
+def validate_damage_result(request, result, target, *, source_id, is_crit, actor_id=None):
     """Check one ordinary damage instance or a miss and return newly dead identities.
 
     RE owns damage, zero-HP consequences and their evidence. This check binds that
@@ -104,7 +104,7 @@ def validate_damage_result(request, result, target, *, source_id, is_crit):
     target_id = target.entity_id
     deaths = [event for event in result.proposed_events if event.type == "death"]
     hp, ops, _ = damage_result_balances(
-        request, result, target, source_id=source_id, is_crit=is_crit
+        request, result, target, source_id=source_id, is_crit=is_crit, actor_id=actor_id
     )
 
     lethal = hp == 0
@@ -162,11 +162,11 @@ def adopt_death_ledger(snapshot, op, target, killer, target_kind, edit):
     edit("combat", op.combat_id, "deaths_recorded", op.expected_records, op.records)
 
 
-def adopt_damage_operation(request, target_kind, op, edit, *, target_id=None):
+def adopt_damage_operation(request, target_kind, op, edit, *, target_id=None, source_id=None):
     """Match one typed damage edit to its owner and pass guarded fields to the candidate."""
     snapshot = request.state_snapshot
     target = target_id if target_id is not None else request.payload.target_id
-    source = request.actor_id
+    source = request.actor_id if source_id is None else source_id
     combat = snapshot.combat_state.combat_id
     if getattr(op, "target_id", target) != target or getattr(op, "combat_id", combat) != combat:
         _invalid("Damage operation belongs to another target or combat")

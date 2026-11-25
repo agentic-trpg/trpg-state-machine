@@ -28,6 +28,7 @@ from .combat import (
     InitializeCombat,
     StartCombat,
 )
+from .combat_opportunity import CombatOpportunity
 from .combat_withdrawal import CombatWithdraw
 from .commands import CheckWorldEffects, CommandReceipt, TypedCommand, world_command_from_data
 from .environment import EnvironmentService
@@ -196,6 +197,7 @@ __all__ = [
     "InitializeCombat",
     "StartCombat",
     "CombatWithdraw",
+    "CombatOpportunity",
     "CombatOpponent",
     "EncounterRegion",
     "DistanceWithdrawal",

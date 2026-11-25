@@ -241,6 +241,7 @@ class SessionRuntime:
                 "combat.start",
                 "combat.intent",
                 "combat.withdraw",
+                "combat.opportunity",
                 "combat.item",
                 "combat.close",
                 "enter_scene",

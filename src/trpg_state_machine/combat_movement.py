@@ -160,6 +160,81 @@ def ordinary_walk_changes(request, result, *, loader):
     )
 
 
+def reactive_walk_route_changes(request, result, position, ledger, moved, *, loader):
+    """Guard completed route segments around one RE-resolved opportunity interruption."""
+    snapshot, actor_id = request.state_snapshot, request.actor_id
+    state = snapshot.combat_state
+    actor = next(a for a in snapshot.character_states if a.entity_id == actor_id)
+    grid = snapshot.scene_state.grid
+    if (
+        position.actor_id != actor_id
+        or position.combat_id != state.combat_id
+        or position.scene_id != snapshot.scene_state.scene_id
+        or position.expected != state.actor_zone[actor_id]
+        or any(
+            cell == position.value and identity != actor_id
+            for identity, cell in state.actor_zone.items()
+        )
+        or ledger.actor_id != actor_id
+        or ledger.expected != state.movement_ledgers[actor_id]
+        or ledger.expected.active_mode != "walk"
+        or not 1 <= len(moved) <= 2
+    ):
+        _invalid("Reactive route differs from the fixed mover and ledger")
+    completed = [position.expected]
+    total_cost = total_distance = 0
+    for event in moved:
+        if (
+            not isinstance(event, ActorMoved)
+            or event.actor_id != actor_id
+            or event.forced
+            or event.movement_mode != "walk"
+            or event.from_zone != completed[-1]
+            or len(event.path) < 2
+            or event.path[0] != event.from_zone
+            or event.path[-1] != event.to_zone
+            or event.distance_ft != (len(event.path) - 1) * grid.cell_size_ft
+            or event.movement_cost_ft < event.distance_ft
+        ):
+            _invalid("Reactive route segment differs from its paid movement event")
+        completed.extend(event.path[1:])
+        total_cost += event.movement_cost_ft
+        total_distance += event.distance_ft
+    if tuple(completed) != position.path or completed[-1] != position.value:
+        _invalid("Reactive route segments do not reconstruct the adopted path")
+    if has_speed_effects(snapshot):
+        if loader is None or speed_effect_support_failure(snapshot, loader) is not None:
+            _invalid("Reactive route requires the bound speed effect graph")
+        speed = speed_with_effects(actor, snapshot.effect_states)
+    else:
+        bonus = (
+            0
+            if loader is not None and supports_fixed_combat_regions(snapshot, loader)
+            else timed_walk_bonuses(snapshot).get(actor_id, 0)
+        )
+        speed = walk_speed(actor, bonus)
+    try:
+        expected = ledger.expected.spend(
+            cost_ft=total_cost,
+            distance_ft=total_distance,
+            mode="walk",
+            effective_speed=speed,
+        )
+    except ValueError as exc:
+        raise StateMachineError(
+            "invalid_rule_result", "Reactive route overspends movement"
+        ) from exc
+    if ledger.value != expected:
+        _invalid("Reactive route ledger differs from its completed segments")
+    return (
+        (
+            ("position", actor_id, "cell", position),
+            ("ledger", actor_id, "movement", ledger.value.model_dump(mode="json")),
+        ),
+        speed,
+    )
+
+
 def require_walk_route(world, sid, position):
     """Validate live path edges and return supported source membership transitions.
 

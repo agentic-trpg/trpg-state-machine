@@ -51,6 +51,7 @@ from dnd5e_engine.evaluation_environmental_spells import (
 from dnd5e_engine.evaluation_haste import has_haste_effects, haste_speed
 from dnd5e_engine.evaluation_movement import timed_walk_bonuses, walk_speed
 from dnd5e_engine.evaluation_preflight import template_support_failure
+from dnd5e_engine.evaluation_reaction_state import OpportunityAttackState, OpportunityDeclineState
 from dnd5e_engine.evaluation_region_effect import supports_fixed_combat_regions
 from dnd5e_engine.evaluation_rng import RNGState
 from dnd5e_engine.evaluation_ruleset import (
@@ -81,7 +82,13 @@ from dnd5e_engine.evaluation_state import (
     MovementLedgerState,
     NonCombatSnapshot,
 )
-from dnd5e_engine.events import ConditionApplied, ConditionRemoved, HealingApplied, IntentSubmitted
+from dnd5e_engine.events import (
+    ConditionApplied,
+    ConditionRemoved,
+    DashTaken,
+    HealingApplied,
+    IntentSubmitted,
+)
 from dnd5e_engine.movement import project_speeds, speed_for_mode
 from dnd5e_engine.rules.conditions import active_condition_names, exhaustion_level_of
 from dnd5e_engine.spatial import cover_ray_cells
@@ -93,7 +100,7 @@ from dnd5e_engine.turn_rules import (
 from pydantic import ValidationError
 
 from .combat import DND_RULESET, _remap, process_id, validate_foundation
-from .combat_movement import ordinary_walk_changes, require_walk_route
+from .combat_movement import ordinary_walk_changes, reactive_walk_route_changes, require_walk_route
 from .combat_regions import adopt_combat_region_edges, adopt_combat_region_turn_start
 from .concentration_adoption import (
     concentration_release_changes,
@@ -205,6 +212,8 @@ def delta_changes(
     effect_targets=(),
     turn_life_target=None,
     reviewed_region_damage=False,
+    reaction_owner=None,
+    reaction_target=None,
 ):
     """Check pre-values and ownership for an attack, Pass or narrow potion Delta.
 
@@ -234,7 +243,9 @@ def delta_changes(
     if not 0 <= turn < len(snapshot.combat_state.initiative_ids):
         _invalid("Turn delta is outside the encounter")
     budget_owners = {request.actor_id, snapshot.combat_state.initiative_ids[turn]}
-    affected_actors = budget_owners | {request.payload.target_id}
+    if reaction_owner is not None:
+        budget_owners.add(reaction_owner)
+    affected_actors = budget_owners | {reaction_target or request.payload.target_id}
     if effect_operations:
         affected_actors.update(effect.target_id for effect in snapshot.effect_states)
         affected_actors.update(effect_targets)
@@ -347,7 +358,7 @@ def delta_changes(
         if target is not None and (
             target not in actors
             or (
-                target != request.payload.target_id
+                target != (reaction_target or request.payload.target_id)
                 and not (
                     type(op) in (delta.DeathStateUpdate, delta.HPDelta, delta.ConditionsUpdate)
                     and target == turn_life_target
@@ -380,8 +391,14 @@ def delta_changes(
         elif turn_life_target is not None and type(op) is delta.DeathLedgerUpdate:
             adopt_death_ledger(snapshot, op, turn_life_target, None, "character", edit)
         elif type(op) in DAMAGE_OPERATIONS:
-            target_kind = actors.get(request.payload.target_id, {}).get("entity_type", "").lower()
-            adopt_damage_operation(request, target_kind, op, edit)
+            target_kind = (
+                actors.get(reaction_target or request.payload.target_id, {})
+                .get("entity_type", "")
+                .lower()
+            )
+            adopt_damage_operation(
+                request, target_kind, op, edit, target_id=reaction_target, source_id=reaction_owner
+            )
         elif type(op) in (delta.ActionBudgetUpdate, delta.TurnUpdate):
             if item_use and type(op) is delta.ActionBudgetUpdate:
                 changed_budget = {
@@ -1278,6 +1295,287 @@ def haste_effect_changes(request, result):
     return (*base, *adopted)
 
 
+def ordinary_defense_action_changes(request, result):
+    """Guard one Action Dash, Dodge or Disengage before shared component adoption."""
+    snapshot, actor_id = request.state_snapshot, request.actor_id
+    kind = request.payload.intent_type
+    combat = snapshot.combat_state
+    actor = next(actor for actor in snapshot.character_states if actor.entity_id == actor_id)
+    original = combatant(actor)
+    if (
+        combat.ended
+        or combat.initiative_ids[combat.current_turn_index] != actor_id
+        or not actor.action_available
+        or actor_id in combat.dead_ids
+        or not actor.is_alive
+        or actor.hp_current <= 0
+        or result.rng_transition.state_changed
+    ):
+        _invalid("Defensive Action differs from the fixed turn or RNG")
+    paid = original.model_copy(update=ordinary_action_payment(original))
+    if kind == "dash":
+        ledger = combat.movement_ledgers[actor_id]
+        if ledger.active_mode != "walk":
+            _invalid("Dash requires the fixed walking ledger")
+        updated = MovementLedgerState.model_validate(ledger.add_dash().model_dump())
+        remaining = updated.remaining(actor.base_speed)
+        paid = paid.model_copy(update={"movement_remaining": remaining})
+        expected_events = (
+            DashTaken(
+                actor_id=actor_id,
+                budget_consumed="action",
+                doubled_movement_remaining=remaining,
+            ),
+        )
+        expected_types = {delta.ActionBudgetUpdate, delta.MovementLedgerUpdate}
+    else:
+        paid = paid.model_copy(
+            update={"dodging": True} if kind == "dodge" else {"disengaging_this_turn": True}
+        )
+        expected_events = (IntentSubmitted(actor_id=actor_id, intent_type=kind),)
+        expected_types = {delta.ActionBudgetUpdate}
+    operations = result.state_delta.operations
+    if (
+        len(operations) != len(expected_types)
+        or {type(op) for op in operations} != expected_types
+        or tuple(result.proposed_events) != expected_events
+    ):
+        _invalid("Defensive Action proposed an unrelated consequence or event")
+    budget = next(op for op in operations if type(op) is delta.ActionBudgetUpdate)
+    fields = delta.AttackBudgetState.model_fields
+    if (
+        budget.actor_id != actor_id
+        or budget.expected
+        != delta.AttackBudgetState.model_validate(
+            {field: getattr(actor, field) for field in fields}
+        )
+        or budget.value
+        != delta.AttackBudgetState.model_validate({field: getattr(paid, field) for field in fields})
+    ):
+        _invalid("Defensive Action budget differs from the fixed actor")
+    if kind == "dash":
+        movement = next(op for op in operations if type(op) is delta.MovementLedgerUpdate)
+        if (
+            movement.actor_id != actor_id
+            or movement.expected != ledger
+            or movement.value != updated
+        ):
+            _invalid("Dash ledger differs from the fixed movement expenditure")
+    return delta_changes(request, result)
+
+
+def reactive_walk_changes(request, result, loader):
+    """Adopt one previously authorized PC reaction during an NPC's ordinary walk."""
+    snapshot, mover = request.state_snapshot, request.actor_id
+    state = snapshot.combat_state
+    if (
+        len(state.pending_reactions) != 1
+        or not isinstance(
+            state.pending_reactions[0], (OpportunityAttackState, OpportunityDeclineState)
+        )
+        or state.pending_reactions[0].mover_id != mover
+        or mover != state.initiative_ids[state.current_turn_index]
+    ):
+        _invalid("Reactive walk lacks its fixed authorized declaration")
+    declaration = state.pending_reactions[0]
+    owner = declaration.owner_id
+    operations = result.state_delta.operations
+    pending = [op for op in operations if type(op) is delta.PendingReactionUpdate]
+    positions = [op for op in operations if type(op) is delta.PositionUpdate]
+    ledgers = [op for op in operations if type(op) is delta.MovementLedgerUpdate]
+    budgets = [op for op in operations if type(op) is delta.ActionBudgetUpdate]
+    rolls = [event for event in result.proposed_events if event.type == "attack_rolled"]
+    moved = [event for event in result.proposed_events if event.type == "actor_moved"]
+    if (
+        len(pending) > 1
+        or len(positions) > 1
+        or len(ledgers) > 1
+        or len(rolls) > 1
+        or len(moved) > (2 if rolls else 1)
+        or (positions != [] and len(ledgers) != 1)
+        or (positions == [] and ledgers)
+    ):
+        _invalid("Reactive walk proposed duplicate or incomplete movement")
+    fired = bool(rolls)
+    if fired:
+        events = result.proposed_events
+        reaction = IntentSubmitted(actor_id=owner, intent_type="reaction", target_id=mover)
+        lethal = any(
+            type(op) is delta.HPDelta and op.target_id == mover and op.resulting_hp == 0
+            for op in operations
+        )
+        if reaction not in events:
+            _invalid("Reactive route lacks its reaction intent")
+        if len(moved) == 2 and not (
+            events.index(moved[0])
+            < events.index(reaction)
+            < events.index(rolls[0])
+            < events.index(moved[1])
+        ):
+            _invalid("Reactive route segments must bracket the reaction attack")
+        if lethal and any(events.index(event) > events.index(rolls[0]) for event in moved):
+            _invalid("A lethal opportunity attack cannot have a later walk segment")
+        owner_actor = next(actor for actor in snapshot.character_states if actor.entity_id == owner)
+        target = next(actor for actor in snapshot.character_states if actor.entity_id == mover)
+        owner_budgets = [op for op in budgets if op.actor_id == owner]
+        if (
+            not isinstance(declaration, OpportunityAttackState)
+            or len(owner_budgets) != 1
+            or not owner_actor.reaction_available
+            or owner_budgets[0].expected.reaction_available is not True
+            or owner_budgets[0].value
+            != owner_budgets[0].expected.model_copy(update={"reaction_available": False})
+            or not pending
+            or not result.rng_transition.state_changed
+            or rolls[0].attacker_id != owner
+            or rolls[0].target_id != mover
+            or not rolls[0].is_opportunity_attack
+            or sum(
+                event == IntentSubmitted(actor_id=owner, intent_type="reaction", target_id=mover)
+                for event in result.proposed_events
+            )
+            != 1
+            or result.proposed_events.index(rolls[0])
+            <= result.proposed_events.index(
+                IntentSubmitted(actor_id=owner, intent_type="reaction", target_id=mover)
+            )
+        ):
+            _invalid("Opportunity attack differs from the approved reactor and payment")
+        validate_damage_result(
+            request,
+            result,
+            target,
+            source_id=declaration.weapon_id,
+            is_crit=rolls[0].is_crit,
+            actor_id=owner,
+        )
+    elif result.rng_transition.state_changed or any(op.actor_id == owner for op in budgets):
+        _invalid("Untriggered reaction cannot pay or draw")
+    if pending:
+        update = pending[0]
+        if (
+            update.combat_id != state.combat_id
+            or update.owner_id != owner
+            or update.expected != tuple(state.pending_reactions)
+            or update.value
+        ):
+            _invalid("Reaction consumption differs from the fixed declaration")
+    if bool(pending) != (fired or isinstance(declaration, OpportunityDeclineState)):
+        _invalid("Reaction decision was not consumed at its walk boundary")
+    walk_changes = ()
+    if positions:
+        mover_budget = [op for op in budgets if op.actor_id == mover]
+        if len(mover_budget) != 1:
+            _invalid("Reactive walk lacks the mover's guarded expenditure")
+        if fired:
+            walk_changes, speed = reactive_walk_route_changes(
+                request, result, positions[0], ledgers[0], moved, loader=loader
+            )
+            if not lethal and positions[0].value != request.payload.target_zone_id:
+                _invalid("Surviving mover must reach the requested destination")
+            if mover_budget[0].expected.movement_remaining != next(
+                actor.movement_remaining
+                for actor in snapshot.character_states
+                if actor.entity_id == mover
+            ):
+                _invalid("Reactive mover budget has a stale pre-value")
+            if not any(
+                type(op) is delta.HPDelta and op.target_id == mover and op.resulting_hp == 0
+                for op in operations
+            ) and mover_budget[0].value.movement_remaining != ledgers[0].value.remaining(speed):
+                _invalid("Reactive mover budget differs from completed walk")
+        else:
+            walk_ops = (positions[0], ledgers[0], mover_budget[0])
+            plain_snapshot = snapshot.model_copy(
+                update={"combat_state": state.model_copy(update={"pending_reactions": []})}
+            )
+            plain_request = request.model_copy(update={"state_snapshot": plain_snapshot})
+            plain_result = result.model_copy(
+                update={
+                    "state_delta": result.state_delta.model_copy(update={"operations": walk_ops}),
+                    "proposed_events": tuple(moved),
+                    "rng_transition": result.rng_transition.model_copy(
+                        update={"state_changed": False}
+                    ),
+                }
+            )
+            walk_changes = ordinary_walk_changes(plain_request, plain_result, loader=loader)
+    elif moved:
+        _invalid("Reaction-stopped walk cannot emit a movement event")
+    if not positions and not fired:
+        _invalid("Untriggered walk must change position")
+    if (
+        not positions
+        and fired
+        and not any(
+            type(op) is delta.HPDelta and op.target_id == mover and op.resulting_hp == 0
+            for op in operations
+        )
+    ):
+        _invalid("Only a lethal reaction may stop this bounded walk")
+    other_ops = tuple(
+        op
+        for op in operations
+        if type(op)
+        not in {delta.PendingReactionUpdate, delta.PositionUpdate, delta.MovementLedgerUpdate}
+        and not (
+            positions
+            and not fired
+            and type(op) is delta.ActionBudgetUpdate
+            and op.actor_id == mover
+        )
+    )
+    other_result = result.model_copy(
+        update={"state_delta": result.state_delta.model_copy(update={"operations": other_ops})}
+    )
+    other_changes = (
+        delta_changes(
+            request,
+            other_result,
+            reaction_owner=owner if fired else None,
+            reaction_target=mover if fired else None,
+        )
+        if other_ops
+        else ()
+    )
+    return (
+        *other_changes,
+        *walk_changes,
+        *(("combat", state.combat_id, "pending_reactions", []) for _ in pending),
+    )
+
+
+def opportunity_pass_changes(request, result):
+    """Let an unused declaration expire at its owner's next TurnStart on Pass."""
+    state = request.state_snapshot.combat_state
+    declaration = state.pending_reactions[0]
+    pending = [
+        op for op in result.state_delta.operations if type(op) is delta.PendingReactionUpdate
+    ]
+    if len(pending) != 1 or (
+        pending[0].combat_id != state.combat_id
+        or pending[0].owner_id != declaration.owner_id
+        or pending[0].expected != tuple(state.pending_reactions)
+        or pending[0].value
+    ):
+        _invalid("Passing over the reaction owner must expire its decision")
+    plain = result.model_copy(
+        update={
+            "state_delta": result.state_delta.model_copy(
+                update={
+                    "operations": tuple(
+                        op
+                        for op in result.state_delta.operations
+                        if type(op) is not delta.PendingReactionUpdate
+                    )
+                }
+            )
+        }
+    )
+    _turn_intent_scope(request, plain)
+    return (*delta_changes(request, plain), ("combat", state.combat_id, "pending_reactions", []))
+
+
 def validate_dnd_result(request, result, *, loader=None, preverified_spell_save=False):
     """Restore an RE result and validate request, binding, read version and Delta.
 
@@ -1397,6 +1695,10 @@ def validate_dnd_result(request, result, *, loader=None, preverified_spell_save=
         if hp_changes != ([actor.hp_current + expected_healing] if expected_healing else []):
             _invalid("Potion healing differs from the rolled event")
         return result, changes
+    if request.operation_kind == "combat.intent" and getattr(
+        request.payload, "intent_type", None
+    ) in {"dash", "dodge", "disengage"}:
+        return result, ordinary_defense_action_changes(request, result)
     if getattr(request.payload, "intent_type", None) == "cast_spell":
         if (graph := _concentration_cast_graph(request, result)) is not None:
             return result, _concentration_cast_changes(request, result, graph)
@@ -1419,10 +1721,23 @@ def validate_dnd_result(request, result, *, loader=None, preverified_spell_save=
         return result, concentration_release_changes(request, result)
     if (
         request.operation_kind == "combat.intent"
+        and request.payload.intent_type == "pass"
+        and len(request.state_snapshot.combat_state.pending_reactions) == 1
+        and isinstance(
+            request.state_snapshot.combat_state.pending_reactions[0],
+            (OpportunityAttackState, OpportunityDeclineState),
+        )
+    ):
+        return result, opportunity_pass_changes(request, result)
+    if (
+        request.operation_kind == "combat.intent"
         and request.payload.intent_type in {"attack", "pass"}
         and (
             request.state_snapshot.combat_state.reaction_effects_pending_expiry
-            or request.state_snapshot.combat_state.pending_reactions
+            or any(
+                not isinstance(pending, (OpportunityAttackState, OpportunityDeclineState))
+                for pending in request.state_snapshot.combat_state.pending_reactions
+            )
         )
     ):
         if (
@@ -1488,6 +1803,8 @@ def validate_dnd_result(request, result, *, loader=None, preverified_spell_save=
     ):
         return result, hold_effect_changes(request, result, source)
     if request.operation_kind == "combat.intent" and request.payload.intent_type == "move":
+        if request.state_snapshot.combat_state.pending_reactions:
+            return result, reactive_walk_changes(request, result, loader)
         return result, ordinary_walk_changes(request, result, loader=loader)
     if (
         request.operation_kind == "combat.intent"
@@ -2076,7 +2393,16 @@ class RulesAdapter:
                 return "spell.capability"
             return None
         if payload.intent_type == "move":
-            if payload.source_id not in (None, actor_id) or combat.pending_reactions:
+            if payload.source_id not in (None, actor_id):
+                return "intent.capability"
+            if combat.pending_reactions and (
+                len(combat.pending_reactions) != 1
+                or not isinstance(
+                    combat.pending_reactions[0],
+                    (OpportunityAttackState, OpportunityDeclineState),
+                )
+                or combat.pending_reactions[0].mover_id != actor_id
+            ):
                 return "intent.capability"
             if any(
                 combat.actor_zone[identity] == payload.target_zone_id
@@ -2086,9 +2412,26 @@ class RulesAdapter:
                 # still holds their position and its World grid requires one actor per cell.
                 return "position_conflict"
             return None
+        if payload.intent_type in {"dash", "dodge", "disengage"}:
+            if payload != type(payload)(
+                intent_type=payload.intent_type, source_id=payload.source_id
+            ) or payload.source_id not in (None, actor_id):
+                return "intent.capability"
+            return None
         if payload.intent_type != "attack":
             if payload.intent_type == "pass":
                 basic = type(payload)(intent_type="pass", source_id=payload.source_id)
+                if (
+                    payload == basic
+                    and payload.source_id in (None, actor_id)
+                    and len(combat.pending_reactions) == 1
+                    and isinstance(
+                        combat.pending_reactions[0],
+                        (OpportunityAttackState, OpportunityDeclineState),
+                    )
+                    and not _has_combat_effects(snapshot)
+                ):
+                    return None
                 if (
                     payload == basic
                     and payload.source_id in (None, actor_id)

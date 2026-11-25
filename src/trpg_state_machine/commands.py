@@ -42,6 +42,7 @@ from .choice_models import (
     PendingChoice,
 )
 from .combat import InitializeCombat, StartCombat, validate_start_combat
+from .combat_opportunity import CombatOpportunity, validate_opportunity
 from .combat_withdrawal import CombatWithdraw, validate_withdrawal
 from .environment_commands import (
     ENVIRONMENT_COMMANDS,
@@ -119,6 +120,7 @@ OPERATIONS = {
     "combat.close": CombatClosePayload,
     "combat.intent": CombatIntentPayload,
     "combat.withdraw": CombatWithdraw,
+    "combat.opportunity": CombatOpportunity,
     "combat.item": ItemUsePayload,
     "world.use_item": ExplorationItemUsePayload,
     "world.cast_spell": ExplorationSpellCastPayload,
@@ -201,6 +203,7 @@ class TypedCommand:
         | StartCombat
         | CombatIntentPayload
         | CombatWithdraw
+        | CombatOpportunity
         | ItemUsePayload
         | ExplorationItemUsePayload
         | ExplorationEnvironmentalSpellCastPayload
@@ -387,6 +390,9 @@ def validate_command(command: TypedCommand) -> None:
         return
     if operation_type is CombatWithdraw:
         validate_withdrawal(command.payload)
+        return
+    if operation_type is CombatOpportunity:
+        validate_opportunity(command.payload)
         return
     if operation_type is DropWorldConcentration:
         return
@@ -958,6 +964,8 @@ class CommandRuntime:
                         events = self._initialize_combat(row, package, prepared)
                     elif type(command.payload) is StartCombat:
                         events = self._combat.start(row, package, command)
+                    elif type(command.payload) is CombatOpportunity:
+                        events = self._combat.declare_opportunity(row, package, command)
                     else:
                         events = self._operate(
                             row,

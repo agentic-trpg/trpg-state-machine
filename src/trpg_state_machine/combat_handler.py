@@ -260,6 +260,88 @@ class CombatHandler:
             )
         ]
 
+    def declare_opportunity(self, row, package, command):
+        """Persist one PC-owned OA decision before the named NPC's movement."""
+        from dnd5e_engine.evaluation_opportunity import opportunity_dependencies
+        from dnd5e_engine.evaluation_reaction_state import (
+            OpportunityAttackState,
+            OpportunityDeclineState,
+        )
+        from dnd5e_engine.evaluation_state import CombatSnapshot
+
+        self.store.require_write()
+        sid = row["session_id"]
+        if command.actor_id != row["pc_actor_id"]:
+            raise StateMachineError("unauthorized", "Only the selected PC can decide this reaction")
+        combat_row = self._conn.execute(
+            "SELECT process_id FROM combats WHERE session_id=?", (sid,)
+        ).fetchone()
+        if combat_row is None:
+            raise StateMachineError("combat_not_initialized", "No active encounter")
+        if combat_row[0] != process_id():
+            raise StateMachineError("combat_unrestorable", "Combat belongs to another process")
+        self.rules._verify_dnd_binding(package, row)
+        snapshot = self.rules._combat_snapshot(row)
+        state = snapshot.combat_state
+        mover = command.payload.mover_id
+        if (
+            state.ended
+            or state.pending_reactions
+            or mover == command.actor_id
+            or mover != state.initiative_ids[state.current_turn_index]
+            or mover not in state.encounter_ids
+            or command.actor_id not in state.party_ids
+        ):
+            raise StateMachineError("combat.reaction_unavailable", "No open NPC movement window")
+        actor = next(a for a in snapshot.character_states if a.entity_id == command.actor_id)
+        if (
+            command.actor_id in state.dead_ids
+            or not actor.is_alive
+            or actor.hp_current <= 0
+            or not actor.reaction_available
+        ):
+            raise StateMachineError("combat.reaction_unavailable", "PC cannot react")
+        common = dict(
+            owner_id=command.actor_id,
+            mover_id=mover,
+            trigger="voluntary_leave_reach",
+            expiry="owner_next_turn_start",
+        )
+        if command.payload.accept:
+            weapon = actor.weapon_in_hands
+            if weapon is None or state.opportunity_attack_weapons.get(command.actor_id) != weapon:
+                raise StateMachineError("combat.reaction_weapon", "No selected held melee weapon")
+            declaration = OpportunityAttackState(
+                source_kind="opportunity_attack",
+                weapon_id=weapon,
+                two_handed=actor.weapon_grip == "two_handed",
+                **common,
+            )
+        else:
+            declaration = OpportunityDeclineState(source_kind="opportunity_decline", **common)
+        candidate = CombatSnapshot.model_validate_json(
+            snapshot.model_copy(
+                update={
+                    "combat_state": state.model_copy(update={"pending_reactions": [declaration]})
+                }
+            ).model_dump_json()
+        )
+        _, failure = opportunity_dependencies(candidate, self.rules.loader)
+        if failure:
+            raise StateMachineError("combat.reaction_unavailable", failure)
+        self.records.update_rule_state(
+            sid, "pending_reactions", [declaration.model_dump(mode="json")]
+        )
+        return [
+            self.capture._capture_event(
+                sid,
+                package,
+                "combat.opportunity_declared",
+                {"owner_id": command.actor_id, "mover_id": mover, "accept": command.payload.accept},
+                phase="combat.before_movement",
+            )
+        ]
+
     @staticmethod
     def _opening_cells(grid, payload, positions):
         """Validate an explicit region or clip a thirteen-by-thirteen default to playable cells."""
