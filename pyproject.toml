@@ -10,8 +10,8 @@ requires-python = ">=3.12"
 dependencies = ["PyYAML>=6.0.2,<7", "dnd5e-engine==0.6.0", "dnd5e-srd-data==0.6.0"]
 
 [tool.uv.sources]
-dnd5e-engine = { git = "https://github.com/agentic-trpg/trpg-rules-engine.git", rev = "662ca2aad306412f55c3f4a09a546187b0976d66", subdirectory = "packages/dnd5e-engine" }
-dnd5e-srd-data = { git = "https://github.com/agentic-trpg/trpg-rules-engine.git", rev = "662ca2aad306412f55c3f4a09a546187b0976d66", subdirectory = "packages/dnd5e-srd-data" }
+dnd5e-engine = { git = "https://github.com/agentic-trpg/trpg-rules-engine.git", rev = "204a4b2e4db4aae4edcaf455f7996a81cce98541", subdirectory = "packages/dnd5e-engine" }
+dnd5e-srd-data = { git = "https://github.com/agentic-trpg/trpg-rules-engine.git", rev = "204a4b2e4db4aae4edcaf455f7996a81cce98541", subdirectory = "packages/dnd5e-srd-data" }
 
 [dependency-groups]
 dev = ["pytest>=8.3,<10", "ruff>=0.9,<1"]

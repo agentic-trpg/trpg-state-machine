@@ -3,8 +3,13 @@
 from dataclasses import dataclass
 from itertools import pairwise
 
-from dnd5e_engine.evaluation_delta import ActionBudgetUpdate, MovementLedgerUpdate
+from dnd5e_engine.evaluation_delta import (
+    ActionBudgetUpdate,
+    MovementLedgerUpdate,
+    PendingReactionUpdate,
+)
 from dnd5e_engine.evaluation_opportunity import opportunity_dependencies, step_reactors
+from dnd5e_engine.evaluation_reaction_state import OpportunityDeclineState
 from dnd5e_engine.spatial import GridTopology
 from dnd5e_engine.specs import GridScene
 
@@ -143,7 +148,7 @@ def require_walk_bystander_clearance(world, sid, snapshot, position):
         raise StateMachineError("movement.capability", "Route crosses a bystander's cell")
 
 
-def check_withdrawal(snapshot, region, position, passage):
+def check_withdrawal(snapshot, region, position, passage, move_result):
     """Require the chosen actual crossing and a compatible combat effect lifecycle."""
     if (
         position is None
@@ -156,17 +161,38 @@ def check_withdrawal(snapshot, region, position, passage):
         )
     ):
         raise StateMachineError("combat.withdrawal_route", "Expected one paid step out of combat")
-    require_withdrawable_effects(snapshot)
+    require_withdrawable_effects(
+        snapshot, consumes_decline=_walk_consumes_decline(snapshot, move_result, position)
+    )
 
 
-def require_withdrawable_effects(snapshot):
-    """Preserve effects whose encounter clocks cannot continue in exploration."""
+def _walk_consumes_decline(snapshot, move_result, position):
+    """Match a validated walk's reaction clear to its fixed decline declaration."""
+    combat = snapshot.combat_state
+    pending = combat.pending_reactions
+    return (
+        len(pending) == 1
+        and isinstance(pending[0], OpportunityDeclineState)
+        and pending[0].mover_id == position.actor_id
+        and any(
+            type(op) is PendingReactionUpdate
+            and op.combat_id == combat.combat_id
+            and op.owner_id == pending[0].owner_id
+            and op.expected == tuple(pending)
+            and not op.value
+            for op in move_result.state_delta.operations
+        )
+    )
+
+
+def require_withdrawable_effects(snapshot, *, consumes_decline=False):
+    """Preserve live encounter clocks, accounting for any verified decline clear."""
     combat = snapshot.combat_state
     # RUO-81-F1: combat-clock transitions need the disposition agreed in RUO-45.
     if (
         combat.effect_lifecycles
         or any(combat.concentration_rounds_remaining.values())
-        or combat.pending_reactions
+        or (combat.pending_reactions and not consumes_decline)
         or combat.reaction_effects_pending_expiry
     ):
         raise StateMachineError(
@@ -216,7 +242,7 @@ def withdrawal_continues(snapshot, actor_id):
 
 
 def pass_snapshot_after_walk(snapshot, move_result, position):
-    """Project the validated paid movement into the detached ordinary Pass input."""
+    """Project the validated paid movement and decline clear into detached Pass input."""
     budget = next(
         op.value for op in move_result.state_delta.operations if type(op) is ActionBudgetUpdate
     )
@@ -237,6 +263,11 @@ def pass_snapshot_after_walk(snapshot, move_result, position):
                 update={
                     "actor_zone": {**combat.actor_zone, actor_id: position.value},
                     "movement_ledgers": {**combat.movement_ledgers, actor_id: ledger},
+                    "pending_reactions": (
+                        []
+                        if _walk_consumes_decline(snapshot, move_result, position)
+                        else combat.pending_reactions
+                    ),
                 }
             ),
         }

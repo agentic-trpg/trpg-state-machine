@@ -16,6 +16,7 @@ from test_session_time_coordination import Clock, Scheduler, start, sync
 from test_timed_spell_cast import timed_spell_world as timed_spell_world
 
 from trpg_state_machine import (
+    CombatOpportunity,
     CombatWithdraw,
     StartCombat,
     StateMachine,
@@ -461,6 +462,115 @@ def test_npc_exit_hands_off_then_last_enemy_closes_without_rewards(tmp_path, pac
             e.payload.get("engine_event", {}).get("type") == "combat_ended"
             for e in command_events(sm, sid, package, context, last_receipt)
         )
+
+
+@pytest.mark.parametrize(
+    ("third", "accept"),
+    [(False, False), (True, False), (True, True)],
+    ids=["declined-ends", "declined-handoff", "accepted-blocks"],
+)
+def test_fixed_withdrawal_respects_pc_opportunity_decision(
+    tmp_path, package_data, context, third, accept
+):
+    package, assets = withdrawal_package(
+        package_data, npc_at_reach=True, reviewed_reactions=True, third=third
+    )
+    context = replace(context, can_start_combat=True)
+    with StateMachine(tmp_path / "withdrawal-reaction.db", dnd_loader=assets) as sm:
+        sid = create(sm, package, context)
+        pc = start_encounter(
+            sm,
+            sid,
+            package,
+            context,
+            area=("0,0", "1,0", "5,3") if third else ("0,0", "1,0"),
+            enemies=(NPC, OTHER) if third else (NPC,),
+            npc_first=True,
+        )
+        if third:
+            pass_turn(sm, sid, package, context, "other-ends")
+        decision = command(
+            sm,
+            sid,
+            package,
+            context,
+            "reaction-decision",
+            "combat.opportunity",
+            CombatOpportunity(NPC, accept),
+        )
+        assert sm.submit_command(decision, package, context=context).status == "committed"
+        before = sm.read_combat_snapshot(sid, package, context=context)
+        rng = sm.read_rng_context(sid, package, context=context)
+        position = sm.read_actor_position(sid, NPC, package, context=context)
+        attempt = leave(sm, sid, package, context, "npc-exits", "1,0", target="2,0", actor=NPC)
+        assert len(before.combat_state.pending_reactions) == 1
+
+        if third and not accept:
+            combat_query = "SELECT state_json FROM combats WHERE session_id=?"
+            persisted = sm._conn.execute(combat_query, (sid,)).fetchone()[0]
+            sm._conn.execute(
+                "CREATE TEMP TRIGGER fail_withdrawal_receipt BEFORE INSERT ON command_receipts "
+                "WHEN NEW.command_id='npc-exits' "
+                "AND json_extract(NEW.receipt_json, '$.status') = 'committed' "
+                "BEGIN SELECT RAISE(ABORT,'injected withdrawal receipt failure'); END"
+            )
+            try:
+                with pytest.raises(StateMachineError, match="SQLite transaction failed") as exc:
+                    sm.submit_command(attempt, package, context=context)
+                assert "injected withdrawal receipt failure" in str(exc.value.__cause__)
+                assert sm.read_combat_snapshot(sid, package, context=context) == before
+                assert sm.read_rng_context(sid, package, context=context) == rng
+                assert sm.read_actor_position(sid, NPC, package, context=context) == position
+                assert sm._conn.execute(combat_query, (sid,)).fetchone()[0] == persisted
+            finally:
+                sm._conn.execute("DROP TRIGGER fail_withdrawal_receipt")
+
+        receipt = sm.submit_command(attempt, package, context=context)
+        if accept:
+            assert (receipt.status, receipt.error_code) == (
+                "rejected",
+                "combat.withdrawal_effects_unsupported",
+            )
+            assert not receipt.event_seqs
+            assert sm.read_combat_snapshot(sid, package, context=context) == before
+            assert sm.read_rng_context(sid, package, context=context) == rng
+            assert sm.read_actor_position(sid, NPC, package, context=context) == position
+            return
+
+        assert receipt.status == "committed", receipt
+        after = sm.read_combat_snapshot(sid, package, context=context)
+        combat = after.combat_state
+        assert not combat.pending_reactions
+        assert next(
+            actor for actor in after.character_states if actor.entity_id == pc
+        ).reaction_available
+        assert sm.read_rng_context(sid, package, context=context) == rng
+        assert sm.read_actor_position(sid, NPC, package, context=context).cell == "2,0"
+        events = command_events(sm, sid, package, context, receipt)
+        engine_events = [
+            event.payload["engine_event"]
+            for event in events
+            if event.event_type == "combat.engine_event"
+        ]
+        assert [
+            event["movement_cost_ft"] for event in engine_events if event["type"] == "actor_moved"
+        ] == [5]
+        assert not any(event["type"] == "attack_rolled" for event in engine_events)
+        assert [
+            event["actor_id"] for event in engine_events if event["type"] == "turn_started"
+        ] == ([pc] if third else [])
+        assert any(
+            event.event_type == "combat.withdrawn" and event.payload["encounter_ended"] is not third
+            for event in events
+        )
+        if third:
+            assert not combat.ended and combat.initiative_ids == (OTHER, pc)
+            assert combat.initiative_ids[combat.current_turn_index] == pc
+            assert NPC not in combat.movement_ledgers
+        else:
+            assert combat.ended and combat.departed_actor_id == NPC
+        assert sm.submit_command(attempt, package, context=context) == receipt
+        assert sm.read_combat_snapshot(sid, package, context=context) == after
 
 
 def test_distance_withdrawal_requires_nearest_hostile_distance_and_spends_no_move(

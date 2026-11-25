@@ -238,7 +238,7 @@ class RuleExecution:
     ):
         """Evaluate the leaving actor's normal handoff outside the shared write lock."""
         position = walking_position(changes)
-        check_withdrawal(request.state_snapshot, region, position, passage)
+        check_withdrawal(request.state_snapshot, region, position, passage, result)
         if not withdrawal_continues(request.state_snapshot, command.actor_id):
             return None
         with self.store.transaction():
@@ -1840,7 +1840,7 @@ class RuleExecution:
                                 live_policy,
                             ) != (rule_command.payload.target_zone_id, passage):
                                 raise StateMachineError("version_conflict", "Exit route changed")
-                            check_withdrawal(snapshot, region, position, passage)
+                            check_withdrawal(snapshot, region, position, passage, result)
                             withdrew = True
                         elif region is not None and crosses_boundary(region, position):
                             raise StateMachineError(
