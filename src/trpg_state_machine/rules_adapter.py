@@ -5,7 +5,7 @@ import json
 from dataclasses import asdict
 
 from dnd5e_engine import evaluation_delta as delta
-from dnd5e_engine.damage_rules import damage_balances
+from dnd5e_engine.damage_rules import damage_balances, with_event_condition
 from dnd5e_engine.death_saves import DeathSaveState
 from dnd5e_engine.evaluation import evaluate
 from dnd5e_engine.evaluation_actor import combatant
@@ -13,6 +13,11 @@ from dnd5e_engine.evaluation_availability import (
     ActionAvailabilityRequest,
     ActionAvailabilityResult,
     query_action_availability,
+)
+from dnd5e_engine.evaluation_burning import (
+    BURNING_DAMAGE_SOURCE,
+    BURNING_EFFECT_ID,
+    burning_turn_input,
 )
 from dnd5e_engine.evaluation_check_facts import CreatureSightFact
 from dnd5e_engine.evaluation_checks import check_fact_needs
@@ -88,6 +93,7 @@ from dnd5e_engine.events import (
     DashTaken,
     HealingApplied,
     IntentSubmitted,
+    Unconscious,
 )
 from dnd5e_engine.movement import project_speeds, speed_for_mode
 from dnd5e_engine.rules.conditions import active_condition_names, exhaustion_level_of
@@ -134,6 +140,7 @@ from .haste_adoption import (
     haste_attack_admission,
     haste_cast_admission,
     haste_pass_admission,
+    lethargy_pass_expiry,
 )
 from .package import canonical_json
 from .rest_activity import rest_changes
@@ -214,6 +221,8 @@ def delta_changes(
     reviewed_region_damage=False,
     reaction_owner=None,
     reaction_target=None,
+    turn_damage=None,
+    turn_budget_actors=(),
 ):
     """Check pre-values and ownership for an attack, Pass or narrow potion Delta.
 
@@ -243,9 +252,12 @@ def delta_changes(
     if not 0 <= turn < len(snapshot.combat_state.initiative_ids):
         _invalid("Turn delta is outside the encounter")
     budget_owners = {request.actor_id, snapshot.combat_state.initiative_ids[turn]}
+    budget_owners.update(turn_budget_actors)
     if reaction_owner is not None:
         budget_owners.add(reaction_owner)
-    affected_actors = budget_owners | {reaction_target or request.payload.target_id}
+    damage_source, damage_target = turn_damage or (reaction_owner, reaction_target)
+    declared_target = damage_target or request.payload.target_id
+    affected_actors = budget_owners | {declared_target}
     if effect_operations:
         affected_actors.update(effect.target_id for effect in snapshot.effect_states)
         affected_actors.update(effect_targets)
@@ -358,7 +370,7 @@ def delta_changes(
         if target is not None and (
             target not in actors
             or (
-                target != (reaction_target or request.payload.target_id)
+                target != declared_target
                 and not (
                     type(op) in (delta.DeathStateUpdate, delta.HPDelta, delta.ConditionsUpdate)
                     and target == turn_life_target
@@ -391,13 +403,9 @@ def delta_changes(
         elif turn_life_target is not None and type(op) is delta.DeathLedgerUpdate:
             adopt_death_ledger(snapshot, op, turn_life_target, None, "character", edit)
         elif type(op) in DAMAGE_OPERATIONS:
-            target_kind = (
-                actors.get(reaction_target or request.payload.target_id, {})
-                .get("entity_type", "")
-                .lower()
-            )
+            target_kind = actors.get(declared_target, {}).get("entity_type", "").lower()
             adopt_damage_operation(
-                request, target_kind, op, edit, target_id=reaction_target, source_id=reaction_owner
+                request, target_kind, op, edit, target_id=damage_target, source_id=damage_source
             )
         elif type(op) in (delta.ActionBudgetUpdate, delta.TurnUpdate):
             if item_use and type(op) is delta.ActionBudgetUpdate:
@@ -572,41 +580,53 @@ def _dying_pass_actor(snapshot, actor_id):
     return None
 
 
-def _turn_handoff(combat, actor_id, turn, events):
-    """Bind a submitted turn transition and ordered boundary events to the fixed roster."""
-    next_turn = next_turn_index(
-        combat.initiative_ids, combat.dead_ids, combat.current_turn_index + 1
-    )
-    if next_turn is None:
-        _invalid("Turn lacks a living next turn")
-    index, rollover = next_turn
-    next_actor = combat.initiative_ids[index]
-    new_round = combat.round_number + int(rollover)
+def _turn_handoff(combat, actor_id, turn, events, *, skipped_actor=None, newly_dead=()):
+    """Bind the handoff and any verified automatic skip to the fixed initiative."""
+    order = combat.initiative_ids
+    index = combat.current_turn_index
+    round_number = combat.round_number
+    expected_events = []
+    closing = (actor_id,) if skipped_actor is None else (actor_id, skipped_actor)
+    for step, outgoing in enumerate(closing):
+        if order[index] != outgoing:
+            _invalid("Turn end differs from the fixed initiative handoff")
+        last_ended = (round_number, outgoing)
+        expected_events.extend(
+            [
+                ("turn_phase", outgoing, "turn_end", round_number),
+                ("turn_ended", outgoing, None, None),
+            ]
+        )
+        dead = combat.dead_ids | set(newly_dead) if step else combat.dead_ids
+        next_turn = next_turn_index(order, dead, index + 1)
+        if next_turn is None:
+            _invalid("Turn lacks a living next turn")
+        index, rollover = next_turn
+        round_number += int(rollover)
+        if rollover:
+            expected_events.extend(
+                [
+                    ("round_started", None, None, round_number),
+                    ("turn_phase", None, "round_start", round_number),
+                ]
+            )
+        expected_events.extend(
+            [
+                ("turn_started", order[index], None, None),
+                ("turn_phase", order[index], "turn_start", round_number),
+            ]
+        )
+
     if (
         turn.value.current_turn_index != index
-        or turn.value.round_number != new_round
-        or turn.value.turn_serial != combat.turn_serial + 1
-        or turn.value.last_ended_turn != (combat.round_number, actor_id)
+        or turn.value.round_number != round_number
+        or turn.value.turn_serial != combat.turn_serial + len(closing)
+        or turn.value.last_ended_turn != last_ended
         or turn.value.ended != combat.ended
         or turn.value.departed_actor_id != combat.departed_actor_id
         or turn.value.monster_turn_start_done != combat.monster_turn_start_done
     ):
         _invalid("Turn does not match the fixed initiative handoff")
-    expected_events = [("turn_phase", actor_id, "turn_end", combat.round_number)]
-    expected_events.append(("turn_ended", actor_id, None, None))
-    if rollover:
-        expected_events.extend(
-            [
-                ("round_started", None, None, new_round),
-                ("turn_phase", None, "round_start", new_round),
-            ]
-        )
-    expected_events.extend(
-        [
-            ("turn_started", next_actor, None, None),
-            ("turn_phase", next_actor, "turn_start", new_round),
-        ]
-    )
     if [
         (
             event.type,
@@ -617,7 +637,7 @@ def _turn_handoff(combat, actor_id, turn, events):
         for event in events
     ] != expected_events:
         _invalid("Turn lacks matching turn handoff events")
-    return next_actor
+    return order[index]
 
 
 def _turn_intent_scope(
@@ -628,6 +648,9 @@ def _turn_intent_scope(
     condition_changes=None,
     effect_movement=None,
     effect_speed=haste_speed,
+    skipped_actor=None,
+    newly_dead=(),
+    start_damage=False,
 ):
     """Validate cast payment or explicit Pass handoff against the fixed turn."""
     snapshot = request.state_snapshot
@@ -659,6 +682,7 @@ def _turn_intent_scope(
     turn_events = [event for event in result.proposed_events if event.type in _TURN_EVENTS]
     if (
         not cast
+        and not start_damage
         and outgoing.hp_current == 0
         and (
             result.rng_transition.state_changed
@@ -687,16 +711,27 @@ def _turn_intent_scope(
 
     ledgers = [op for op in operations if type(op) is delta.MovementLedgerUpdate]
     if advances:
-        next_actor = _turn_handoff(combat, actor_id, turns[0], turn_events)
+        _turn_handoff(
+            combat,
+            actor_id,
+            turns[0],
+            turn_events,
+            skipped_actor=skipped_actor,
+            newly_dead=newly_dead,
+        )
+        starters = {event.actor_id for event in turn_events if event.type == "turn_started"}
         fresh = MovementLedgerState(spent_ft=0, distance_ft=0, active_mode="walk", dash_count=0)
-        old_ledger = combat.movement_ledgers[next_actor]
-        if [(op.actor_id, op.value) for op in ledgers] != (
-            [(next_actor, fresh)] if old_ledger != fresh else []
+        expected_ledgers = {
+            identity: fresh for identity in starters if combat.movement_ledgers[identity] != fresh
+        }
+        if (
+            len(ledgers) != len(expected_ledgers)
+            or {op.actor_id: op.value for op in ledgers} != expected_ledgers
         ):
             _invalid("Cast or Pass changed movement outside the next turn reset")
         for identity, actor in actors.items():
             ledger = combat.movement_ledgers[identity]
-            if identity == next_actor:
+            if identity in starters:
                 actor = reset_turn_budget(actor, effective_speed=speed(actor, "walk"), attacks=1)
             else:
                 actor = actor.model_copy(
@@ -732,6 +767,7 @@ def _turn_intent_scope(
             expected_budgets[identity] = values
     if proposed_budgets != expected_budgets:
         _invalid("Cast or Pass changed budgets outside Action payment and turn reset")
+    return tuple(event.actor_id for event in turn_events if event.type == "turn_started")
 
 
 def _death_save_evidence(actor, events, life):
@@ -1295,6 +1331,158 @@ def haste_effect_changes(request, result):
     return (*base, *adopted)
 
 
+def _turn_phase_payloads(events, actor_id, serial):
+    """Collect rule consequences and clock inputs at the emitted turn phases."""
+    if not events or events[0] != IntentSubmitted(actor_id=actor_id, intent_type="pass"):
+        _invalid("TurnStart damage lacks its authorized Pass")
+    payloads = {}
+    endings = []
+    phase = None
+    for event in events[1:]:
+        if event.type == "turn_phase":
+            phase = (event.actor_id, event.phase, event.round_number)
+            if phase in payloads:
+                _invalid("Pass repeated a turn phase")
+            payloads[phase] = []
+            if event.phase == "turn_start":
+                serial += 1
+            elif event.phase == "turn_end":
+                endings.append((event.actor_id, event.round_number, serial))
+        elif event.type in _TURN_EVENTS:
+            phase = None
+        elif phase is None:
+            _invalid("Pass proposed a rule consequence outside a turn phase")
+        else:
+            payloads[phase].append(event)
+    return payloads, endings
+
+
+def _burning_pass_changes(request, result, plain, target_id, source_id):
+    """Bind the reviewed start damage and any follow-up TurnEnd to one Pass."""
+    snapshot = request.state_snapshot
+    combat = snapshot.combat_state
+    events = result.proposed_events
+    phases, endings = _turn_phase_payloads(events, request.actor_id, combat.turn_serial)
+    starts = [phase for phase in phases if phase[1] == "turn_start"]
+    if starts and starts[0][0] != target_id:
+        plain_request = request.model_copy(update={"state_snapshot": plain})
+        if has_haste_effects(plain):
+            return haste_effect_changes(plain_request, result)
+        if (dying := _dying_pass_actor(plain, request.actor_id)) is not None:
+            return _dying_pass_changes(plain_request, result, dying)
+        _turn_intent_scope(plain_request, result)
+        if any(phases.values()) or result.rng_transition.state_changed:
+            _invalid("Pass before the Burning actor proposed unexpected rule consequences")
+        return delta_changes(plain_request, result)
+    if not starts or not result.rng_transition.state_changed:
+        _invalid("Burning requires its target's TurnStart and a resolved damage die")
+
+    entrant = next(a for a in snapshot.character_states if a.entity_id == target_id)
+    hp, damage_ops, instance = damage_result_balances(
+        request, result, entrant, source_id=BURNING_DAMAGE_SOURCE, is_crit=False, actor_id=source_id
+    )
+    packet = phases.pop(starts[0])
+    if not packet or packet[0].type != "damage_applied" or packet[0].damage_type != "fire":
+        _invalid("Burning damage evidence must begin at the target's TurnStart")
+    dead = damage_ops.get(delta.DeathLedgerUpdate)
+    life = damage_ops.get(delta.DeathStateUpdate)
+    newly_dead = set() if dead is None else dead.dead_ids - dead.expected_dead_ids
+    if dead is not None and (
+        hp > 0
+        or newly_dead != {target_id}
+        or life is None
+        or life.value.is_alive
+        or len(dead.records) != len(dead.expected_records) + 1
+        or len(packet) != 2
+        or packet[1].type != "death"
+        or packet[1].target_id != target_id
+        or packet[1].reason != dead.records[-1].reason
+    ):
+        _invalid("Burning death lacks its matching phase evidence and life state")
+    if life is not None and (
+        life.target_id != target_id
+        or life.value.is_alive == bool(newly_dead)
+        or (not newly_dead and entrant.hp_current > 0)
+    ):
+        _invalid("Burning proposed a life update outside its damaged target")
+    processed = damage_ops.get(delta.ProcessedDamageUpdate)
+    knockout = hp == 0 and entrant.hp_current > 0 and not newly_dead
+    if processed is not None and (
+        hp != 0 or processed.value - processed.expected != {(target_id, instance)}
+    ):
+        _invalid("Burning changed damage history outside this instance")
+    if knockout and processed is None:
+        _invalid("A Burning knockout must record its zero-HP damage instance")
+
+    adopted = ()
+    conditions = {}
+    movement = None
+    if plain.effect_states:
+        adopted, conditions, phase, expiry, target, effects = lethargy_pass_expiry(
+            plain, result, endings
+        )
+        movement = (target, effects)
+        if phase is not None and tuple(phases.pop(phase)) != expiry:
+            _invalid("Lethargy lacks ordered expiry evidence at the covered TurnEnd")
+
+    gained_unconscious = knockout and "unconscious" not in active_condition_names(
+        entrant.conditions
+    )
+    condition_events = (
+        (
+            Unconscious(target_id=target_id),
+            ConditionApplied(target_id=target_id, condition="unconscious"),
+        )
+        if gained_unconscious
+        else ()
+    )
+    if not newly_dead and tuple(packet[1:]) != condition_events:
+        _invalid("Burning lacks matching unconsciousness evidence or proposed extra effects")
+    if gained_unconscious:
+        staged = combatant(entrant).model_copy(
+            update={"conditions": list(conditions.get(target_id, entrant.conditions))}
+        )
+        marked = with_event_condition(staged, "unconscious", round_number=starts[0][2])
+        conditions[target_id] = tuple(
+            ConditionRecord.model_validate(c.model_dump()) for c in marked.conditions
+        )
+    if any(phases.values()):
+        _invalid("Pass proposed extra effects outside Burning or the supported TurnEnd")
+    actual_conditions = [
+        (op.target_id, op.value)
+        for op in result.state_delta.operations
+        if type(op) is delta.ConditionsUpdate
+    ]
+    if len(actual_conditions) != len(conditions) or dict(actual_conditions) != conditions:
+        _invalid("Turn conditions differ from the verified damage and expiry")
+
+    skipped = target_id if len(starts) == 2 and hp == 0 else None
+    if hp == 0 and not newly_dead and skipped is None:
+        _invalid("An unconscious Burning entrant cannot keep the turn")
+    operations = (delta.EffectLifecycleUpdate,) if adopted else ()
+    starters = _turn_intent_scope(
+        request,
+        result,
+        effect_operations=(*DAMAGE_OPERATIONS, delta.ConditionsUpdate, *operations),
+        condition_changes=conditions,
+        effect_movement=movement,
+        skipped_actor=skipped,
+        newly_dead=newly_dead,
+        start_damage=True,
+    )
+    return (
+        *delta_changes(
+            request,
+            result,
+            effect_operations=operations,
+            effect_targets=tuple(conditions),
+            turn_damage=(source_id, target_id),
+            turn_budget_actors=starters,
+        ),
+        *adopted,
+    )
+
+
 def ordinary_defense_action_changes(request, result):
     """Guard one Action Dash, Dodge or Disengage before shared component adoption."""
     snapshot, actor_id = request.state_snapshot, request.actor_id
@@ -1719,6 +1907,19 @@ def validate_dnd_result(request, result, *, loader=None, preverified_spell_save=
         and request.payload.intent_type == "drop_concentration"
     ):
         return result, concentration_release_changes(request, result)
+    if (
+        request.operation_kind == "combat.intent"
+        and request.payload.intent_type == "pass"
+        and any(effect.id == BURNING_EFFECT_ID for effect in request.state_snapshot.effect_states)
+    ):
+        if loader is None:
+            _invalid("TurnStart damage requires its bound rules loader")
+        try:
+            plain, sources = burning_turn_input(request.state_snapshot, loader)
+        except ValueError as exc:
+            raise StateMachineError("invalid_rule_result", str(exc)) from exc
+        ((target, source),) = sources.items()
+        return result, _burning_pass_changes(request, result, plain, target, source)
     if (
         request.operation_kind == "combat.intent"
         and request.payload.intent_type == "pass"
@@ -2456,6 +2657,7 @@ class RulesAdapter:
                         or has_haste_effects(snapshot)
                         or has_speed_effects(snapshot)
                         or supports_fixed_combat_regions(snapshot, self.loader)
+                        or any(effect.id == BURNING_EFFECT_ID for effect in snapshot.effect_states)
                     )
                 ):
                     return None

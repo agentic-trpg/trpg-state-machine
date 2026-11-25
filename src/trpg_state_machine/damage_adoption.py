@@ -197,7 +197,8 @@ def adopt_damage_operation(request, target_kind, op, edit, *, target_id=None, so
             )
         edit("combat", combat, "processed_zero_hp_damage_instances", op.expected, op.value)
     elif type(op) is delta.DeathLedgerUpdate:
-        adopt_death_ledger(snapshot, op, target, source, target_kind, edit)
+        killer = source if source != target else None
+        adopt_death_ledger(snapshot, op, target, killer, target_kind, edit)
 
 
 def validate_area_damage(request, result, targets, packets, *, source_id):

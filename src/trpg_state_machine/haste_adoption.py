@@ -428,3 +428,68 @@ def haste_pass_admission(request, result):
         _invalid("Haste Pass effects do not match its ordered TurnEnd evidence")
     after = (effect,) if removed is None else tuple(op.effect for op in follow_ups.values())
     return adopted, {target: pair[1] for target, pair in expected.items()}, effect.target_id, after
+
+
+def lethargy_pass_expiry(snapshot, result, endings):
+    """Verify a standalone Haste follow-up against the actual TurnEnd clock and lineage."""
+    combat = snapshot.combat_state
+    if (
+        len(snapshot.effect_states) != 1
+        or len(combat.effect_lifecycles) != 1
+        or len(combat.conditions_by_effect) != 1
+        or combat.concentration_chain
+    ):
+        _invalid("TurnStart damage requires a standalone Lethargy effect graph")
+    (effect,) = snapshot.effect_states
+    identity = effect_identity(effect)
+    (clock,) = combat.effect_lifecycles
+    (link,) = combat.conditions_by_effect
+    if clock.identity != identity or link.identity != identity:
+        _invalid("Lethargy clock or lineage differs from the fixed effect")
+    phase = next(
+        (
+            (actor, "turn_end", round_number)
+            for actor, round_number, serial in endings
+            if clock.state.expires_at(actor, "end", serial, round_number)
+        ),
+        None,
+    )
+    updates = _indexed_operations(
+        result.state_delta.operations, delta.EffectLifecycleUpdate, lambda op: op.identity
+    )
+    if set(updates) != ({identity} if phase else set()):
+        _invalid("Lethargy expiry does not match its actual TurnEnd")
+    if phase is None:
+        return (), {}, None, (), effect.target_id, (effect,)
+
+    removal = updates[identity]
+    if (
+        removal.combat_id != combat.combat_id
+        or removal.expected_effect != effect
+        or removal.expected_lifecycle != clock
+        or removal.expected_lineage != link
+        or any(value is not None for value in (removal.effect, removal.lifecycle, removal.lineage))
+    ):
+        _invalid("Lethargy expiry rewrites the fixed effect, clock or lineage")
+    actors = {actor.entity_id: actor for actor in snapshot.character_states}
+    conditions, ended, _ = condition_transition(
+        actors, {identity: effect}, {identity: link}, updates, {}
+    )
+    events = (
+        EffectExpired(
+            target_id=effect.target_id, effect_id=effect.id, origin=effect.origin, reason="duration"
+        ),
+        *(
+            ConditionRemoved(target_id=effect.target_id, condition=name)
+            for name in sorted(ended.get(effect.target_id, ()))
+        ),
+    )
+    changes = (("effect_lifecycle", identity, "update", removal),)
+    return (
+        changes,
+        {target: pair[1] for target, pair in conditions.items()},
+        phase,
+        events,
+        effect.target_id,
+        (),
+    )
