@@ -1,5 +1,25 @@
 # Session Management 重构进度
 
+## 2026-11-25 战斗交棒、关闭、移动反应和敌方回合（本地候选）
+
+公开开战后的普通武器攻击、法术、喝药和移动分别支付自身预算，保留当前 Turn。
+普通交棒由显式 Pass 提交。动态开战可以直接以机械胜负关闭，也可在开战时固定
+一个已注册的额外终结条件，由已有关闭入口检查。尚存活的 0 HP 角色按已提交
+的生命状态处理。普通攻击与后续死亡豁免的输入、骰点和事件属于各自的公开命令。
+
+探索普通治疗法术可恢复仍存活的 0 HP 目标并清除适用的濒死状态。公开测试使用
+仍存活的 NPC；同一单玩家会话中的第二施法者给 PC 治疗尚未通过该入口验收。
+受控敌方回合采用已提交的进攻或留守 Goal，通过现有命令提议合法移动、攻击、
+显式 Pass，并支持回执重放。
+
+Dash、Dodge、Disengage 有真实动作与后续效果用例。首个借机攻击切片由 PC 在
+NPC 回合内预先声明自己的反应，绑定 RE 决定是否触发、实际伤害及移动路径。
+固定战区撤离的复杂移动反应、RUO-45 的跨轮效果到期和完整 Turn 阶段结算仍单独跟踪。
+
+[公开开战和交棒](../tests/test_combat_turn_flow.py) · [药水](../tests/test_combat_healing_potion.py) ·
+[配置终结](../tests/test_combat_end_condition.py) · [探索治疗](../tests/test_exploration_cure_wounds.py) ·
+[移动反应](../tests/test_combat_actions.py) · [敌方回合](../tests/test_npc_combat_policy.py)
+
 ## 2026-11-20 专注者降到 0 HP 与战斗关闭（候选）
 
 公开武器攻击可采用将正在维持受支持 Hold Person 专注组的 PC 打到 0 HP 的结果。

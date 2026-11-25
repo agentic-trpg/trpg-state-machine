@@ -187,10 +187,8 @@ def test_actual_positions_are_read_and_unknown_position_is_never_reset(
         assert error.value.code == "invalid_spatial_state" and stored_state(db) == before
 
 
-@pytest.mark.parametrize("intent", ["dash", "dodge", "disengage"])
-def test_new_engine_capabilities_remain_outside_existing_sm_admission(
-    tmp_path, package_data, context, intent
-):
+@pytest.mark.parametrize("intent", ["hide", "help", "ready"])
+def test_unsupported_combat_intents_reject_without_rng(tmp_path, package_data, context, intent):
     sm, sid, package, _, _ = setup(tmp_path, package_data, context)
     with sm:
         command = replace(
