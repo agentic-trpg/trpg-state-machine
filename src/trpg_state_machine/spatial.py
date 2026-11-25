@@ -33,6 +33,7 @@ from .errors import StateMachineError
 from .game_time import AdvanceGameTime
 from .grid import GridService, cell_in_bounds
 from .grid_maps import ObserverTopology
+from .instance_data import passage_index
 from .models import TrustedContext
 from .package import AdventurePackage
 from .scoped_reads import scoped_read
@@ -984,8 +985,8 @@ class WorldHandler:
             raise StateMachineError("invalid_spatial_state", "Encounter occupancy overlaps")
         return positions
 
-    def _spatial_combat_guard(self, sid, scene_id, package):
-        """Check whether current spatial state supports entering combat."""
+    def _spatial_combat_guard(self, sid, scene_id, package, *, project_passage_doors=False):
+        """Guard unsupported geometry, with live shared-door projection for dynamic combat."""
         if self.magic.has_exploration_concentration(sid):
             raise StateMachineError(
                 "unsupported_combat_dynamic_lighting",
@@ -1021,38 +1022,76 @@ class WorldHandler:
                 "unsupported_combat_dynamic_obstacles",
                 "Object spatial properties need RE integration",
             )
+        passages = self.facts.instances.passages(sid, scene_id=scene_id)
+        door_ids = {p.door_object_id for p in passages} if project_passage_doors else set()
         objects = self._conn.execute(
             "SELECT object_id FROM objects WHERE session_id=? AND scene_id=?", (sid, scene_id)
         ).fetchall()
-        if any(self.facts.instances.legacy_object(sid, o[0]).blocks_passage for o in objects):
+        if any(
+            self.facts.instances.legacy_object(sid, o[0]).blocks_passage
+            for o in objects
+            if o[0] not in door_ids
+        ):
             raise StateMachineError(
                 "unsupported_combat_dynamic_obstacles",
                 "Movement-only objects cannot be represented by the pinned combat evaluator",
             )
-        for passage in self.facts.instances.passages(sid, scene_id=scene_id):
-            if scene_id not in {e.scene_id for e in passage.endpoints}:
-                continue
-            if passage.door_object_id and self._door_closed(sid, passage, package):
-                raise StateMachineError(
-                    "unsupported_combat_dynamic_obstacles",
-                    "Closed passage door needs combat integration",
-                )
+        if not project_passage_doors and self._closed_passage_cells(
+            sid, scene_id, passages, package
+        ):
+            raise StateMachineError(
+                "unsupported_combat_dynamic_obstacles",
+                "Closed passage door needs combat integration",
+            )
+
+    def closed_combat_passage_cells(self, sid, scene_id, *, cells=None):
+        """Project live shared-door blockers for selected cells or the whole Scene."""
+        if cells is None:
+            passages = self.facts.instances.passages(sid, scene_id=scene_id)
+            return self._closed_passage_cells(sid, scene_id, passages, None)
+        if not cells:
+            return set()
+        thresholds = passage_index(self.store, sid).doors_by_threshold
+        cells_by_door = {}
+        for cell in cells:
+            for door_id in thresholds.get((scene_id, cell), ()):
+                cells_by_door.setdefault(door_id, []).append(cell)
+        return {
+            cell
+            for door_id, door_cells in cells_by_door.items()
+            if self._door_blocks_passage(sid, door_id, None)
+            for cell in door_cells
+        }
+
+    def _closed_passage_cells(self, sid, scene_id, passages, package):
+        """Return thresholds closed by live shared-door state in the current read scope."""
+        return {
+            endpoint.threshold_cell
+            for passage in passages
+            if passage.door_object_id and self._door_closed(sid, passage, package)
+            for endpoint in passage.endpoints
+            if endpoint.scene_id == scene_id
+        }
 
     def _door_closed(self, sid, passage, package):
         """Determine shared-door closure from object blocking and lock state."""
-        blocking = self.objects.spatial.blocks(sid, passage.door_object_id, package)
+        return self._door_blocks_passage(sid, passage.door_object_id, package)
+
+    def _door_blocks_passage(self, sid, door_id, package):
+        """Read a specific shared door's current blocking state and verify compatible locks."""
+        blocking = self.objects.spatial.blocks(sid, door_id, package)
         if blocking is not None:
             return blocking
-        self.objects.openable.lock_status(sid, passage.door_object_id, package)
+        self.objects.openable.lock_status(sid, door_id, package)
         door = self._conn.execute(
             "SELECT state FROM objects WHERE session_id=? AND object_id=?",
-            (sid, passage.door_object_id),
+            (sid, door_id),
         ).fetchone()
         if door:
             return door[0] == "closed"
         # An unvisited Scene has not instantiated its objects yet. This is an
         # initial fact only, never a replacement for an existing runtime row.
-        return self.facts.instances.pending_object(sid, passage.door_object_id)[1].state == "closed"
+        return self.facts.instances.pending_object(sid, door_id)[1].state == "closed"
 
     def _spatial_reader(self, sid, actor_id, package, context):
         """Verify self/control authority before reading the actor's actual position."""

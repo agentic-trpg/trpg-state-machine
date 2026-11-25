@@ -6,6 +6,7 @@ from dnd5e_engine import evaluation_delta as delta
 from dnd5e_engine.evaluation_effects import EffectState
 from dnd5e_engine.evaluation_movement import timed_walk_bonuses, walk_speed
 from dnd5e_engine.evaluation_region_effect import supports_fixed_combat_regions
+from dnd5e_engine.evaluation_shield import has_shield, retained_shield_walk_failure
 from dnd5e_engine.evaluation_speed_effects import (
     has_speed_effects,
     is_bound_attack_speed_effect,
@@ -67,6 +68,11 @@ def ordinary_walk_changes(request, result, *, loader):
     """
     snapshot, actor_id = request.state_snapshot, request.actor_id
     combat = snapshot.combat_state
+    retained_shield = has_shield(snapshot)
+    if retained_shield and (
+        loader is None or retained_shield_walk_failure(snapshot, loader) is not None
+    ):
+        _invalid("Walking result requires the bound retained Shield graph")
     operations = {type(op): op for op in result.state_delta.operations}
     if (
         len(result.state_delta.operations) != 3
@@ -76,8 +82,6 @@ def ordinary_walk_changes(request, result, *, loader):
         or combat.ended
         or combat.initiative_ids[combat.current_turn_index] != actor_id
         or combat.pending_reactions
-        or combat.active_reaction_responses
-        or combat.reaction_effects_pending_expiry
     ):
         _invalid("Ordinary walk must change only its mover's position and movement budget")
     position = operations[delta.PositionUpdate]
@@ -115,7 +119,9 @@ def ordinary_walk_changes(request, result, *, loader):
     ):
         _invalid("Walking event differs from the adopted route")
     try:
-        if has_speed_effects(snapshot):
+        if retained_shield:
+            speed = walk_speed(actor)
+        elif has_speed_effects(snapshot):
             if loader is None or speed_effect_support_failure(snapshot, loader) is not None:
                 _invalid("Walking result requires the bound speed effect graph")
             speed = speed_with_effects(actor, snapshot.effect_states)

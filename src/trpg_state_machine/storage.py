@@ -15,7 +15,7 @@ from .storage_migrations import (
 )
 from .version_map import VersionMap
 
-CURRENT_SCHEMA_VERSION = 73
+CURRENT_SCHEMA_VERSION = 74
 
 
 class _Coordinator:

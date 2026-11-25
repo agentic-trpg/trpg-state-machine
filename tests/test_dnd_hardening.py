@@ -10,7 +10,7 @@ import pytest
 import yaml
 from dnd5e_engine.evaluation_contracts import CombatIntentPayload, PreflightChoice
 from dnd5e_engine.evaluation_state import CombatSnapshot, NonCombatSnapshot
-from dnd_support import NPC
+from dnd_support import NPC, pass_turn
 from dnd_support import package_data as dnd_package_data
 from perception_support import synthetic_notice
 from pydantic import ValidationError
@@ -44,6 +44,7 @@ def test_real_vertical_pipeline_committed_observations_fresh_process_audit(
         sm.grant_npc_access(sid, NPC, "agent:lantern", package, context=context)
         pc = attack(sm, sid, package, context)
         assert sm.submit_command(pc, package, context=context).status == "committed"
+        pass_turn(sm, sid, package, context)
         npc = npc_command(sm, sid, package, context)
         assert sm.submit_command(npc, package, context=context).status == "committed"
         before = sm.read_combat_snapshot(sid, package, context=context)

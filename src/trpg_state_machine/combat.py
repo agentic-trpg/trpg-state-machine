@@ -1,8 +1,4 @@
-"""Pinned Engine schema adapter. SQLite components are the only durable authority.
-
-This is a restricted, authored initial encounter, not the proposed combat.start API.
-No initiative calculation, registry handle, snapshot replacement, or rule formula.
-"""
+"""Combat command inputs and validation of authored mechanical foundations."""
 
 import os
 from dataclasses import dataclass
@@ -28,6 +24,103 @@ def process_id():
 @dataclass(frozen=True, slots=True)
 class InitializeCombat:
     """Initialize the one reviewed encounter in the pinned Adventure Package."""
+
+
+@dataclass(frozen=True, slots=True)
+class CombatOpponent:
+    """Associate a selected opponent with a stat block in the bound ruleset."""
+
+    actor_id: str
+    monster_slug: str
+
+
+@dataclass(frozen=True, slots=True)
+class StartCombat:
+    """Start combat with a fixed defense area or a pursuit distance in feet.
+
+    Participants and their confirmed initiative order use actual Session actor
+    identities. Optional opponent profiles select actions from bound stat blocks.
+    """
+
+    participant_ids: tuple[str, ...]
+    initiative_order: tuple[str, ...]
+    opening_cell: str | None = None
+    area_cells: tuple[str, ...] | None = None
+    opponent_profiles: tuple[CombatOpponent, ...] = ()
+    withdrawal_distance_ft: int | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class EncounterRegion:
+    """Immutable set of playable cells owned by one encounter in one Scene."""
+
+    combat_id: str
+    scene_id: str
+    cells: frozenset[str]
+
+
+@dataclass(frozen=True, slots=True)
+class DistanceWithdrawal:
+    """Immutable distance threshold, measured in feet, for one pursuit encounter."""
+
+    combat_id: str
+    scene_id: str
+    distance_ft: int
+
+
+def validate_start_combat(payload: StartCombat) -> None:
+    """Validate immutable command shape and exact agreement of the two rosters."""
+
+    def valid_id(value):
+        """Check an identity before set operations and canonical encoding."""
+        return type(value) is str and bool(value.strip()) and len(value) <= 256
+
+    roster, order = payload.participant_ids, payload.initiative_order
+    if (
+        type(roster) is not tuple
+        or type(order) is not tuple
+        or len(roster) < 2
+        or len(roster) != len(order)
+        or not all(valid_id(value) for values in (roster, order) for value in values)
+        or set(roster) != set(order)
+        or len(set(order)) != len(order)
+    ):
+        raise StateMachineError("invalid_operation", "Provide a unique roster and its exact order")
+    opening, area, distance = (
+        payload.opening_cell,
+        payload.area_cells,
+        payload.withdrawal_distance_ft,
+    )
+    if (
+        sum(choice is not None for choice in (opening, area, distance)) != 1
+        or (opening is not None and not valid_id(opening))
+        or (distance is not None and (type(distance) is not int or not 0 < distance < 2**63))
+        or (
+            area is not None
+            and (
+                type(area) is not tuple
+                or not area
+                or not all(valid_id(cell) for cell in area)
+                or len(set(area)) != len(area)
+            )
+        )
+    ):
+        raise StateMachineError(
+            "invalid_operation",
+            "Choose an opening cell, a complete distinct area, or a positive integer distance",
+        )
+    profiles = payload.opponent_profiles
+    if (
+        type(profiles) is not tuple
+        or any(
+            type(profile) is not CombatOpponent
+            or not valid_id(profile.actor_id)
+            or not valid_id(profile.monster_slug)
+            for profile in profiles
+        )
+        or len({profile.actor_id for profile in profiles}) != len(profiles)
+    ):
+        raise StateMachineError("invalid_operation", "Provide distinct, typed opponent profiles")
 
 
 def validate_foundation(value):

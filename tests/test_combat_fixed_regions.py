@@ -160,6 +160,7 @@ def test_fixed_region_enter_turn_and_exit_share_authoritative_effects(
         assert original.effect_states == ()
         after_attack = read()
         assert effects_for(after_attack, hero) == {beta}
+        submit(pass_command(sid, after_attack, "combat.region.hero-start"))
         submit(move_command(session, "6,1", "combat.region.leave-beta"))
         final = read()
         assert effects_for(final, NPC) == {ogre}

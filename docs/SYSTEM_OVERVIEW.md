@@ -48,6 +48,14 @@ SM `4d62c6e` 已包含 SPELL-01 的受限实现：材料绑定与法术同一行
 生命周期时钟和战斗快照投影使用同一记录；独立角色条件归 CharacterFacts 的
 带身份顺序行，战斗与探索从独立行和效果链接投影原有 RE 列表。
 RE 负责受支持机械规则，SM 负责输入准备、结果校验和采用，不能另算一套规则。
+受信任的 `combat.start` 从当前角色与场景事实建立单场遭遇，接收已确定的参战名单、
+出手顺序，以及固定防守区域或追击撤离距离。`read_combat_withdrawal` 返回本场采用的配置。
+普通武器攻击保留当前 Turn，显式 `combat.intent` Pass 采用绑定规则返回的交棒。
+采用完整 Round 时，SessionTime 按绑定推进共享时钟。
+固定防守的普通步行留在区域内。`combat.withdraw` 在边界支付一个合法的离场步，或在追击中
+达到最近敌人的距离门槛后沿用当前位置。撤离、交棒、时间与回执共同提交。唯一 PC 或末名
+对手离场时恢复探索。自动触发先攻与突袭、多人场外回合调度仍待接入。
+设计与时间边界见 [战斗生命周期](../../agentic-trpg/docs/STATE_MACHINE_ARCHITECTURE.md#7-战斗有状态-combat-handler-与跨领域提交)。
 `combat.item` 已通过既有 RuleExecution 接入所选 PC 自饮普通治疗药水的受限路径；
 WorldFacts 按实例删除并记录消费，CharacterFacts 写入 HP，详见
 [ITEM-01 Batch B](ITEM_01_COMBAT_HEALING_POTION.md)。

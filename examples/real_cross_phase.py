@@ -219,6 +219,15 @@ def main():
             sm,
             sid,
             package,
+            "end-turn.npc",
+            "combat.intent",
+            CombatIntentPayload(intent_type="pass"),
+            NPC,
+        )
+        send(
+            sm,
+            sid,
+            package,
             "attack.pc",
             "combat.intent",
             CombatIntentPayload(

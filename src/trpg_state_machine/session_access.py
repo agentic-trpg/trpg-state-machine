@@ -31,6 +31,8 @@ from ._operations import (
     UnlockDoor,
 )
 from .choice_models import ChoiceFinalizeSpellOperationPayload, ChoiceRespondOperationPayload
+from .combat import StartCombat
+from .combat_withdrawal import CombatWithdraw
 from .environment_commands import ENVIRONMENT_OPERATIONS
 from .errors import StateMachineError
 from .game_time import AdvanceGameTime
@@ -64,6 +66,7 @@ def _trusted(context: TrustedContext) -> None:
         or type(context.can_spend_item_charge) is not bool
         or type(context.can_authorize_long_rest) is not bool
         or type(context.can_authorize_short_rest) is not bool
+        or type(context.can_start_combat) is not bool
     ):
         raise StateMachineError(
             "invalid_context", "GM adjudication grant must be a trusted boolean"
@@ -122,6 +125,10 @@ class SessionAccess:
 
     def _authorize_command(self, row, actor_id, payload, context):
         """Authorize the command actor and operation for the trusted context."""
+        if type(payload) is StartCombat and (
+            actor_id != row["pc_actor_id"] or not context.can_start_combat
+        ):
+            raise StateMachineError("unauthorized", "Trusted encounter-start grant required")
         if type(payload) is LongRest and (
             actor_id != row["pc_actor_id"] or not context.can_authorize_long_rest
         ):
@@ -176,6 +183,7 @@ class SessionAccess:
                     payload,
                     (
                         CombatIntentPayload,
+                        CombatWithdraw,
                         ExplorationFeaturePayload,
                         CombatClosePayload,
                         CheckPayload,

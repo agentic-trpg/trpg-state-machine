@@ -815,6 +815,14 @@ class StateMachine(
         """Delegate trusted combat snapshot reading."""
         return self._combat.read_combat_snapshot(session_id, package, context=context)
 
+    def read_combat_region(self, session_id, package, *, context):
+        """Read the active dynamic encounter area for an authorized Session owner."""
+        return self._combat.read_combat_region(session_id, package, context=context)
+
+    def read_combat_withdrawal(self, session_id, package, *, context):
+        """Read the active encounter's withdrawal policy for an authorized Session owner."""
+        return self._combat.read_combat_withdrawal(session_id, package, context=context)
+
     def read_rng_context(self, session_id, package, *, context):
         """Delegate fixed RNG context reading."""
         return self._combat.read_rng_context(session_id, package, context=context)

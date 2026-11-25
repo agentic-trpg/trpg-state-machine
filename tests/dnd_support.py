@@ -4,6 +4,7 @@ import json
 from datetime import date
 from pathlib import Path
 
+from dnd5e_engine.evaluation_contracts import CombatIntentPayload
 from dnd5e_engine.evaluation_ruleset import ruleset_binding
 from dnd5e_srd_data import BundledAssetLoader, MemoryAssetLoader, Provenance, ReviewState
 from dnd5e_srd_data.schema.common import ActivationBlock, AttackActivity, DamagePart, Range
@@ -91,3 +92,20 @@ def initialize(sm, sid, package, context, command_id="init.dnd"):
         state.world_version,
     )
     return sm.submit_command(command, package, context=context)
+
+
+def pass_turn(sm, sid, package, context, command_id="end-turn"):
+    """End the current turn through the public command with its current version."""
+    snapshot = sm.read_combat_snapshot(sid, package, context=context)
+    state = snapshot.combat_state
+    command = TypedCommand(
+        sid,
+        command_id,
+        state.initiative_ids[state.current_turn_index],
+        "combat.intent",
+        CombatIntentPayload(intent_type="pass"),
+        snapshot.world_version,
+    )
+    receipt = sm.submit_command(command, package, context=context)
+    assert receipt.status == "committed", receipt
+    return receipt

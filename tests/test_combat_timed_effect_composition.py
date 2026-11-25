@@ -157,6 +157,7 @@ def test_barkskin_and_longstrider_in_one_encounter(timed_spell_world):
         assert not roll["is_hit"]
         assert sm.read_character_ac(sid, pc, package, context=context).effective == 17
 
+        advance_turn("second-ogre-pass")
         execute(move_command(session, "7,1", "stay-in-reach"))
         assert remaining(read()) == 35
         speed_expiry = advance_turn("expire-longstrider")

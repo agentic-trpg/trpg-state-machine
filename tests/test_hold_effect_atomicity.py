@@ -247,7 +247,7 @@ def _assert_result_committed(sm, sid, package, context, before_rng, receipt, pro
 def test_hold_attack_knockout_ends_exact_group_atomically(
     tmp_path, context, monkeypatch, linked_target
 ):
-    """Commit the real attack's knockout and any bundled first save after a late retry."""
+    """Commit knockout and concentration removal together, then pass explicitly."""
     seed = 0 if linked_target else 9
     sm, sid, package, _, db = hold_world(
         tmp_path, context, seed=seed, caster_hp=1, two_targets=linked_target is not None
@@ -283,16 +283,14 @@ def test_hold_attack_knockout_ends_exact_group_atomically(
             return result
 
         monkeypatch.setattr(sm._rules, "_evaluate_dnd", observe)
-        # Receipt insertion must observe the knockout, graph deletion and, in the
-        # two-participant encounter, the first failure from the bundled TurnStart.
-        failures = "IS NULL" if linked_target else "=1"
+        # The attack commits the knockout and graph deletion. The save belongs to Pass.
         sm._conn.execute(
             "CREATE TEMP TRIGGER fail_knockout_receipt BEFORE INSERT ON command_receipts "
             "WHEN NEW.command_id='hold.attack' AND "
             "(SELECT current_hp FROM characters WHERE session_id=NEW.session_id "
             f"AND actor_id='{caster}')=0 AND "
             "(SELECT death_save_failures FROM mechanical_life WHERE session_id=NEW.session_id "
-            f"AND actor_id='{caster}') {failures} AND "
+            f"AND actor_id='{caster}') IS NULL AND "
             "NOT EXISTS(SELECT 1 FROM effect_concentrations WHERE session_id=NEW.session_id "
             f"AND caster_id='{caster}') AND "
             "NOT EXISTS(SELECT 1 FROM ongoing_effects WHERE session_id=NEW.session_id "
@@ -323,9 +321,7 @@ def test_hold_attack_knockout_ends_exact_group_atomically(
             actor.concentration_effect_id,
         ) == (0, True, NPC, None)
         assert [c.condition for c in actor.conditions] == ["unconscious"]
-        assert actor.death_saves == (
-            None if linked_target else DeathSaveRecord(successes=0, failures=1, is_stable=False)
-        )
+        assert actor.death_saves is None
         state = after.combat_state
         assert (state.dead_ids, state.deaths_recorded) == (set(), [])
         assert state.damage_instance_sequence == before.combat_state.damage_instance_sequence + 1
@@ -343,12 +339,24 @@ def test_hold_attack_knockout_ends_exact_group_atomically(
         if linked_target:
             target = next(a for a in after.character_states if a.entity_id == linked_target)
             assert not target.conditions and target.hp_current == 40
-        assert state.turn_serial == before.combat_state.turn_serial + 1
-        assert state.initiative_ids[state.current_turn_index] == (linked_target or caster)
+        assert state.turn_serial == before.combat_state.turn_serial
+        assert state.initiative_ids[state.current_turn_index] == NPC
         committed = stored_state(db)
         assert sm.submit_command(attack, package, context=context) == receipt
         assert len(proposals) == 2
         assert stored_state(db) == committed
+        handoff = pass_command(sid, after, "hold.knockout.handoff")
+        handoff_receipt = sm.submit_command(handoff, package, context=context)
+        assert handoff_receipt.status == "committed", handoff_receipt
+        started = sm.read_combat_snapshot(sid, package, context=context)
+        assert started.combat_state.turn_serial == state.turn_serial + 1
+        assert started.combat_state.initiative_ids[started.combat_state.current_turn_index] == (
+            linked_target or caster
+        )
+        caster_after = next(a for a in started.character_states if a.entity_id == caster)
+        assert caster_after.death_saves == (
+            None if linked_target else DeathSaveRecord(successes=0, failures=1, is_stable=False)
+        )
 
 
 @pytest.mark.parametrize(("seed", "revived"), [(11, False), (390, True)])
@@ -364,7 +372,10 @@ def test_hold_knockout_public_pass_adopts_nonterminal_saves(
         attack = hold_attack_command(sid, cast.actor_id, before.world_version)
         assert sm.submit_command(attack, package, context=context).status == "committed"
         after_attack = sm.read_combat_snapshot(sid, package, context=context)
-        ready = pass_command(sid, after_attack, "hold.nonterminal.ready")
+        first_save = pass_command(sid, after_attack, "hold.nonterminal.first-save")
+        assert sm.submit_command(first_save, package, context=context).status == "committed"
+        after_first = sm.read_combat_snapshot(sid, package, context=context)
+        ready = pass_command(sid, after_first, "hold.nonterminal.ready")
         assert sm.submit_command(ready, package, context=context).status == "committed"
         before_save = sm.read_combat_snapshot(sid, package, context=context)
         before_rng = sm.read_rng_context(sid, package, context=context)
@@ -419,6 +430,9 @@ def test_hold_knockout_public_pass_reaches_terminal_death_atomically(
         before = sm.read_combat_snapshot(sid, package, context=context)
         attack = hold_attack_command(sid, caster, before.world_version)
         assert sm.submit_command(attack, package, context=context).status == "committed"
+        after_attack = sm.read_combat_snapshot(sid, package, context=context)
+        first_save = pass_command(sid, after_attack, "hold.dying.first-save")
+        assert sm.submit_command(first_save, package, context=context).status == "committed"
         dying = sm.read_combat_snapshot(sid, package, context=context)
         dying_rng = sm.read_rng_context(sid, package, context=context)
         ready = pass_command(sid, dying, "hold.dying.pass")

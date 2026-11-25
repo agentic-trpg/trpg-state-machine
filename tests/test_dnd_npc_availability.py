@@ -2,7 +2,7 @@ from dataclasses import replace
 
 import pytest
 from dnd5e_engine.evaluation_contracts import CombatIntentPayload
-from dnd_support import NPC, WEAPON
+from dnd_support import NPC, WEAPON, pass_turn
 from test_dnd_runtime import attack, authority, setup
 
 from trpg_state_machine import SetSceneFlag, StateMachine, StateMachineError, TypedCommand
@@ -50,6 +50,7 @@ def test_pc_and_npc_share_real_attack_commit_and_replay(tmp_path, package_data, 
             sm.submit_command(attack(sm, sid, package, context), package, context=context).status
             == "committed"
         )
+        pass_turn(sm, sid, package, context)
         before = sm.read_combat_snapshot(sid, package, context=context)
         assert before.combat_state.initiative_ids[before.combat_state.current_turn_index] == NPC
         command = npc_command(sm, sid, package, context, action=action)
@@ -82,6 +83,7 @@ def test_wrong_principal_and_revoked_grant_cannot_submit_or_query(
     sm, sid, package, _ = setup(tmp_path, package_data, context)
     with sm:
         sm.submit_command(attack(sm, sid, package, context), package, context=context)
+        pass_turn(sm, sid, package, context)
         command = npc_command(sm, sid, package, context)
         wrong = replace(context, principal_id=principal, controlled_npc_ids=grants)
         before = authority(sm, sid)
@@ -211,6 +213,7 @@ def test_available_does_not_authorize_stale_execution_or_revoked_control(
             command, command_id="pc.current", expected_world_version=receipt.world_version
         )
         assert sm.submit_command(command, package, context=context).status == "committed"
+        pass_turn(sm, sid, package, context)
         npc = npc_command(sm, sid, package, context)
         assert (
             sm.query_action_availability(sid, NPC, npc.payload, package, context=context).status
@@ -271,6 +274,7 @@ def test_known_multiattack_is_not_dispatched_as_a_single_attack(
     sm, sid, package, _ = setup(tmp_path, package_data, context)
     with sm:
         sm.submit_command(attack(sm, sid, package, context), package, context=context)
+        pass_turn(sm, sid, package, context)
         command = npc_command(sm, sid, package, context, action="multiattack")
         before = sm.read_combat_snapshot(sid, package, context=context)
         rng = sm.read_rng_context(sid, package, context=context)

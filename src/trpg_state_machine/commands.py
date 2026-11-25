@@ -41,7 +41,8 @@ from .choice_models import (
     ChoiceRespondOperationPayload,
     PendingChoice,
 )
-from .combat import InitializeCombat
+from .combat import InitializeCombat, StartCombat, validate_start_combat
+from .combat_withdrawal import CombatWithdraw, validate_withdrawal
 from .environment_commands import (
     ENVIRONMENT_COMMANDS,
     ENVIRONMENT_OPERATIONS,
@@ -117,6 +118,7 @@ OPERATIONS = {
     "rules.save": SavePayload,
     "combat.close": CombatClosePayload,
     "combat.intent": CombatIntentPayload,
+    "combat.withdraw": CombatWithdraw,
     "combat.item": ItemUsePayload,
     "world.use_item": ExplorationItemUsePayload,
     "world.cast_spell": ExplorationSpellCastPayload,
@@ -127,6 +129,7 @@ OPERATIONS = {
     "world.drop_concentration": DropWorldConcentration,
     "world.dismiss_spell": DismissWorldSpell,
     "combat.initialize": InitializeCombat,
+    "combat.start": StartCombat,
     "rule_operation": RuleOperation,
     "enter_scene": EnterScene,
     "set_scene_flag": SetSceneFlag,
@@ -195,7 +198,9 @@ class TypedCommand:
         | PlaceObject
         | RuleOperation
         | InitializeCombat
+        | StartCombat
         | CombatIntentPayload
+        | CombatWithdraw
         | ItemUsePayload
         | ExplorationItemUsePayload
         | ExplorationEnvironmentalSpellCastPayload
@@ -298,6 +303,7 @@ def validate_command(command: TypedCommand) -> None:
             LongRest,
             ShortRest,
             StartSpellCast,
+            StartCombat,
         ):
             raise StateMachineError(
                 "invalid_time_wait", "This operation cannot be a domain wait reply"
@@ -375,6 +381,12 @@ def validate_command(command: TypedCommand) -> None:
             )
         return
     if operation_type is LongRest:
+        return
+    if operation_type is StartCombat:
+        validate_start_combat(command.payload)
+        return
+    if operation_type is CombatWithdraw:
+        validate_withdrawal(command.payload)
         return
     if operation_type is DropWorldConcentration:
         return
@@ -829,6 +841,7 @@ class CommandRuntime:
             )
         if type(command.payload) in (
             CombatIntentPayload,
+            CombatWithdraw,
             ItemUsePayload,
             ExplorationItemUsePayload,
             ExplorationEnvironmentalSpellCastPayload,
@@ -941,17 +954,17 @@ class CommandRuntime:
                             actor_id=command.actor_id,
                             command_id=command.command_id,
                         )
+                    elif type(command.payload) is InitializeCombat:
+                        events = self._initialize_combat(row, package, prepared)
+                    elif type(command.payload) is StartCombat:
+                        events = self._combat.start(row, package, command)
                     else:
-                        events = (
-                            self._initialize_combat(row, package, prepared)
-                            if isinstance(command.payload, InitializeCombat)
-                            else self._operate(
-                                row,
-                                package,
-                                command.payload,
-                                actor_id=command.actor_id,
-                                source_command_id=command.command_id,
-                            )
+                        events = self._operate(
+                            row,
+                            package,
+                            command.payload,
+                            actor_id=command.actor_id,
+                            source_command_id=command.command_id,
                         )
                     events.extend(
                         self._session_runtime.finish_time_wait_reply(row, package, command, events)
@@ -982,7 +995,7 @@ class CommandRuntime:
                             self._objects.mechanisms._prepared_saves.reset(token)
                     if _step_probe:
                         raise _DiscardStepCandidate
-                    if type(command.payload) is not InitializeCombat:
+                    if type(command.payload) not in (InitializeCombat, StartCombat):
                         events.extend(
                             sync_npc_schedules(
                                 self, command.session_id, command.command_id, package

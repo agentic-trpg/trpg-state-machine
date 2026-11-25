@@ -289,6 +289,7 @@ def test_re_longstrider_clock_survives_combat_round_and_close(tmp_path, package_
     from dnd_support import create, initialize
     from modern_support import modern_data, modern_loader
     from test_combat_closure import close_command, pc_attack
+    from test_hold_effect_candidate import pass_command
 
     from trpg_state_machine.package import _validate
 
@@ -324,6 +325,11 @@ def test_re_longstrider_clock_survives_combat_round_and_close(tmp_path, package_
         attack = pc_attack(sm, sid, package, context)
         attack_receipt = sm.submit_command(attack, package, context=context)
         assert attack_receipt.status == "committed", attack_receipt
+        assert sm.read_time_sync(sid, package, context=context).committed_tick == 3594
+        assert effects.next_boundary(sid, package) == 3600
+        snapshot = sm.read_combat_snapshot(sid, package, context=context)
+        end_turn = pass_command(sid, snapshot, "end-combat-round")
+        assert sm.submit_command(end_turn, package, context=context).status == "committed"
         assert sm.read_time_sync(sid, package, context=context).committed_tick == 3600
         assert effects.next_boundary(sid, package) is None
         assert (
@@ -562,6 +568,7 @@ def test_real_combat_round_six_ticks_replay_and_exit_rebase(tmp_path, package_da
     from dnd_support import create, initialize
     from modern_support import modern_data, modern_loader
     from test_combat_closure import close_command, pc_attack
+    from test_hold_effect_candidate import pass_command
 
     from trpg_state_machine.package import _validate
 
@@ -587,10 +594,16 @@ def test_real_combat_round_six_ticks_replay_and_exit_rebase(tmp_path, package_da
         attack = pc_attack(sm, sid, p, ctx)
         receipt = sm.submit_command(attack, p, context=ctx)
         assert receipt.status == "committed"
-        after = sm.read_combat_snapshot(sid, p, context=ctx).combat_state.round_number
-        assert after == before + 1
+        after_attack = sm.read_combat_snapshot(sid, p, context=ctx)
+        assert after_attack.combat_state.round_number == before
+        assert sync(s).committed_tick == 10
+        end_turn = pass_command(sid, after_attack, "end-combat-round")
+        turn_receipt = sm.submit_command(end_turn, p, context=ctx)
+        assert turn_receipt.status == "committed", turn_receipt
+        assert sm.read_combat_snapshot(sid, p, context=ctx).combat_state.round_number == before + 1
         assert sync(s).committed_tick == 16
         assert sm.submit_command(attack, p, context=ctx) == receipt
+        assert sm.submit_command(end_turn, p, context=ctx) == turn_receipt
         assert sync(s).committed_tick == 16
         assert (
             sm.submit_command(close_command(sm, sid, p, ctx), p, context=ctx).status == "committed"
@@ -860,6 +873,7 @@ def test_combat_pending_budget_must_finish_before_close_and_cannot_be_cancelled(
     from dnd_support import create, initialize
     from modern_support import modern_data, modern_loader
     from test_combat_closure import close_command, pc_attack
+    from test_hold_effect_candidate import pass_command
 
     from trpg_state_machine.package import _validate
 
@@ -879,6 +893,9 @@ def test_combat_pending_budget_must_finish_before_close_and_cannot_be_cancelled(
         assert initialize(sm, sid, p, ctx).status == "committed"
         attack = pc_attack(sm, sid, p, ctx)
         assert sm.submit_command(attack, p, context=ctx).status == "committed"
+        snapshot = sm.read_combat_snapshot(sid, p, context=ctx)
+        end_turn = pass_command(sid, snapshot, "end-combat-round")
+        assert sm.submit_command(end_turn, p, context=ctx).status == "committed"
         s = (sm, sid, p, ctx, Clock(), Scheduler(Clock()))
         assert sync(s).committed_tick == 1 and sync(s).pending_target_tick == 6
         assert sync(s).progress_status == "pending"

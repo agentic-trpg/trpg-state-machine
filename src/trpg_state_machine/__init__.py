@@ -21,7 +21,14 @@ from .choice_models import (
     ChoiceRespondOperationPayload,
     PendingChoice,
 )
-from .combat import InitializeCombat
+from .combat import (
+    CombatOpponent,
+    DistanceWithdrawal,
+    EncounterRegion,
+    InitializeCombat,
+    StartCombat,
+)
+from .combat_withdrawal import CombatWithdraw
 from .commands import CheckWorldEffects, CommandReceipt, TypedCommand, world_command_from_data
 from .environment import EnvironmentService
 from .environment_commands import (
@@ -187,6 +194,11 @@ __all__ = [
     "ChoiceRespondOperationPayload",
     "PendingChoice",
     "InitializeCombat",
+    "StartCombat",
+    "CombatWithdraw",
+    "CombatOpponent",
+    "EncounterRegion",
+    "DistanceWithdrawal",
     "CommandReceipt",
     "TypedCommand",
     "EnterScene",

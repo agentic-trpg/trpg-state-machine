@@ -9,7 +9,7 @@ from dataclasses import replace
 import pytest
 import yaml
 from dnd5e_engine.evaluation_contracts import CombatIntentPayload
-from dnd_support import NPC, create, initialize, loader
+from dnd_support import NPC, create, initialize, loader, pass_turn
 from dnd_support import package_data as real_data
 from test_dnd_npc_availability import npc_command
 from test_dnd_runtime import attack, authority
@@ -35,6 +35,7 @@ def prepare(tmp_path, context, change=None):
     sm.grant_npc_access(sid, NPC, "agent:caretaker", package, context=context)
     npc = NPCContext("agent:caretaker", sid, NPC)
     sm.submit_command(attack(sm, sid, package, context), package, context=context)
+    pass_turn(sm, sid, package, context)
     task = create_task(sm, sid, package, npc)
     command = npc_command(sm, sid, package, context)
     result = NPCEvaluationResult(

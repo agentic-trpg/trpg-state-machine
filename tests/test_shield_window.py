@@ -9,10 +9,10 @@ from dnd5e_engine.evaluation_contracts import CombatIntentPayload
 from dnd5e_engine.evaluation_rng import RNGState
 from dnd5e_engine.evaluation_shield import shield_graph, shield_source_id
 from dnd5e_engine.evaluation_shield_delta import ShieldStateTransition
-from dnd_support import initialize
+from dnd_support import initialize, pass_turn
 from item_support import NPC, item_data
 from test_npc_evaluation_tasks import create_task
-from test_timed_spell_cast import OTHER_ENEMY, cast_command, first_level_balance
+from test_timed_spell_cast import OTHER_ENEMY, cast_command, first_level_balance, move_command
 from test_timed_spell_cast import timed_spell_world as timed_spell_world
 
 from trpg_state_machine import (
@@ -241,16 +241,30 @@ def test_public_shield_response(
             assert expected_rng.randint(1, 20) == natural
             assert published_rng.state == RNGState.capture(expected_rng)
             assert before.hp_current == after.hp_current
-            if immediate_expiry:
-                assert after.reaction_available
-                assert result.effect_states == ()
-                return
             assert not after.reaction_available
             assert len(result.effect_states) == 1
             ac = sm.read_character_ac(sid, pc, package, context=context)
             assert ac.effective == ac.base + 5
+            first_pass = sm.submit_command(
+                replace(
+                    advance, command_id="first-pass", expected_world_version=result.world_version
+                ),
+                package,
+                context=context,
+            )
+            assert first_pass.status == "committed", first_pass
+            after_pass = snapshot()
+            if immediate_expiry:
+                assert after_pass.effect_states == ()
+                assert next(
+                    a for a in after_pass.character_states if a.entity_id == pc
+                ).reaction_available
+                return
+            assert after_pass.effect_states == result.effect_states
             turn = sm.submit_command(
-                replace(advance, actor_id=OTHER_ENEMY, expected_world_version=result.world_version),
+                replace(
+                    advance, actor_id=OTHER_ENEMY, expected_world_version=after_pass.world_version
+                ),
                 package,
                 context=context,
             )
@@ -316,6 +330,45 @@ def _shield_answer(attack, pending, option="accept"):
     )
 
 
+def test_retained_shield_leaves_attackers_movement_available(timed_spell_world):
+    """A retained Shield changes AC while the attacking Ogre can still walk."""
+    session = _prepare(timed_spell_world, seed=3, immediate_expiry=True, hp=(80, 100))
+    sm, sid, package, context = session
+    with sm:
+        assert initialize(sm, sid, package, context).status == "committed"
+        attack = _shield_attack(session)
+        owner = attack.payload.target_id
+        pending = sm.submit_command(attack, package, context=context)
+        settle = sm.submit_command(_shield_answer(attack, pending), package, context=context)
+        assert settle.status == "committed", settle
+        before = sm.read_combat_snapshot(sid, package, context=context)
+        shield = shield_graph(before)
+        assert shield.expiry_owner_id == owner
+        rng = sm.read_rng_context(sid, package, context=context)
+        ac = sm.read_character_ac(sid, owner, package, context=context)
+        assert ac.effective == ac.base + 5
+
+        step = move_command(session, "1,1", "ogre-walk-after-shield")
+        assert step.actor_id == NPC
+        receipt = sm.submit_command(step, package, context=context)
+        assert receipt.status == "committed", receipt
+        after = sm.read_combat_snapshot(sid, package, context=context)
+        assert after.combat_state.actor_zone[NPC] == "1,1"
+        assert after.combat_state.movement_ledgers[NPC].spent_ft == 5
+        assert before.combat_state.turn_serial == after.combat_state.turn_serial
+        assert before.effect_states == after.effect_states
+        assert shield_graph(after) == shield
+        assert sm.read_character_ac(sid, owner, package, context=context) == ac
+        assert sm.read_rng_context(sid, package, context=context) == rng
+        assert sm.submit_command(step, package, context=context) == receipt
+
+        pass_turn(sm, sid, package, context, "ogre-pass-after-shield")
+        ended = sm.read_combat_snapshot(sid, package, context=context)
+        assert ended.combat_state.initiative_ids[ended.combat_state.current_turn_index] == owner
+        assert not ended.effect_states
+        assert next(a for a in ended.character_states if a.entity_id == owner).reaction_available
+
+
 @pytest.mark.parametrize("fake_death", [False, True])
 def test_active_shield_rejects_premature_graph_change(timed_spell_world, monkeypatch, fake_death):
     """An actual handoff to another NPC cannot expire Shield or remove its response."""
@@ -329,6 +382,7 @@ def test_active_shield_rejects_premature_graph_change(timed_spell_world, monkeyp
             sm.submit_command(_shield_answer(attack, pending), package, context=context).status
             == "committed"
         )
+        pass_turn(sm, sid, package, context, "attack-owner-pass")
         before = sm.read_combat_snapshot(sid, package, context=context)
         rng = sm.read_rng_context(sid, package, context=context)
         events = sm.read_events(sid, package, context=context)
@@ -453,6 +507,7 @@ def test_shield_expires_before_the_incoming_dying_defender_saves(timed_spell_wor
         pending = sm.submit_command(attack, package, context=context)
         accepted = sm.submit_command(_shield_answer(attack, pending), package, context=context)
         assert accepted.status == "committed", accepted
+        pass_turn(sm, sid, package, context, "attack-owner-pass")
         before = sm.read_combat_snapshot(sid, package, context=context)
         dying = next(actor for actor in before.character_states if actor.entity_id == pc)
         assert dying.hp_current == 0 and dying.is_alive and before.effect_states
@@ -570,6 +625,7 @@ def test_active_shield_rejects_later_knockout_with_prior_npc_death(timed_spell_w
         pending = sm.submit_command(attack, package, context=context)
         accepted = sm.submit_command(_shield_answer(attack, pending), package, context=context)
         assert accepted.status == "committed", accepted
+        pass_turn(sm, sid, package, context, "attack-owner-pass")
         before = sm.read_combat_snapshot(sid, package, context=context)
         rng = sm.read_rng_context(sid, package, context=context)
         events = sm.read_events(sid, package, context=context)

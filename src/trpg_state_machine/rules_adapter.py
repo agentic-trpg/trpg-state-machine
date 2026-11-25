@@ -5,7 +5,7 @@ import json
 from dataclasses import asdict
 
 from dnd5e_engine import evaluation_delta as delta
-from dnd5e_engine.attack_rules import attack_action_is_spent, can_retain_turn
+from dnd5e_engine.attack_rules import attack_action_is_spent
 from dnd5e_engine.damage_rules import damage_balances
 from dnd5e_engine.death_saves import DeathSaveState
 from dnd5e_engine.evaluation import evaluate
@@ -141,7 +141,7 @@ from .shield_adoption import (
     shield_combat_fields,
 )
 from .spatial import SpatialPosition
-from .speed_effect_adoption import speed_effect_pass_admission, supports_pass_roster
+from .speed_effect_adoption import speed_effect_pass_admission
 from .spell_adoption import ordinary_spell_changes
 
 
@@ -266,20 +266,9 @@ def delta_changes(
                 != any(event.type == "damage_applied" for event in result.proposed_events)
             ):
                 _invalid("Damage differs from the authorized weapon attack")
-            newly_dead = validate_damage_result(
+            validate_damage_result(
                 request, result, target, source_id=source_id, is_crit=rolls[0].is_crit
             )
-            if newly_dead and turn_advanced:
-                state = snapshot.combat_state
-                expected_turn = next_turn_index(
-                    state.initiative_ids, state.dead_ids | newly_dead, state.current_turn_index + 1
-                )
-                if (
-                    expected_turn is None
-                    or turn != expected_turn[0]
-                    or turn_update.value.round_number != state.round_number + int(expected_turn[1])
-                ):
-                    _invalid("Attack turn did not advance to the next living actor")
 
     def edit(component, identity, field, expected, value):
         """Validate one edit and update the isolated candidate and change list."""
@@ -1032,7 +1021,7 @@ def _hold_pass_boundaries(request, result, source, lifecycles):
 
 
 def _hold_knockout(request, result, caster, chain):
-    """Bind initial PC dying, exact concentration removal and any first START save."""
+    """Bind initial PC dying and exact concentration removal before the next turn."""
     snapshot = request.state_snapshot
     combat = snapshot.combat_state
     payload = request.payload
@@ -1103,31 +1092,17 @@ def _hold_knockout(request, result, caster, chain):
         ),
         None,
     )
-    turn = next((op for op in operations if type(op) is delta.TurnUpdate), None)
     if (
         budget is None
         or budget.value.action_available
         or not budget.value.action_taken_this_turn
         or budget.value.attack_rolls_made_this_turn != outgoing.attack_rolls_made_this_turn + 1
-        or (turn is None)
-        != can_retain_turn(combatant(outgoing).model_copy(update=budget.value.model_dump()))
     ):
-        _invalid("Knockout lacks the attack budget and its required turn handoff")
-    turn_events = [event for event in events if event.type in _TURN_EVENTS]
-    incoming = _turn_handoff(combat, attacker, turn, turn_events) if turn is not None else None
-    if turn is None and turn_events:
-        _invalid("Knockout turn events require a typed handoff")
-    life = damage.get(delta.DeathStateUpdate)
-    started = [e.target_id for e in events if e.type == "death_save_started"]
-    saves = [e for e in events if e.type == "death_save_rolled"]
-    if incoming != source:
-        if life is not None or started or saves:
-            _invalid("Knockout cannot change death saves outside the dying actor's TurnStart")
-        return
-    if started != [source] or len(saves) != 1:
-        _invalid("Knockout TurnStart requires its first nonterminal save")
-    if _death_save_evidence(caster, events[-2:], life) != "ongoing":
-        _invalid("The first knockout save must leave the actor dying")
+        _invalid("Knockout lacks the attack budget payment")
+    if delta.DeathStateUpdate in damage or any(
+        event.type in {"death_save_started", "death_save_rolled"} for event in events
+    ):
+        _invalid("Knockout cannot change death saves outside the dying actor's TurnStart")
 
 
 def hold_effect_changes(request, result, source):
@@ -1375,6 +1350,15 @@ def validate_dnd_result(request, result, *, loader=None, preverified_spell_save=
                 _invalid("Proposed mechanical event refers to an actor outside the snapshot")
     if result.status != "accepted":
         return result, ()
+    if (
+        request.operation_kind == "combat.intent"
+        and request.payload.intent_type == "attack"
+        and (
+            any(type(op) is delta.TurnUpdate for op in result.state_delta.operations)
+            or any(event.type in _TURN_EVENTS for event in result.proposed_events)
+        )
+    ):
+        _invalid("A weapon attack cannot end its actor's turn")
     if request.operation_kind == "rules.check":
         return result, check_changes(request, result)
     if request.operation_kind == "rules.save":
@@ -1743,8 +1727,8 @@ class RulesAdapter:
         self.characters.rule_components(row["session_id"], set(actors), full_audit=True)
 
     @scoped_read
-    def _combat_snapshot(self, row, *, for_pass=False, for_walk=False):
-        """Build fixed combat facts with the required Pass or walking projection."""
+    def _combat_snapshot(self, row, *, for_pass=False, for_walk=False, attack_actors=None):
+        """Build fixed combat facts for the operation's relevant dependencies."""
         sid = row["session_id"]
         if row["mechanical_schema_version"] not in (
             "engine-snapshot/17",
@@ -1759,6 +1743,7 @@ class RulesAdapter:
         if combat is None:
             raise StateMachineError("combat_not_initialized", "Session has no mechanical encounter")
         state = json.loads(combat["state_json"])
+        dynamic = combat["region_json"] is not None or combat["withdrawal_distance_ft"] is not None
         roster = set(state["initiative_ids"])
         state.update(self.characters.effects.combat_fields(sid, roster))
         scene = self.facts.mechanical_scene(sid, combat["scene_id"])
@@ -1769,11 +1754,45 @@ class RulesAdapter:
                 state["initiative_ids"],
                 self.facts.maps.scene(sid, combat["scene_id"]).grid,
             )
+            if dynamic and not for_pass:
+                ray = None
+                if attack_actors is not None:
+                    start, end = (state["actor_zone"].get(actor) for actor in attack_actors)
+                    ray = (
+                        (start, *cover_ray_cells(start, end))
+                        if start is not None and end is not None
+                        else ()
+                    )
+                closed = self.world.closed_combat_passage_cells(sid, combat["scene_id"], cells=ray)
+                if closed:
+                    grid = scene["grid"]
+                    scene = {
+                        **scene,
+                        "grid": {
+                            **grid,
+                            "blocked_cells": sorted(set(grid["blocked_cells"]) | closed),
+                        },
+                    }
         try:
             components = self.characters.rule_components(sid, roster)
             actors = self.characters.combat_rule_actors(
                 sid, roster, components["inventory_state"]["entries"]
             )
+            if dynamic and not state["ended"]:
+                # Active rules can only resolve participant references. The owning
+                # actor facts and original damage/death events retain attribution.
+                actors = {
+                    identity: (
+                        {**actor, "last_damaged_by": None}
+                        if actor["last_damaged_by"] not in roster
+                        else actor
+                    )
+                    for identity, actor in actors.items()
+                }
+                state["deaths_recorded"] = [
+                    {**death, "killer_id": None} if death["killer_id"] not in roster else death
+                    for death in state["deaths_recorded"]
+                ]
             snapshot = CombatSnapshot.model_validate_json(
                 canonical_json(
                     {
@@ -2072,12 +2091,7 @@ class RulesAdapter:
                 return "spell.capability"
             return None
         if payload.intent_type == "move":
-            if (
-                payload.source_id not in (None, actor_id)
-                or combat.pending_reactions
-                or combat.active_reaction_responses
-                or combat.reaction_effects_pending_expiry
-            ):
+            if payload.source_id not in (None, actor_id) or combat.pending_reactions:
                 return "intent.capability"
             if any(
                 combat.actor_zone[identity] == payload.target_zone_id
@@ -2102,16 +2116,11 @@ class RulesAdapter:
                 if (
                     payload == basic
                     and payload.source_id in (None, actor_id)
-                    and snapshot.snapshot_schema_version == "engine-snapshot/20"
                     and not (
                         combat.pending_reactions
                         or combat.active_reaction_responses
                         or combat.reaction_effects_pending_expiry
                         or combat.sap_marks
-                    )
-                    and (
-                        supports_pass_roster(snapshot.character_states)
-                        or _dying_pass_actor(snapshot, actor_id) is not None
                     )
                     and (
                         not _has_combat_effects(snapshot)

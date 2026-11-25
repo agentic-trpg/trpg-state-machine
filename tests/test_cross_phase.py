@@ -11,7 +11,7 @@ from pathlib import Path
 
 import pytest
 from dnd5e_engine.evaluation_contracts import CombatIntentPayload, RuleEvaluationResult
-from dnd_support import NPC, create, initialize
+from dnd_support import NPC, create, initialize, pass_turn
 from modern_support import modern_data, modern_loader, modern_package
 from perception_support import synthetic_notice
 from test_combat_closure import close_command, modern_setup, pc_attack
@@ -130,6 +130,8 @@ def test_complete_real_cross_phase_pipeline_and_new_process(tmp_path, package_da
             ).status
             == "committed"
         )
+        checkpoints.append(audit(database, sid))
+        pass_turn(sm, sid, package, context)
         checkpoints.append(audit(database, sid))
         assert (
             sm.submit_command(pc_attack(sm, sid, package, context), package, context=context).status
@@ -464,7 +466,11 @@ def test_documented_example_runs_real_engine_and_persists_database(tmp_path):
     assert output["rng_version"] == 4 and 0 < output["hp"] < 8
     assert audit(directory / "session.db", output["session_id"])[0] == output["world_version"]
     with closing(sqlite3.connect(directory / "session.db")) as db:
-        assert db.execute("SELECT count(*) FROM command_receipts").fetchone()[0] == 9
+        assert db.execute("SELECT count(*) FROM command_receipts").fetchone()[0] == 10
+        assert db.execute(
+            "SELECT json_extract(receipt_json, '$.status') FROM command_receipts "
+            "WHERE command_id='end-turn.npc'"
+        ).fetchone() == ("committed",)
         assert (
             db.execute(
                 "SELECT count(*) FROM events WHERE event_type='rules.check_rolled'"

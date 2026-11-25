@@ -24,6 +24,7 @@ class TrustedContext:
     can_spend_item_charge: bool = False
     can_authorize_long_rest: bool = False
     can_authorize_short_rest: bool = False
+    can_start_combat: bool = False
 
 
 @dataclass(frozen=True, slots=True)

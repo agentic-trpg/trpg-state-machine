@@ -28,6 +28,7 @@ from .package import canonical_json
 from .scoped_reads import scoped_read
 from .session_access import _binding
 from .spell_cast_activity import StartSpellCast
+from .time_binding import TimeBinding, deadline_after_seconds
 from .world_commands import ActivateMechanism, RepositionObject
 
 
@@ -173,7 +174,7 @@ class SessionRuntime:
         return [] if self.time is None else self.time.waits.finish(row, package, command, events)
 
     def coordinate_combat_time(self, row, package, command_id, previous_round, event_offset=0):
-        """RE retains Turn rules; only a completed Round advances six world ticks."""
+        """Advance the shared clock once for a committed RE round transition."""
         import json
 
         if self.time is None or previous_round is None:
@@ -187,10 +188,18 @@ class SessionRuntime:
             raise StateMachineError("invalid_rule_result", "Unexpected Round transition")
         events = []
         if rounds:
-            current = self.time.world.facts.time_state(row["session_id"])[1]
+            binding, current = self.time.world.facts.time_state(row["session_id"])
+            # Legacy ticks retain their historical increment without a seconds conversion.
+            target = (
+                deadline_after_seconds(
+                    binding, current, self.time.world.loader.round_duration_seconds
+                )
+                if type(binding) is TimeBinding
+                else current + 6
+            )
             staged_row = dict(row)
             staged_row["event_seq"] += event_offset
-            events = self.time._advance(staged_row, package, current + 6, command_id, "combat", 8)
+            events = self.time._advance(staged_row, package, target, command_id, "combat", 8)
         if rounds or state["ended"]:
             self.time.invalidate(row["session_id"])
         return events
@@ -229,7 +238,9 @@ class SessionRuntime:
                 "rules.check",
                 "rules.save",
                 "combat.initialize",
+                "combat.start",
                 "combat.intent",
+                "combat.withdraw",
                 "combat.item",
                 "combat.close",
                 "enter_scene",

@@ -1,6 +1,7 @@
 """Real pinned evaluate(), closed delta validation and one SQLite commit boundary."""
 
 import json
+from uuid import uuid4
 
 from dnd5e_engine.evaluation_bardic_grant import ExplorationFeaturePayload
 from dnd5e_engine.evaluation_contracts import (
@@ -16,19 +17,24 @@ from dnd5e_engine.evaluation_contracts import (
 )
 
 from .combat import (
+    DistanceWithdrawal,
+    EncounterRegion,
     _remap,
     process_id,
     validate_noncombat_foundation,
 )
 from .combat_regions import adopt_combat_region_turn_start
+from .combat_start_rules import prepare_start
+from .combat_withdrawal import CombatWithdraw
 from .commands import validate_command
 from .errors import StateMachineError
+from .grid import cell_in_bounds
 from .package import canonical_json
 from .rest_activity import LongRest, ShortRest
 
 
 class CombatHandler:
-    """Current authored encounter/check/attack/closure orchestration, no formulas."""
+    """Orchestrate encounter creation, checks, attacks and closure across domain owners."""
 
     def __init__(
         self,
@@ -163,7 +169,7 @@ class CombatHandler:
                 "version_conflict", "Component facts changed during preparation"
             )
         self.runtime.set_mechanical_schema(row["session_id"], snapshot.snapshot_schema_version)
-        self.records.initialize(sid, snapshot, spatial=spatial is not None, process_id=process_id())
+        self.records.initialize(sid, snapshot, process_id=process_id())
         combat = snapshot.combat_state
         if not combat.ended:
             adopt_combat_region_turn_start(
@@ -181,6 +187,105 @@ class CombatHandler:
                 phase="combat.after_initialization",
             )
         ]
+
+    def start(self, row, package, command):
+        """Adopt a trusted encounter and its chosen withdrawal policy in one write scope."""
+        self.store.require_write()
+        sid, scene_id = row["session_id"], row["current_scene_id"]
+        payload = command.payload
+        participant_ids = payload.participant_ids
+        if row["pc_actor_id"] not in participant_ids:
+            raise StateMachineError("invalid_combat_roster", "Select the Session PC")
+        if self.records.active(sid):
+            raise StateMachineError("combat_already_active", "An encounter is already active")
+        self.rules._verify_dnd_binding(package, row)
+        snapshot = self.rules._noncombat_snapshot(row, actor_ids=payload.initiative_order)
+        scene = self.facts.maps.scene(sid, scene_id)
+        positions = self.rules._current_cells(sid, scene_id, participant_ids, scene.grid)
+        combat_id = "combat." + uuid4().hex
+        if payload.withdrawal_distance_ft is None:
+            cells = self._opening_cells(scene.grid, payload, positions)
+            withdrawal = EncounterRegion(combat_id, scene_id, cells)
+        else:
+            withdrawal = DistanceWithdrawal(combat_id, scene_id, payload.withdrawal_distance_ft)
+        if self.world.closed_combat_passage_cells(sid, scene_id, cells=positions.values()):
+            raise StateMachineError("invalid_combat_region", "A participant is on a closed doorway")
+        self.world._spatial_combat_guard(sid, scene_id, package, project_passage_doors=True)
+        candidate, budgets = prepare_start(
+            snapshot,
+            payload,
+            row["pc_actor_id"],
+            combat_id,
+            positions,
+            self.rules.session_binding(row),
+            self.rules.loader,
+        )
+        self.records.initialize(sid, candidate, process_id=process_id(), withdrawal=withdrawal)
+        for actor in candidate.character_states:
+            changed = budgets[actor.entity_id]
+            for field in sorted(self.characters.RULE_FIELDS):
+                if getattr(actor, field) != getattr(changed, field):
+                    self.characters.update_rule_metadata(
+                        sid, actor.entity_id, field, getattr(changed, field)
+                    )
+        adopt_combat_region_turn_start(
+            self.world, row, candidate, candidate.combat_state.initiative_ids[0]
+        )
+        if self.runtime.time:
+            self.runtime.time.invalidate(sid)
+        return [
+            self.capture._capture_event(
+                sid,
+                package,
+                "combat.started",
+                {"scene_id": scene_id, "combat_id": combat_id},
+                phase="combat.after_initialization",
+            )
+        ]
+
+    @staticmethod
+    def _opening_cells(grid, payload, positions):
+        """Validate an explicit region or clip a thirteen-by-thirteen default to playable cells."""
+        topology = grid.topology
+        if payload.area_cells is not None:
+            cells = payload.area_cells
+            if any(
+                not cell_in_bounds(topology, cell) or not topology.is_valid_cell(cell)
+                for cell in cells
+            ):
+                raise StateMachineError(
+                    "invalid_combat_region", "Area has an invalid or blocked cell"
+                )
+        else:
+            opening = payload.opening_cell
+            if not cell_in_bounds(topology, opening) or not topology.is_valid_cell(opening):
+                raise StateMachineError(
+                    "invalid_combat_region", "Opening cell is invalid or blocked"
+                )
+            x0, y0 = map(int, opening.split(","))
+            radius = 6
+            cells = tuple(
+                f"{x},{y}"
+                for y in range(max(0, y0 - radius), min(grid.data["height"], y0 + radius + 1))
+                for x in range(max(0, x0 - radius), min(grid.data["width"], x0 + radius + 1))
+                if topology.is_valid_cell(f"{x},{y}")
+            )
+        region = frozenset(cells)
+        if not region.issuperset(positions.values()):
+            raise StateMachineError("invalid_combat_region", "Area must contain every participant")
+        return region
+
+    def read_combat_region(self, session_id, package, *, context):
+        """Authorize reading the active fixed region without returning participant data."""
+        with self.store.transaction():
+            self.sessions._session(session_id, package, context)
+            return self.records.active_region(session_id)
+
+    def read_combat_withdrawal(self, session_id, package, *, context):
+        """Authorize reading the active policy without returning participant data."""
+        with self.store.transaction():
+            self.sessions._session(session_id, package, context)
+            return self.records.active_withdrawal(session_id)
 
     def read_noncombat_snapshot(self, session_id, package, *, context):
         """Authorize access and verify bindings before constructing a noncombat snapshot."""
@@ -221,6 +326,7 @@ class CombatHandler:
 
         if type(command.payload) not in (
             CombatIntentPayload,
+            CombatWithdraw,
             ItemUsePayload,
             ExplorationItemUsePayload,
             ExplorationEnvironmentalSpellCastPayload,
@@ -263,7 +369,10 @@ class CombatHandler:
         with self.store.transaction():
             row = self.sessions._session(session_id, package, context)
             self.sessions._authorize_command(row, actor_id, payload, context)
-            snapshot = self.rules._combat_snapshot(row)
+            attack_actors = (
+                (actor_id, payload.target_id) if payload.intent_type == "attack" else None
+            )
+            snapshot = self.rules._combat_snapshot(row, attack_actors=attack_actors)
             owner = self._conn.execute(
                 "SELECT process_id FROM combats WHERE session_id=?", (session_id,)
             ).fetchone()[0]

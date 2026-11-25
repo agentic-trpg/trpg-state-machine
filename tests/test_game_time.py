@@ -441,7 +441,7 @@ def test_real_dead_actor_is_not_started_and_combat_clock_is_unsupported(
     tmp_path, evaluation_package, context
 ):
     import yaml
-    from dnd_support import initialize
+    from dnd_support import initialize, pass_turn
     from test_combat_closure import close_command, pc_attack
     from test_real_checks import check_setup
 
@@ -456,6 +456,8 @@ def test_real_dead_actor_is_not_started_and_combat_clock_is_unsupported(
             sm.submit_command(pc_attack(sm, sid, package, context), package, context=context).status
             == "committed"
         )
+        assert sm.read_session(sid, package, context=context).world.game_tick == 10
+        pass_turn(sm, sid, package, context)
         rng = sm.read_rng_context(sid, package, context=context)
         rejected = tick(sm, sid, package, context, 17, key="clock.combat")
         assert rejected.error_code == "unsupported_combat_world_operation"

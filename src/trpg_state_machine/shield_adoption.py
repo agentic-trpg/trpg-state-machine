@@ -185,7 +185,8 @@ def shield_changes(request, result, turn_handoff):
             < events.index(cast)
             < events.index(applied[0])
             < events.index(rolls[0])
-            or (owner not in starts and (len(budgets) != 1 or budgets[0].value.reaction_available))
+            or len(budgets) != 1
+            or budgets[0].value.reaction_available
         ):
             _invalid("Shield must resolve between the original hit and its final attack evidence")
         identity = (effect.target_id, effect.id, effect.origin)
@@ -195,10 +196,9 @@ def shield_changes(request, result, turn_handoff):
                 ("slot_ledger", owner, "expended_resources", ledgers[0]),
             )
         )
-        if owner not in starts and (len(graphs) != 1 or graphs[0].value is None):
+        # The attack retains its own turn, so Shield must persist until a later Pass.
+        if len(graphs) != 1 or graphs[0].value is None:
             _invalid("Shield response lacks its persistent effect")
-        if owner in starts and graphs:
-            _invalid("Shield cannot survive its owner's immediate turn start")
     else:
         if resources or ledgers or consumed or reactions or casts or applied or old is None:
             _invalid("Active Shield attack or Pass cannot make a new response payment")

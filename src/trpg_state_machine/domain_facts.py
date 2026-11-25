@@ -24,6 +24,7 @@ from dnd5e_engine.types.conditions import ActiveCondition
 from dnd5e_srd_data.schema.common import PassiveEffectChange
 from pydantic import TypeAdapter
 
+from .combat import DistanceWithdrawal, EncounterRegion
 from .errors import StateMachineError
 from .item_recharge import next_item_dawn
 from .item_units import core_item_id, item_unit_from_row, valid_item_unit
@@ -3452,8 +3453,8 @@ class CombatRecords:
         """Return the combat-records connection."""
         return self.store.connection
 
-    def initialize(self, sid, snapshot, *, spatial, process_id):
-        """Initialize combat runtime records."""
+    def initialize(self, sid, snapshot, *, process_id, withdrawal=None):
+        """Store fresh encounter records, replacing an ended encounter only for dynamic start."""
         self.store.require_write()
         effect_fields = (
             "concentration_chain",
@@ -3468,16 +3469,63 @@ class CombatRecords:
             )
         for field in effect_fields:
             del state[field]
-        self._conn.execute(
-            "INSERT INTO combats VALUES (?,?,?,?,?)",
+        combat_id, scene_id = snapshot.combat_state.combat_id, snapshot.scene_state.scene_id
+        if withdrawal is not None and (
+            type(withdrawal) not in (EncounterRegion, DistanceWithdrawal)
+            or (withdrawal.combat_id, withdrawal.scene_id) != (combat_id, scene_id)
+        ):
+            raise StateMachineError(
+                "invalid_rule_result", "Withdrawal belongs to another encounter"
+            )
+        replace_ended = (
+            " ON CONFLICT(session_id) DO UPDATE SET combat_id=excluded.combat_id,"
+            " scene_id=excluded.scene_id,state_json=excluded.state_json,"
+            " process_id=excluded.process_id,region_json=excluded.region_json,"
+            " withdrawal_distance_ft=excluded.withdrawal_distance_ft"
+            " WHERE json_extract(combats.state_json,'$.ended')=1"
+            if withdrawal is not None
+            else ""
+        )
+        changed = self._conn.execute(
+            "INSERT INTO combats(session_id,combat_id,scene_id,state_json,process_id,region_json,"
+            "withdrawal_distance_ft) VALUES (?,?,?,?,?,?,?)" + replace_ended,
             (
                 sid,
-                snapshot.combat_state.combat_id,
-                snapshot.scene_state.scene_id,
+                combat_id,
+                scene_id,
                 canonical_json(state),
                 process_id,
+                canonical_json(sorted(withdrawal.cells))
+                if type(withdrawal) is EncounterRegion
+                else None,
+                withdrawal.distance_ft if type(withdrawal) is DistanceWithdrawal else None,
             ),
         )
+        if changed.rowcount != 1:
+            raise StateMachineError("combat_already_active", "An encounter is already active")
+
+    def active_region(self, sid):
+        """Read the fixed area if the active encounter uses fixed defense."""
+        withdrawal = self.active_withdrawal(sid)
+        return withdrawal if type(withdrawal) is EncounterRegion else None
+
+    def active_withdrawal(self, sid) -> EncounterRegion | DistanceWithdrawal | None:
+        """Read one active encounter's adopted withdrawal policy in the caller's scope."""
+        row = self._conn.execute(
+            "SELECT combat_id,scene_id,region_json,withdrawal_distance_ft "
+            "FROM combats WHERE session_id=? AND json_extract(state_json,'$.ended')=0",
+            (sid,),
+        ).fetchone()
+        if row is None:
+            return None
+        combat_id, scene_id = row["combat_id"], row["scene_id"]
+        if row["withdrawal_distance_ft"] is not None:
+            return DistanceWithdrawal(combat_id, scene_id, row["withdrawal_distance_ft"])
+        if row["region_json"] is not None:
+            return EncounterRegion(
+                combat_id, scene_id, frozenset(self.store.memory.json(row["region_json"]))
+            )
+        return None
 
     def freeze_positions(self, sid, cells):
         """Freeze position evidence for the closing combat."""
@@ -3486,6 +3534,53 @@ class CombatRecords:
             "UPDATE combats SET state_json=json_set(state_json,'$.actor_zone',json(?)) "
             "WHERE session_id=?",
             (canonical_json(cells), sid),
+        )
+
+    def withdraw_participant(self, sid, combat_id, actor_id, next_actor):
+        """Remove an opponent from live mechanics after the bound evaluator's handoff."""
+        self.store.require_write()
+        row = self._conn.execute(
+            "SELECT state_json FROM combats WHERE session_id=? AND combat_id=?",
+            (sid, combat_id),
+        ).fetchone()
+        if row is None:
+            raise StateMachineError("version_conflict", "Encounter changed during withdrawal")
+        state = self.store.memory.json(row[0])
+        initiative = state["initiative_ids"]
+        if (
+            state["ended"]
+            or actor_id not in state["encounter_ids"]
+            or actor_id in state["dead_ids"]
+            or actor_id == next_actor
+            or initiative[state["current_turn_index"]] != next_actor
+        ):
+            raise StateMachineError("invalid_rule_result", "Withdrawal lacks its verified handoff")
+        remaining = [identity for identity in initiative if identity != actor_id]
+        replacement = {
+            **state,
+            "initiative_ids": remaining,
+            "encounter_ids": [
+                identity for identity in state["encounter_ids"] if identity != actor_id
+            ],
+            "current_turn_index": remaining.index(next_actor),
+            "last_ended_turn": None,
+        }
+        for field in (
+            "movement_ledgers",
+            "opportunity_attack_weapons",
+            "monster_slug_by_entity",
+            "xp_value_by_entity",
+            "monster_action_uses_by_entity",
+            "expended_resources",
+        ):
+            if actor_id in state[field]:
+                replacement[field] = {k: v for k, v in state[field].items() if k != actor_id}
+        replacement["processed_zero_hp_damage_instances"] = [
+            pair for pair in state["processed_zero_hp_damage_instances"] if pair[0] != actor_id
+        ]
+        self._conn.execute(
+            "UPDATE combats SET state_json=? WHERE session_id=? AND combat_id=?",
+            (canonical_json(replacement), sid, combat_id),
         )
 
     def update_rule_state(self, sid, field, value):

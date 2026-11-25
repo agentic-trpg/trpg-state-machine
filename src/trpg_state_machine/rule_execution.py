@@ -15,6 +15,7 @@ from dnd5e_engine.evaluation_charged_item import (
 from dnd5e_engine.evaluation_condition_choice import condition_choice_profile
 from dnd5e_engine.evaluation_contracts import (
     CheckPayload,
+    CombatIntentPayload,
     ExplorationCastActivityPayload,
     ExplorationEnvironmentalSpellCastPayload,
     ExplorationItemAreaFacts,
@@ -65,7 +66,22 @@ from .choice_models import (
     ChoiceRespondOperationPayload,
     PendingChoice,
 )
-from .combat import process_id
+from .combat import DistanceWithdrawal, EncounterRegion, process_id
+from .combat_withdrawal import (
+    CombatWithdraw,
+    boundary_blockers,
+    check_withdrawal,
+    commit_withdrawal,
+    confine_walk,
+    crosses_boundary,
+    distance_withdrawal_origin,
+    pass_snapshot_after_walk,
+    prepare_withdrawal,
+    require_no_unmasked_opportunity,
+    require_walk_bystander_clearance,
+    walking_position,
+    withdrawal_continues,
+)
 from .commands import CommandReceipt
 from .dnd_checks import world_effects_ready
 from .effect_hp_adoption import apply_world_spell_ends
@@ -86,6 +102,7 @@ from .rule_sight import read_creature_sight
 from .rules_adapter import UnsupportedEffectConsequence, validate_dnd_result
 from .shield_adoption import UnsupportedShieldKnockout, UnsupportedShieldTerminal
 from .shield_window import ShieldWindows, guard_shield_window
+from .spatial import SpatialPosition
 from .spell_adoption import UnsupportedSpellConsequence
 from .spell_cast_activity import (
     EXPLORATION_RULES_SNAPSHOT_VERSION,
@@ -211,6 +228,193 @@ class RuleExecution:
             if spell is not None and exploration_healing_requires_sight(spell)
             else None
         )
+
+    async def _prepare_withdrawal_turn(
+        self, row, package, context, command, region, passage, request, result, changes
+    ):
+        """Evaluate the leaving actor's normal handoff outside the shared write lock."""
+        position = walking_position(changes)
+        check_withdrawal(request.state_snapshot, region, position, passage)
+        if not withdrawal_continues(request.state_snapshot, command.actor_id):
+            return None
+        with self.store.transaction():
+            current = self.sessions._session(command.session_id, package, context)
+            if current["world_version"] != row["world_version"]:
+                return None
+            pass_base = self.rules._combat_snapshot(current, for_pass=True)
+        turn_input = pass_snapshot_after_walk(pass_base, result, position)
+        return await self._evaluate_withdrawal_turn(
+            row, package, command, turn_input, request.rng_context
+        )
+
+    async def _evaluate_withdrawal_turn(self, row, package, command, turn_input, rng):
+        """Use the ordinary stateless Pass contract for the remaining encounter."""
+        turn_payload = CombatIntentPayload(intent_type="pass")
+        turn_request = self.rules.request(
+            replace(command, command_type="combat.intent", payload=turn_payload),
+            package,
+            turn_input,
+            rng,
+            row=row,
+        )
+        turn_result = await self.rules._evaluate_dnd(copy.deepcopy(turn_request))
+        turn_result, turn_changes = validate_dnd_result(
+            turn_request, turn_result, loader=self.rules.loader
+        )
+        if turn_result.status != "accepted":
+            raise StateMachineError(turn_result.error.code, "Withdrawal handoff was refused")
+        turn = next(
+            operation
+            for operation in turn_result.state_delta.operations
+            if type(operation) is TurnUpdate
+        )
+        next_actor = turn_input.combat_state.initiative_ids[turn.value.current_turn_index]
+        return turn_input, turn_result, turn_changes, next_actor
+
+    def _adopt_withdrawal_turn(self, row, package, command, turn, rng):
+        """Apply the verified turn and capture its events for the original receipt."""
+        if turn is None:
+            return None, []
+        turn_input, turn_result, turn_changes, next_actor = turn
+        self.rules._apply_dnd_changes(
+            row,
+            turn_changes,
+            command_id=command.command_id,
+            snapshot=turn_input,
+            turn_starts=(next_actor,),
+        )
+        self.runtime.advance_rule_rng(command.session_id, turn_result.rng_transition, rng)
+        return next_actor, [
+            self.capture._capture_event(
+                command.session_id,
+                package,
+                "combat.engine_event",
+                {
+                    "combat_id": turn_input.combat_state.combat_id,
+                    "scene_id": turn_input.scene_state.scene_id,
+                    "engine_event": event.model_dump(mode="json"),
+                },
+                phase="engine.intermediate_phase_unavailable",
+                unresolved=True,
+            )
+            for event in turn_result.proposed_events
+            if event.type != "intent_submitted"
+        ]
+
+    async def _submit_distance_withdrawal(self, command, package, context, fingerprint):
+        """Commit a no-move exit, with an ordinary RE handoff only when combat continues."""
+        sid = command.session_id
+
+        def authorized_row():
+            """Share authorization and pending-command fences across both scopes."""
+            row = self.sessions._session(sid, package, context)
+            self.sessions._authorize_command(row, command.actor_id, command.payload, context)
+            self.sessions._npc_handoff_command_guard(command)
+            self.runtime.authorize_time_wait_reply(row, package, command, context)
+            if self.action_choices is not None:
+                self.action_choices._guard_pending_action_owner(sid)
+            return row
+
+        status, error = "committed", None
+        snapshot, policy, turn = None, None, None
+        with self.store.transaction():
+            row = authorized_row()
+            if replay := self.runtime._command_replay(command, fingerprint):
+                return replay
+            guard_shield_window(self._conn, row)
+            self.rules._verify_dnd_binding(package, row)
+            rng = self.rules._rng_context(row)
+            if self.runtime.version_conflict(row, command):
+                status, error = "conflict", "version_conflict"
+            else:
+                policy = self.rules.records.active_withdrawal(sid)
+                if not isinstance(policy, DistanceWithdrawal):
+                    status, error = "rejected", "combat.withdrawal_unavailable"
+                else:
+                    snapshot = self.rules._combat_snapshot(row, for_pass=True)
+                    owner = self._conn.execute(
+                        "SELECT process_id FROM combats WHERE session_id=?", (sid,)
+                    ).fetchone()[0]
+                    if owner != process_id():
+                        raise StateMachineError(
+                            "combat_unrestorable",
+                            "Interrupted combat requires explicit recovery support",
+                        )
+                    try:
+                        origin = distance_withdrawal_origin(
+                            self.world, row, snapshot, command.actor_id, command.payload, policy
+                        )
+                    except StateMachineError as exc:
+                        status, error = "rejected", exc.code
+        if status == "committed" and withdrawal_continues(snapshot, command.actor_id):
+            try:
+                turn = await self._evaluate_withdrawal_turn(row, package, command, snapshot, rng)
+            except StateMachineError as exc:
+                if exc.code == "invalid_rule_result":
+                    raise
+                status, error = "rejected", exc.code
+
+        with self.store.transaction(write=True):
+            row = authorized_row()
+            if replay := self.runtime._command_replay(command, fingerprint):
+                return replay
+            guard_shield_window(self._conn, row)
+            version = row["world_version"]
+            if (
+                self.runtime.version_conflict(row, command)
+                or self.rules._rng_context(row) != rng
+                or (
+                    snapshot is not None
+                    and (
+                        self.rules.records.active_withdrawal(sid) != policy
+                        or self.rules._combat_snapshot(row, for_pass=True) != snapshot
+                    )
+                )
+            ):
+                status, error = "conflict", "version_conflict"
+            elif status == "committed":
+                try:
+                    with self.store.savepoint():
+                        next_actor, turn_events = self._adopt_withdrawal_turn(
+                            row, package, command, turn, rng
+                        )
+                        events = commit_withdrawal(
+                            self.world,
+                            self.rules.records,
+                            row,
+                            package,
+                            snapshot,
+                            command.actor_id,
+                            origin,
+                            next_actor,
+                        )
+                        events.extend(turn_events)
+                        events.extend(
+                            self.runtime.finish_time_wait_reply(row, package, command, events)
+                        )
+                        events = self.effects._expand_events(
+                            row, package, events, command.command_id
+                        )
+                        events.extend(
+                            self.runtime.coordinate_combat_time(
+                                row,
+                                package,
+                                command.command_id,
+                                snapshot.combat_state.round_number,
+                                len(events),
+                            )
+                        )
+                        version = self.runtime.stage_outcome(command, row, package, events)
+                except StateMachineError as exc:
+                    if exc.code not in {
+                        "version_conflict",
+                        "combat.region_capability",
+                        "event_cascade_limit",
+                    }:
+                        raise
+                    status = "conflict" if exc.code == "version_conflict" else "rejected"
+                    error = exc.code
+            return self.runtime.finish(command, context, fingerprint, row, status, version, error)
 
     def _exploration_error(
         self, row, command, *, exploration_spell, casting_finish=False, casting_activity=False
@@ -710,6 +914,10 @@ class RuleExecution:
         long_rest = type(command.payload) is LongRest
         if casting_activity or (not (exploration_rule or rest) and shield_prompt is None):
             command = self.runtime.prepare_timed_command(command, package, context, fingerprint)
+        if type(command.payload) is CombatWithdraw and (
+            command.payload.target_cell is None and command.payload.passage_id is None
+        ):
+            return await self._submit_distance_withdrawal(command, package, context, fingerprint)
         object_check = type(command.payload) in OPENABLE_CHECK_OPERATIONS
         mechanism_check = type(command.payload) is CheckMechanism
         domain_check = object_check or mechanism_check
@@ -719,6 +927,14 @@ class RuleExecution:
             self.world.objects.mechanisms if mechanism_check else self.world.objects.openable
         )
         plan, prepare_error, rule_command = None, None, command
+        withdrawal_requested = type(command.payload) is CombatWithdraw
+        movement_requested = (
+            withdrawal_requested or getattr(command.payload, "intent_type", None) == "move"
+        )
+        region, passage = None, None
+        blockers = None
+        unconfined = None
+        policy = None
         attune_plan = None
         initial_exploration_error = None
         rest_plan = None
@@ -824,14 +1040,24 @@ class RuleExecution:
             if public_check or domain_check or exploration_item:
                 return self.rules._noncombat_snapshot(value, package)
             intent_type = getattr(command.payload, "intent_type", None)
-            projects_walk = intent_type == "move" or (
+            projects_walk = movement_requested or (
                 intent_type == "cast_spell"
                 and command.payload.spell_id is not None
                 and spell_attack_has_speed_effect(self.rules.loader, command.payload.spell_id)
             )
-            return self.rules._combat_snapshot(
-                value, for_pass=intent_type == "pass", for_walk=projects_walk
+            attack = shield_original or rule_command
+            attack_actors = (
+                (attack.actor_id, attack.payload.target_id)
+                if getattr(attack.payload, "intent_type", None) == "attack"
+                else None
             )
+            snapshot = self.rules._combat_snapshot(
+                value,
+                for_pass=intent_type == "pass",
+                for_walk=projects_walk,
+                attack_actors=attack_actors,
+            )
+            return confine_walk(snapshot, blockers)
 
         with self.store.transaction():
             row = self.sessions._session(command.session_id, package, context)
@@ -856,6 +1082,22 @@ class RuleExecution:
                 raise StateMachineError(
                     "ruleset_binding_mismatch", "Pinned evaluator version is not installed"
                 )
+            if movement_requested:
+                policy = self.rules.records.active_withdrawal(command.session_id)
+                if isinstance(policy, EncounterRegion):
+                    region = policy
+            if withdrawal_requested:
+                try:
+                    target, passage = prepare_withdrawal(
+                        self.world, row, command.actor_id, command.payload, package, region
+                    )
+                    rule_command = replace(
+                        command,
+                        command_type="combat.intent",
+                        payload=CombatIntentPayload(intent_type="move", target_zone_id=target),
+                    )
+                except StateMachineError as exc:
+                    prepare_error = exc.code
             if exploration_rule:
                 initial_exploration_error = exploration_error(row)
                 prepare_error = initial_exploration_error
@@ -956,6 +1198,10 @@ class RuleExecution:
                 if material is None:
                     prepare_error = "spell.material"
             snapshot = None if prepare_error else build_snapshot(row)
+            if snapshot is not None and region is not None and not withdrawal_requested:
+                blockers = boundary_blockers(region, snapshot.scene_state.grid)
+                if blockers:
+                    unconfined, snapshot = snapshot, confine_walk(snapshot, blockers)
             if (
                 spell_save_handlers is not None
                 and self.action_choices is not None
@@ -1013,7 +1259,8 @@ class RuleExecution:
                     check_request, package
                 )
             if (
-                type(command.payload) not in (CheckPayload, SavePayload)
+                snapshot is not None
+                and type(command.payload) not in (CheckPayload, SavePayload)
                 and not domain_check
                 and not (exploration_rule or rest)
             ):
@@ -1101,6 +1348,7 @@ class RuleExecution:
         if capability is None and not world_ready:
             capability = "world_precondition_failed"
         result, changes, shield_token = None, (), None
+        withdrawal_turn = None
         spent_spell_grants = ()
         preverified_spell_save = False
         if _spell_save_resume is not None:
@@ -1256,6 +1504,34 @@ class RuleExecution:
                         capability = "combat.shield_terminal_unsupported"
                     except UnsupportedShieldKnockout:
                         capability = "combat.shield_knockout_unsupported"
+                    if (
+                        unconfined is not None
+                        and capability is None
+                        and result.status == "accepted"
+                    ):
+                        try:
+                            require_no_unmasked_opportunity(
+                                unconfined, walking_position(changes), self.rules.loader
+                            )
+                        except StateMachineError as exc:
+                            capability = exc.code
+                    if withdrawal_requested and capability is None and result.status == "accepted":
+                        try:
+                            withdrawal_turn = await self._prepare_withdrawal_turn(
+                                row,
+                                package,
+                                context,
+                                command,
+                                region,
+                                passage,
+                                request,
+                                result,
+                                changes,
+                            )
+                        except StateMachineError as exc:
+                            if exc.code == "invalid_rule_result":
+                                raise
+                            capability = exc.code
             self.rules._verify_dnd_binding(package, row)
         choice_requested = result is not None and result.status == "needs_choice"
         bardic_candidate = (
@@ -1495,6 +1771,39 @@ class RuleExecution:
                 try:
                     if command.time_wait is not None:
                         self.runtime.time.waits.validate(row, package, command)
+                    position = walking_position(changes) if movement_requested else None
+                    withdrew = False
+                    if movement_requested and position is not None:
+                        live_policy = self.rules.records.active_withdrawal(command.session_id)
+                        if live_policy != policy:
+                            raise StateMachineError("version_conflict", "Encounter range changed")
+                        if withdrawal_requested:
+                            if prepare_withdrawal(
+                                self.world,
+                                row,
+                                command.actor_id,
+                                command.payload,
+                                package,
+                                live_policy,
+                            ) != (rule_command.payload.target_zone_id, passage):
+                                raise StateMachineError("version_conflict", "Exit route changed")
+                            check_withdrawal(snapshot, region, position, passage)
+                            withdrew = True
+                        elif region is not None and crosses_boundary(region, position):
+                            raise StateMachineError(
+                                "combat.withdrawal_route",
+                                "Ordinary movement remains inside the encounter",
+                            )
+                        if policy is not None:
+                            require_walk_bystander_clearance(
+                                self.world, command.session_id, snapshot, position
+                            )
+                        if (
+                            withdrew
+                            and withdrawal_continues(snapshot, command.actor_id)
+                            and (withdrawal_turn is None)
+                        ):
+                            raise StateMachineError("version_conflict", "Withdrawal turn changed")
                     if domain_check:
                         current_plan = check_service.prepare_check(
                             row, command.actor_id, command.payload, package
@@ -1838,6 +2147,31 @@ class RuleExecution:
                         if not isinstance(event, ObjectIdentified)
                     ]
                     events.extend(effects_events)
+                    if withdrew:
+                        if withdrawal_turn is not None and (
+                            self.rules._combat_snapshot(row, for_pass=True) != withdrawal_turn[0]
+                        ):
+                            raise StateMachineError(
+                                "combat.withdrawal_handoff_facts",
+                                "Movement changed the fixed withdrawal turn facts",
+                            )
+                        next_actor, turn_events = self._adopt_withdrawal_turn(
+                            row, package, command, withdrawal_turn, rng
+                        )
+                        events.extend(
+                            commit_withdrawal(
+                                self.world,
+                                self.rules.records,
+                                row,
+                                package,
+                                snapshot,
+                                command.actor_id,
+                                SpatialPosition(position.scene_id, position.value),
+                                next_actor,
+                                landing=passage.landing if passage is not None else None,
+                            )
+                        )
+                        events.extend(turn_events)
                     events.extend(spell_end_events)
                     events.extend(
                         effect_time.spell_end_event(row["session_id"], package, ending)
@@ -1937,6 +2271,10 @@ class RuleExecution:
                         "position_conflict",
                         "movement.capability",
                         "combat.region_capability",
+                        "combat.withdrawal_unavailable",
+                        "combat.withdrawal_route",
+                        "combat.withdrawal_effects_unsupported",
+                        "combat.withdrawal_handoff_facts",
                         "version_conflict",
                         "mechanism_target_unavailable",
                         "unsupported_mechanism_target",

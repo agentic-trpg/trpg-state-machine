@@ -152,7 +152,7 @@ def test_real_ledger_updates_preserve_prior_history(tmp_path, package_data, cont
             assert new_entries and {actor for actor, _ in new_entries} == {
                 command.payload.target_id
             }
-            assert after.combat_state.initiative_ids[after.combat_state.current_turn_index] == OTHER
+            assert after.combat_state.initiative_ids[after.combat_state.current_turn_index] == NPC
             assert any(
                 type(op) is delta.ActionBudgetUpdate and op.actor_id == command.payload.target_id
                 for op in result.state_delta.operations
@@ -273,17 +273,23 @@ def corrupt_ledger(request, result, fault):
                 value=1,
             )
         else:
-            index = next(i for i, op in enumerate(operations) if type(op) is delta.TurnUpdate)
-            op = operations.pop(index)
+            before = delta.TurnState.model_validate(
+                state.model_dump(include=delta.TurnState.model_fields)
+            )
             field = fault.removeprefix("adjacent_")
             value = (
                 True
                 if field == "ended"
                 else OTHER
                 if field == "departed_actor_id"
-                else (op.value.turn_serial, OTHER)
+                else (before.turn_serial, OTHER)
             )
-            injected = op.model_copy(update={"value": op.value.model_copy(update={field: value})})
+            injected = delta.TurnUpdate(
+                kind="combat.turn_update",
+                combat_id=state.combat_id,
+                expected=before,
+                value=before.model_copy(update={field: value}),
+            )
         # Attribution uses an existing operation; replace it to avoid duplicate
         # field rejection masking the ownership check under test.
         operations = [op for op in operations if type(op) is not type(injected)]

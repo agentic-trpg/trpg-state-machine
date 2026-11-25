@@ -747,6 +747,12 @@ def test_public_ordinary_attack_with_active_timed_spell(
             assert hp_after[NPC] == hp_before[NPC]
             after_rng = sm.read_rng_context(sid, package, context=context)
             assert after_rng.version == rng.version + 1
+            assert after.effect_states == expected_effects
+            assert sm.read_time_sync(sid, package, context=context).committed_tick == before_tick
+            rollover = pass_command(sid, after, "round-ending-pass")
+            rollover_receipt = sm.submit_command(rollover, package, context=context)
+            assert rollover_receipt.status == "committed", rollover_receipt
+            after = sm.read_combat_snapshot(sid, package, context=context)
             after_tick = before_tick + 6
             assert after.effect_states == (expected_effects if after_tick < deadline else ())
             assert sm.read_time_sync(sid, package, context=context).committed_tick == after_tick
@@ -756,7 +762,7 @@ def test_public_ordinary_attack_with_active_timed_spell(
             budgets = (movement[cast.actor_id], movement[NPC])
 
             if with_effect:
-                expiry_receipt, expiry_command = receipt, command
+                expiry_receipt, expiry_command = rollover_receipt, rollover
                 if after_tick < deadline:
                     turn = pass_command(sid, after, "last-active-turn")
                     assert sm.submit_command(turn, package, context=context).status == "committed"
