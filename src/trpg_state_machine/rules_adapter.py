@@ -5,7 +5,6 @@ import json
 from dataclasses import asdict
 
 from dnd5e_engine import evaluation_delta as delta
-from dnd5e_engine.attack_rules import attack_action_is_spent
 from dnd5e_engine.damage_rules import damage_balances
 from dnd5e_engine.death_saves import DeathSaveState
 from dnd5e_engine.evaluation import evaluate
@@ -207,7 +206,7 @@ def delta_changes(
     turn_life_target=None,
     reviewed_region_damage=False,
 ):
-    """Check pre-values and ownership for an attack, turn advance or narrow potion Delta.
+    """Check pre-values and ownership for an attack, Pass or narrow potion Delta.
 
     A temporary candidate validates invariants; it is never persisted as a Snapshot.
     Whole-session OCC covers all Engine dependencies in this candidate API.
@@ -218,6 +217,8 @@ def delta_changes(
         (op for op in result.state_delta.operations if type(op) is delta.TurnUpdate), None
     )
     turn_advanced = turn_update is not None
+    if item_use and turn_advanced:
+        _invalid("Potion cannot advance the current turn")
     data = snapshot.model_dump(mode="json")
     actors = {a["entity_id"]: a for a in data["character_states"]}
     combat = data["combat_state"]
@@ -317,8 +318,6 @@ def delta_changes(
             delta.InventoryConsume,
             delta.HPDelta,
             delta.ActionBudgetUpdate,
-            delta.TurnUpdate,
-            delta.MovementLedgerUpdate,
         ):
             _invalid("Unsupported item-use consequence")
         if type(op) is delta.InventoryConsume:
@@ -392,11 +391,7 @@ def delta_changes(
                 }
                 if op.actor_id == request.actor_id:
                     permitted = {"bonus_action_available", "bonus_action_taken_this_turn"}
-                    if turn_advanced:
-                        permitted |= {"movement_remaining", "sneak_attack_spent_this_turn"}
-                    if not changed_budget <= permitted or (
-                        not turn_advanced and changed_budget != permitted
-                    ):
+                    if changed_budget != permitted:
                         _invalid("Potion changed an unrelated action budget")
                     paid = (
                         op.expected.bonus_action_available
@@ -404,24 +399,9 @@ def delta_changes(
                         and not op.value.bonus_action_available
                         and op.value.bonus_action_taken_this_turn
                     )
-                elif not turn_advanced or op.actor_id != snapshot.combat_state.initiative_ids[turn]:
-                    _invalid("Potion changed another actor's budget outside turn start")
+                else:
+                    _invalid("Potion changed another actor's budget")
             if type(op) is delta.TurnUpdate:
-                if item_use:
-                    source = next(
-                        actor
-                        for actor in snapshot.character_states
-                        if actor.entity_id == request.actor_id
-                    )
-                    if (
-                        source.action_available
-                        or source.movement_remaining > 0
-                        or (source.attack_action_engaged and source.attacks_remaining > 0)
-                        or op.value.last_ended_turn
-                        != (snapshot.combat_state.round_number, request.actor_id)
-                        or op.value.turn_serial != op.expected.turn_serial + 1
-                    ):
-                        _invalid("Potion turn advance differs from the spent turn")
                 if op.value.ended != op.expected.ended:
                     _invalid("Combat completion is not supported by this attack slice")
                 for field in ("monster_turn_start_done", "last_ended_turn", "departed_actor_id"):
@@ -632,7 +612,7 @@ def _turn_intent_scope(
     effect_movement=None,
     effect_speed=haste_speed,
 ):
-    """Bind the ordinary turn handoff and validate its affected target's movement ledger."""
+    """Validate cast payment or explicit Pass handoff against the fixed turn."""
     snapshot = request.state_snapshot
     combat = snapshot.combat_state
     operations = result.state_delta.operations
@@ -656,7 +636,7 @@ def _turn_intent_scope(
         outgoing = outgoing.model_copy(update=payment)
 
     turns = [op for op in operations if type(op) is delta.TurnUpdate]
-    advances = not cast or attack_action_is_spent(outgoing)
+    advances = not cast
     if len(turns) != int(advances):
         _invalid("Cast or Pass omitted or duplicated its required turn transition")
     turn_events = [event for event in result.proposed_events if event.type in _TURN_EVENTS]
@@ -710,13 +690,16 @@ def _turn_intent_scope(
             actors[identity] = actor.model_copy(update={"sneak_attack_spent_this_turn": False})
     elif turn_events or ledgers:
         _invalid("Effect cast proposed turn consequences without a turn transition")
-    elif effect_movement is not None:
-        target = effect_movement[0]
-        actor = actors[target]
-        ledger = combat.movement_ledgers[target]
-        actors[target] = actor.model_copy(
-            update={"movement_remaining": ledger.remaining(speed(actor, ledger.active_mode))}
-        )
+    else:
+        movement_targets = set(condition_changes or ())
+        if effect_movement is not None:
+            movement_targets.add(effect_movement[0])
+        for target in movement_targets:
+            actor = actors[target]
+            ledger = combat.movement_ledgers[target]
+            actors[target] = actor.model_copy(
+                update={"movement_remaining": ledger.remaining(speed(actor, ledger.active_mode))}
+            )
 
     fields = delta.AttackBudgetState.model_fields
     proposed_budgets = {
@@ -1397,6 +1380,7 @@ def validate_dnd_result(request, result, *, loader=None, preverified_spell_save=
             or submitted[0].item_id != bottle["item_slug"]
             or len(healed) != 1
             or healed[0].target_id != request.actor_id
+            or any(event.type in _TURN_EVENTS for event in result.proposed_events)
         ):
             _invalid("Potion events do not match the selected bottle and authorized drinker")
         actor = next(

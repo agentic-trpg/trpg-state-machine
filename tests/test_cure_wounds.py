@@ -10,6 +10,8 @@ from dnd5e_engine.evaluation_delta import (
     ActionBudgetUpdate,
     AttackBudgetState,
     MovementLedgerUpdate,
+    TurnState,
+    TurnUpdate,
 )
 from dnd5e_engine.evaluation_rng import RNGState
 from dnd5e_engine.evaluation_ruleset import ruleset_binding
@@ -330,6 +332,19 @@ def cast_command(
     )
 
 
+def pass_command(sm, sid, package, context, actor_id, *, key="pass"):
+    """Build a public Pass for the current actor at the current world version."""
+    state = sm.read_session(sid, package, context=context)
+    return TypedCommand(
+        sid,
+        key,
+        actor_id,
+        "combat.intent",
+        CombatIntentPayload(intent_type="pass"),
+        state.world_version,
+    )
+
+
 def pool(snapshot):
     """Return the one authored level-one slot balance."""
     return next(p for p in snapshot.resource_state.pools if p.pool_id == SLOT)
@@ -530,7 +545,7 @@ def test_full_hp_still_pays_and_draws(tmp_path, context):
 
 
 def test_only_living_caster_wraps_round_and_pays_slot(tmp_path, context):
-    """A paid cast may reset its own action when no other actor can take a turn."""
+    """A paid cast retains Turn; Pass alone wraps the lone survivor's round."""
     sm, sid, package, _, _ = cure_world(tmp_path, context, solo_dead=True)
     with sm:
         command = cast_command(sm, sid, package, context)
@@ -545,8 +560,8 @@ def test_only_living_caster_wraps_round_and_pays_slot(tmp_path, context):
         assert receipt.status == "committed"
         after = sm.read_combat_snapshot(sid, package, context=context)
         assert after.combat_state.current_turn_index == before.combat_state.current_turn_index
-        assert after.combat_state.round_number == before.combat_state.round_number + 1
-        assert actor(after, command.actor_id).action_available
+        assert after.combat_state.round_number == before.combat_state.round_number
+        assert not actor(after, command.actor_id).action_available
         assert (
             actor(after, command.actor_id).hp_current > actor(before, command.actor_id).hp_current
         )
@@ -554,6 +569,17 @@ def test_only_living_caster_wraps_round_and_pays_slot(tmp_path, context):
         assert after.combat_state.expended_resources[command.actor_id]["spell_slot:1"] == 1
         assert sm.read_rng_context(sid, package, context=context) != before_rng
         assert sm.submit_command(command, package, context=context) == receipt
+        passed = sm.submit_command(
+            pass_command(sm, sid, package, context, command.actor_id),
+            package,
+            context=context,
+        )
+        assert passed.status == "committed", passed
+        wrapped = sm.read_combat_snapshot(sid, package, context=context)
+        assert wrapped.combat_state.round_number == before.combat_state.round_number + 1
+        assert wrapped.combat_state.current_turn_index == before.combat_state.current_turn_index
+        assert actor(wrapped, command.actor_id).action_available
+        assert pool(wrapped) == pool(after)
 
 
 def test_spent_next_actor_receives_ordinary_turn_reset(tmp_path, context):
@@ -565,6 +591,15 @@ def test_spent_next_actor_receives_ordinary_turn_reset(tmp_path, context):
         assert not actor(before, NPC).action_available
         receipt = sm.submit_command(command, package, context=context)
         assert receipt.status == "committed"
+        retained = sm.read_combat_snapshot(sid, package, context=context)
+        assert retained.combat_state.turn_serial == before.combat_state.turn_serial
+        assert not actor(retained, NPC).action_available
+        passed = sm.submit_command(
+            pass_command(sm, sid, package, context, command.actor_id),
+            package,
+            context=context,
+        )
+        assert passed.status == "committed", passed
         after = sm.read_combat_snapshot(sid, package, context=context)
         assert actor(after, NPC).action_available
         assert not actor(after, NPC).action_taken_this_turn
@@ -681,15 +716,22 @@ def test_forged_turn_reference_rolls_back_all_spell_facts(tmp_path, context, fie
             result = await original(request)
             assert result.status == "accepted"
             operations = list(result.state_delta.operations)
-            index = next(i for i, op in enumerate(operations) if op.kind == "combat.turn_update")
-            turn = operations[index]
+            assert not any(op.kind == "combat.turn_update" for op in operations)
+            turn_before = TurnState.model_validate(
+                before.combat_state.model_dump(include=TurnState.model_fields)
+            )
             forged_value = (
                 command.actor_id
                 if field == "departed_actor_id"
                 else (before.combat_state.round_number, command.actor_id)
             )
-            operations[index] = turn.model_copy(
-                update={"value": turn.value.model_copy(update={field: forged_value})}
+            operations.append(
+                TurnUpdate(
+                    kind="combat.turn_update",
+                    combat_id=before.combat_state.combat_id,
+                    expected=turn_before,
+                    value=turn_before.model_copy(update={field: forged_value}),
+                )
             )
             return result.model_copy(
                 update={
@@ -729,8 +771,8 @@ def test_forged_turn_reference_rolls_back_all_spell_facts(tmp_path, context, fie
     ("field", "forged_value"),
     [("extra_actions_remaining", 1), ("attacks_remaining", 2)],
 )
-def test_forged_next_actor_budget_rolls_back_spell(tmp_path, context, field, forged_value):
-    """A paid cast cannot grant the following actor extra actions or attacks."""
+def test_forged_other_actor_budget_rolls_back_spell(tmp_path, context, field, forged_value):
+    """A paid cast cannot grant another actor extra actions or attacks."""
     sm, sid, package, _, _ = cure_world(tmp_path, context)
     with sm:
         command = cast_command(sm, sid, package, context)
@@ -746,8 +788,8 @@ def test_forged_next_actor_budget_rolls_back_spell(tmp_path, context, field, for
             result = await original(request)
             assert result.status == "accepted"
             operations = list(result.state_delta.operations)
-            turn = next(op for op in operations if op.kind == "combat.turn_update")
-            next_actor = before.combat_state.initiative_ids[turn.value.current_turn_index]
+            assert not any(op.kind == "combat.turn_update" for op in operations)
+            next_actor = NPC
             budget = next(
                 (
                     op
@@ -797,11 +839,13 @@ def test_forged_next_actor_budget_rolls_back_spell(tmp_path, context, field, for
         assert sm.get_command_receipt(sid, command.command_id, package, context=context) is None
 
 
-def test_missing_turn_start_event_rolls_back_spell(tmp_path, context):
-    """An accepted Delta must retain the event proving its next actor handoff."""
+def test_missing_turn_start_event_rolls_back_pass_after_spell(tmp_path, context):
+    """Pass after a paid cast must retain the next actor's turn-start event."""
     sm, sid, package, _, _ = cure_world(tmp_path, context)
     with sm:
         command = cast_command(sm, sid, package, context)
+        assert sm.submit_command(command, package, context=context).status == "committed"
+        command = pass_command(sm, sid, package, context, command.actor_id)
         before = sm.read_combat_snapshot(sid, package, context=context)
         before_rng = sm.read_rng_context(sid, package, context=context)
         before_events = sm._conn.execute(
@@ -810,7 +854,7 @@ def test_missing_turn_start_event_rolls_back_spell(tmp_path, context):
         original = sm._rules._evaluate_dnd
 
         async def without_turn_start(request):
-            """Remove one genuine turn event after RE accepts the cast."""
+            """Remove one genuine turn event after RE accepts Pass."""
             result = await original(request)
             assert result.status == "accepted"
             events = tuple(
@@ -836,12 +880,14 @@ def test_missing_turn_start_event_rolls_back_spell(tmp_path, context):
 
 @pytest.mark.parametrize("fault", ["forged_move", "omitted_budget"])
 def test_next_turn_reset_cannot_be_forged_or_omitted(tmp_path, context, fault):
-    """A paid cast adopts only the ordinary next actor movement and action reset."""
+    """Pass after a paid cast adopts only the next actor's ordinary reset."""
     sm, sid, package, _, _ = cure_world(
         tmp_path, context, next_actor_spent=fault == "omitted_budget"
     )
     with sm:
         command = cast_command(sm, sid, package, context)
+        assert sm.submit_command(command, package, context=context).status == "committed"
+        command = pass_command(sm, sid, package, context, command.actor_id)
         before = sm.read_combat_snapshot(sid, package, context=context)
         before_rng = sm.read_rng_context(sid, package, context=context)
         before_events = sm._conn.execute(

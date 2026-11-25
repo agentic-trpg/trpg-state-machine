@@ -13,6 +13,7 @@ from test_hold_effect_candidate import (
     hold_attack_command,
     hold_cast_command,
     hold_world,
+    pass_after_hold_cast,
     pass_command,
 )
 
@@ -79,6 +80,12 @@ def test_hold_late_receipt_failure_rolls_back_then_replay_and_stale_conflict(
         assert old_snapshot.combat_state.concentration_chain == {}
         assert old_snapshot.world_version == command.expected_world_version
         assert len(committed.effect_states) == 1
+        assert (
+            committed.combat_state.current_turn_index
+            == old_snapshot.combat_state.current_turn_index
+        )
+        assert committed.combat_state.turn_serial == old_snapshot.combat_state.turn_serial
+        assert committed.combat_state.concentration_rounds_remaining[command.actor_id] == 10
         assert committed_rng != old_rng
         assert sm.submit_command(command, package, context=context) == receipt
         assert sm.get_command_receipt(sid, command.command_id, package, context=context) == receipt
@@ -177,7 +184,7 @@ def test_hold_damage_and_concentration_drop_roll_back_together(tmp_path, context
     with sm:
         cast = hold_cast_command(sm, sid, package, context)
         assert sm.submit_command(cast, package, context=context).status == "committed"
-        before = sm.read_combat_snapshot(sid, package, context=context)
+        before = pass_after_hold_cast(sm, sid, package, context)
         before_rng = sm.read_rng_context(sid, package, context=context)
         caster = cast.actor_id
         hp_before = next(a for a in before.character_states if a.entity_id == caster).hp_current
@@ -257,7 +264,7 @@ def test_hold_attack_knockout_ends_exact_group_atomically(
             sm, sid, package, context, target_ids=(linked_target,) if linked_target else None
         )
         assert sm.submit_command(cast, package, context=context).status == "committed"
-        before = sm.read_combat_snapshot(sid, package, context=context)
+        before = pass_after_hold_cast(sm, sid, package, context)
         before_rng = sm.read_rng_context(sid, package, context=context)
         before_events = sm.read_events(sid, package, context=context)
         persisted = stored_state(db)
@@ -368,7 +375,7 @@ def test_hold_knockout_public_pass_adopts_nonterminal_saves(
     with sm:
         cast = hold_cast_command(sm, sid, package, context)
         assert sm.submit_command(cast, package, context=context).status == "committed"
-        before = sm.read_combat_snapshot(sid, package, context=context)
+        before = pass_after_hold_cast(sm, sid, package, context)
         attack = hold_attack_command(sid, cast.actor_id, before.world_version)
         assert sm.submit_command(attack, package, context=context).status == "committed"
         after_attack = sm.read_combat_snapshot(sid, package, context=context)
@@ -427,7 +434,7 @@ def test_hold_knockout_public_pass_reaches_terminal_death_atomically(
         cast = hold_cast_command(sm, sid, package, context)
         assert sm.submit_command(cast, package, context=context).status == "committed"
         caster = cast.actor_id
-        before = sm.read_combat_snapshot(sid, package, context=context)
+        before = pass_after_hold_cast(sm, sid, package, context)
         attack = hold_attack_command(sid, caster, before.world_version)
         assert sm.submit_command(attack, package, context=context).status == "committed"
         after_attack = sm.read_combat_snapshot(sid, package, context=context)
@@ -586,4 +593,6 @@ def test_hold_command_rejects_out_of_scope_delta(tmp_path, context, monkeypatch,
 
         assert sm.submit_command(command, package, context=context).status == "committed"
         after = sm.read_combat_snapshot(sid, package, context=context)
-        assert after.combat_state.turn_serial == before.combat_state.turn_serial + 1
+        assert after.combat_state.turn_serial == before.combat_state.turn_serial + int(
+            mutation != "cast_hp"
+        )

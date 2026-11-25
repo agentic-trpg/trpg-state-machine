@@ -62,7 +62,7 @@ def test_point_cast_adopts_two_saves_and_shared_damage(
         after = sm.read_combat_snapshot(sid, package, context=context)
         assert after.resource_state == before.resource_state
         assert after.combat_state.expended_resources == before.combat_state.expended_resources
-        assert after.combat_state.turn_serial == before.combat_state.turn_serial + 1
+        assert after.combat_state.turn_serial == before.combat_state.turn_serial
         assert after.combat_state.damage_instance_sequence == (
             before.combat_state.damage_instance_sequence + len(targets)
         )
@@ -129,7 +129,7 @@ def test_empty_area_spends_action_without_rng(open_spell_combat, context, monkey
             after.combat_state.damage_instance_sequence
             == before.combat_state.damage_instance_sequence
         )
-        assert after.combat_state.turn_serial == before.combat_state.turn_serial + 1
+        assert after.combat_state.turn_serial == before.combat_state.turn_serial
         assert not actor(after, command.actor_id).action_available
         assert actor(after, NPC).hp_current == actor(before, NPC).hp_current
         assert sm.read_rng_context(sid, package, context=context) == rng

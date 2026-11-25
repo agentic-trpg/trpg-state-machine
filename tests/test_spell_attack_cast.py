@@ -1,6 +1,7 @@
 """Exercise canonical ranged spell attacks through public SM combat commands."""
 
 from copy import deepcopy
+from dataclasses import replace
 from random import Random
 
 import pytest
@@ -12,8 +13,10 @@ from dnd5e_engine.spell_delivery import EffectSelection
 from dnd5e_srd_data import BundledAssetLoader, MemoryAssetLoader
 from dnd_support import create, initialize
 from item_support import NPC, ROPE, item_data, item_loader
+from test_combat_start import start_command
 from test_cure_wounds import actor, pool
 from test_dnd_runtime import authority
+from test_hold_effect_candidate import pass_command
 from test_ordinary_spells import assert_committed_events, assert_npc_death, observe_evaluation
 
 from trpg_state_machine import StateMachine, StateMachineError, TypedCommand
@@ -43,6 +46,8 @@ def open_spell_combat(tmp_path, context):
         extra_spells=(),
         walking=False,
         other_enemy_turn=False,
+        dynamic=False,
+        start_context=None,
     ):
         canonical = BundledAssetLoader()
         base = item_loader()
@@ -167,12 +172,28 @@ def open_spell_combat(tmp_path, context):
                 ]
             }
 
+        if dynamic:
+            data["rule_bindings"].pop("combat_foundation")
         package = _validate(data)
         db = tmp_path / "spell-attack.sqlite"
         sm = StateMachine(db, dnd_loader=loader)
+        active_context = start_context or context
         try:
-            sid = create(sm, package, context)
-            receipt = initialize(sm, sid, package, context)
+            sid = create(sm, package, active_context)
+            if dynamic:
+                roster = (sm.read_session(sid, package, context=active_context).pc_actor_id, NPC)
+                opening = start_command(
+                    sm,
+                    sid,
+                    package,
+                    active_context,
+                    participant_ids=roster,
+                    initiative_order=roster,
+                    opponent_profiles=(),
+                )
+                receipt = sm.submit_command(opening, package, context=active_context)
+            else:
+                receipt = initialize(sm, sid, package, active_context)
             assert receipt.status == "committed", receipt
         except Exception:
             sm.close()
@@ -211,7 +232,7 @@ def cast_command(sm, sid, package, context, spell_id, **choices):
 def test_ranged_spell_attacks_commit_at_canonical_range(
     open_spell_combat, context, monkeypatch, spell_id, seed, natural, hit, crit
 ):
-    """Check the roll draw, damage dice, resource mirror and turn handoff for both spells."""
+    """Check the roll draw, damage dice, resource mirror and retained turn."""
     column, damage_die, damage_type = SPELLS[spell_id]
     sm, sid, package, loader, db = open_spell_combat(seed=seed, column=column)
     with sm:
@@ -229,7 +250,6 @@ def test_ranged_spell_attacks_commit_at_canonical_range(
         assert result.status == "accepted"
         (cast,) = [event for event in result.proposed_events if event.type == "spell_cast"]
         (roll,) = [event for event in result.proposed_events if event.type == "attack_rolled"]
-        (turn,) = [event for event in result.proposed_events if event.type == "turn_started"]
         assert (cast.actor_id, cast.spell_id, cast.slot_level) == (command.actor_id, spell_id, None)
         assert (roll.attacker_id, roll.target_id, roll.advantage) == (
             command.actor_id,
@@ -243,7 +263,9 @@ def test_ranged_spell_attacks_commit_at_canonical_range(
             hit,
             crit,
         )
-        assert turn.actor_id == NPC
+        assert not any(
+            event.type in {"turn_ended", "turn_started"} for event in result.proposed_events
+        )
 
         expected_rolls = Random(seed)
         assert expected_rolls.randint(1, 20) == natural
@@ -298,8 +320,8 @@ def test_ranged_spell_attacks_commit_at_canonical_range(
         assert pool(after).current == pool(after).maximum == 2
         assert after.resource_state == before.resource_state
         assert after.combat_state.expended_resources == before.combat_state.expended_resources
-        assert after.combat_state.current_turn_index == 1
-        assert after.combat_state.turn_serial == before.combat_state.turn_serial + 1
+        assert after.combat_state.current_turn_index == before.combat_state.current_turn_index
+        assert after.combat_state.turn_serial == before.combat_state.turn_serial
         after_rng = sm.read_rng_context(sid, package, context=context)
         assert after_rng.version == rng.version + 1
         assert (
@@ -316,6 +338,42 @@ def test_ranged_spell_attacks_commit_at_canonical_range(
             reopened.get_command_receipt(sid, command.command_id, package, context=context)
             == receipt
         )
+
+
+@pytest.mark.parametrize("dynamic", [False, True], ids=["initialized", "combat.start"])
+def test_spell_payment_keeps_movement_and_pass_hands_off(open_spell_combat, context, dynamic):
+    """A paid Action retains movement, and only explicit Pass advances this turn."""
+    active_context = replace(context, can_start_combat=True) if dynamic else context
+    sm, sid, package, _, _ = open_spell_combat(
+        walking=True, dynamic=dynamic, start_context=active_context
+    )
+    with sm:
+        before = sm.read_combat_snapshot(sid, package, context=active_context)
+        cast = cast_command(sm, sid, package, active_context, FIRE_BOLT)
+        assert sm.submit_command(cast, package, context=active_context).status == "committed"
+        after_cast = sm.read_combat_snapshot(sid, package, context=active_context)
+        assert after_cast.combat_state.current_turn_index == before.combat_state.current_turn_index
+        again = cast_command(sm, sid, package, active_context, FIRE_BOLT)
+        again = replace(again, command_id="second-cast")
+        assert sm.submit_command(again, package, context=active_context).status == "rejected"
+        move = TypedCommand(
+            sid,
+            "after-cast-move",
+            cast.actor_id,
+            "combat.intent",
+            CombatIntentPayload(intent_type="move", target_zone_id="0,1"),
+            after_cast.world_version,
+        )
+        assert sm.submit_command(move, package, context=active_context).status == "committed"
+        after_move = sm.read_combat_snapshot(sid, package, context=active_context)
+        assert after_move.combat_state.current_turn_index == before.combat_state.current_turn_index
+        end = pass_command(sid, after_move, "pass-after-cast")
+        receipt = sm.submit_command(end, package, context=active_context)
+        assert receipt.status == "committed", receipt
+        assert sm.submit_command(end, package, context=active_context) == receipt
+        after_pass = sm.read_combat_snapshot(sid, package, context=active_context)
+        assert after_pass.combat_state.current_turn_index != before.combat_state.current_turn_index
+        assert after_pass.combat_state.turn_serial == before.combat_state.turn_serial + 1
 
 
 def test_adjacent_hostile_imposes_disadvantage(open_spell_combat, context, monkeypatch):
@@ -444,7 +502,7 @@ def test_lethal_spell_attack_rolls_back_late_receipt_failure(
         assert observed == [first, first]
         after = sm.read_combat_snapshot(sid, package, context=context)
         assert_npc_death(before, after, first, command.actor_id)
-        assert actor(after, command.actor_id).attack_rolls_made_this_turn == 0
+        assert actor(after, command.actor_id).attack_rolls_made_this_turn == 1
         assert after.resource_state == before.resource_state
         assert (
             sm.read_rng_context(sid, package, context=context).state

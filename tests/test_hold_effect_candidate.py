@@ -256,6 +256,25 @@ def pass_command(sid, snapshot, command_id):
     )
 
 
+def pass_after_hold_cast(sm, sid, package, context, *, command_id="hold.cast.pass"):
+    """End the caster's paid turn and expose the target's ordinary TurnStart."""
+    cast_state = sm.read_combat_snapshot(sid, package, context=context)
+    caster = sm.read_session(sid, package, context=context).pc_actor_id
+    assert (
+        cast_state.combat_state.initiative_ids[cast_state.combat_state.current_turn_index] == caster
+    )
+    assert cast_state.combat_state.concentration_rounds_remaining[caster] == 10
+    command = pass_command(sid, cast_state, command_id)
+    assert sm.submit_command(command, package, context=context).status == "committed"
+    target_state = sm.read_combat_snapshot(sid, package, context=context)
+    assert (
+        target_state.combat_state.initiative_ids[target_state.combat_state.current_turn_index]
+        == NPC
+    )
+    assert target_state.combat_state.concentration_rounds_remaining[caster] == 9
+    return target_state
+
+
 @pytest.mark.parametrize("seed", [0, 5])
 @pytest.mark.parametrize("slot_level", [2, 3])
 def test_hold_public_cast_and_reopen(tmp_path, context, seed, slot_level):
@@ -267,6 +286,9 @@ def test_hold_public_cast_and_reopen(tmp_path, context, seed, slot_level):
         receipt = sm.submit_command(command, package, context=context)
         assert receipt.status == "committed", receipt
         after = sm.read_combat_snapshot(sid, package, context=context)
+        assert after.combat_state.current_turn_index == before.combat_state.current_turn_index
+        assert after.combat_state.turn_serial == before.combat_state.turn_serial
+        assert after.combat_state.concentration_rounds_remaining[command.actor_id] == 10
         (effect,) = after.effect_states
         assert effect.target_id == (NPC if seed == 0 else command.actor_id)
         assert tuple(after.combat_state.concentration_chain[command.actor_id]) == (
@@ -340,7 +362,7 @@ def test_hold_public_target_turn(tmp_path, context, seed):
     with sm:
         cast = hold_cast_command(sm, sid, package, context)
         assert sm.submit_command(cast, package, context=context).status == "committed"
-        before = sm.read_combat_snapshot(sid, package, context=context)
+        before = pass_after_hold_cast(sm, sid, package, context)
         turn = pass_command(sid, before, "hold.target.turn")
         assert turn.actor_id == NPC
         receipt = sm.submit_command(turn, package, context=context)
@@ -360,7 +382,7 @@ def test_hold_public_caster_turn_decrements(tmp_path, context):
     with sm:
         cast = hold_cast_command(sm, sid, package, context)
         assert sm.submit_command(cast, package, context=context).status == "committed"
-        first = sm.read_combat_snapshot(sid, package, context=context)
+        first = pass_after_hold_cast(sm, sid, package, context)
         target_turn = pass_command(sid, first, "hold.target.turn")
         assert target_turn.actor_id == NPC
         rng = sm.read_rng_context(sid, package, context=context)
@@ -382,11 +404,12 @@ def test_hold_public_caster_turn_decrements(tmp_path, context):
 
 
 def test_hold_public_caster_duration_expires(tmp_path, context):
-    """A saved-against anchor expires on the ninth caster TurnEnd, then plain Pass works."""
+    """A saved-against anchor expires on the tenth caster TurnEnd, then Pass works."""
     sm, sid, package, _, _ = hold_world(tmp_path, context, seed=5)
     with sm:
         cast = hold_cast_command(sm, sid, package, context)
         assert sm.submit_command(cast, package, context=context).status == "committed"
+        pass_after_hold_cast(sm, sid, package, context)
         for turn in range(18):
             before = sm.read_combat_snapshot(sid, package, context=context)
             assert before.effect_states
@@ -410,7 +433,7 @@ def test_hold_public_damage_concentration(tmp_path, context, seed):
     with sm:
         cast = hold_cast_command(sm, sid, package, context)
         assert sm.submit_command(cast, package, context=context).status == "committed"
-        before = sm.read_combat_snapshot(sid, package, context=context)
+        before = pass_after_hold_cast(sm, sid, package, context)
         assert before.effect_states[0].target_id == cast.actor_id
         attack = hold_attack_command(sid, cast.actor_id, before.world_version)
         receipt = sm.submit_command(attack, package, context=context)

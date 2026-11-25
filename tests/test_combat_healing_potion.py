@@ -7,8 +7,10 @@ from dnd5e_engine.evaluation_contracts import ItemUsePayload
 from dnd5e_engine.evaluation_delta import ActionBudgetUpdate, InventoryConsume
 from dnd5e_engine.evaluation_ruleset import ruleset_binding
 from dnd5e_srd_data import BundledAssetLoader, MemoryAssetLoader
-from dnd_support import initialize
+from dnd_support import NPC, initialize
 from item_support import A, create, item_data, item_loader, navigate, submit
+from test_combat_start import start_command
+from test_hold_effect_candidate import pass_command
 
 from trpg_state_machine import (
     PickupItem,
@@ -31,6 +33,8 @@ def potion_world(
     combat=True,
     full_hp=False,
     timed=False,
+    dynamic=False,
+    start_context=None,
 ):
     """Pick up two authored normal healing potions and optionally enter combat."""
     base = item_loader()
@@ -78,18 +82,37 @@ def potion_world(
                 "policy": "ordinary_public",
             }
         )
+    if dynamic:
+        data["rule_bindings"].pop("combat_foundation")
     package = _validate(data)
     db = tmp_path / "potion.db"
     sm = StateMachine(db, dnd_loader=loader)
-    sid = create(sm, package, context)
-    navigate(sm, sid, package, context, (A, "1,1"), "near.potion")
+    active_context = start_context or context
+    sid = create(sm, package, active_context)
+    navigate(sm, sid, package, active_context, (A, "1,1"), "near.potion")
     for iid in (FIRST, SECOND):
         assert (
-            submit(sm, sid, package, context, PickupItem(iid, A, "2,1"), "pick." + iid).status
+            submit(
+                sm, sid, package, active_context, PickupItem(iid, A, "2,1"), "pick." + iid
+            ).status
             == "committed"
         )
     if combat:
-        assert initialize(sm, sid, package, context).status == "committed"
+        if dynamic:
+            roster = (sm.read_session(sid, package, context=active_context).pc_actor_id, NPC)
+            opening = start_command(
+                sm,
+                sid,
+                package,
+                active_context,
+                participant_ids=roster,
+                initiative_order=roster,
+                opening_cell="1,1",
+                opponent_profiles=(),
+            )
+            assert sm.submit_command(opening, package, context=active_context).status == "committed"
+        else:
+            assert initialize(sm, sid, package, active_context).status == "committed"
     return sm, sid, package, loader, db
 
 
@@ -210,8 +233,8 @@ def test_potion_rejects_other_target_without_mutation(tmp_path, context):
         assert sm.read_combat_snapshot(sid, package, context=context) == before
 
 
-def test_potion_can_advance_a_fully_spent_turn(tmp_path, context):
-    """RE's supported turn advance and ledger output survive narrow adoption."""
+def test_potion_retains_a_fully_spent_turn(tmp_path, context):
+    """A Bonus Action leaves even a fully spent turn for explicit Pass."""
     sm, sid, package, _, _ = potion_world(tmp_path, context, last_turn=True)
     with sm:
         command = potion_command(sm, sid, package, context)
@@ -219,11 +242,36 @@ def test_potion_can_advance_a_fully_spent_turn(tmp_path, context):
         receipt = sm.submit_command(command, package, context=context)
         assert receipt.status == "committed"
         after = sm.read_combat_snapshot(sid, package, context=context)
-        assert after.combat_state.current_turn_index != before.combat_state.current_turn_index
-        assert after.combat_state.last_ended_turn == (
-            before.combat_state.round_number,
-            command.actor_id,
-        )
+        assert after.combat_state.current_turn_index == before.combat_state.current_turn_index
+        assert after.combat_state.last_ended_turn == before.combat_state.last_ended_turn
+        end = pass_command(sid, after, "pass-after-potion")
+        passed = sm.submit_command(end, package, context=context)
+        assert passed.status == "committed", passed
+        assert sm.submit_command(end, package, context=context) == passed
+        handed_off = sm.read_combat_snapshot(sid, package, context=context)
+        assert handed_off.combat_state.current_turn_index != after.combat_state.current_turn_index
+        assert handed_off.combat_state.turn_serial == after.combat_state.turn_serial + 1
+
+
+def test_combat_start_potion_keeps_turn_until_pass(tmp_path, context):
+    """A dynamically started encounter keeps the drinker's turn until Pass."""
+    host = replace(context, can_start_combat=True)
+    sm, sid, package, _, _ = potion_world(tmp_path, host, dynamic=True, start_context=host)
+    with sm:
+        before = sm.read_combat_snapshot(sid, package, context=host)
+        drink = potion_command(sm, sid, package, host, "dynamic-drink")
+        receipt = sm.submit_command(drink, package, context=host)
+        assert receipt.status == "committed", receipt
+        after = sm.read_combat_snapshot(sid, package, context=host)
+        assert after.combat_state.current_turn_index == before.combat_state.current_turn_index
+        assert after.combat_state.turn_serial == before.combat_state.turn_serial
+        assert sm.submit_command(drink, package, context=host) == receipt
+        end = pass_command(sid, after, "dynamic-pass")
+        passed = sm.submit_command(end, package, context=host)
+        assert passed.status == "committed", passed
+        assert sm.submit_command(end, package, context=host) == passed
+        advanced = sm.read_combat_snapshot(sid, package, context=host)
+        assert advanced.combat_state.turn_serial == before.combat_state.turn_serial + 1
 
 
 @pytest.mark.parametrize(

@@ -5,6 +5,7 @@ from dataclasses import replace
 import pytest
 from dnd5e_engine.evaluation_contracts import CombatIntentPayload
 from dnd5e_engine.outcome import DeathRecord
+from test_combat_closure import close_command
 from test_cure_wounds import BYSTANDER, NPC, SLOT, SOURCE, actor, cast_command, cure_world, pool
 from test_dnd_runtime import authority
 
@@ -143,7 +144,7 @@ def test_save_damage_commits_or_saves_without_slot(tmp_path, context, seed):
 
 
 def test_save_damage_commits_death_and_skips_dead_enemy(tmp_path, context, monkeypatch):
-    """Adopt RE's lethal Sacred Flame and hand the turn to the surviving enemy."""
+    """Adopt lethal Sacred Flame while retaining the caster's active turn."""
     sm, sid, package, loader, db = cure_world(
         tmp_path,
         context,
@@ -163,11 +164,8 @@ def test_save_damage_commits_death_and_skips_dead_enemy(tmp_path, context, monke
         assert receipt.status == "committed", receipt
         after = sm.read_combat_snapshot(sid, package, context=context)
         assert_npc_death(before, after, result, command.actor_id)
-        assert after.combat_state.current_turn_index == 2
-        (turn_started,) = [
-            event for event in result.proposed_events if event.type == "turn_started"
-        ]
-        assert turn_started.actor_id == BYSTANDER
+        assert after.combat_state.current_turn_index == before.combat_state.current_turn_index
+        assert not any(event.type == "turn_started" for event in result.proposed_events)
         assert actor(after, BYSTANDER).hp_current == actor(before, BYSTANDER).hp_current
         assert actor(after, BYSTANDER).is_alive
         assert after.resource_state == before.resource_state
@@ -187,6 +185,24 @@ def test_save_damage_commits_death_and_skips_dead_enemy(tmp_path, context, monke
             reopened.get_command_receipt(sid, command.command_id, package, context=context)
             == receipt
         )
+
+
+def test_last_enemy_spell_defeat_allows_close_without_pass(tmp_path, context):
+    """The current actor can close a decided encounter after a lethal spell."""
+    sm, sid, package, _, _ = cure_world(
+        tmp_path, context, extra_spells=("sacred-flame",), rng_seed=2, target_hp=1
+    )
+    with sm:
+        cast = damage_command(sm, sid, package, context, key="last-enemy")
+        assert sm.submit_command(cast, package, context=context).status == "committed"
+        after_cast = sm.read_combat_snapshot(sid, package, context=context)
+        assert NPC in after_cast.combat_state.dead_ids
+        assert after_cast.combat_state.current_turn_index == 0
+        close = close_command(sm, sid, package, context, "close-after-spell")
+        receipt = sm.submit_command(close, package, context=context)
+        assert receipt.status == "committed", receipt
+        assert sm.submit_command(close, package, context=context) == receipt
+        assert sm.read_session(sid, package, context=context).phase == "exploration"
 
 
 @pytest.mark.parametrize(
@@ -309,7 +325,7 @@ def test_lethal_slotted_damage_receipt_failure_rolls_back_and_replays(
         assert after.combat_state.initiative_ids[after.combat_state.current_turn_index] == (
             command.actor_id
         )
-        assert after.combat_state.round_number == before.combat_state.round_number + 1
+        assert after.combat_state.round_number == before.combat_state.round_number
         assert pool(after).current == pool(before).current - 1 == 1
         assert actor(after, command.actor_id).spell_slots == {1: 1}
         assert after.combat_state.expended_resources == {command.actor_id: {"spell_slot:1": 1}}
