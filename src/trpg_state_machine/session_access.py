@@ -281,7 +281,69 @@ class SessionAccess:
             )
 
     def _npc_handoff_command_guard(self, command):
-        """Recheck persisted origin under the existing command's world write lock."""
+        """Recheck handoff or bounded policy origin under the command write lock."""
+        if command.command_id.startswith("npc-policy:"):
+            try:
+                combat_key, serial, version, mode, attack_hash, step = command.command_id.rsplit(
+                    ":", 5
+                )
+                combat_id = combat_key.removeprefix("npc-policy:")
+                if (
+                    not combat_id
+                    or mode not in ("engage", "hold")
+                    or step not in ("move", "attack", "pass")
+                    or (mode == "hold" and step != "pass")
+                    or len(attack_hash) != 16
+                    or any(c not in "0123456789abcdef" for c in attack_hash)
+                    or type(command.payload) is not CombatIntentPayload
+                    or command.payload.intent_type != step
+                    or command.payload.source_id != command.actor_id
+                ):
+                    raise ValueError
+                if step == "attack":
+                    from hashlib import sha256
+
+                    attack_id = command.payload.stat_block_action_id or command.payload.weapon_id
+                    if (
+                        attack_id is None
+                        or sha256(attack_id.encode("utf-8")).hexdigest()[:16] != attack_hash
+                    ):
+                        raise ValueError
+                expected_serial, expected_version = int(serial), int(version)
+            except ValueError as exc:
+                raise StateMachineError("invalid_command", "Invalid NPC policy command") from exc
+            state = self._conn.execute(
+                "SELECT npc_state_version FROM npc_states WHERE session_id=? AND npc_id=?",
+                (command.session_id, command.actor_id),
+            ).fetchone()
+            grant = self._conn.execute(
+                "SELECT 1 FROM npc_access WHERE session_id=? AND observer_id=?",
+                (command.session_id, command.actor_id),
+            ).fetchone()
+            goal = self._conn.execute(
+                "SELECT payload_json FROM npc_private_records WHERE session_id=? AND npc_id=? "
+                "AND record_kind='goal' AND record_id='goal.combat.policy' AND is_current=1",
+                (command.session_id, command.actor_id),
+            ).fetchone()
+            combat = self._conn.execute(
+                "SELECT combat_id,json_extract(state_json,'$.turn_serial') FROM combats "
+                "WHERE session_id=?",
+                (command.session_id,),
+            ).fetchone()
+            goal_data = json.loads(goal[0]) if goal is not None else None
+            if (
+                grant is None
+                or state is None
+                or state[0] != expected_version
+                or goal_data is None
+                or goal_data.get("status") != "active"
+                or goal_data.get("text") != mode
+                or combat is None
+                or combat[0] != combat_id
+                or combat[1] != expected_serial
+            ):
+                raise StateMachineError("policy_changed", "NPC policy source or Turn changed")
+            return
         row = self._conn.execute(
             "SELECT h.command_id,h.payload_json,t.session_id,t.npc_id,t.principal_id "
             "FROM npc_output_handoffs h "
@@ -303,9 +365,12 @@ class SessionAccess:
 
     def _npc_combat_location_guard(self, command):
         """Current target admission after receipt replay, before mechanical assembly."""
-        if not self._conn.execute(
-            "SELECT 1 FROM npc_output_handoffs WHERE command_id=?", (command.command_id,)
-        ).fetchone():
+        if (
+            not command.command_id.startswith("npc-policy:")
+            and not self._conn.execute(
+                "SELECT 1 FROM npc_output_handoffs WHERE command_id=?", (command.command_id,)
+            ).fetchone()
+        ):
             return
         if type(command.payload) is CombatIntentPayload and command.payload.target_id is not None:
             locations = dict(
@@ -325,42 +390,52 @@ class SessionAccess:
                 )
 
     def _npc_combat_target_guard(self, command, package, snapshot):
-        """Handoff visibility is deliberately limited to clear, bright current scenes."""
-        if not self._conn.execute(
-            "SELECT 1 FROM npc_output_handoffs WHERE command_id=?", (command.command_id,)
-        ).fetchone():
+        """Deny NPC handoff or policy targets outside the reviewed visible scope."""
+        if (
+            not command.command_id.startswith("npc-policy:")
+            and not self._conn.execute(
+                "SELECT 1 FROM npc_output_handoffs WHERE command_id=?", (command.command_id,)
+            ).fetchone()
+        ):
             return
         if type(command.payload) is not CombatIntentPayload or command.payload.target_id is None:
             return
+        if not self._npc_combat_target_visible(
+            command.session_id, command.actor_id, command.payload.target_id, snapshot
+        ):
+            raise StateMachineError(
+                "unauthorized_target", "Target is outside the supported current perception scope"
+            )
+
+    def _npc_combat_target_visible(self, session_id, actor_id, target_id, snapshot):
+        """Check one target's current clear-scene projection before policy reads its cell."""
         from .domain_facts import WorldFacts
 
-        definition = WorldFacts(self.store).instances.actor(command.session_id, command.actor_id)
+        definition = WorldFacts(self.store).instances.actor(session_id, actor_id)
         locations = dict(
             self._conn.execute(
                 "SELECT actor_id,current_scene_id FROM actors "
                 "WHERE session_id=? AND actor_id IN (?,?)",
-                (command.session_id, command.actor_id, command.payload.target_id),
+                (session_id, actor_id, target_id),
             ).fetchall()
         )
         states = {a.entity_id: a for a in snapshot.character_states}
         grid = snapshot.scene_state.grid
-        observer, target = states.get(command.actor_id), states.get(command.payload.target_id)
-        if (
+        observer, target = states.get(actor_id), states.get(target_id)
+        return not (
             definition.senses is None
             or not dict(definition.senses)["visual"]
-            or command.payload.target_id not in locations
-            or locations.get(command.actor_id) != locations.get(command.payload.target_id)
+            or target_id not in locations
+            or locations.get(actor_id) != locations.get(target_id)
             or observer is None
             or target is None
             or observer.conditions
             or target.conditions
+            or target_id in snapshot.combat_state.hidden_entities
             or grid.default_lighting != "bright"
             or grid.lighting
             or grid.obscurement_cells
             or grid.wall_segments
             or grid.blocked_cells
             or grid.cover_cells
-        ):
-            raise StateMachineError(
-                "unauthorized_target", "Target is outside the supported current perception scope"
-            )
+        )

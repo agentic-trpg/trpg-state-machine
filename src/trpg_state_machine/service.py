@@ -35,6 +35,7 @@ from .models import (
     WorldState,
 )
 from .npc_bootstrap import NPCBootstrap
+from .npc_combat_policy import NPCCombatPolicyRuntime
 from .npc_evaluation import NPCEvaluationRuntime
 from .npc_modes import NPCModeRuntime
 from .npc_outputs import NPCOutputRuntime
@@ -60,6 +61,7 @@ from .storage import SqliteStore
 
 class StateMachine(
     CommandRuntime,
+    NPCCombatPolicyRuntime,
     EventRuntime,
     MechanicalRuntime,
     ObservationLifecycleRuntime,
