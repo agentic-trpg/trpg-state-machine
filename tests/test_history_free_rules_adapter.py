@@ -187,7 +187,7 @@ def test_actual_positions_are_read_and_unknown_position_is_never_reset(
         assert error.value.code == "invalid_spatial_state" and stored_state(db) == before
 
 
-@pytest.mark.parametrize("intent", ["dash", "dodge", "disengage", "pass"])
+@pytest.mark.parametrize("intent", ["dash", "dodge", "disengage"])
 def test_new_engine_capabilities_remain_outside_existing_sm_admission(
     tmp_path, package_data, context, intent
 ):
@@ -204,6 +204,39 @@ def test_new_engine_capabilities_remain_outside_existing_sm_admission(
         receipt = sm.submit_command(command, package, context=context)
         assert receipt.status == "rejected" and receipt.error_code == "intent.capability"
         assert sm.read_rng_context(sid, package, context=context) == before
+
+
+def test_pass_submits_while_attack_availability_remains_read_only(tmp_path, package_data, context):
+    sm, sid, package, _, database = setup(tmp_path, package_data, context)
+    with sm:
+        before = sm.read_combat_snapshot(sid, package, context=context)
+        assert before.snapshot_schema_version == "engine-snapshot/17"
+        command = replace(
+            attack(sm, sid, package, context), payload=CombatIntentPayload(intent_type="pass")
+        )
+        stored = stored_state(database)
+        rng = sm.read_rng_context(sid, package, context=context)
+        answer = sm.query_action_availability(
+            sid, command.actor_id, command.payload, package, context=context
+        )
+        assert (answer.status, answer.reason.code) == ("unknown", "intent.capability")
+        assert stored_state(database) == stored
+        assert sm.read_rng_context(sid, package, context=context) == rng
+
+        receipt = sm.submit_command(command, package, context=context)
+        assert receipt.status == "committed", receipt
+        after = sm.read_combat_snapshot(sid, package, context=context).combat_state
+        assert after.turn_serial == before.combat_state.turn_serial + 1
+        assert after.initiative_ids[after.current_turn_index] == after.initiative_ids[1]
+        assert after.initiative_ids[after.current_turn_index] != command.actor_id
+        assert sm.read_rng_context(sid, package, context=context) == rng
+
+        second_pass = replace(
+            command, command_id="pass.out_of_turn", expected_world_version=receipt.world_version
+        )
+        refused = sm.submit_command(second_pass, package, context=context)
+        assert (refused.status, refused.error_code) == ("rejected", "not_actor_turn")
+        assert sm.read_rng_context(sid, package, context=context) == rng
 
 
 def predecessor(data):
