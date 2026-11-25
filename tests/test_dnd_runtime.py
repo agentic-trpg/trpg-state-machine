@@ -149,7 +149,7 @@ def test_real_attack_full_delta_rng_and_database_parity(
             CombatIntentPayload(intent_type="attack", weapon_id=WEAPON, target_id="npc.absent"),
             "target_invalid",
         ),
-        (CombatIntentPayload(intent_type="dash"), "intent.capability"),
+        (CombatIntentPayload(intent_type="cast_spell"), "intent.capability"),
     ],
 )
 def test_refusals_do_not_change_rng_or_facts(tmp_path, package_data, context, intent, code):

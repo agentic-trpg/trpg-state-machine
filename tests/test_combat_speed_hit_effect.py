@@ -169,7 +169,9 @@ def test_longstrider_ray_overlap(timed_spell_world, world_first, monkeypatch):
 
     def walk(cell, key):
         """Issue ordinary walking for the current actor."""
-        return execute(move_command(session, cell, key))
+        command = move_command(session, cell, key)
+        assert command.actor_id == NPC
+        return execute(command)
 
     def events_for(receipt):
         """Read the committed events belonging to this receipt."""
@@ -261,10 +263,14 @@ def test_longstrider_ray_overlap(timed_spell_world, world_first, monkeypatch):
             identity(ray),
         }
 
+        # Casting spends the Action but leaves the caster's Turn open.
+        pass_turn("caster.after.ray", caster)
+        after_caster_pass = read()
+
         if world_first:
             assert movement(both) == (25, 5, 5)
             assert sm.read_time_sync(sid, package, context=context).committed_tick == 3594
-            boundary_command = pass_command(sid, both, "third.expires.longstrider")
+            boundary_command = pass_command(sid, read(), "third.expires.longstrider")
             assert boundary_command.actor_id == OTHER_ENEMY
             boundary = retry_clock_expiry_after_growth(
                 sm, boundary_command, package, context, monkeypatch
@@ -288,7 +294,7 @@ def test_longstrider_ray_overlap(timed_spell_world, world_first, monkeypatch):
             assert movement(both) == (30, 0, 0)
             too_far = walk("8,0", "both.walk-thirty-five")
             assert (too_far.status, too_far.error_code) == ("rejected", "movement.insufficient")
-            assert read() == both
+            assert read() == after_caster_pass
             assert (receipt := walk("7,0", "both.walk-thirty")).status == "committed", receipt
             assert movement(read()) == (0, 30, 30)
             pass_turn("target.to.third", NPC)
@@ -343,9 +349,7 @@ def test_hit_slow_walk_and_expiry_at_casters_start(
         ]
         (damage,) = [event for event in result.proposed_events if event.type == "damage_applied"]
         state = hit.combat_state
-        assert state.initiative_ids[state.current_turn_index] == (
-            OTHER_ENEMY if other_enemy_turn else NPC
-        )
+        assert state.initiative_ids[state.current_turn_index] == command.actor_id
         assert effect == creation.effect and effect.target_id == NPC
         assert clock == creation.lifecycle and lineage == creation.lineage and not lineage.statuses
         assert clock.state.expiry_actor_id == command.actor_id
@@ -367,6 +371,14 @@ def test_hit_slow_walk_and_expiry_at_casters_start(
         with StateMachine(db, dnd_loader=loader) as reopened:
             assert reopened.read_combat_snapshot(sid, package, context=context) == hit
 
+        caster_pass = pass_command(sid, hit, "ray.caster-after-cast")
+        assert caster_pass.actor_id == command.actor_id
+        assert sm.submit_command(caster_pass, package, context=context).status == "committed"
+        hit = sm.read_combat_snapshot(sid, package, context=context)
+        assert hit.combat_state.initiative_ids[hit.combat_state.current_turn_index] == (
+            OTHER_ENEMY if other_enemy_turn else NPC
+        )
+
         if other_enemy_turn:
             earlier = pass_command(sid, hit, "ray.before-target")
             receipt = sm.submit_command(earlier, package, context=context)
@@ -379,12 +391,13 @@ def test_hit_slow_walk_and_expiry_at_casters_start(
 
         movement = sm, sid, package, context
         longer = move_command(movement, "11,0", "ray.walk-25")
+        assert longer.actor_id == NPC
         refused = sm.submit_command(longer, package, context=context)
         assert (refused.status, refused.error_code) == ("rejected", "movement.insufficient")
         assert sm.read_combat_snapshot(sid, package, context=context) == hit
-        walk = sm.submit_command(
-            move_command(movement, "10,0", "ray.walk-20"), package, context=context
-        )
+        walk_command = move_command(movement, "10,0", "ray.walk-20")
+        assert walk_command.actor_id == NPC
+        walk = sm.submit_command(walk_command, package, context=context)
         assert walk.status == "committed", walk
         moved = sm.read_combat_snapshot(sid, package, context=context)
         assert moved.combat_state.actor_zone[NPC] == "10,0"
@@ -520,6 +533,10 @@ def test_hit_effect_rolls_back_at_receipt(open_spell_combat, context, removal):
         command = cast_command(sm, sid, package, context, RAY)
         if removal:
             assert sm.submit_command(command, package, context=context).status == "committed"
+            snapshot = sm.read_combat_snapshot(sid, package, context=context)
+            caster_pass = pass_command(sid, snapshot, "ray.rollback-caster-pass")
+            assert caster_pass.actor_id == command.actor_id
+            assert sm.submit_command(caster_pass, package, context=context).status == "committed"
             snapshot = sm.read_combat_snapshot(sid, package, context=context)
             command = pass_command(sid, snapshot, "ray.rollback-expire")
         before = sm.read_combat_snapshot(sid, package, context=context)

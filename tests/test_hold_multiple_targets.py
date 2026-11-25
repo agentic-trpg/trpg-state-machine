@@ -23,6 +23,22 @@ def _cast(sm, sid, package, context, *, slot_level=3, targets=(NPC, SECOND_TARGE
     return hold_cast_command(sm, sid, package, context, slot_level=slot_level, target_ids=targets)
 
 
+def _pass_cast_turn(sm, sid, package, context, cast):
+    """End the caster's paid turn before testing an NPC turn or release."""
+    snapshot = sm.read_combat_snapshot(sid, package, context=context)
+    assert (
+        snapshot.combat_state.initiative_ids[snapshot.combat_state.current_turn_index]
+        == cast.actor_id
+    )
+    assert snapshot.combat_state.concentration_rounds_remaining == {cast.actor_id: 10}
+    turn = pass_command(sid, snapshot, f"{cast.command_id}.pass")
+    assert sm.submit_command(turn, package, context=context).status == "committed"
+    after = sm.read_combat_snapshot(sid, package, context=context)
+    assert after.combat_state.initiative_ids[after.combat_state.current_turn_index] == NPC
+    assert after.combat_state.concentration_rounds_remaining == {cast.actor_id: 9}
+    return after
+
+
 def _engine_events(sm, sid, package, context, receipt):
     """Read the durable mechanical event evidence for exactly one receipt."""
     events = [
@@ -63,7 +79,7 @@ def test_hold_cast_two_targets(tmp_path, context, seed, targets, failed_targets)
             (effect.target_id, effect.id, effect.origin) for effect in after.effect_states
         )
         assert combat.concentration_chain == {cast.actor_id: list(chain)}
-        assert combat.concentration_rounds_remaining == {cast.actor_id: 9}
+        assert combat.concentration_rounds_remaining == {cast.actor_id: 10}
         assert tuple(clock.identity for clock in combat.effect_lifecycles) == (
             chain if failed_targets else ()
         )
@@ -122,7 +138,7 @@ def test_hold_two_targets_pass_keeps_other_member_and_ticks_on_caster_turn(
     with sm:
         cast = _cast(sm, sid, package, context, targets=targets)
         assert sm.submit_command(cast, package, context=context).status == "committed"
-        before = sm.read_combat_snapshot(sid, package, context=context)
+        before = _pass_cast_turn(sm, sid, package, context, cast)
         assert len(before.effect_states) == 2
         original_chain = before.combat_state.concentration_chain[cast.actor_id]
         assert tuple(identity[0] for identity in original_chain) == targets
@@ -176,7 +192,7 @@ def test_hold_two_target_caster_duration_expires_both_members(tmp_path, context,
     with sm:
         cast = _cast(sm, sid, package, context)
         assert sm.submit_command(cast, package, context=context).status == "committed"
-        snapshot = sm.read_combat_snapshot(sid, package, context=context)
+        snapshot = _pass_cast_turn(sm, sid, package, context, cast)
         order = (NPC, SECOND_TARGET, cast.actor_id)
         for serial in range(26):
             rounds = 9 - serial // len(order)
@@ -274,7 +290,7 @@ def test_hold_pass_rejects_expiry_of_another_member(tmp_path, context, monkeypat
     with sm:
         cast = _cast(sm, sid, package, context)
         assert sm.submit_command(cast, package, context=context).status == "committed"
-        before = sm.read_combat_snapshot(sid, package, context=context)
+        before = _pass_cast_turn(sm, sid, package, context, cast)
         rng = sm.read_rng_context(sid, package, context=context)
         committed_events = sm.read_events(sid, package, context=context)
         turn = pass_command(sid, before, "hold.pass.forged")
@@ -379,7 +395,7 @@ def test_hold_two_target_cast_preserves_positive_hp_caster_damage(
     with sm:
         cast = _cast(sm, sid, package, context)
         assert sm.submit_command(cast, package, context=context).status == "committed"
-        before = sm.read_combat_snapshot(sid, package, context=context)
+        before = _pass_cast_turn(sm, sid, package, context, cast)
         assert tuple(effect.target_id for effect in before.effect_states) == (SECOND_TARGET,)
         attack = hold_attack_command(sid, cast.actor_id, before.world_version)
         receipt = sm.submit_command(attack, package, context=context)
@@ -405,7 +421,7 @@ def test_hold_drop_releases_both_members_outside_caster_turn(tmp_path, context, 
     with sm:
         cast = _cast(sm, sid, package, context, targets=targets)
         assert sm.submit_command(cast, package, context=context).status == "committed"
-        before = sm.read_combat_snapshot(sid, package, context=context)
+        before = _pass_cast_turn(sm, sid, package, context, cast)
         rng = sm.read_rng_context(sid, package, context=context)
         assert len(before.effect_states) == 2
         assert before.combat_state.initiative_ids[before.combat_state.current_turn_index] == NPC

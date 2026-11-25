@@ -6,7 +6,7 @@ import pytest
 from dnd5e_engine.evaluation_contracts import CombatIntentPayload
 from dnd_support import NPC
 from test_hold_effect_atomicity import _effect_counts
-from test_hold_effect_candidate import hold_cast_command, hold_world
+from test_hold_effect_candidate import hold_cast_command, hold_world, pass_command
 from test_storage_conditions import _condition
 
 from trpg_state_machine import StateMachine, StateMachineError
@@ -22,12 +22,25 @@ def _cast_then_prepare_drop(sm, sid, package, context):
     """Establish a real Hold Person graph and prepare its caster's release."""
     cast = hold_cast_command(sm, sid, package, context)
     assert sm.submit_command(cast, package, context=context).status == "committed"
-    version = sm.read_session(sid, package, context=context).world_version
+    cast_state = sm.read_combat_snapshot(sid, package, context=context)
+    assert (
+        cast_state.combat_state.initiative_ids[cast_state.combat_state.current_turn_index]
+        == cast.actor_id
+    )
+    assert cast_state.combat_state.concentration_rounds_remaining == {cast.actor_id: 10}
+    turn = pass_command(sid, cast_state, "hold.cast.pass")
+    assert sm.submit_command(turn, package, context=context).status == "committed"
+    target_state = sm.read_combat_snapshot(sid, package, context=context)
+    assert (
+        target_state.combat_state.initiative_ids[target_state.combat_state.current_turn_index]
+        == NPC
+    )
+    assert target_state.combat_state.concentration_rounds_remaining == {cast.actor_id: 9}
     return replace(
         cast,
         command_id="hold.drop",
         payload=CombatIntentPayload(intent_type="drop_concentration"),
-        expected_world_version=version,
+        expected_world_version=target_state.world_version,
     )
 
 
