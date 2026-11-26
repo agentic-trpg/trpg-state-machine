@@ -25,6 +25,44 @@ def npc_command(sm, sid, package, context, *, action="scimitar", key="attack.npc
     return TypedCommand(sid, key, NPC, "combat.intent", payload, s.world_version)
 
 
+@pytest.mark.parametrize("adjacent", [True, False])
+def test_stat_block_ranged_attack_observes_nearby_enemy(tmp_path, package_data, context, adjacent):
+    """A Bandit's crossbow suffers close-combat disadvantage only nearby."""
+
+    def place_target(foundation):
+        foundation["snapshot"]["combat_state"]["actor_zone"].update(
+            {NPC: "0,0", "pc_template.observer": "1,0" if adjacent else "2,0"}
+        )
+        foundation["snapshot"]["combat_state"].update(
+            current_turn_index=1, turn_serial=2, monster_turn_start_done=[2, NPC]
+        )
+
+    sm, sid, package, assets = setup(tmp_path, package_data, context, place_target)
+    with sm:
+        command = npc_command(sm, sid, package, context, action="light-crossbow")
+        receipt = sm.submit_command(command, package, context=context)
+        assert receipt.status == "committed", receipt
+        attacks = [
+            e.payload["engine_event"]
+            for e in sm.read_events(sid, package, context=context)
+            if e.event_type == "combat.engine_event"
+            and e.payload["engine_event"]["type"] == "attack_rolled"
+        ]
+        assert len(attacks) == 1
+        assert attacks[0]["advantage"] == ("disadvantage" if adjacent else "normal")
+        assert attacks[0]["disadvantage_sources"] == (["ranged_in_melee"] if adjacent else [])
+        saved = authority(sm, sid)
+        assert sm.submit_command(command, package, context=context) == receipt
+        assert authority(sm, sid) == saved
+    with StateMachine(tmp_path / "dnd.db", dnd_loader=assets) as reopened:
+        assert (
+            reopened.get_command_receipt(sid, command.command_id, package, context=context)
+            == receipt
+        )
+        assert reopened.submit_command(command, package, context=context) == receipt
+        assert authority(reopened, sid) == saved
+
+
 @pytest.mark.parametrize("action", [None, "scimitar", "light-crossbow"])
 def test_pc_and_npc_share_real_attack_commit_and_replay(tmp_path, package_data, context, action):
     def equip_weapon(foundation):
