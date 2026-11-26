@@ -271,8 +271,20 @@ def test_public_check_projects_only_named_target_in_current_scene(tmp_path, cont
             assert sm.read_rng_context(sid, package, context=gm) == before
 
 
-@pytest.mark.parametrize("sight", ["visible", "hidden", "unknown", "changed"])
-def test_frightened_pick_lock_prepares_sight_and_replays(tmp_path, context, sight, monkeypatch):
+@pytest.mark.parametrize(
+    ("sight", "poisoned"),
+    [
+        ("visible", False),
+        ("hidden", False),
+        ("unknown", False),
+        ("changed", False),
+        ("visible", True),
+        ("hidden", True),
+    ],
+)
+def test_frightened_pick_lock_prepares_sight_and_replays(
+    tmp_path, context, sight, poisoned, monkeypatch
+):
     """An action-triggered check uses the same declared sight as rules.check."""
     data, loader = check_data(dc=100)
     if sight != "unknown":
@@ -307,6 +319,14 @@ def test_frightened_pick_lock_prepares_sight_and_replays(tmp_path, context, sigh
             sm._world.characters.effects.add_effect(
                 sid, effect.model_dump(mode="json"), conditions=["frightened"]
             )
+            if poisoned:
+                sm._world.characters.add_condition(
+                    sid,
+                    actor,
+                    ActiveCondition(
+                        condition="poisoned", source_entity_id="implied:test", scope="session"
+                    ),
+                )
         op = PickLock(A, DOOR, "lock.outer", CRED, "0,0")
         availability = sm.query_world_action(sid, actor, op, package, context=context)
         assert availability.status == ("unavailable" if sight == "unknown" else "available"), (
@@ -315,8 +335,9 @@ def test_frightened_pick_lock_prepares_sight_and_replays(tmp_path, context, sigh
         check = world_command(sm, sid, package, context, op, "fear-pick")
         before_rng = sm.read_rng_context(sid, package, context=context)
         expected_rng = before_rng.state.restore()
+        disadvantaged = sight == "visible" or poisoned
         if sight in ("visible", "hidden"):
-            for _ in range(2 if sight == "visible" else 1):
+            for _ in range(2 if disadvantaged else 1):
                 expected_rng.randint(1, 20)
         if sight == "changed":
             import trpg_state_machine.rule_execution as execution
@@ -347,9 +368,12 @@ def test_frightened_pick_lock_prepares_sight_and_replays(tmp_path, context, sigh
             for e in sm.read_events(sid, package, context=context)
             if e.event_seq in receipt.event_seqs and e.event_type == "rules.check_rolled"
         )
-        assert event.payload["engine_event"]["advantage"] == (
-            "disadvantage" if sight == "visible" else "normal"
-        )
+        detail = event.payload["engine_event"]
+        assert detail["advantage"] == ("disadvantage" if disadvantaged else "normal")
+        reasons = ["attacker:Frightened"] if sight == "visible" else []
+        if poisoned:
+            reasons.append("attacker:Poisoned")
+        assert sorted(detail["disadvantage_sources"]) == reasons
         assert sm.read_rng_context(sid, package, context=context).state == RNGState.capture(
             expected_rng
         )

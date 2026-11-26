@@ -37,11 +37,14 @@ from .instance_data import passage_index
 from .models import TrustedContext
 from .package import AdventurePackage
 from .scoped_reads import scoped_read
-from .visual_observer_state import can_see_invisible, observer_blinded, sight_conditions_unknown
+from .visual_observer_state import (
+    CHECK_NEUTRAL_CONDITIONS,
+    can_see_invisible,
+    observer_blinded,
+    sight_conditions_unknown,
+)
 from .visual_target_state import target_is_invisible
 from .world_commands import WORLD_CAPABILITY_OPERATIONS, PutItem, TakeItem
-
-_RULE_CHECK_NEUTRAL_CONDITIONS = frozenset({"frightened"})
 
 
 @dataclass(frozen=True, slots=True)
@@ -243,10 +246,9 @@ class WorldHandler:
         check_conditions_ready = False
         if rule_check and mechanical:
             check_conditions_ready = (
-                set(self.characters.condition_names(sid, actor_id))
-                <= _RULE_CHECK_NEUTRAL_CONDITIONS
+                set(self.characters.condition_names(sid, actor_id)) <= CHECK_NEUTRAL_CONDITIONS
                 and set(self.characters.effects.linked_condition_names(sid, actor_id))
-                <= _RULE_CHECK_NEUTRAL_CONDITIONS
+                <= CHECK_NEUTRAL_CONDITIONS
             )
         if (
             (core and (core[0] <= 0 or self.store.memory.json(core[1])))
@@ -319,7 +321,7 @@ class WorldHandler:
             self.characters,
             sid,
             actor_id,
-            neutral_conditions=_RULE_CHECK_NEUTRAL_CONDITIONS if rule_check else frozenset(),
+            neutral_conditions=CHECK_NEUTRAL_CONDITIONS if rule_check else frozenset(),
         ):
             raise StateMachineError(
                 "unsupported_target_visibility",

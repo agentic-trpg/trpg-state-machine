@@ -2,6 +2,9 @@
 
 from dnd5e_engine.visual_sight import SEE_INVISIBLE_KEY
 
+CHECK_NEUTRAL_CONDITIONS = frozenset({"frightened", "poisoned"})
+"""Conditions reviewed for manual-check readiness and directed sight."""
+
 
 def sight_conditions_unknown(characters, sid, actor_id, *, neutral_conditions=frozenset()):
     """Reject unreviewed sight conditions, with any caller-proven neutral conditions."""
