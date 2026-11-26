@@ -12,6 +12,7 @@ from dnd5e_engine.evaluation_actor import combatant
 from dnd5e_engine.evaluation_availability import (
     ActionAvailabilityRequest,
     ActionAvailabilityResult,
+    AttackHitPreview,
     query_action_availability,
 )
 from dnd5e_engine.evaluation_burning import (
@@ -3073,7 +3074,16 @@ class RulesAdapter:
         )
 
     def query_availability(
-        self, session_id, actor_id, payload, package, snapshot, owner, *, row=None
+        self,
+        session_id,
+        actor_id,
+        payload,
+        package,
+        snapshot,
+        owner,
+        *,
+        row=None,
+        can_preview_attack_mechanics=False,
     ):
         """Query the pinned attack-only availability and validate its input association."""
         row = row if row is not None else self._pinned_row(session_id, package)
@@ -3081,7 +3091,7 @@ class RulesAdapter:
         try:
             request = ActionAvailabilityRequest(
                 schema_version=(
-                    "engine-availability/16"
+                    "engine-availability/17"
                     if snapshot.snapshot_schema_version == "engine-snapshot/20"
                     else "engine-availability/15"
                     if snapshot.snapshot_schema_version == "engine-snapshot/19"
@@ -3095,6 +3105,7 @@ class RulesAdapter:
                 payload=copy.deepcopy(payload),
                 state_snapshot=snapshot,
                 ruleset_binding=self.session_binding(row),
+                include_hit_preview=can_preview_attack_mechanics,
             )
             capability = (
                 self._dnd_capability(payload, actor_id, snapshot)
@@ -3139,8 +3150,14 @@ class RulesAdapter:
             raise StateMachineError("invalid_rule_result", "Invalid availability result") from exc
         # Free-text Engine preflight errors may mention hidden mechanical inputs.
         # Expose a bounded code and a generic status description to the authorized actor.
+        safe_preview = (
+            result.hit_preview
+            if can_preview_attack_mechanics and result.hit_preview is not None
+            else AttackHitPreview(status="unknown")
+        )
         return result.model_copy(
             update={
+                "hit_preview": safe_preview,
                 "reason": RuleError(
                     code=result.reason.code,
                     reason={
@@ -3148,6 +3165,6 @@ class RulesAdapter:
                         "unavailable": "Unavailable on this snapshot.",
                         "unknown": "This capability cannot currently be determined.",
                     }[result.status],
-                )
+                ),
             }
         )

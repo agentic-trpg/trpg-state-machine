@@ -307,6 +307,10 @@ RE 的规则范围。区域查询、整图规则输入和事件投影共用有�
 5. 合法变化经 Facts／Records 应用，RNG、证据、事件、回执及必要后续工作共同持久化，
    再受 Store 的发布边界约束。`accepted` 本身从未等于 `committed`。
 
+RUO-88 候选通过 `query_action_availability` 按同一规则绑定读取攻击预览。SM 先检查会话
+和行动角色控制权，再按可信预览权限披露总命中率、骰式和原因，可供 GUI 和 DM 对话读取。正式提交继续
+沿上面的步骤从当前事实求值。契约见 [MC §4.4](../../agentic-trpg/docs/MODULE_CONTRACTS.md#44-action-availability-query-decided-partially-implemented)。
+
 ### 事件与 NPC 后续工作
 
 `EventCapture` 固定阶段证据，`PackageEffects._expand_events` 有界展开来源事件后果；

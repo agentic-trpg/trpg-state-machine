@@ -67,6 +67,7 @@ def _trusted(context: TrustedContext) -> None:
         or type(context.can_authorize_long_rest) is not bool
         or type(context.can_authorize_short_rest) is not bool
         or type(context.can_start_combat) is not bool
+        or type(context.can_preview_attack_mechanics) is not bool
     ):
         raise StateMachineError(
             "invalid_context", "GM adjudication grant must be a trusted boolean"

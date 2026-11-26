@@ -25,6 +25,7 @@ class TrustedContext:
     can_authorize_long_rest: bool = False
     can_authorize_short_rest: bool = False
     can_start_combat: bool = False
+    can_preview_attack_mechanics: bool = False
 
 
 @dataclass(frozen=True, slots=True)

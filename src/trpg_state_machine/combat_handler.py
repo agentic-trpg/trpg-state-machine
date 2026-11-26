@@ -476,5 +476,12 @@ class CombatHandler:
                 "SELECT process_id FROM combats WHERE session_id=?", (session_id,)
             ).fetchone()[0]
         return self.rules.query_availability(
-            session_id, actor_id, payload, package, snapshot, owner, row=row
+            session_id,
+            actor_id,
+            payload,
+            package,
+            snapshot,
+            owner,
+            row=row,
+            can_preview_attack_mechanics=context.can_preview_attack_mechanics,
         )
