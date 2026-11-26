@@ -72,9 +72,12 @@ def test_public_checks_use_poisoned_while_either_fog_source_is_active(tmp_path, 
             assert engine["skill"] == skill and engine["ability"] == "wis"
             assert engine["advantage"] == ("disadvantage" if expected_draws == 2 else "normal")
             assert engine["disadvantage_sources"] == (
-                ["condition:attacker"] if condition_sources else []
+                ["attacker:Poisoned"] if condition_sources else []
             )
             assert engine["advantage_sources"] == list(advantage)
+            assert engine["sources"] == list(advantage) + (
+                ["condition:attacker"] if condition_sources else []
+            )
             assert engine["natural"] == engine["rolled_natural"] == min(rolls)
             after_rng = sm.read_rng_context(sid, package, context=context)
             assert after_rng.state == RNGState.capture(rng)
