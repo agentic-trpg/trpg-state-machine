@@ -41,6 +41,8 @@ from .visual_observer_state import can_see_invisible, observer_blinded, sight_co
 from .visual_target_state import target_is_invisible
 from .world_commands import WORLD_CAPABILITY_OPERATIONS, PutItem, TakeItem
 
+_RULE_CHECK_NEUTRAL_CONDITIONS = frozenset({"frightened"})
+
 
 @dataclass(frozen=True, slots=True)
 class SpatialPosition:
@@ -218,9 +220,13 @@ class WorldHandler:
         return self.scenes.ensure_scene(sid, scene_id, package)
 
     @scoped_read
-    def _world_actor_ready(self, sid, actor_id, *, navigation_scope=None, movement=False):
+    def _world_actor_ready(
+        self, sid, actor_id, *, navigation_scope=None, movement=False, rule_check=False
+    ):
         """Check activity occupancy, actor state and authoritative position for action
-        readiness. Region statuses still need to preserve the movement capability.
+        readiness. A rule check may carry reviewed Frightened into RE adjudication;
+        death, activity, concentration and other conditions still block here.
+        Region statuses still need to preserve the movement capability.
         """
         qualified = self.activities.qualifies(navigation_scope, sid, actor_id)
         if self.activities.active(sid, actor_id) and not qualified:
@@ -234,14 +240,25 @@ class WorldHandler:
             (sid, actor_id),
         ).fetchone()
         life = self.characters.life(sid, actor_id) if mechanical else None
+        check_conditions_ready = False
+        if rule_check and mechanical:
+            check_conditions_ready = (
+                set(self.characters.condition_names(sid, actor_id))
+                <= _RULE_CHECK_NEUTRAL_CONDITIONS
+                and set(self.characters.effects.linked_condition_names(sid, actor_id))
+                <= _RULE_CHECK_NEUTRAL_CONDITIONS
+            )
         if (
             (core and (core[0] <= 0 or self.store.memory.json(core[1])))
             or mechanical
             and (
                 not life["is_alive"]
-                or self.characters.has_conditions(sid, actor_id)
-                or self.characters.effects.has_linked_conditions(
-                    sid, actor_id, capability="movement" if movement else None
+                or (not check_conditions_ready and self.characters.has_conditions(sid, actor_id))
+                or (
+                    not check_conditions_ready
+                    and self.characters.effects.has_linked_conditions(
+                        sid, actor_id, capability="movement" if movement else None
+                    )
                 )
                 or self.characters.effects.has_round_concentration(sid, actor_id)
             )
@@ -264,10 +281,12 @@ class WorldHandler:
             )
 
     @scoped_read
-    def _public_scope(self, sid, actor_id, package):
+    def _public_scope(self, sid, actor_id, package, *, rule_check=False):
         """Validate public spatial eligibility in the actor's scene.
 
-        Region statuses still need to preserve visual target authorization.
+        A rule check treats Frightened as sight-neutral while retaining actual
+        object visibility and target authorization. Other callers keep their
+        original condition boundary.
         """
         proof = self._conn.execute(
             "SELECT complete FROM scene_integrity WHERE session_id=? AND scene_id="
@@ -296,7 +315,12 @@ class WorldHandler:
             "SELECT actor_id FROM mechanical_actors WHERE session_id=? AND actor_id=?",
             (sid, actor_id),
         ).fetchone()
-        if mechanical and sight_conditions_unknown(self.characters, sid, actor_id):
+        if mechanical and sight_conditions_unknown(
+            self.characters,
+            sid,
+            actor_id,
+            neutral_conditions=_RULE_CHECK_NEUTRAL_CONDITIONS if rule_check else frozenset(),
+        ):
             raise StateMachineError(
                 "unsupported_target_visibility",
                 "Condition-aware target authorization is unavailable",
@@ -587,16 +611,20 @@ class WorldHandler:
             if e.scene_id == scene_id
         )
 
-    def _manual_object_target(self, sid, actor_id, operation, package, *, navigation_scope=None):
-        """Return the target's scene/state/cell and any admitted local door passage."""
+    def _manual_object_target(
+        self, sid, actor_id, operation, package, *, navigation_scope=None, rule_check=False
+    ):
+        """Return the target and local passage, carrying only check-scoped readiness."""
         position = self._actor_position(sid, actor_id)
         if operation.scene_id != position.scene_id:
             raise StateMachineError("invalid_target", "Interaction must be in the actor's scene")
         definition = self.facts.object_definition(sid, operation.object_id)
         fine = self.facts.instances.scene(sid, position.scene_id).has_grid
         if fine:
-            self._world_actor_ready(sid, actor_id, navigation_scope=navigation_scope)
-            self._public_scope(sid, actor_id, package)
+            self._world_actor_ready(
+                sid, actor_id, navigation_scope=navigation_scope, rule_check=rule_check
+            )
+            self._public_scope(sid, actor_id, package, rule_check=rule_check)
         obj = self.facts.object(sid, operation.object_id)
         if obj is None:
             raise StateMachineError("invalid_target", "No authorized local object")
@@ -638,13 +666,15 @@ class WorldHandler:
         if (actor[0] != "pc" and definition is None) or obj["scene_id"] != position.scene_id:
             raise StateMachineError("invalid_target", "No authorized local switch")
         if fine:
-            self._validate_switch_range(sid, actor_id, operation, package)
+            self._validate_switch_range(sid, actor_id, operation, package, rule_check=rule_check)
         return target, None
 
-    def _validate_switch_range(self, sid, actor_id, operation, package):
-        """Check actor readiness and touching cells for the switch target."""
-        self._world_actor_ready(sid, actor_id)
-        self.objects.spatial.contact_cell(sid, actor_id, operation.object_id, package)
+    def _validate_switch_range(self, sid, actor_id, operation, package, *, rule_check=False):
+        """Check readiness and contact, retaining check scope for an actual rule check."""
+        self._world_actor_ready(sid, actor_id, rule_check=rule_check)
+        self.objects.spatial.contact_cell(
+            sid, actor_id, operation.object_id, package, rule_check=rule_check
+        )
 
     def _validate_door_occupancy(self, sid, operation, package):
         """Check entity occupancy in the door threshold."""

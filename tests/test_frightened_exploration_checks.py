@@ -9,14 +9,27 @@ from dnd5e_engine.evaluation_effects import effect_state
 from dnd5e_engine.evaluation_rng import RNGState
 from dnd5e_engine.types.conditions import ActiveCondition
 from dnd5e_engine.types.effects import ActiveEffect
-from lock_support import NPC, A, lock_loader
+from lock_support import CRED, DOOR, NPC, A, B, lock_loader
+from spatial_support import create
 from test_faerie_fire import _grow_remote
+from test_lockable_passages import acquire
+from test_mechanism_service import extended_data, method
 from test_object_protection import large_data
+from test_openable_checks import check_data
 from test_real_checks import check_command
 from test_scoped_runtime_validation import measure
+from test_world_mechanisms import LEVER
+from world_support import command as world_command
 from world_support import setup
 
-from trpg_state_machine import StateMachine, StateMachineError
+from trpg_state_machine import (
+    CheckMechanism,
+    ClearJam,
+    PickLock,
+    StateMachine,
+    StateMachineError,
+)
+from trpg_state_machine.package import _validate
 from trpg_state_machine.spatial import SpatialPosition
 
 SOURCE_CELL = "8,6"
@@ -256,3 +269,258 @@ def test_public_check_projects_only_named_target_in_current_scene(tmp_path, cont
             assert (receipt.status, receipt.error_code) == ("rejected", "target_invalid")
             assert not receipt.event_seqs
             assert sm.read_rng_context(sid, package, context=gm) == before
+
+
+@pytest.mark.parametrize("sight", ["visible", "hidden", "unknown", "changed"])
+def test_frightened_pick_lock_prepares_sight_and_replays(tmp_path, context, sight, monkeypatch):
+    """An action-triggered check uses the same declared sight as rules.check."""
+    data, loader = check_data(dc=100)
+    if sight != "unknown":
+        data["passages"][0]["door_object_id"] = None
+        data["scenes"][0]["objects"][0]["initial_cell"] = "0,1"
+    data["actors"][0]["initial_cell"] = "2,2"
+    data["rule_bindings"].pop("combat_foundation", None)
+    grids = [
+        data["scenes"][0]["grid"],
+        data["rule_bindings"]["noncombat_foundation"]["snapshot"]["scene_state"]["grid"],
+    ]
+    for grid in grids:
+        grid["default_lighting"] = "bright"
+        if sight == "hidden":
+            grid["lighting"]["2,2"] = "dark"
+    package = _validate(data)
+    db = tmp_path / "fear-lock.db"
+    with StateMachine(db, dnd_loader=loader) as sm:
+        sid = create(sm, package, context)
+        acquire(sm, sid, package, context, iid=CRED, key="tool")
+        actor = sm.read_session(sid, package, context=context).pc_actor_id
+        with sm._store.transaction(write=True):
+            effect = effect_state(
+                ActiveEffect(
+                    id="effect:fear",
+                    name="Fear",
+                    origin=f"cast:fear:{NPC}",
+                    target_id=actor,
+                    statuses={"frightened"},
+                )
+            )
+            sm._world.characters.effects.add_effect(
+                sid, effect.model_dump(mode="json"), conditions=["frightened"]
+            )
+        op = PickLock(A, DOOR, "lock.outer", CRED, "0,0")
+        availability = sm.query_world_action(sid, actor, op, package, context=context)
+        assert availability.status == ("unavailable" if sight == "unknown" else "available"), (
+            availability
+        )
+        check = world_command(sm, sid, package, context, op, "fear-pick")
+        before_rng = sm.read_rng_context(sid, package, context=context)
+        expected_rng = before_rng.state.restore()
+        if sight in ("visible", "hidden"):
+            for _ in range(2 if sight == "visible" else 1):
+                expected_rng.randint(1, 20)
+        if sight == "changed":
+            import trpg_state_machine.rule_execution as execution
+
+            evaluate = execution.evaluate_openable
+
+            async def move_source_before_adoption(spec, *, loader):
+                outcome = await evaluate(spec, loader=loader)
+                with sm._store.transaction(write=True):
+                    sm._world.characters.move(sid, NPC, SpatialPosition(B, "0,0"))
+                return outcome
+
+            monkeypatch.setattr(execution, "evaluate_openable", move_source_before_adoption)
+        receipt = sm.submit_command(check, package, context=context)
+        if sight == "changed":
+            assert (receipt.status, receipt.error_code) == ("conflict", "version_conflict")
+            assert not receipt.event_seqs
+            assert sm.read_rng_context(sid, package, context=context) == before_rng
+            return
+        if sight == "unknown":
+            assert (receipt.status, receipt.error_code) == ("rejected", "check.effects")
+            assert not receipt.event_seqs
+            assert sm.read_rng_context(sid, package, context=context) == before_rng
+            return
+        assert receipt.status == "committed", receipt
+        event = next(
+            e
+            for e in sm.read_events(sid, package, context=context)
+            if e.event_seq in receipt.event_seqs and e.event_type == "rules.check_rolled"
+        )
+        assert event.payload["engine_event"]["advantage"] == (
+            "disadvantage" if sight == "visible" else "normal"
+        )
+        assert sm.read_rng_context(sid, package, context=context).state == RNGState.capture(
+            expected_rng
+        )
+        assert sm.submit_command(check, package, context=context) == receipt
+    with StateMachine(db, dnd_loader=loader) as restored:
+        assert restored.submit_command(check, package, context=context) == receipt
+
+
+def test_frightened_mechanism_check_uses_same_fact_preparation(tmp_path, context):
+    """A service action checks sight in availability and at actual evaluation."""
+    disarm = method("disarm")
+    disarm.update(ability="dex", skill="sleight_of_hand", dc=100)
+    data = extended_data(methods=[disarm])
+    data["passages"][0]["door_object_id"] = None
+    data["scenes"][0]["objects"][0]["initial_cell"] = "0,2"
+    data["actors"][0]["initial_cell"] = "2,2"
+    for grid in (
+        data["scenes"][0]["grid"],
+        data["rule_bindings"]["noncombat_foundation"]["snapshot"]["scene_state"]["grid"],
+    ):
+        grid["default_lighting"] = "bright"
+    package = _validate(data)
+    with StateMachine(tmp_path / "fear-mechanism.db", dnd_loader=lock_loader()) as sm:
+        sid = create(sm, package, context)
+        actor = sm.read_session(sid, package, context=context).pc_actor_id
+        with sm._store.transaction(write=True):
+            effect = effect_state(
+                ActiveEffect(
+                    id="effect:fear",
+                    name="Fear",
+                    origin=f"cast:fear:{NPC}",
+                    target_id=actor,
+                    statuses={"frightened"},
+                )
+            )
+            sm._world.characters.effects.add_effect(
+                sid, effect.model_dump(mode="json"), conditions=["frightened"]
+            )
+        op = CheckMechanism(A, LEVER, "0,0", "disarm")
+        availability = sm.query_world_action(sid, actor, op, package, context=context)
+        assert availability.status == "available", availability
+        receipt = sm.submit_command(
+            world_command(sm, sid, package, context, op, "fear-mech"), package, context=context
+        )
+        assert receipt.status == "committed", receipt
+        event = next(
+            e
+            for e in sm.read_events(sid, package, context=context)
+            if e.event_seq in receipt.event_seqs and e.event_type == "rules.check_rolled"
+        )
+        assert event.payload["engine_event"]["advantage"] == "disadvantage"
+
+
+def test_frightened_crowbar_advantage_cancels_on_actual_check(tmp_path, context):
+    """RE combines a check's tool advantage and visible fear disadvantage."""
+    data, loader = check_data(dc=100, jammed=True)
+    data["passages"][0]["door_object_id"] = None
+    data["scenes"][0]["objects"][0]["initial_cell"] = "0,1"
+    data["actors"][0]["initial_cell"] = "2,2"
+    data["rule_bindings"].pop("combat_foundation", None)
+    next(item for item in data["item_transfers"] if item["instance_id"] == CRED)["item_slug"] = (
+        "crowbar"
+    )
+    method = data["world_objects"][0]["capabilities"][0]["force_methods"][0]
+    method.update(required_tool="crowbar", leverage_applicable=True)
+    package = _validate(data)
+    with StateMachine(tmp_path / "fear-crowbar.db", dnd_loader=loader) as sm:
+        sid = create(sm, package, context)
+        acquire(sm, sid, package, context, iid=CRED, key="crowbar")
+        actor = sm.read_session(sid, package, context=context).pc_actor_id
+        with sm._store.transaction(write=True):
+            effect = effect_state(
+                ActiveEffect(
+                    id="effect:fear",
+                    name="Fear",
+                    origin=f"cast:fear:{NPC}",
+                    target_id=actor,
+                    statuses={"frightened"},
+                )
+            )
+            sm._world.characters.effects.add_effect(
+                sid, effect.model_dump(mode="json"), conditions=["frightened"]
+            )
+        op = ClearJam(A, DOOR, "free-jam", CRED, "0,0")
+        assert sm.query_world_action(sid, actor, op, package, context=context).status == "available"
+        receipt = sm.submit_command(
+            world_command(sm, sid, package, context, op, "fear-crowbar"),
+            package,
+            context=context,
+        )
+        assert receipt.status == "committed", receipt
+        event = next(
+            event
+            for event in sm.read_events(sid, package, context=context)
+            if event.event_seq in receipt.event_seqs and event.event_type == "rules.check_rolled"
+        )
+        assert event.payload["engine_event"]["advantage"] == "normal"
+        assert event.payload["engine_event"]["advantage_sources"]
+        assert event.payload["engine_event"]["disadvantage_sources"]
+
+
+def test_world_check_still_rejects_unreviewed_actor_condition(tmp_path, context):
+    """The check-specific sight path does not admit an unrelated action condition."""
+    data, loader = check_data()
+    package = _validate(data)
+    with StateMachine(tmp_path / "unreviewed-condition.db", dnd_loader=loader) as sm:
+        sid = create(sm, package, context)
+        acquire(sm, sid, package, context, iid=CRED, key="tool")
+        actor = sm.read_session(sid, package, context=context).pc_actor_id
+        with sm._store.transaction(write=True):
+            sm._world.characters.add_condition(
+                sid,
+                actor,
+                ActiveCondition(
+                    condition="incapacitated",
+                    source_entity_id="npc:012345abcdef",
+                    scope="session",
+                ),
+            )
+        op = PickLock(A, DOOR, "lock.outer", CRED, "0,0")
+        availability = sm.query_world_action(sid, actor, op, package, context=context)
+        assert (availability.status, availability.reason) == (
+            "unavailable",
+            "unsupported_actor_state",
+        )
+
+
+def test_frightened_lock_check_reads_stay_local_under_remote_growth(tmp_path, context):
+    """The named lock and fear source keep fixed reads as remote instances grow."""
+    observed = []
+    for growth in (0, 25):
+        data, loader = check_data(dc=100)
+        data["passages"][0]["door_object_id"] = None
+        data["scenes"][0]["objects"][0]["initial_cell"] = "0,1"
+        data["actors"][0]["initial_cell"] = "2,2"
+        data["rule_bindings"].pop("combat_foundation", None)
+        package = _validate(data)
+        with StateMachine(tmp_path / f"fear-scale-{growth}.db", dnd_loader=loader) as sm:
+            sid = create(sm, package, context)
+            acquire(sm, sid, package, context, iid=CRED, key="tool")
+            actor = sm.read_session(sid, package, context=context).pc_actor_id
+            with sm._store.transaction(write=True):
+                effect = effect_state(
+                    ActiveEffect(
+                        id="effect:fear",
+                        name="Fear",
+                        origin=f"cast:fear:{NPC}",
+                        target_id=actor,
+                        statuses={"frightened"},
+                    )
+                )
+                sm._world.characters.effects.add_effect(
+                    sid, effect.model_dump(mode="json"), conditions=["frightened"]
+                )
+            if growth:
+                _grow_remote(sm, sid, growth)
+            op = PickLock(A, DOOR, "lock.outer", CRED, "0,0")
+            with measure(sm) as (availability_work, _):
+                availability = sm.query_world_action(sid, actor, op, package, context=context)
+            assert availability.status == "available", availability
+            with measure(sm) as (submit_work, _):
+                receipt = sm.submit_command(
+                    world_command(sm, sid, package, context, op, "fear-scale"),
+                    package,
+                    context=context,
+                )
+            assert receipt.status == "committed", receipt
+            observed.append(
+                (
+                    (availability_work["sql_selects"], availability_work["sql_rows"]),
+                    (submit_work["sql_selects"], submit_work["sql_rows"]),
+                )
+            )
+    assert observed[0] == observed[1]

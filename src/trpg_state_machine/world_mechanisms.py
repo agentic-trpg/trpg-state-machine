@@ -261,11 +261,13 @@ class MechanismService:
         """Validate actor, placement and target for a manual mechanism operation."""
         h, sid = self.h, row["session_id"]
         h._world_operation_capability(row, op)
-        h._world_actor_ready(sid, actor)
-        position = h._public_scope(sid, actor, package)
+        h._world_actor_ready(sid, actor, rule_check=type(op) is CheckMechanism)
+        position = h._public_scope(sid, actor, package, rule_check=type(op) is CheckMechanism)
         if (position.scene_id, position.cell) != (op.scene_id, op.expected_cell):
             raise StateMachineError("position_conflict", "Actor position changed")
-        h.objects.containers.reachable(sid, actor, op.object_id, package)
+        h.objects.containers.reachable(
+            sid, actor, op.object_id, package, rule_check=type(op) is CheckMechanism
+        )
         c = self.config(row["session_id"], op.object_id)
         if c is None:
             raise StateMachineError("unsupported_object_capability", "Object is not a mechanism")
@@ -892,6 +894,7 @@ class MechanismService:
             snapshot,
             rules._rng_context(row),
         )
+        request, _, _ = rules.with_check_sight(request, package)
         if failure := check_support_failure(request, rules.loader):
             raise StateMachineError(failure["error"].code, "Check outside supported rule facts")
         return plan

@@ -2107,6 +2107,13 @@ class RulesAdapter:
             ) from exc
         return needs, self.check_sight_facts(request.session_id, request.actor_id, needs, package)
 
+    def with_check_sight(self, request, package):
+        """Attach RE-declared sight facts to one fixed check request for evaluation or preview."""
+        needs, facts = self.prepare_check_sight(request, package)
+        if facts:
+            request = request.model_copy(update={"creature_sight_facts": facts})
+        return request, needs, facts
+
     def check_sight_facts(self, sid, actor_id, needs, package):
         """Read only the declared pairs and preserve unknown as an absent fact."""
         if not needs:

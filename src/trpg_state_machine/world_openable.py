@@ -5,7 +5,14 @@ from dataclasses import asdict, replace
 from ._execution import _execution_data, _WorldEffectKind
 from ._operations import LockDoor, ObjectState, SetObjectState, UnlockDoor
 from .errors import StateMachineError
-from .world_commands import BarObject, ClearJam, LockObject, PickLock, UnlockObject
+from .world_commands import (
+    OPENABLE_CHECK_OPERATIONS,
+    BarObject,
+    ClearJam,
+    LockObject,
+    PickLock,
+    UnlockObject,
+)
 
 
 class OpenableService:
@@ -60,6 +67,7 @@ class OpenableService:
             operation,
             package,
             navigation_scope=navigation_scope,
+            rule_check=type(operation) in OPENABLE_CHECK_OPERATIONS,
         )
 
     def lock_status(self, sid, object_id, package):
@@ -330,8 +338,8 @@ class OpenableService:
 
         h, sid = self.h, row["session_id"]
         h._world_operation_capability(row, op)
-        h._world_actor_ready(sid, actor_id)
-        position = h._public_scope(sid, actor_id, package)
+        h._world_actor_ready(sid, actor_id, rule_check=True)
+        position = h._public_scope(sid, actor_id, package, rule_check=True)
         self.manual_target(sid, actor_id, op, package)
         if position.cell != op.expected_cell:
             raise StateMachineError("position_conflict", "Interaction position changed")
@@ -536,6 +544,7 @@ class OpenableService:
             row["session_id"], "query", actor_id, "rules.check", plan[0], row["world_version"]
         )
         req = rules.request(command, package, snapshot, rules._rng_context(row))
+        req, _, _ = rules.with_check_sight(req, package)
         spec = OpenableCheckRequest(
             schema_version="engine-openable/1",
             request=req,

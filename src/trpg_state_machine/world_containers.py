@@ -93,12 +93,14 @@ class ContainerService:
         self.h = handler
         self.facts = handler.facts
 
-    def reachable(self, sid, actor, oid, package, *, require_visible_contact=True):
+    def reachable(
+        self, sid, actor, oid, package, *, require_visible_contact=True, rule_check=False
+    ):
         """Validate actual scene, carrier, ancestor access and spatial contact with the
-        target.
+        target. Pass check-scoped observer readiness only for a rule check.
         """
         h = self.h
-        position = h._public_scope(sid, actor, package)
+        position = h._public_scope(sid, actor, package, rule_check=rule_check)
         obj = self.facts.object(sid, oid)
         if obj is None:
             raise StateMachineError("invalid_target", "No authorized local object")
@@ -114,7 +116,12 @@ class ContainerService:
         if location["carrier_id"] is None:
             root = location["ancestry"][-1] if location["ancestry"] else oid
             h.objects.spatial.contact_cell(
-                sid, actor, root, package, require_visible=require_visible_contact
+                sid,
+                actor,
+                root,
+                package,
+                require_visible=require_visible_contact,
+                rule_check=rule_check,
             )
         return obj
 

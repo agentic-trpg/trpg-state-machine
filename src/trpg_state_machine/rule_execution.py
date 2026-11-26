@@ -1264,12 +1264,16 @@ class RuleExecution:
             )
             rng = self.rules._rng_context(row)
             if (
-                public_check
-                and command.payload.dc is not None
-                and row["world_version"] == command.expected_world_version
-            ):
-                check_request = self.rules.request(command, package, snapshot, rng, row=row)
-                check_sight_needs, check_sight_facts = self.rules.prepare_check_sight(
+                (public_check and command.payload.dc is not None)
+                or (
+                    domain_check
+                    and plan is not None
+                    and plan[0] is not None
+                    and not (object_check and plan[5])
+                )
+            ) and row["world_version"] == command.expected_world_version:
+                check_request = self.rules.request(rule_command, package, snapshot, rng, row=row)
+                check_request, check_sight_needs, check_sight_facts = self.rules.with_check_sight(
                     check_request, package
                 )
             if (
@@ -1308,8 +1312,6 @@ class RuleExecution:
                 item_area_facts=item_area_facts,
                 independent_condition=independent_condition,
             )
-            if check_sight_facts:
-                request = request.model_copy(update={"creature_sight_facts": check_sight_facts})
             capability = (
                 None
                 if rest or casting_activity

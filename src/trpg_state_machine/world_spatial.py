@@ -436,13 +436,14 @@ class ObjectSpatialService:
             _, visible = self._object_visibility(sid, actor, position, oid, package)
             return visible
 
-    def contact_cell(self, sid, actor, oid, package, *, require_visible=True):
+    def contact_cell(self, sid, actor, oid, package, *, require_visible=True, rule_check=False):
         """Nearest legal adjacent contact, excluding only the target itself.
 
         Callers own operation authorization, including door standing ports, container access and
         tools. Ongoing, already authorized physical contact can persist without sight.
+        Only an actual rule-check caller may pass check-scoped observer readiness.
         """
-        position = self.h._public_scope(sid, actor, package)
+        position = self.h._public_scope(sid, actor, package, rule_check=rule_check)
         if require_visible:
             targets, visible = self._object_visibility(sid, actor, position, oid, package)
         else:
