@@ -36,6 +36,8 @@ def test_attack_life_rows_rollback_and_reopen(tmp_path, package_data, context):
             & json.loads(stored).keys()
         )
         command = attack(sm, sid, package, context)
+        before_rng = sm.read_rng_context(sid, package, context=context)
+        expected_face = before_rng.state.restore().randint(1, 20)
         sm._conn.execute(
             "CREATE TEMP TRIGGER fail_life BEFORE UPDATE ON mechanical_life "
             "BEGIN SELECT RAISE(ABORT,'life fault'); END"
@@ -43,10 +45,19 @@ def test_attack_life_rows_rollback_and_reopen(tmp_path, package_data, context):
         with pytest.raises(StateMachineError, match="SQLite transaction failed"):
             sm.submit_command(command, package, context=context)
         assert sm.read_combat_snapshot(sid, package, context=context) == before
+        assert sm.read_rng_context(sid, package, context=context) == before_rng
+        assert sm.get_command_rolls(sid, command.command_id, package, context=context) is None
         assert _life(sm, sid, NPC)["temp_hp"] == 3
         sm._conn.execute("DROP TRIGGER fail_life")
         receipt = sm.submit_command(command, package, context=context)
         assert receipt.status == "committed"
+        (roll,) = sm.get_command_rolls(sid, command.command_id, package, context=context)["rolls"]
+        assert roll["type"] == "attack_rolled"
+        assert roll["roll_detail"]["d20"] == {
+            "faces": [expected_face],
+            "kept_index": 0,
+            "origin": "rng",
+        }
         after = sm.read_combat_snapshot(sid, package, context=context)
         current = next(actor for actor in after.character_states if actor.entity_id == NPC)
         life = _life(sm, sid, NPC)
@@ -67,6 +78,9 @@ def test_attack_life_rows_rollback_and_reopen(tmp_path, package_data, context):
         )
     with StateMachine(tmp_path / "dnd.db", dnd_loader=assets) as reopened:
         assert reopened.read_combat_snapshot(sid, package, context=context) == after
+        assert reopened.get_command_rolls(sid, command.command_id, package, context=context)[
+            "rolls"
+        ] == [roll]
 
 
 def test_missing_life_row_and_database_bounds(tmp_path, package_data, context):
