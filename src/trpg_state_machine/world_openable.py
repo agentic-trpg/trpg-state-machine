@@ -46,8 +46,10 @@ class OpenableService:
             self.facts, sid, oid
         )
 
-    def manual_target(self, sid, actor_id, operation, package, *, navigation_scope=None):
-        """Resolve the manual opening target at the actor's passage endpoint."""
+    def manual_target(
+        self, sid, actor_id, operation, package, *, navigation_scope=None, rule_check=False
+    ):
+        """Resolve the manual target, retaining a validated check consequence's scope."""
         position = self.h._actor_position(sid, actor_id)
         if operation.scene_id != position.scene_id:
             raise StateMachineError("invalid_target", "Interaction must be in the actor's scene")
@@ -67,7 +69,7 @@ class OpenableService:
             operation,
             package,
             navigation_scope=navigation_scope,
-            rule_check=type(operation) in OPENABLE_CHECK_OPERATIONS,
+            rule_check=rule_check or type(operation) in OPENABLE_CHECK_OPERATIONS,
         )
 
     def lock_status(self, sid, object_id, package):
@@ -225,9 +227,17 @@ class OpenableService:
             )
 
     def validate_open(
-        self, row, actor_id, operation, package, *, origin=None, navigation_scope=None
+        self,
+        row,
+        actor_id,
+        operation,
+        package,
+        *,
+        origin=None,
+        navigation_scope=None,
+        rule_check=False,
     ):
-        """Validate a direct or mechanism-origin opening operation."""
+        """Validate direct, mechanism, or accepted-check opening without widening direct use."""
         h, sid = self.h, row["session_id"]
         if type(operation.state) is not ObjectState:
             raise StateMachineError("invalid_operation", "Expected a typed ObjectState")
@@ -236,7 +246,12 @@ class OpenableService:
         if origin is None:
             h._world_operation_capability(row, operation)
             obj, passage = self.manual_target(
-                sid, actor_id, operation, package, navigation_scope=navigation_scope
+                sid,
+                actor_id,
+                operation,
+                package,
+                navigation_scope=navigation_scope,
+                rule_check=rule_check,
             )
         else:
             obj = self.facts.object(sid, operation.object_id)
@@ -257,12 +272,26 @@ class OpenableService:
         return passage
 
     def operate_open(
-        self, row, actor_id, operation, package, *, origin=None, navigation_scope=None
+        self,
+        row,
+        actor_id,
+        operation,
+        package,
+        *,
+        origin=None,
+        navigation_scope=None,
+        rule_check=False,
     ):
-        """Change opening state, synchronize affected contents inventory and emit events."""
+        """Change opening state and emit events, retaining an accepted check's scope."""
         self.h.store.require_write()
         passage = self.validate_open(
-            row, actor_id, operation, package, origin=origin, navigation_scope=navigation_scope
+            row,
+            actor_id,
+            operation,
+            package,
+            origin=origin,
+            navigation_scope=navigation_scope,
+            rule_check=rule_check,
         )
         sid = row["session_id"]
         if self.facts.object(sid, operation.object_id)["state"] == operation.state.value:
@@ -523,6 +552,7 @@ class OpenableService:
                         actor_id,
                         SetObjectState(op.scene_id, op.object_id, ObjectState.OPEN),
                         package,
+                        rule_check=True,
                     )
                 )
         return events
@@ -534,11 +564,12 @@ class OpenableService:
         from .commands import TypedCommand
 
         plan = self.prepare_check(row, actor_id, op, package)
-        if type(op) is PickLock and plan[5]:
-            return plan
         rules = getattr(self, "rules", None)
         if rules is None:
             raise StateMachineError("rules_unavailable", "No composed Rule Engine adapter")
+        rules._verify_dnd_binding(package, row)
+        if plan[5]:
+            return plan
         snapshot = rules._noncombat_snapshot(row, package)
         command = TypedCommand(
             row["session_id"], "query", actor_id, "rules.check", plan[0], row["world_version"]
@@ -553,7 +584,6 @@ class OpenableService:
             required_tool=plan[2],
             leverage_applicable=plan[3],
         )
-        rules._verify_dnd_binding(package, row)
         failure = openable_support_failure(spec, loader=rules.loader)
         if failure is not None:
             raise StateMachineError(failure["error"].code, "Operation outside supported rule facts")

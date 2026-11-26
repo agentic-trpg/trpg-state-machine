@@ -631,7 +631,9 @@ class WorldHandler:
             raise StateMachineError("invalid_target", "No authorized local object")
         target = (obj["scene_id"], obj["state"], obj["cell"])
         if obj["container_id"] is not None or obj["carrier_id"] is not None:
-            self.objects.containers.reachable(sid, actor_id, operation.object_id, package)
+            self.objects.containers.reachable(
+                sid, actor_id, operation.object_id, package, rule_check=rule_check
+            )
             return target, None
         ports = self._door_ports(position.scene_id, operation.object_id, package, sid=sid)
         if ports:

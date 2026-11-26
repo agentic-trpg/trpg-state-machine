@@ -18,14 +18,20 @@ from test_object_protection import large_data
 from test_openable_checks import check_data
 from test_real_checks import check_command
 from test_scoped_runtime_validation import measure
+from test_world_containers import BAG, BOX, container_data
 from test_world_mechanisms import LEVER
 from world_support import command as world_command
-from world_support import setup
+from world_support import setup, submit
 
 from trpg_state_machine import (
     CheckMechanism,
     ClearJam,
+    ForceOpen,
+    ObjectState,
     PickLock,
+    PickupItem,
+    PutItem,
+    SetObjectState,
     StateMachine,
     StateMachineError,
 )
@@ -548,3 +554,153 @@ def test_frightened_lock_check_reads_stay_local_under_remote_growth(tmp_path, co
                 )
             )
     assert observed[0] == observed[1]
+
+
+@pytest.mark.parametrize("operation_type", [ClearJam, ForceOpen])
+@pytest.mark.parametrize("dc,success", [(0, True), (100, False)])
+def test_frightened_open_after_check_keeps_direct_toggle_guard(
+    tmp_path, context, operation_type, dc, success
+):
+    """Only an accepted check may carry its validated scope into open_after."""
+    data, loader = check_data(dc=dc, jammed=True)
+    data["passages"][0]["door_object_id"] = None
+    data["scenes"][0]["objects"][0]["initial_cell"] = "0,1"
+    data["actors"][0]["initial_cell"] = "2,2"
+    data["rule_bindings"].pop("combat_foundation", None)
+    for lock in data["world_objects"][0]["capabilities"][1]["locks"]:
+        lock["initial_locked"] = False
+    method = data["world_objects"][0]["capabilities"][0]["force_methods"][0]
+    method["open_after"] = True
+    package = _validate(data)
+    with StateMachine(
+        tmp_path / f"fear-open-{operation_type.__name__}-{dc}.db", dnd_loader=loader
+    ) as sm:
+        sid = create(sm, package, context)
+        actor = sm.read_session(sid, package, context=context).pc_actor_id
+        with sm._store.transaction(write=True):
+            effect = effect_state(
+                ActiveEffect(
+                    id="effect:fear",
+                    name="Fear",
+                    origin=f"cast:fear:{NPC}",
+                    target_id=actor,
+                    statuses={"frightened"},
+                )
+            )
+            sm._world.characters.effects.add_effect(
+                sid, effect.model_dump(mode="json"), conditions=["frightened"]
+            )
+        direct = SetObjectState(A, DOOR, ObjectState.OPEN)
+        assert (
+            submit(sm, sid, package, context, direct, "direct").error_code
+            == "unsupported_actor_state"
+        )
+        op = operation_type(A, DOOR, "free-jam", None, "0,0")
+        assert sm.query_world_action(sid, actor, op, package, context=context).status == "available"
+        receipt = submit(sm, sid, package, context, op, "checked-open")
+        assert receipt.status == "committed", receipt
+        assert sm._world_facts.object(sid, DOOR)["state"] == ("open" if success else "closed")
+        assert bool(sm._world_facts.openable_state(sid, DOOR)["jammed"]) is not success
+        assert (
+            submit(
+                sm,
+                sid,
+                package,
+                context,
+                SetObjectState(A, DOOR, ObjectState.CLOSED),
+                "direct-again",
+            ).error_code
+            == "unsupported_actor_state"
+        )
+
+
+@pytest.mark.parametrize("operation_type", [ClearJam, ForceOpen])
+def test_frightened_noop_openable_query_does_not_require_sight(tmp_path, context, operation_type):
+    """Availability matches no-op submit when fear-source sight is unresolved."""
+    data, loader = check_data()
+    package = _validate(data)
+    with StateMachine(
+        tmp_path / f"fear-noop-{operation_type.__name__}.db", dnd_loader=loader
+    ) as sm:
+        sid = create(sm, package, context)
+        actor = sm.read_session(sid, package, context=context).pc_actor_id
+        with sm._store.transaction(write=True):
+            effect = effect_state(
+                ActiveEffect(
+                    id="effect:fear",
+                    name="Fear",
+                    origin=f"cast:fear:{NPC}",
+                    target_id=actor,
+                    statuses={"frightened"},
+                )
+            )
+            sm._world.characters.effects.add_effect(
+                sid, effect.model_dump(mode="json"), conditions=["frightened"]
+            )
+        op = operation_type(A, DOOR, "free-jam", None, "0,0")
+        before_rng = sm.read_rng_context(sid, package, context=context)
+        availability = sm.query_world_action(sid, actor, op, package, context=context)
+        assert availability.status == "available", availability
+        receipt = submit(sm, sid, package, context, op, "noop-fear")
+        assert receipt.status == "committed" and not receipt.event_seqs, receipt
+        assert sm.read_rng_context(sid, package, context=context) == before_rng
+
+
+def test_frightened_check_reaches_contained_openable(tmp_path, context):
+    """A real force check can reach a contained target and apply its opening result."""
+    data = container_data()
+    data["manifest"]["schema_version"] = "state-machine-foundation/7"
+    data["passages"][0]["door_object_id"] = None
+    data["lockable_doors"] = [lock for lock in data["lockable_doors"] if lock["object_id"] != DOOR]
+    data["actors"][0]["initial_cell"] = "2,2"
+    bag = next(obj for obj in data["scenes"][0]["objects"] if obj["object_id"] == BAG)
+    bag["state"] = "closed"
+    profile = next(obj for obj in data["world_objects"] if obj["object_id"] == BAG)
+    profile["capabilities"][0].update(
+        initial_jammed=True,
+        force_methods=[
+            {
+                "method_id": "clear-and-open",
+                "ability": "str",
+                "skill": "athletics",
+                "dc": 0,
+                "required_tool": None,
+                "leverage_applicable": False,
+                "unlock_lock_id": None,
+                "clear_bar": False,
+                "clear_jam": True,
+                "open_after": True,
+            }
+        ],
+    )
+    package = _validate(data)
+    with StateMachine(tmp_path / "fear-contained.db", dnd_loader=lock_loader()) as sm:
+        sid = create(sm, package, context)
+        actor = sm.read_session(sid, package, context=context).pc_actor_id
+        assert (
+            submit(sm, sid, package, context, PickupItem(BAG, A, "1,0"), "bag").status
+            == "committed"
+        )
+        assert (
+            submit(sm, sid, package, context, PutItem(A, BAG, BOX, "0,0"), "nest").status
+            == "committed"
+        )
+        with sm._store.transaction(write=True):
+            effect = effect_state(
+                ActiveEffect(
+                    id="effect:fear",
+                    name="Fear",
+                    origin=f"cast:fear:{NPC}",
+                    target_id=actor,
+                    statuses={"frightened"},
+                )
+            )
+            sm._world.characters.effects.add_effect(
+                sid, effect.model_dump(mode="json"), conditions=["frightened"]
+            )
+        op = ForceOpen(A, BAG, "clear-and-open", None, "0,0")
+        assert sm.query_world_action(sid, actor, op, package, context=context).status == "available"
+        receipt = submit(sm, sid, package, context, op, "contained-open")
+        assert receipt.status == "committed", receipt
+        assert sm._world_facts.object(sid, BAG)["state"] == "open"
+        assert sm._world_facts.placement(sid, BAG)["container_id"] == BOX
