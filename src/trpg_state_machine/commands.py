@@ -1166,6 +1166,8 @@ class CommandRuntime:
                                     "roll_total",
                                     "succeeded",
                                     "sources",
+                                    "advantage_sources",
+                                    "disadvantage_sources",
                                 )
                                 if key in data
                             },

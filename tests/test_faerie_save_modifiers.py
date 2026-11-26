@@ -420,6 +420,13 @@ def test_faerie_magic_resistance_requires_bound_trait(timed_spell_world, bind_tr
             "normal",
             ["trait", "condition:target"],
         )
+        assert event["advantage_sources"] == ["trait:MagicResistance"]
+        assert event["disadvantage_sources"] == ["target:Restrained"]
+        (reported,) = sm.get_command_rolls(sid, command.command_id, package, context=context)[
+            "rolls"
+        ]
+        assert reported["advantage_sources"] == event["advantage_sources"]
+        assert reported["disadvantage_sources"] == event["disadvantage_sources"]
         assert event["roll_detail"]["d20"] == {"faces": [12], "kept_index": 0, "origin": "rng"}
         expected = before.state.restore()
         assert expected.randint(1, 20) == 12

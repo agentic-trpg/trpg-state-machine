@@ -120,6 +120,15 @@ def test_preview_requires_trusted_mechanics_grant_and_submit_revalidates(
         )
         receipt = sm.submit_command(command, package, context=context)
         assert receipt.status == "committed"
+        attack = next(
+            event.payload["engine_event"]
+            for event in sm.read_events(sid, package, context=context)
+            if event.source_command_id == command.command_id
+            and event.payload.get("engine_event", {}).get("type") == "attack_rolled"
+        )
+        assert attack["advantage"] == visible.hit_preview.mode
+        assert tuple(attack["advantage_sources"]) == visible.hit_preview.advantage_reasons
+        assert tuple(attack["disadvantage_sources"]) == visible.hit_preview.disadvantage_reasons
         no_budget = sm.query_action_availability(sid, actor, payload, package, context=privileged)
         assert no_budget.status == "unavailable"
         assert no_budget.hit_preview.status == "unknown"

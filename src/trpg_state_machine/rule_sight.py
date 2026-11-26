@@ -7,7 +7,7 @@ from .spatial import SpatialPosition
 from .visual_observer_state import sight_conditions_unknown
 from .visual_target_state import target_is_invisible
 
-_NEUTRAL_SIGHT_CONDITIONS = frozenset({"frightened"})
+_NEUTRAL_SIGHT_CONDITIONS = frozenset({"frightened", "poisoned"})
 
 
 def read_creature_sight(world, sid, observer_id, source_ids, package):
@@ -65,7 +65,7 @@ def read_creature_sight(world, sid, observer_id, source_ids, package):
 
 
 def _unknown_conditions(world, sid, actor_id):
-    """Allow Frightened's sight-dependent rules without treating it as a sight modifier."""
+    """Allow reviewed Frightened and Poisoned without treating either as sight modifiers."""
     return sight_conditions_unknown(
         world.characters, sid, actor_id, neutral_conditions=_NEUTRAL_SIGHT_CONDITIONS
     )

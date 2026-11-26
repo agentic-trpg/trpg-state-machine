@@ -1,5 +1,9 @@
 # Session Management 重构进度
 
+## 2026-11-26 优劣势来源明细（本地候选）
+
+探索 `rules.check` 保留各自适用的中毒和可见恐惧劣势原因；未知恐惧来源的视线事实仍在掷骰前拒绝，即使中毒已产生劣势。授权回执查询返回检定和豁免的双向原因，原有合并来源标签仍保留。妖火受束缚目标的魔法抗性优势与束缚劣势可分别识别。授权普通攻击预览与正式事件复用 RE 的原因列表，已验证倒地目标与闪避抵消。当前仅有定向公开测试，尚未做全量回归。[检定与视线用例](../tests/test_frightened_exploration_checks.py)、[豁免用例](../tests/test_faerie_save_modifiers.py)、[攻击预览用例](../tests/test_attack_hit_preview.py)。
+
 ## 2026-11-25 基础战斗收尾（本地候选）
 
 绑定 RE `dnd5e-evaluation/75` 时，按规范数据块初始化的盗匪可用同一组公开命令走位、

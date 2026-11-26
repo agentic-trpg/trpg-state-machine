@@ -23,7 +23,9 @@ SOURCE_CELL = "8,6"
 HIDDEN_CELL = "8,7"
 
 
-def _setup(tmp_path, context, *, dark=False, untracked=False, unproven_ray=False, growth=0):
+def _setup(
+    tmp_path, context, *, dark=False, untracked=False, unproven_ray=False, growth=0, poisoned=False
+):
     """Seed one effect-linked fear source, or a direct condition with a missing source."""
     data = large_data()
     data["pc_templates"][0]["initial_cell"] = "0,0" if unproven_ray else "8,8"
@@ -76,6 +78,14 @@ def _setup(tmp_path, context, *, dark=False, untracked=False, unproven_ray=False
             characters.effects.add_effect(
                 sid, effect.model_dump(mode="json"), conditions=["frightened"]
             )
+        if poisoned:
+            characters.add_condition(
+                sid,
+                actor_id,
+                ActiveCondition(
+                    condition="poisoned", source_entity_id="implied:test", scope="session"
+                ),
+            )
     return sm, sid, package, db
 
 
@@ -107,7 +117,7 @@ def test_public_frightened_check_distinguishes_visibility_and_replays(tmp_path, 
         detail = event.payload["engine_event"]
         assert detail["rolled_natural"] == min(rolls)
         assert detail["advantage"] == ("normal" if dark else "disadvantage")
-        assert detail["disadvantage_sources"] == ([] if dark else ["condition:attacker"])
+        assert detail["disadvantage_sources"] == ([] if dark else ["attacker:Frightened"])
         assert NPC not in str(event.payload)
         assert not event.signals
         assert sm.read_rng_context(sid, package, context=gm).state == RNGState.capture(rng)
@@ -116,13 +126,51 @@ def test_public_frightened_check_distinguishes_visibility_and_replays(tmp_path, 
         assert restored.read_rng_context(sid, package, context=gm).state == RNGState.capture(rng)
 
 
+@pytest.mark.parametrize("dark", [False, True])
+@pytest.mark.parametrize("cancel", [False, True])
+def test_public_poisoned_frightened_sources_and_cancellation(tmp_path, context, dark, cancel):
+    gm = replace(context, can_adjudicate_checks=True)
+    sm, sid, package, db = _setup(tmp_path, gm, dark=dark, poisoned=True)
+    with sm:
+        command = check_command(
+            sm,
+            sid,
+            package,
+            gm,
+            "check.poison.fear",
+            advantage=("flag",) if cancel else (),
+        )
+        before = sm.read_rng_context(sid, package, context=gm)
+        receipt = sm.submit_command(command, package, context=gm)
+        assert receipt.status == "committed", receipt
+        event = sm.read_events(sid, package, context=gm)[-1].payload["engine_event"]
+        assert event["advantage"] == ("normal" if cancel else "disadvantage")
+        assert event["advantage_sources"] == (["flag"] if cancel else [])
+        assert event["disadvantage_sources"] == (
+            ["attacker:Poisoned"] if dark else ["attacker:Poisoned", "attacker:Frightened"]
+        )
+        assert NPC not in str(event)
+        rolls = sm.get_command_rolls(sid, command.command_id, package, context=gm)["rolls"]
+        assert rolls[0]["disadvantage_sources"] == event["disadvantage_sources"]
+        expected = before.state.restore()
+        draws = 1 if cancel else 2
+        for _ in range(draws):
+            expected.randint(1, 20)
+        assert sm.read_rng_context(sid, package, context=gm).state == RNGState.capture(expected)
+    with StateMachine(db, dnd_loader=lock_loader()) as restored:
+        assert restored.submit_command(command, package, context=gm) == receipt
+
+
 @pytest.mark.parametrize("untracked", [False, True])
+@pytest.mark.parametrize("poisoned", [False, True])
 def test_public_frightened_check_requires_known_source_and_adjudication(
-    tmp_path, context, untracked
+    tmp_path, context, untracked, poisoned
 ):
     gm = replace(context, can_adjudicate_checks=True)
     # The tracked source's ray crosses fixtures whose current vision is unproven.
-    sm, sid, package, _ = _setup(tmp_path, gm, untracked=untracked, unproven_ray=not untracked)
+    sm, sid, package, _ = _setup(
+        tmp_path, gm, untracked=untracked, unproven_ray=not untracked, poisoned=poisoned
+    )
     with sm:
         command = check_command(sm, sid, package, gm, "check.fear.unknown")
         before = sm.read_rng_context(sid, package, context=gm)
