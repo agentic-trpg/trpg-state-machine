@@ -227,8 +227,8 @@ class WorldHandler:
         self, sid, actor_id, *, navigation_scope=None, movement=False, rule_check=False
     ):
         """Check activity occupancy, actor state and authoritative position for action
-        readiness. A rule check may carry reviewed Frightened into RE adjudication;
-        death, activity, concentration and other conditions still block here.
+        readiness. A rule check may carry reviewed conditions into RE adjudication.
+        Life, activity, concentration and remaining condition gates apply here.
         Region statuses still need to preserve the movement capability.
         """
         qualified = self.activities.qualifies(navigation_scope, sid, actor_id)
@@ -286,9 +286,8 @@ class WorldHandler:
     def _public_scope(self, sid, actor_id, package, *, rule_check=False):
         """Validate public spatial eligibility in the actor's scene.
 
-        A rule check treats Frightened as sight-neutral while retaining actual
-        object visibility and target authorization. Other callers keep their
-        original condition boundary.
+        A rule check accepts reviewed sight-neutral conditions and still requires
+        proved object visibility and target authorization.
         """
         proof = self._conn.execute(
             "SELECT complete FROM scene_integrity WHERE session_id=? AND scene_id="
