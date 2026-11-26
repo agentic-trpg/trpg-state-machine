@@ -3,6 +3,7 @@
 import json
 from dataclasses import replace
 
+from dnd5e_engine.areas import AreaTemplate
 from item_support import NPC, ROPE, A, B
 from spatial_support import submit as submit_world
 from test_scoped_runtime_validation import measure
@@ -212,11 +213,13 @@ def test_environmental_cast_uses_prepared_actor_order(timed_spell_world, monkeyp
     sm, _, _, _ = session
     prepare = sm._rules.prepare_environmental_spell
     snapshot = sm._rules._noncombat_snapshot
+    cast_positions = sm._world.magic.cast_positions
     prepared = []
     assembled = []
+    world_needs = []
 
-    def reverse_prepared_order(command, positions):
-        result = prepare(command, positions)
+    def reverse_prepared_order(command, positions, world_needs):
+        result = prepare(command, positions, world_needs)
         assert result.actor_ids == (command.actor_id, NPC)
         result = replace(result, actor_ids=result.actor_ids[::-1])
         prepared.append(result.actor_ids)
@@ -227,14 +230,22 @@ def test_environmental_cast_uses_prepared_actor_order(timed_spell_world, monkeyp
         assembled.append(tuple(actor.entity_id for actor in result.character_states))
         return result
 
+    def record_world_needs(row, package, command, needs):
+        world_needs.append(needs)
+        return cast_positions(row, package, command, needs)
+
     with sm:
         monkeypatch.setattr(sm._rules, "prepare_environmental_spell", reverse_prepared_order)
         monkeypatch.setattr(sm._rules, "_noncombat_snapshot", record_snapshot)
+        monkeypatch.setattr(sm._world.magic, "cast_positions", record_world_needs)
         command, receipt = _cast(session)
         assert receipt.status == "committed", receipt
     assert prepared == [(NPC, command.actor_id)]
     assert len(assembled) == 2
     assert assembled == prepared * 2
+    assert len(world_needs) == 2
+    assert world_needs[0] is world_needs[1]
+    assert world_needs[0].visual_occupant_area == AreaTemplate("cube", "square", 20, "target", True)
 
 
 def test_unadmitted_save_trait_rejects_before_payment_or_rng(timed_spell_world):

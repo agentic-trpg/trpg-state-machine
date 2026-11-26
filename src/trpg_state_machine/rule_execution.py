@@ -945,6 +945,7 @@ class RuleExecution:
         cast_record = None
         spell_actor_ids, spell_positions = None, None
         environmental_schema_version = None
+        environmental_world_needs = None
         multi_spell_positions = None
         sight_range = self._spell_sight_range(command)
         charged_item, item_area_facts = None, None
@@ -1156,7 +1157,10 @@ class RuleExecution:
                     row, command, package
                 )
             elif environmental_spell and prepare_error is None:
-                spell_positions = self.world.magic.cast_positions(row, package, command)
+                environmental_world_needs = self.rules.environmental_spell_world_needs(command)
+                spell_positions = self.world.magic.cast_positions(
+                    row, package, command, environmental_world_needs
+                )
                 if spell_positions is None:
                     prepare_error = (
                         "target_invalid"
@@ -1168,7 +1172,7 @@ class RuleExecution:
                     )
                 else:
                     environmental_preparation = self.rules.prepare_environmental_spell(
-                        command, spell_positions
+                        command, spell_positions, environmental_world_needs
                     )
                     spell_actor_ids = environmental_preparation.actor_ids
                     environmental_schema_version = environmental_preparation.schema_version
@@ -1706,7 +1710,10 @@ class RuleExecution:
                 or (
                     environmental_spell
                     and prepare_error is None
-                    and self.world.magic.cast_positions(row, package, command) != spell_positions
+                    and self.world.magic.cast_positions(
+                        row, package, command, environmental_world_needs
+                    )
+                    != spell_positions
                 )
                 or (
                     charged_item is not None

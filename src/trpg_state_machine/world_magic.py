@@ -15,6 +15,7 @@ from dnd5e_engine.evaluation_environmental_contracts import (
     EnvironmentalMagicEffectTarget,
     VisualTargetFact,
 )
+from dnd5e_engine.evaluation_environmental_spells import EnvironmentalSpellWorldNeeds
 from dnd5e_engine.spatial import cell_id, parse_cell
 from dnd5e_engine.spellcasting import spell_range_ft
 from dnd5e_srd_data.schema.environment import EnvironmentalSpec
@@ -113,8 +114,8 @@ class WorldMagic:
                 result = "unknown"
         return result
 
-    def cast_positions(self, row, package, command):
-        """Resolve asserted target IDs into fixed, authoritative local facts for RE."""
+    def cast_positions(self, row, package, command, needs: EnvironmentalSpellWorldNeeds):
+        """Resolve asserted targets and RE-declared occupancy into fixed World facts."""
         sid, scene = row["session_id"], row["current_scene_id"]
         facts = self.h.facts
         source = facts.carrier_position(sid, command.actor_id)
@@ -211,12 +212,13 @@ class WorldMagic:
             ):
                 return None
         visual_occupants = ()
-        if command.payload.spell_id == "faerie-fire":
+        if (template := needs.visual_occupant_area) is not None:
             if target.kind != "point":
                 return None
-            template = AreaTemplate("cube", "square", 20, "target", True)
             geometry = grid.topology
-            candidate_cells = geometry.cells_in_template(cell, "square", 20)
+            candidate_cells = geometry.cells_in_template(
+                cell, template.grid_shape, template.size_ft
+            )
             for covered in self._total_cover_cells(sid, scene, package, candidate_cells):
                 geometry = geometry.with_cover_at(covered, "total")
             cells = area_cells(geometry, template, cell, None)

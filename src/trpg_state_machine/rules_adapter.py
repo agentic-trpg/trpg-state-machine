@@ -51,6 +51,8 @@ from dnd5e_engine.evaluation_contracts import (
 )
 from dnd5e_engine.evaluation_environmental_spells import (
     EnvironmentalSpellPreparation,
+    EnvironmentalSpellWorldNeeds,
+    environmental_spell_world_needs,
     prepare_environmental_spell,
 )
 from dnd5e_engine.evaluation_haste import has_haste_effects, haste_speed
@@ -2082,11 +2084,17 @@ class RulesAdapter:
         """Translate SM's durable identity to the pinned RE contract."""
         return RulesetBinding(**asdict(_binding(row)))
 
-    def prepare_environmental_spell(self, command, positions) -> EnvironmentalSpellPreparation:
-        """Get RE's required actor IDs and schema from the fixed loader and World facts."""
+    def prepare_environmental_spell(
+        self, command, positions, world_needs: EnvironmentalSpellWorldNeeds | None = None
+    ) -> EnvironmentalSpellPreparation:
+        """Get RE's actor IDs using the already fixed World dependency declaration."""
         return prepare_environmental_spell(
-            command.payload, command.actor_id, positions, self.loader
+            command.payload, command.actor_id, positions, self.loader, world_needs=world_needs
         )
+
+    def environmental_spell_world_needs(self, command) -> EnvironmentalSpellWorldNeeds:
+        """Ask RE which World occupancy facts the bound spatial spell requires."""
+        return environmental_spell_world_needs(command.payload, self.loader)
 
     def prepare_check_sight(self, request, package):
         """Ask RE which World relationships this bound check still requires."""
