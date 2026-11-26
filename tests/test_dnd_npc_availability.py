@@ -1,3 +1,4 @@
+import sqlite3
 from dataclasses import replace
 
 import pytest
@@ -40,6 +41,7 @@ def test_stat_block_ranged_attack_observes_nearby_enemy(tmp_path, package_data, 
     sm, sid, package, assets = setup(tmp_path, package_data, context, place_target)
     with sm:
         command = npc_command(sm, sid, package, context, action="light-crossbow")
+        before_rng = sm.read_rng_context(sid, package, context=context)
         receipt = sm.submit_command(command, package, context=context)
         assert receipt.status == "committed", receipt
         attacks = [
@@ -51,6 +53,28 @@ def test_stat_block_ranged_attack_observes_nearby_enemy(tmp_path, package_data, 
         assert len(attacks) == 1
         assert attacks[0]["advantage"] == ("disadvantage" if adjacent else "normal")
         assert attacks[0]["disadvantage_sources"] == (["ranged_in_melee"] if adjacent else [])
+        expected = before_rng.state.restore()
+        faces = [expected.randint(1, 20) for _ in range(2 if adjacent else 1)]
+        kept = min(faces) if adjacent else faces[0]
+        assert attacks[0]["roll_detail"]["d20"] == {
+            "faces": faces,
+            "kept_index": faces.index(kept),
+            "origin": "rng",
+        }
+        assert attacks[0]["natural"] == kept
+        assert attacks[0]["roll_detail"]["modifiers"] == []
+        projected = sm.get_command_rolls(sid, command.command_id, package, context=context)
+        (public_roll,) = projected["rolls"]
+        assert public_roll["roll_detail"] == attacks[0]["roll_detail"]
+        assert public_roll["advantage_sources"] == attacks[0]["advantage_sources"]
+        assert public_roll["disadvantage_sources"] == attacks[0]["disadvantage_sources"]
+        with pytest.raises(StateMachineError, match="control grant"):
+            sm.get_command_rolls(
+                sid,
+                command.command_id,
+                package,
+                context=replace(context, controlled_npc_ids=()),
+            )
         saved = authority(sm, sid)
         assert sm.submit_command(command, package, context=context) == receipt
         assert authority(sm, sid) == saved
@@ -61,6 +85,24 @@ def test_stat_block_ranged_attack_observes_nearby_enemy(tmp_path, package_data, 
         )
         assert reopened.submit_command(command, package, context=context) == receipt
         assert authority(reopened, sid) == saved
+        assert (
+            reopened.get_command_rolls(sid, command.command_id, package, context=context)
+            == projected
+        )
+    with sqlite3.connect(tmp_path / "dnd.db") as conn:
+        conn.execute(
+            "UPDATE events SET payload_json="
+            "json_remove(payload_json, '$.engine_event.roll_detail') "
+            "WHERE session_id=? AND event_seq=?",
+            (sid, public_roll["event_seq"]),
+        )
+    with StateMachine(tmp_path / "dnd.db", dnd_loader=assets) as older:
+        (legacy,) = older.get_command_rolls(sid, command.command_id, package, context=context)[
+            "rolls"
+        ]
+        assert legacy["roll_detail"] is None
+        assert legacy["natural"] == kept
+        assert legacy["advantage"] == attacks[0]["advantage"]
 
 
 @pytest.mark.parametrize("action", [None, "scimitar", "light-crossbow"])
@@ -84,10 +126,19 @@ def test_pc_and_npc_share_real_attack_commit_and_replay(tmp_path, package_data, 
 
     sm, sid, package, assets = setup(tmp_path, package_data, context, equip_weapon)
     with sm:
-        assert (
-            sm.submit_command(attack(sm, sid, package, context), package, context=context).status
-            == "committed"
-        )
+        pc_command = attack(sm, sid, package, context)
+        pc_rng = sm.read_rng_context(sid, package, context=context).state.restore()
+        pc_face = pc_rng.randint(1, 20)
+        assert sm.submit_command(pc_command, package, context=context).status == "committed"
+        (pc_roll,) = sm.get_command_rolls(sid, pc_command.command_id, package, context=context)[
+            "rolls"
+        ]
+        assert pc_roll["type"] == "attack_rolled"
+        assert pc_roll["roll_detail"]["d20"] == {
+            "faces": [pc_face],
+            "kept_index": 0,
+            "origin": "rng",
+        }
         pass_turn(sm, sid, package, context)
         before = sm.read_combat_snapshot(sid, package, context=context)
         assert before.combat_state.initiative_ids[before.combat_state.current_turn_index] == NPC
@@ -131,10 +182,13 @@ def test_wrong_principal_and_revoked_grant_cannot_submit_or_query(
         with pytest.raises(StateMachineError):
             sm.query_action_availability(sid, NPC, command.payload, package, context=wrong)
         assert authority(sm, sid) == before
+        assert sm.get_command_rolls(sid, command.command_id, package, context=context) is None
         receipt = sm.submit_command(command, package, context=context)
         assert receipt.status == "committed"
         with pytest.raises(StateMachineError):
             sm.get_command_receipt(sid, command.command_id, package, context=wrong)
+        with pytest.raises(StateMachineError):
+            sm.get_command_rolls(sid, command.command_id, package, context=wrong)
 
 
 def test_npc_budget_exhaustion_is_unavailable_and_rejected(tmp_path, package_data, context):

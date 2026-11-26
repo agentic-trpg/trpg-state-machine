@@ -1110,7 +1110,8 @@ class CommandRuntime:
         """Project committed dice or authorized live action-choice dice evidence.
 
         Return None for an unknown command, otherwise a JSON-ready mapping with
-        receipt status and rolls in committed event order. A roll_detail of None
+        receipt status and rolls, including attacks, in committed event order.
+        A roll_detail of None
         means that the stored event lacks detailed dice evidence, whether from an
         older event or a path without that evidence. Rest hit-die values are
         adjusted per-die healing, while Cure Wounds dice are raw faces. An empty
@@ -1197,6 +1198,7 @@ class CommandRuntime:
                 if not isinstance(engine, dict) or engine.get("type") not in (
                     "check_rolled",
                     "save_rolled",
+                    "attack_rolled",
                     "rest_resolved",
                     "healing_applied",
                 ):
@@ -1234,6 +1236,7 @@ class CommandRuntime:
                             field: engine[field]
                             for field in (
                                 "actor_id",
+                                "attacker_id",
                                 "target_id",
                                 "ability",
                                 "dc",
@@ -1243,6 +1246,11 @@ class CommandRuntime:
                                 "roll_total",
                                 "succeeded",
                                 "sources",
+                                "advantage_sources",
+                                "disadvantage_sources",
+                                "is_hit",
+                                "is_crit",
+                                "is_opportunity_attack",
                             )
                             if field in engine
                         },
